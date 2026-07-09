@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.config import router as config_router
 from app.core.config import settings
 from app.pricing.api import router as pricing_router
 
@@ -17,6 +18,7 @@ app.add_middleware(
 )
 
 app.include_router(pricing_router)
+app.include_router(config_router)
 
 
 @app.get("/health", tags=["meta"])

@@ -17,5 +17,15 @@ class Settings(BaseSettings):
     # Allowed CORS origins (the Next.js frontend).
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    @property
+    def sqlalchemy_url(self) -> str:
+        """DATABASE_URL as a SQLAlchemy/psycopg URL."""
+        if not self.database_url:
+            raise RuntimeError("DATABASE_URL is not set")
+        url = self.database_url
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        return url
+
 
 settings = Settings()

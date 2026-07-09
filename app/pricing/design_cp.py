@@ -15,9 +15,7 @@ def compute_effective_machine_time(batch_print_time_hr: float, units_per_bed: in
     return round(batch_print_time_hr / units_per_bed, 4)
 
 
-def compute_design_cp(
-    metrics: SlicerMetrics, assumptions: CostAssumptions
-) -> DesignCPBreakdown:
+def compute_design_cp(metrics: SlicerMetrics, assumptions: CostAssumptions) -> DesignCPBreakdown:
     """Total Design CP for a single unit (spec §3)."""
     filament = metrics.filament_g / 1000 * assumptions.filament_cost_per_kg
     purge = metrics.purge_g / 1000 * assumptions.filament_cost_per_kg
