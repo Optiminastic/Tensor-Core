@@ -1,0 +1,33 @@
+[project]
+name = "tensor-be"
+version = "0.1.0"
+description = "Tensor backend — FastAPI costing & selling-price approval API"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.27",
+  "ruff>=0.7",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
