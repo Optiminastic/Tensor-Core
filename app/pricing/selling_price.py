@@ -28,6 +28,8 @@ def generate_selling_price(
     fixed_costs: FixedVariableCosts,
     brand: Brand,
     margins: MarginAssumptions = DEFAULT_MARGINS,
+    ladder: list[int] | None = None,
+    stress_ad_spend_pct: float = STRESS_AD_SPEND_PCT,
 ) -> SellingPriceResult:
     """Recommend a ladder price that clears unit economics (spec §9–§10).
 
@@ -35,6 +37,10 @@ def generate_selling_price(
     ladder. Also reports whether the price survives the 40% ad-spend stress
     test, and — for each cheaper rung it can't support — the max Design CP
     that *would* make that rung viable.
+
+    `ladder` and `stress_ad_spend_pct` default to the brand's built-in policy so
+    the engine works standalone; the API passes the admin-editable values loaded
+    from the brand record.
     """
     margin_normal = remaining_margin(margins)
     if margin_normal <= 0:
@@ -44,11 +50,12 @@ def generate_selling_price(
     fixed_variable = round(design_cp + other_fixed, 2)
     raw_sp = round(fixed_variable / margin_normal, 2)
 
-    ladder = ladder_for(brand)
+    if ladder is None:
+        ladder = ladder_for(brand)
     recommended = snap_up_to_ladder(raw_sp, ladder)
     cp_pct_at_recommended = round(design_cp / recommended, 4) if recommended else None
 
-    margin_stress = remaining_margin(margins, ad_spend_pct=STRESS_AD_SPEND_PCT)
+    margin_stress = remaining_margin(margins, ad_spend_pct=stress_ad_spend_pct)
     survives_stress = bool(
         recommended and margin_stress > 0 and recommended >= fixed_variable / margin_stress
     )

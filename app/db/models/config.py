@@ -6,7 +6,11 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base, TimestampMixin, UUIDPk
 from app.pricing.models import Brand
 
-_brand_enum = Enum(Brand, name="brand", values_callable=lambda e: [m.value for m in e])
+# The single SQLAlchemy Enum bound to the `brand` Postgres type. Shared so every
+# table that stores a brand references one Enum object — two Enum(name="brand")
+# instances in the metadata would clash on create_all and try to re-create the
+# type in migrations. Imported by app/db/models/projects.py.
+brand_enum = Enum(Brand, name="brand", values_callable=lambda e: [m.value for m in e])
 
 
 class MaterialProfile(UUIDPk, TimestampMixin, Base):
@@ -37,7 +41,7 @@ class CostAssumptionSet(UUIDPk, TimestampMixin, Base):
     __tablename__ = "cost_assumption_sets"
 
     name: Mapped[str] = mapped_column(String(120), unique=True)
-    brand: Mapped[Brand | None] = mapped_column(_brand_enum, nullable=True)
+    brand: Mapped[Brand | None] = mapped_column(brand_enum, nullable=True)
     filament_cost_per_kg: Mapped[float] = mapped_column(
         Numeric(10, 2, asdecimal=False), default=1000
     )

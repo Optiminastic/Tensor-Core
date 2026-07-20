@@ -1,17 +1,18 @@
 from fastapi.testclient import TestClient
 
-from app.main import app
+# The `client` fixture (from conftest) overrides get_db with the in-memory test
+# database. The pricing endpoints now take a db session to load brand policy;
+# unseeded, they fall back to the engine's built-in ladder, so the spec number
+# holds either way.
 
-client = TestClient(app)
 
-
-def test_health() -> None:
+def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
 
-def test_selling_price_endpoint() -> None:
+def test_selling_price_endpoint(client: TestClient) -> None:
     response = client.post(
         "/pricing/selling-price",
         json={
