@@ -1,19 +1,13 @@
-# Env / secrets — never commit
+# Env / secrets - never commit
 .env
 .env.*
 !.env.example
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-
-# Tooling caches
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
+# Go
+/bin/
+*.exe
+*.test
+*.out
 
 # OS
 .DS_Store

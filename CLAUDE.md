@@ -1,85 +1,75 @@
-# Tensor Backend (be/) — Python / FastAPI Rules
+# Tensor-Core - Go / Gin Rules
 
-The backend owns the domain: PostgreSQL, the costing & pricing engine, the slicer worker, and all integrations. It is the source of truth. The frontend (`../fe`) only renders and calls this API.
+The backend owns the domain: PostgreSQL, the costing and pricing engine, admin config, and (later) the slicer worker and integrations. It is the source of truth. The frontend (`../Tensor`) only renders and calls this API.
 
 ## Toolchain
-- **uv** for everything: `uv sync`, `uv run pytest`, `uv run ruff check .`, `uv run uvicorn app.main:app --reload`.
-- Python **3.12+**. Ruff is the linter/formatter. Pytest for tests.
-- Never `pip install` directly — add deps via `uv add <pkg>` (or `uv add --dev` for dev deps). Ask before adding a new dependency.
+- **Go 1.25+**. `go build ./...`, `go test ./...`, `go vet ./...`, `gofmt -w internal cmd`.
+- **pgx v5** driver, **sqlc** for typed queries (no ORM), **goose** for migrations (embedded), **Gin** for HTTP, **lestrrat-go/jwx** for JWT/JWKS, **go-playground/validator** via Gin binding.
+- Add deps with `go get`; ask before adding a new dependency.
 
 ## Structure
 ```
-app/
-  main.py            FastAPI entrypoint (health, routers, CORS)
-  core/config.py     Settings (pydantic-settings); env optional until DB is wired
-  pricing/           Costing & pricing engine (pure logic + a FastAPI router)
-    models.py        Pydantic models (Brand, SlicerMetrics, CostAssumptions, …)
-    assumptions.py   Defaults, price ladders, thresholds (spec §4/§8/§9)
-    design_cp.py     compute_design_cp(), compute_effective_machine_time()
-    selling_price.py generate_selling_price(), remaining_margin()
-    status.py        evaluate_status() → Green / Yellow / Red
-    api.py           /pricing/* endpoints
-  auth/              Authorization — verify tokens, guard endpoints
-    jwt.py           verify a Better Auth JWT against the frontend's JWKS
-    catalog.py       permission catalog + default role grants
-    dependencies.py  current_user, require_permission, require_internal_secret
-    service.py       resolve_user_authz(), bump_permissions_version()
-    seed.py          sync the catalog into the DB (uv run python -m app.auth.seed)
-  api/
-    config.py        /config/* admin CRUD (permission-guarded)
-    internal.py      /internal/* service-to-service (shared secret, not in schema)
-  db/models/
-    authz.py         Role, Permission, RolePermission, UserRole, UserAuthzState
-tests/               Pytest, mirrors app/ ; validates spec worked examples
+cmd/
+  api/       HTTP entrypoint (health, routers, CORS, graceful shutdown)
+  seed/      migrate + seed RBAC catalog and brands (idempotent)
+  migrate/   apply migrations only
+internal/
+  config/    Settings from the environment
+  pricing/   costing/pricing engine - PURE (no DB, no I/O, no globals beyond constants)
+    models.go       structs (Brand, SlicerMetrics, CostAssumptions, ...)
+    assumptions.go  ladders, thresholds, entry rule (built-in fallback)
+    design_cp.go    ComputeDesignCP, ComputeEffectiveMachineTime
+    selling_price.go GenerateSellingPrice, RemainingMargin, SnapUpToLadder
+    status.go       EvaluateStatus -> Green / Yellow / Red
+    round.go        Python-compatible round-half-to-even + formatting
+  brandpolicy/ the ONLY DB read on the pricing path; loads a brand's policy
+  auth/      jwt.go (verify against JWKS, EdDSA), catalog.go (permissions + grants),
+             service.go (ResolveUserAuthz, BumpPermissionsVersion), invites.go,
+             seed.go (sync catalog into DB), middleware.go (Gin guards), models.go
+  httpapi/   Gin routers/handlers, one file per router; errors.go is the {"detail"} shape
+  db/
+    migrations/  goose SQL (0001 baseline, idempotent, never touches Better Auth tables)
+    queries/     sqlc source
+    gen/         sqlc-generated (checked in; never edit by hand)
+    schema.sql   plain DDL for sqlc codegen ONLY (keep in sync with 0001)
+    store.go convert.go migrate.go
 ```
-Future: `app/integrations/` (Shopify/Razorpay/Shiprocket/Meta), `worker/` (slicer, Redis).
 
 ## Hard rules
-- **Pure domain logic stays pure** — costing/pricing functions take inputs and return Pydantic models; no I/O, no DB, no globals. They must be unit-testable without a database (the pricing engine already is).
-- **Slicer output is the source of truth** for time/filament/cost. AI only produces suggestions/summaries — never costs.
-- Full type hints on every function signature; use `X | None`, `list[...]`, `StrEnum`. Ruff rules: `E,F,I,UP,B`.
-- Validate all external input with Pydantic models at the API boundary.
-- Money: round to 2 decimals in outputs; percentages as fractions (0.25 = 25%).
-- Keep functions small and single-purpose; extract helpers rather than growing one function.
-- Every new engine rule or formula gets a test asserting the spec's numbers.
+- **Pure domain logic stays pure.** `internal/pricing/*` takes inputs and returns structs; no DB, no I/O, no globals. It is unit-testable without a database. The DB->engine bridge lives in `brandpolicy` + the handler, never in the engine.
+- **Numeric parity.** Money uses `roundHalfEven` (matches Python `round()`). Every new formula gets a test asserting the spec's numbers. Percentages are fractions (0.25 = 25%).
+- **Slicer output is the source of truth** for time/filament/cost. AI only produces suggestions, never costs.
+- Explicit return types, small single-purpose functions, no `interface{}` in hand-written code except where sqlc forces it for enum/domain params.
+- Validate all external input at the HTTP boundary (Gin binding tags + explicit business checks).
+- Regenerate sqlc after editing `internal/db/queries` or `schema.sql`; `schema.sql` and the goose baseline must describe the same tables (the integration tests catch drift).
 
-## Auth — `app/auth/`
+## Auth - `internal/auth/`
 
-Authentication (who you are) belongs to Better Auth in the frontend. **This service owns authorization** (what you may do). The two are deliberately independent.
-
-FastAPI verifies the Better Auth-issued JWT (`Authorization: Bearer …`) against the frontend's JWKS (`AUTH_JWKS_URL`), checking signature, `exp`, `iss` and `aud`. A verified token is *trusted data* — it is signed by the issuer, not supplied by the client — so reading its claims is enforcement, not trust.
-
-```
-jwt.py           verify a token against the JWKS (EdDSA)
-catalog.py       the permission catalog + default role grants
-dependencies.py  current_user, require_permission, require_internal_secret
-service.py       resolve_user_authz, bump_permissions_version
-seed.py          sync the catalog into the DB (idempotent)
-models.py        TokenClaims, AuthenticatedUser, UserAuthzResponse
-```
+Authentication (who you are) belongs to Better Auth in the frontend. **This service owns authorization** (what you may do). Gin verifies the Better Auth JWT (`Authorization: Bearer ...`) against the frontend's JWKS (`AUTH_JWKS_URL`): signature, `exp`, `iss`, `aud`, algorithms pinned to EdDSA/RS256/ES256. A verified token is trusted data.
 
 ### Hard rules
-
-- **Guard on permissions, never roles.** `Depends(require_permission(CONFIG_MANAGE))`, never `if user.role == "ADMIN"`. Adding a role must never require touching an endpoint.
-- **Take the `PermissionSpec` from `catalog.py`, not a bare string.** A typo'd string is an endpoint that silently never grants; a typo'd import is an error.
-- **The database is the runtime source of truth for grants.** `catalog.py` seeds `role_permissions` and is the default, but `resolve_user_authz` reads the table. That is what makes `permissions_version` meaningful — a grant can change without a deploy.
-- **Anything that changes a user's roles must call `bump_permissions_version`.** Otherwise the change is invisible until the token expires (up to 15 min).
+- **Guard on permissions, never roles.** `RequirePermission(auth.ConfigManage.Key())`, never `if role == ADMIN`.
+- **Take the `PermissionSpec` from `catalog.go`, not a bare string.**
+- **The database is the runtime source of truth for grants.** `catalog.go` seeds `role_permissions` and is the default; `ResolveUserAuthz` reads the table. That is what makes `permissions_version` meaningful.
+- **Anything that changes a user's roles must call `BumpPermissionsVersion`.**
 - **Fail closed.** No roles means no permissions means every guard rejects. Never default to a role on error.
-- **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, never in the OpenAPI schema, never reachable from a browser. No secret configured means 503, not open.
-- Add a new permission to `ALL_PERMISSIONS` and the relevant `ROLE_PERMISSIONS` entry, then re-run the seed. `ADMIN` is defined as the whole catalog, so it picks it up automatically.
+- **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, guarded at the router level. No secret configured means 503, not open.
+- Add a new permission to `AllPermissions` and the relevant `roleGrants` entry, then re-run the seed. `ADMIN` is the whole catalog by construction.
 
-Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`. Separation of duties is asserted in `tests/test_auth_internal.py` (e.g. Operator must never see cost assumptions) — those tests are the spec, do not relax them to make something pass.
+Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`. Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator must never see cost assumptions) - those tests are the spec, do not relax them.
+
+### Contract with the frontend
+Every route, method, JSON shape, status code, and error `detail` string must stay identical - the frontend validates responses with Zod. Domain responses are snake_case; `permissionsVersion` and `adminExists` are camelCase. POST-create returns 201; revoke/bootstrap/accept return 204.
 
 ### Table ownership
-
-One Postgres, two migration tools. `alembic/env.py`'s `include_object` keeps Alembic off Better Auth's tables.
+One Postgres, two migration tools. The goose baseline is idempotent and never touches Better Auth's tables.
 
 | Tables | Owner |
 | --- | --- |
 | `user`, `session`, `account`, `verification`, `jwks` | Better Auth (`pnpm auth:migrate`, from the frontend) |
-| everything else, incl. `roles`, `permissions`, `user_roles` | Alembic (`uv run alembic upgrade head`) |
+| everything else, incl. `roles`, `permissions`, `user_roles` | goose (`go run ./cmd/migrate`) |
 
-`user_roles.user_id` holds a Better Auth user id with **no foreign key** — a constraint would couple Alembic to Better Auth's CLI and force an apply order. An orphaned row is harmless: no user, no token, no authorization.
+`user_roles.user_id` holds a Better Auth user id with **no foreign key** - an orphaned row is harmless.
 
 ## After changes
-Run `uv run ruff check .` and `uv run pytest` — both must be green before done.
+Run `gofmt -w internal cmd`, `go vet ./...`, and `go test ./...` (with `TENSOR_TEST_DB` set for the integration suite) - all must be green before done.

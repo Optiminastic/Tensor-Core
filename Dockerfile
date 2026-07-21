@@ -1,20 +1,19 @@
-# Tensor backend — FastAPI, managed with uv.
-FROM python:3.12-slim
-
-# uv (fast, reproducible installs)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-WORKDIR /app
-
-# Install dependencies first for better layer caching.
-COPY pyproject.toml uv.lock* ./
-RUN uv sync --frozen --no-dev --no-install-project
-
-# App source
+# Tensor-Core - Go / Gin. Multi-stage: build a static binary, ship it on a
+# minimal base. Migrations are embedded in the binary (internal/db/migrations).
+FROM golang:1.25 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN uv sync --frozen --no-dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
-ENV PATH="/app/.venv/bin:$PATH"
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /app
+COPY --from=build /out/api /app/api
+COPY --from=build /out/seed /app/seed
+COPY --from=build /out/migrate /app/migrate
+EXPOSE 8001
+USER nonroot:nonroot
+ENTRYPOINT ["/app/api"]
