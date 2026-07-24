@@ -8,6 +8,8 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
+	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
 // Server holds the HTTP layer's dependencies and builds the router.
@@ -15,11 +17,23 @@ type Server struct {
 	cfg    config.Settings
 	store  *db.Store
 	guards *auth.Guards
+
+	// Design pipeline dependencies. Nil until EnablePipeline is called; the
+	// design routes fail closed (503) when they are absent.
+	storage    *storage.Client
+	dispatcher *slicing.Dispatcher
 }
 
 // NewServer wires the HTTP layer.
 func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards) *Server {
 	return &Server{cfg: cfg, store: store, guards: guards}
+}
+
+// EnablePipeline attaches the object store and slicer dispatcher so the design
+// routes can accept uploads and enqueue slices.
+func (s *Server) EnablePipeline(objects *storage.Client, dispatcher *slicing.Dispatcher) {
+	s.storage = objects
+	s.dispatcher = dispatcher
 }
 
 // Router builds the Gin engine with CORS, health, and every router mounted at
@@ -38,6 +52,8 @@ func (s *Server) Router() *gin.Engine {
 	s.registerAdmin(r)
 	s.registerProjects(r)
 	s.registerBrands(r)
+	s.registerConnections(r)
+	s.registerDesigns(r)
 	s.registerInternal(r)
 
 	return r

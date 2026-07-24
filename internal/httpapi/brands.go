@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,10 +20,25 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/pricing"
 )
 
+// slugPattern is the shape a brand slug must take: lowercase alphanumerics
+// separated by single hyphens. It doubles as the {slug} path validator.
+var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// reservedBrandSlugs would collide with the frontend's static dashboard routes
+// (/dashboard/<slug> is dynamic, but these segments resolve to their own pages
+// first), so a brand may not take them.
+var reservedBrandSlugs = map[string]bool{
+	"users":    true,
+	"settings": true,
+	"brands":   true,
+	"projects": true,
+}
+
 type brandResponse struct {
 	ID                string    `json:"id"`
-	Key               string    `json:"key"`
+	Slug              string    `json:"slug"`
 	Name              string    `json:"name"`
+	LogoURL           *string   `json:"logo_url"`
 	StartingPrice     float64   `json:"starting_price"`
 	ShopifyURL        *string   `json:"shopify_url"`
 	Description       *string   `json:"description"`
@@ -36,7 +53,7 @@ type brandResponse struct {
 }
 
 func brandDTO(
-	id uuid.UUID, key, name string, startingPrice float64, shopifyURL, description *string,
+	id uuid.UUID, slug, name string, logoURL *string, startingPrice float64, shopifyURL, description *string,
 	isActive bool, ladderRaw []byte, green, yellow float64, emh pgtype.Numeric,
 	entryRung *int32, created, updated pgtype.Timestamptz,
 ) (brandResponse, error) {
@@ -50,7 +67,7 @@ func brandDTO(
 		er = &v
 	}
 	return brandResponse{
-		ID: id.String(), Key: key, Name: name, StartingPrice: startingPrice,
+		ID: id.String(), Slug: slug, Name: name, LogoURL: logoURL, StartingPrice: startingPrice,
 		ShopifyURL: shopifyURL, Description: description, IsActive: isActive, Ladder: ladder,
 		CPGreenMax: green, CPYellowMax: yellow,
 		EntryMachineHours: db.NumFloatPtr(emh), EntryRung: er,
@@ -62,12 +79,45 @@ func (s *Server) registerBrands(r *gin.Engine) {
 	g := r.Group("/brands")
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.BrandRead.Key()), s.listBrands)
-	g.GET("/:key", s.guards.RequirePermission(auth.BrandRead.Key()), s.getBrand)
-	g.PATCH("/:key", s.guards.RequirePermission(auth.BrandManage.Key()), s.updateBrand)
+	g.POST("", s.guards.RequirePermission(auth.BrandManage.Key()), s.createBrand)
+	g.GET("/:slug", s.guards.RequirePermission(auth.BrandRead.Key()), s.getBrand)
+	g.PATCH("/:slug", s.guards.RequirePermission(auth.BrandManage.Key()), s.updateBrand)
+	g.DELETE("/:slug", s.guards.RequirePermission(auth.BrandManage.Key()), s.deleteBrand)
 }
 
-func notConfigured(key pricing.Brand) string {
-	return fmt.Sprintf("Brand '%s' is not configured yet.", key)
+func notConfigured(slug pricing.Brand) string {
+	return fmt.Sprintf("Brand '%s' is not configured yet.", slug)
+}
+
+// brandSlugParam reads and validates the {slug} path segment. Any well-formed
+// slug is accepted; brands are free-form, so validity is about shape only.
+func brandSlugParam(c *gin.Context) (string, bool) {
+	slug := c.Param("slug")
+	if !slugPattern.MatchString(slug) {
+		detail(c, http.StatusUnprocessableEntity, "The brand slug in the URL is not valid.")
+		return "", false
+	}
+	return slug, true
+}
+
+// slugify turns a human name into a slug: lowercased, non-alphanumerics folded
+// to single hyphens, trimmed. Used when a create request omits an explicit slug.
+func slugify(name string) string {
+	lowered := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range lowered {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+			continue
+		}
+		if !prevHyphen && b.Len() > 0 {
+			b.WriteByte('-')
+			prevHyphen = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func (s *Server) listBrands(c *gin.Context) {
@@ -78,7 +128,7 @@ func (s *Server) listBrands(c *gin.Context) {
 	}
 	out := make([]brandResponse, 0, len(rows))
 	for _, r := range rows {
-		dto, err := brandDTO(r.ID, r.Key, r.Name, r.StartingPrice, r.ShopifyUrl, r.Description,
+		dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
 			r.IsActive, r.Ladder, r.CpGreenMax, r.CpYellowMax, r.EntryMachineHours, r.EntryRung,
 			r.CreatedAt, r.UpdatedAt)
 		if err != nil {
@@ -91,20 +141,20 @@ func (s *Server) listBrands(c *gin.Context) {
 }
 
 func (s *Server) getBrand(c *gin.Context) {
-	key, ok := brandKeyParam(c)
+	slug, ok := brandSlugParam(c)
 	if !ok {
 		return
 	}
-	r, err := s.store.Q.GetBrandByKey(c.Request.Context(), string(key))
+	r, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(key))
+			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
 			return
 		}
 		detail(c, http.StatusInternalServerError, "Could not load the brand.")
 		return
 	}
-	dto, err := brandDTO(r.ID, r.Key, r.Name, r.StartingPrice, r.ShopifyUrl, r.Description,
+	dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
 		r.IsActive, r.Ladder, r.CpGreenMax, r.CpYellowMax, r.EntryMachineHours, r.EntryRung,
 		r.CreatedAt, r.UpdatedAt)
 	if err != nil {
@@ -114,8 +164,108 @@ func (s *Server) getBrand(c *gin.Context) {
 	c.JSON(http.StatusOK, dto)
 }
 
+type brandCreateRequest struct {
+	Slug              *string  `json:"slug"`
+	Name              string   `json:"name" binding:"required,min=1,max=120"`
+	LogoURL           *string  `json:"logo_url"`
+	StartingPrice     float64  `json:"starting_price" binding:"required,gt=0"`
+	ShopifyURL        *string  `json:"shopify_url"`
+	Description       *string  `json:"description" binding:"omitempty,max=500"`
+	IsActive          *bool    `json:"is_active"`
+	Ladder            []int    `json:"ladder" binding:"required,min=1"`
+	CPGreenMax        float64  `json:"cp_green_max" binding:"required,gt=0,lte=1"`
+	CPYellowMax       float64  `json:"cp_yellow_max" binding:"required,gt=0,lte=1"`
+	EntryMachineHours *float64 `json:"entry_machine_hours" binding:"omitempty,gt=0"`
+	EntryRung         *int32   `json:"entry_rung" binding:"omitempty,gt=0"`
+}
+
+func (s *Server) createBrand(c *gin.Context) {
+	var req brandCreateRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+
+	slug := slugify(req.Name)
+	if req.Slug != nil && *req.Slug != "" {
+		slug = strings.ToLower(strings.TrimSpace(*req.Slug))
+	}
+	if !slugPattern.MatchString(slug) {
+		detail(c, http.StatusUnprocessableEntity, "The brand slug is not valid.")
+		return
+	}
+	if reservedBrandSlugs[slug] {
+		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("'%s' is reserved. Choose another name or slug.", slug))
+		return
+	}
+
+	if !validateLadderSlice(c, req.Ladder) {
+		return
+	}
+	if req.CPGreenMax > req.CPYellowMax {
+		detail(c, http.StatusBadRequest, "The green threshold must be at or below the yellow threshold.")
+		return
+	}
+
+	exists, err := s.store.Q.BrandExists(c.Request.Context(), slug)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not verify the brand.")
+		return
+	}
+	if exists {
+		detail(c, http.StatusConflict, fmt.Sprintf("A brand with the slug '%s' already exists.", slug))
+		return
+	}
+
+	ladderJSON, err := json.Marshal(req.Ladder)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not encode the ladder.")
+		return
+	}
+	active := true
+	if req.IsActive != nil {
+		active = *req.IsActive
+	}
+
+	r, err := s.store.Q.InsertBrand(c.Request.Context(), gen.InsertBrandParams{
+		ID: uuid.New(), Slug: slug, Name: req.Name, LogoUrl: req.LogoURL,
+		StartingPrice: req.StartingPrice, ShopifyUrl: req.ShopifyURL, Description: req.Description,
+		IsActive: active, Ladder: ladderJSON, CpGreenMax: req.CPGreenMax, CpYellowMax: req.CPYellowMax,
+		EntryMachineHours: req.EntryMachineHours, EntryRung: req.EntryRung,
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not create the brand.")
+		return
+	}
+	dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
+		r.IsActive, r.Ladder, r.CpGreenMax, r.CpYellowMax, r.EntryMachineHours, r.EntryRung,
+		r.CreatedAt, r.UpdatedAt)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "The brand ladder is corrupt.")
+		return
+	}
+	c.JSON(http.StatusCreated, dto)
+}
+
+func (s *Server) deleteBrand(c *gin.Context) {
+	slug, ok := brandSlugParam(c)
+	if !ok {
+		return
+	}
+	rows, err := s.store.Q.DeleteBrand(c.Request.Context(), slug)
+	if err != nil {
+		// A project still references this brand (FK RESTRICT).
+		detail(c, http.StatusConflict, "This brand still has projects and cannot be deleted.")
+		return
+	}
+	if rows == 0 {
+		detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (s *Server) updateBrand(c *gin.Context) {
-	key, ok := brandKeyParam(c)
+	slug, ok := brandSlugParam(c)
 	if !ok {
 		return
 	}
@@ -129,17 +279,17 @@ func (s *Server) updateBrand(c *gin.Context) {
 		return
 	}
 
-	current, err := s.store.Q.GetBrandByKey(c.Request.Context(), string(key))
+	current, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(key))
+			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
 			return
 		}
 		detail(c, http.StatusInternalServerError, "Could not load the brand.")
 		return
 	}
 
-	params := gen.UpdateBrandParams{Key: string(key)}
+	params := gen.UpdateBrandParams{Slug: slug}
 	if !s.applyBrandUpdate(c, raw, &params) {
 		return
 	}
@@ -160,13 +310,13 @@ func (s *Server) updateBrand(c *gin.Context) {
 	r, err := s.store.Q.UpdateBrand(c.Request.Context(), params)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(key))
+			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
 			return
 		}
 		detail(c, http.StatusInternalServerError, "Could not update the brand.")
 		return
 	}
-	dto, err := brandDTO(r.ID, r.Key, r.Name, r.StartingPrice, r.ShopifyUrl, r.Description,
+	dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
 		r.IsActive, r.Ladder, r.CpGreenMax, r.CpYellowMax, r.EntryMachineHours, r.EntryRung,
 		r.CreatedAt, r.UpdatedAt)
 	if err != nil {
@@ -190,6 +340,14 @@ func (s *Server) applyBrandUpdate(c *gin.Context, raw map[string]json.RawMessage
 			return false
 		}
 		params.Name = &name
+	}
+	if v, ok := raw["logo_url"]; ok {
+		var url *string
+		if !decodeField(c, v, &url) {
+			return false
+		}
+		params.SetLogoUrl = true
+		params.LogoUrl = url
 	}
 	if v, ok := raw["starting_price"]; ok {
 		var price float64
@@ -301,19 +459,8 @@ func validateLadder(c *gin.Context, raw json.RawMessage) ([]byte, bool) {
 		detail(c, http.StatusUnprocessableEntity, "The request body is invalid.")
 		return nil, false
 	}
-	if len(ladder) == 0 {
-		detail(c, http.StatusUnprocessableEntity, "The ladder needs at least one price.")
+	if !validateLadderSlice(c, ladder) {
 		return nil, false
-	}
-	for i, price := range ladder {
-		if price <= 0 {
-			detail(c, http.StatusUnprocessableEntity, "Ladder prices must be positive.")
-			return nil, false
-		}
-		if i > 0 && price <= ladder[i-1] {
-			detail(c, http.StatusUnprocessableEntity, "Ladder prices must be strictly ascending.")
-			return nil, false
-		}
 	}
 	out, err := json.Marshal(ladder)
 	if err != nil {
@@ -321,4 +468,24 @@ func validateLadder(c *gin.Context, raw json.RawMessage) ([]byte, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// validateLadderSlice enforces the ladder invariants: non-empty, positive, and
+// strictly ascending. It writes a 422 and returns false on the first violation.
+func validateLadderSlice(c *gin.Context, ladder []int) bool {
+	if len(ladder) == 0 {
+		detail(c, http.StatusUnprocessableEntity, "The ladder needs at least one price.")
+		return false
+	}
+	for i, price := range ladder {
+		if price <= 0 {
+			detail(c, http.StatusUnprocessableEntity, "Ladder prices must be positive.")
+			return false
+		}
+		if i > 0 && price <= ladder[i-1] {
+			detail(c, http.StatusUnprocessableEntity, "Ladder prices must be strictly ascending.")
+			return false
+		}
+	}
+	return true
 }

@@ -229,7 +229,7 @@ func TestIntegrationPricingFromDB(t *testing.T) {
 	// Drop the 1199 rung from the gifting ladder; the engine must now recommend
 	// 1299, proving it reads the ladder from the database.
 	newLadder, _ := json.Marshal([]int{999, 1299, 1499, 1799, 1999, 2499, 2999, 3499, 3999})
-	if _, err := store.Q.UpdateBrand(ctx, gen.UpdateBrandParams{Key: "gifting", Ladder: newLadder}); err != nil {
+	if _, err := store.Q.UpdateBrand(ctx, gen.UpdateBrandParams{Slug: "gifting", Ladder: newLadder}); err != nil {
 		t.Fatalf("update ladder: %v", err)
 	}
 
@@ -317,5 +317,99 @@ func TestIntegrationBrandGuard(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &brands)
 	if len(brands) != 2 {
 		t.Errorf("brands = %d, want 2", len(brands))
+	}
+}
+
+func TestIntegrationBrandCreateAndDelete(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	manage := minter.mint(t, []string{"brand:read", "brand:manage"})
+
+	// A free-form brand is created with a derived slug and a valid ladder.
+	create := map[string]any{
+		"name":           "Festive Editions",
+		"starting_price": 1499,
+		"ladder":         []int{1499, 1999, 2499},
+		"cp_green_max":   0.25,
+		"cp_yellow_max":  0.30,
+	}
+	rr := doJSON(router, http.MethodPost, "/brands", manage, create)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create brand = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var brand map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &brand)
+	if brand["slug"] != "festive-editions" {
+		t.Fatalf("slug = %v, want festive-editions", brand["slug"])
+	}
+
+	// green above yellow is a 400 with the exact message.
+	bad := map[string]any{
+		"name": "Bad", "starting_price": 999, "ladder": []int{999},
+		"cp_green_max": 0.40, "cp_yellow_max": 0.30,
+	}
+	if rr := doJSON(router, http.MethodPost, "/brands", manage, bad); rr.Code != http.StatusBadRequest {
+		t.Errorf("green>yellow = %d, want 400", rr.Code)
+	}
+
+	// Delete the new brand; it has no projects, so it goes cleanly.
+	if rr := doJSON(router, http.MethodDelete, "/brands/festive-editions", manage, nil); rr.Code != http.StatusNoContent {
+		t.Errorf("delete brand = %d, want 204", rr.Code)
+	}
+	if rr := doJSON(router, http.MethodGet, "/brands/festive-editions", manage, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("get deleted brand = %d, want 404", rr.Code)
+	}
+}
+
+func TestIntegrationBrandConnections(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	manage := minter.mint(t, []string{"brand:read", "brand:manage"})
+
+	// No connections on a fresh brand.
+	rr := doJSON(router, http.MethodGet, "/brands/gifting/connections", manage, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list connections = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var conns []map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &conns)
+	if len(conns) != 0 {
+		t.Fatalf("connections = %d, want 0", len(conns))
+	}
+
+	// Upsert a google_ads connection; the token must never be echoed back.
+	up := map[string]any{
+		"status": "connected", "external_account_id": "acct-123",
+		"access_token": "secret-token",
+	}
+	rr = doJSON(router, http.MethodPut, "/brands/gifting/connections/google_ads", manage, up)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("upsert connection = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("secret-token")) {
+		t.Fatal("access token leaked in the connection response")
+	}
+
+	// An unknown provider is a 422.
+	if rr := doJSON(router, http.MethodPut, "/brands/gifting/connections/tiktok_ads", manage, up); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("unknown provider = %d, want 422", rr.Code)
+	}
+
+	// The connection now lists, then disconnects.
+	rr = doJSON(router, http.MethodGet, "/brands/gifting/connections", manage, nil)
+	_ = json.Unmarshal(rr.Body.Bytes(), &conns)
+	if len(conns) != 1 || conns[0]["provider"] != "google_ads" {
+		t.Fatalf("connections = %+v, want one google_ads", conns)
+	}
+	if rr := doJSON(router, http.MethodDelete, "/brands/gifting/connections/google_ads", manage, nil); rr.Code != http.StatusNoContent {
+		t.Errorf("delete connection = %d, want 204", rr.Code)
 	}
 }

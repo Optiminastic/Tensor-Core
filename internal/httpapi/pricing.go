@@ -37,7 +37,7 @@ func (s *Server) postDesignCP(c *gin.Context) {
 
 type sellingPriceRequest struct {
 	DesignCP   float64                     `json:"design_cp"`
-	Brand      pricing.Brand               `json:"brand" binding:"required,oneof=gifting decor"`
+	Brand      pricing.Brand               `json:"brand" binding:"required,min=1"`
 	FixedCosts *pricing.FixedVariableCosts `json:"fixed_costs"`
 	Margins    *pricing.MarginAssumptions  `json:"margins"`
 }
@@ -61,10 +61,11 @@ func (s *Server) postSellingPrice(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the brand policy.")
 		return
 	}
-	var ladder []int
-	if policy != nil {
-		ladder = policy.Ladder
+	if policy == nil {
+		detail(c, http.StatusNotFound, notConfigured(req.Brand))
+		return
 	}
+	ladder := policy.Ladder
 
 	result, err := pricing.GenerateSellingPrice(
 		req.DesignCP, fixed, req.Brand, margins, ladder, pricing.StressAdSpendPct,
@@ -81,7 +82,7 @@ func (s *Server) postSellingPrice(c *gin.Context) {
 type statusRequest struct {
 	DesignCP float64                `json:"design_cp"`
 	TargetSP float64                `json:"target_sp"`
-	Brand    pricing.Brand          `json:"brand" binding:"required,oneof=gifting decor"`
+	Brand    pricing.Brand          `json:"brand" binding:"required,min=1"`
 	Metrics  *pricing.SlicerMetrics `json:"metrics"`
 }
 
@@ -96,17 +97,16 @@ func (s *Server) postStatus(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the brand policy.")
 		return
 	}
+	if policy == nil {
+		detail(c, http.StatusNotFound, notConfigured(req.Brand))
+		return
+	}
 
-	var thresholds *[2]float64
-	var entryMachineHours *float64
+	thresholds := &[2]float64{policy.GreenMax, policy.YellowMax}
+	entryMachineHours := policy.EntryMachineHours
 	entryRung := pricing.GiftingEntryRung
-	if policy != nil {
-		t := [2]float64{policy.GreenMax, policy.YellowMax}
-		thresholds = &t
-		entryMachineHours = policy.EntryMachineHours
-		if policy.EntryRung != nil {
-			entryRung = *policy.EntryRung
-		}
+	if policy.EntryRung != nil {
+		entryRung = *policy.EntryRung
 	}
 
 	result, err := pricing.EvaluateStatus(

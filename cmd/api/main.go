@@ -18,6 +18,8 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
+	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
 func main() {
@@ -46,6 +48,19 @@ func main() {
 	)
 	guards := auth.NewGuards(verifier, cfg.InternalAPISecret)
 	server := httpapi.NewServer(cfg, store, guards)
+
+	// Design pipeline: attach object storage + the slicer dispatcher. If storage
+	// is unreachable the API still serves everything else; the design routes fail
+	// closed with 503 until it is available.
+	if objects, err := storage.New(
+		ctx, cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOSecure,
+	); err != nil {
+		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
+	} else {
+		dispatcher := slicing.NewDispatcher(cfg.SlicerDispatchURL, cfg.InternalAPISecret)
+		server.EnablePipeline(objects, dispatcher)
+		log.Printf("design pipeline enabled (storage=%s, dispatch=%s)", cfg.MinIOEndpoint, cfg.SlicerDispatchURL)
+	}
 
 	addr := ":" + envOr("PORT", "8001")
 	srv := &http.Server{

@@ -251,11 +251,11 @@ type costAssumptionResponse struct {
 }
 
 func costAssumptionDTO(
-	id uuid.UUID, name string, brand any, filament, electricity, machine, finishing, consumables, failure float64,
+	id uuid.UUID, name string, brand *string, filament, electricity, machine, finishing, consumables, failure float64,
 	isDefault bool, created, updated pgtype.Timestamptz,
 ) costAssumptionResponse {
 	return costAssumptionResponse{
-		ID: id.String(), Name: name, Brand: db.StrPtrFromIface(brand),
+		ID: id.String(), Name: name, Brand: brand,
 		FilamentCostPerKg: filament, ElectricityCostPerUnit: electricity, MachineHourCost: machine,
 		FinishingLabour: finishing, Consumables: consumables, FailurePct: failure,
 		IsDefault: isDefault, CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
@@ -278,7 +278,7 @@ func (s *Server) listCostAssumptions(c *gin.Context) {
 
 type costAssumptionCreateRequest struct {
 	Name                   string   `json:"name" binding:"required,min=1,max=120"`
-	Brand                  *string  `json:"brand" binding:"omitempty,oneof=gifting decor"`
+	Brand                  *string  `json:"brand" binding:"omitempty,min=1,max=120"`
 	FilamentCostPerKg      *float64 `json:"filament_cost_per_kg" binding:"omitempty,gt=0"`
 	ElectricityCostPerUnit *float64 `json:"electricity_cost_per_unit" binding:"omitempty,gte=0"`
 	MachineHourCost        *float64 `json:"machine_hour_cost" binding:"omitempty,gte=0"`
@@ -300,16 +300,12 @@ func (s *Server) createCostAssumption(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	var brand any
-	if req.Brand != nil {
-		brand = *req.Brand
-	}
 	isDefault := false
 	if req.IsDefault != nil {
 		isDefault = *req.IsDefault
 	}
 	r, err := s.store.Q.InsertCostAssumption(c.Request.Context(), gen.InsertCostAssumptionParams{
-		ID: uuid.New(), Name: req.Name, Brand: brand,
+		ID: uuid.New(), Name: req.Name, Brand: req.Brand,
 		FilamentCostPerKg:      floatOr(req.FilamentCostPerKg, 1000),
 		ElectricityCostPerUnit: floatOr(req.ElectricityCostPerUnit, 12),
 		MachineHourCost:        floatOr(req.MachineHourCost, 45),
@@ -375,14 +371,12 @@ func (s *Server) updateCostAssumption(c *gin.Context) {
 		if !decodeField(c, v, &brand) {
 			return
 		}
-		if brand != nil && *brand != "gifting" && *brand != "decor" {
-			detail(c, http.StatusUnprocessableEntity, "Unknown brand.")
+		if brand != nil && (len(*brand) < 1 || len(*brand) > 120) {
+			detail(c, http.StatusUnprocessableEntity, "Brand must be 1 to 120 characters.")
 			return
 		}
 		params.SetBrand = true
-		if brand != nil {
-			params.Brand = *brand
-		}
+		params.Brand = brand
 	}
 	numeric := []struct {
 		key    string

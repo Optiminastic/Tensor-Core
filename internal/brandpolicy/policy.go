@@ -28,7 +28,7 @@ type Policy struct {
 // Load reads the brand row and maps it to a Policy. It returns (nil, nil) when
 // the brand is not configured, so pricing falls back to built-in defaults.
 func Load(ctx context.Context, q *gen.Queries, brand pricing.Brand) (*Policy, error) {
-	row, err := q.GetBrandByKey(ctx, string(brand))
+	row, err := q.GetBrandBySlug(ctx, string(brand))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

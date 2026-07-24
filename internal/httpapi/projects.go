@@ -61,9 +61,25 @@ func (s *Server) listProjects(c *gin.Context) {
 }
 
 type projectCreateRequest struct {
-	Name        string        `json:"name" binding:"required,min=1,max=120"`
-	Brand       pricing.Brand `json:"brand" binding:"required,oneof=gifting decor"`
-	Description *string       `json:"description" binding:"omitempty,max=500"`
+	Name        string  `json:"name" binding:"required,min=1,max=120"`
+	Brand       string  `json:"brand" binding:"required,min=1,max=120"`
+	Description *string `json:"description" binding:"omitempty,max=500"`
+}
+
+// brandMustExist confirms a project's brand references a real brand slug. It
+// writes a 422 and returns false when the brand is not configured, so the FK
+// constraint never surfaces as a raw 500.
+func (s *Server) brandMustExist(c *gin.Context, slug string) bool {
+	exists, err := s.store.Q.BrandExists(c.Request.Context(), slug)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not verify the brand.")
+		return false
+	}
+	if !exists {
+		detail(c, http.StatusUnprocessableEntity, notConfigured(pricing.Brand(slug)))
+		return false
+	}
+	return true
 }
 
 func (s *Server) createProject(c *gin.Context) {
@@ -71,10 +87,13 @@ func (s *Server) createProject(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	if !s.brandMustExist(c, req.Brand) {
+		return
+	}
 	user, _ := auth.UserFrom(c) // created_by comes from the token, never the body.
 
 	r, err := s.store.Q.InsertProject(c.Request.Context(), gen.InsertProjectParams{
-		ID: uuid.New(), Name: req.Name, Brand: string(req.Brand),
+		ID: uuid.New(), Name: req.Name, Brand: req.Brand,
 		Description: req.Description, Status: "active", CreatedBy: user.ID,
 	})
 	if err != nil {
@@ -133,11 +152,14 @@ func (s *Server) updateProject(c *gin.Context) {
 		if !decodeField(c, v, &brand) {
 			return
 		}
-		if brand != string(pricing.BrandGifting) && brand != string(pricing.BrandDecor) {
-			detail(c, http.StatusUnprocessableEntity, "Unknown brand.")
+		if len(brand) < 1 || len(brand) > 120 {
+			detail(c, http.StatusUnprocessableEntity, "Brand must be 1 to 120 characters.")
 			return
 		}
-		params.Brand = brand
+		if !s.brandMustExist(c, brand) {
+			return
+		}
+		params.Brand = &brand
 	}
 	if v, ok := raw["description"]; ok {
 		var desc *string

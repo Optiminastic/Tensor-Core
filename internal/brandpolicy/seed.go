@@ -12,7 +12,7 @@ import (
 )
 
 type brandDefault struct {
-	key               pricing.Brand
+	slug              pricing.Brand
 	name              string
 	startingPrice     float64
 	description       string
@@ -30,13 +30,13 @@ func i32(v int32) *int32      { return &v }
 // constants so the database and the built-in fallback agree.
 var brandDefaults = []brandDefault{
 	{
-		key: pricing.BrandGifting, name: "Personalised Gifting", startingPrice: 999,
+		slug: pricing.BrandGifting, name: "Personalised Gifting", startingPrice: 999,
 		description: "Personalised 3D-printed gifting. Starts at ₹999.",
 		ladder:      pricing.GiftingLadder, greenMax: 0.25, yellowMax: 0.30,
 		entryMachineHours: fptr(pricing.GiftingEntryMachineHours), entryRung: i32(pricing.GiftingEntryRung),
 	},
 	{
-		key: pricing.BrandDecor, name: "Decor", startingPrice: 3999,
+		slug: pricing.BrandDecor, name: "Decor", startingPrice: 3999,
 		description: "Home, office and desk decor. Starts at ₹3,999.",
 		ladder:      pricing.DecorLadder, greenMax: 0.30, yellowMax: 0.33,
 		entryMachineHours: nil, entryRung: nil,
@@ -48,7 +48,7 @@ var brandDefaults = []brandDefault{
 func SyncBrands(ctx context.Context, store *db.Store) (int, error) {
 	err := store.InTx(ctx, func(q *gen.Queries) error {
 		for _, d := range brandDefaults {
-			exists, err := q.BrandExists(ctx, string(d.key))
+			exists, err := q.BrandExists(ctx, string(d.slug))
 			if err != nil {
 				return err
 			}
@@ -62,8 +62,9 @@ func SyncBrands(ctx context.Context, store *db.Store) (int, error) {
 			description := d.description
 			if _, err := q.InsertBrand(ctx, gen.InsertBrandParams{
 				ID:                uuid.New(),
-				Key:               string(d.key),
+				Slug:              string(d.slug),
 				Name:              d.name,
+				LogoUrl:           nil,
 				StartingPrice:     d.startingPrice,
 				ShopifyUrl:        nil,
 				Description:       &description,

@@ -20,6 +20,14 @@ type Settings struct {
 	InternalAPISecret string
 	JWKSCacheSeconds  int
 	CORSOrigins       []string
+
+	// Design pipeline: object storage for STL/G-code and the slicer dispatcher.
+	MinIOEndpoint     string
+	MinIOAccessKey    string
+	MinIOSecretKey    string
+	MinIOBucket       string
+	MinIOSecure       bool
+	SlicerDispatchURL string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -35,6 +43,26 @@ func Load() Settings {
 		InternalAPISecret: os.Getenv("INTERNAL_API_SECRET"),
 		JWKSCacheSeconds:  intEnvOr("JWKS_CACHE_SECONDS", 300),
 		CORSOrigins:       corsOrigins(envOr("CORS_ORIGINS", `["http://localhost:3000"]`)),
+
+		MinIOEndpoint:     envOr("MINIO_ENDPOINT", "localhost:9100"),
+		MinIOAccessKey:    envOr("MINIO_ACCESS_KEY", "tensor"),
+		MinIOSecretKey:    envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
+		MinIOBucket:       envOr("MINIO_BUCKET", "designs"),
+		MinIOSecure:       boolEnvOr("MINIO_SECURE", false),
+		SlicerDispatchURL: envOr("SLICER_DISPATCH_URL", "http://localhost:8090"),
+	}
+}
+
+// boolEnvOr parses a boolean env var, accepting the common truthy spellings.
+func boolEnvOr(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
 	}
 }
 

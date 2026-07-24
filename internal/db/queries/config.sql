@@ -1,6 +1,6 @@
 -- Config: material profiles, machine profiles, cost assumption sets.
 -- numeric columns are cast to/from float8 so pgx scans and binds float64
--- cleanly; the nullable brand enum is read as text and written via a text cast.
+-- cleanly; brand is now a nullable free-form slug (plain text).
 
 -- name: ListMaterials :many
 SELECT id, name, material_type, cost_per_kg::float8 AS cost_per_kg,
@@ -68,7 +68,7 @@ INSERT INTO cost_assumption_sets (
     id, name, brand, filament_cost_per_kg, electricity_cost_per_unit,
     machine_hour_cost, finishing_labour, consumables, failure_pct, is_default
 ) VALUES (
-    sqlc.arg('id'), sqlc.arg('name'), sqlc.narg('brand')::brand,
+    sqlc.arg('id'), sqlc.arg('name'), sqlc.narg('brand'),
     sqlc.arg('filament_cost_per_kg')::float8, sqlc.arg('electricity_cost_per_unit')::float8,
     sqlc.arg('machine_hour_cost')::float8, sqlc.arg('finishing_labour')::float8,
     sqlc.arg('consumables')::float8, sqlc.arg('failure_pct')::float8, sqlc.arg('is_default')
@@ -85,7 +85,7 @@ RETURNING id, name, brand,
 -- name: UpdateCostAssumption :one
 UPDATE cost_assumption_sets SET
     name = COALESCE(sqlc.narg('name'), name),
-    brand = CASE WHEN sqlc.arg('set_brand')::bool THEN sqlc.narg('brand')::brand ELSE brand END,
+    brand = CASE WHEN sqlc.arg('set_brand')::bool THEN sqlc.narg('brand') ELSE brand END,
     filament_cost_per_kg = COALESCE(sqlc.narg('filament_cost_per_kg')::float8, filament_cost_per_kg),
     electricity_cost_per_unit = COALESCE(sqlc.narg('electricity_cost_per_unit')::float8, electricity_cost_per_unit),
     machine_hour_cost = COALESCE(sqlc.narg('machine_hour_cost')::float8, machine_hour_cost),

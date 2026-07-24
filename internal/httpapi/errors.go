@@ -13,8 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
-
-	"github.com/Optiminastic/tensor-core/internal/pricing"
 )
 
 // detail writes {"detail": msg} with the given status.
@@ -60,15 +58,4 @@ func parseUUIDParam(c *gin.Context, name string) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
-}
-
-// brandKeyParam validates the {key} path segment against the fixed brand set,
-// writing a 422 on an unknown value.
-func brandKeyParam(c *gin.Context) (pricing.Brand, bool) {
-	key := c.Param("key")
-	if key != string(pricing.BrandGifting) && key != string(pricing.BrandDecor) {
-		detail(c, http.StatusUnprocessableEntity, "Unknown brand.")
-		return "", false
-	}
-	return pricing.Brand(key), true
 }

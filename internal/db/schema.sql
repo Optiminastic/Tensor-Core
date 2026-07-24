@@ -1,22 +1,17 @@
 -- Plain DDL used ONLY by sqlc to build its type catalog for code generation.
--- The runtime source of truth is internal/db/migrations/0001_baseline.sql
--- (idempotent, goose). These two must describe the same schema; the DB
--- integration tests apply the goose migration and then run every sqlc query, so
--- any drift between them fails the tests.
+-- The runtime source of truth is the goose migrations in internal/db/migrations
+-- (idempotent). These must describe the same final schema; the DB integration
+-- tests apply the migrations and then run every sqlc query, so any drift fails.
 
--- Defined as domains (not enums) for codegen ONLY: sqlc maps a domain to its
--- base type (text -> Go string) and generates no enum type, avoiding a clash
--- between the `brand` enum's type and the `brands` table model. The real
--- database (goose migration) uses genuine ENUM types of the same name; every
--- query casts text <-> the enum, so this codegen shim and the runtime type line
--- up. Keep the allowed values in sync with 0001_baseline.sql.
-CREATE DOMAIN brand AS text CHECK (VALUE IN ('gifting', 'decor'));
+-- Brands are now free-form (user-created), so `brand` is plain text, referenced
+-- by a brand's slug -- there is no brand enum anymore. project_status stays a
+-- fixed set, modelled as a domain (sqlc maps a domain to its base text type).
 CREATE DOMAIN project_status AS text CHECK (VALUE IN ('active', 'archived'));
 
 CREATE TABLE cost_assumption_sets (
     id                        uuid PRIMARY KEY,
     name                      varchar(120) NOT NULL UNIQUE,
-    brand                     brand,
+    brand                     text,
     filament_cost_per_kg      numeric(10, 2) NOT NULL,
     electricity_cost_per_unit numeric(10, 2) NOT NULL,
     machine_hour_cost         numeric(10, 2) NOT NULL,
@@ -106,21 +101,11 @@ CREATE TABLE user_invites (
 );
 CREATE INDEX ix_user_invites_email ON user_invites (email);
 
-CREATE TABLE projects (
-    id          uuid PRIMARY KEY,
-    name        varchar(120) NOT NULL UNIQUE,
-    brand       brand NOT NULL,
-    description varchar(500),
-    status      project_status NOT NULL,
-    created_by  varchar(64) NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE TABLE brands (
     id                  uuid PRIMARY KEY,
-    key                 brand NOT NULL UNIQUE,
+    slug                text NOT NULL UNIQUE,
     name                varchar(120) NOT NULL,
+    logo_url            text,
     starting_price      numeric(10, 2) NOT NULL,
     shopify_url         varchar(255),
     description         varchar(500),
@@ -132,4 +117,96 @@ CREATE TABLE brands (
     entry_rung          integer,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE projects (
+    id          uuid PRIMARY KEY,
+    name        varchar(120) NOT NULL UNIQUE,
+    brand       text NOT NULL REFERENCES brands (slug) ON DELETE RESTRICT,
+    description varchar(500),
+    status      project_status NOT NULL,
+    created_by  varchar(64) NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Per-brand connections to external ad and commerce platforms. Tokens are stored
+-- so the platform can be called on the brand's behalf; one row per (brand,
+-- provider). status is 'disconnected' | 'connected' | 'error'.
+CREATE TABLE brand_connections (
+    id                  uuid PRIMARY KEY,
+    brand_slug          text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,
+    provider            text NOT NULL,
+    status              text NOT NULL,
+    external_account_id text,
+    access_token        text,
+    refresh_token       text,
+    expires_at          timestamptz,
+    connected_by        varchar(64),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_brand_connection UNIQUE (brand_slug, provider)
+);
+
+-- The design pipeline (see migration 0003). A design is the uploaded model plus
+-- the answers that drive slicing; status is queued -> slicing -> priced | failed.
+CREATE TABLE designs (
+    id            uuid PRIMARY KEY,
+    brand_slug    text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,
+    name          varchar(160) NOT NULL,
+    created_by    varchar(64) NOT NULL,
+    status        text NOT NULL,
+    stl_key       text NOT NULL,
+    material      varchar(20) NOT NULL,
+    colour        varchar(60),
+    finish        varchar(20) NOT NULL,
+    units_per_bed integer NOT NULL,
+    quality       varchar(20) NOT NULL,
+    infill_pct    numeric(5, 2) NOT NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_designs_brand_slug ON designs (brand_slug);
+
+CREATE TABLE slice_jobs (
+    id         uuid PRIMARY KEY,
+    design_id  uuid NOT NULL REFERENCES designs (id) ON DELETE CASCADE,
+    status     text NOT NULL,
+    attempt    integer NOT NULL DEFAULT 1,
+    error      text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_slice_jobs_design_id ON slice_jobs (design_id);
+
+CREATE TABLE slice_metrics (
+    job_id                    uuid PRIMARY KEY REFERENCES slice_jobs (id) ON DELETE CASCADE,
+    print_time_hr             numeric(10, 4) NOT NULL,
+    effective_machine_time_hr numeric(10, 4) NOT NULL,
+    filament_g                numeric(10, 3) NOT NULL,
+    purge_g                   numeric(10, 3) NOT NULL DEFAULT 0,
+    support_g                 numeric(10, 3) NOT NULL DEFAULT 0,
+    colour_changes            integer NOT NULL DEFAULT 0,
+    electricity_kwh           numeric(10, 4) NOT NULL DEFAULT 0,
+    units_per_bed             integer NOT NULL,
+    layer_height_mm           numeric(6, 3) NOT NULL DEFAULT 0,
+    infill_density_pct        numeric(6, 2) NOT NULL DEFAULT 0,
+    wall_loops                integer NOT NULL DEFAULT 0,
+    support_used              boolean NOT NULL DEFAULT false,
+    filament_length_mm        numeric(12, 2) NOT NULL DEFAULT 0,
+    gcode_key                 text NOT NULL DEFAULT '',
+    created_at                timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE design_pricing (
+    design_id      uuid PRIMARY KEY REFERENCES designs (id) ON DELETE CASCADE,
+    design_cp      numeric(12, 2) NOT NULL,
+    breakdown      json NOT NULL,
+    verdict        text NOT NULL,
+    cp_pct         numeric(6, 4) NOT NULL,
+    recommended_sp integer,
+    reasons        json NOT NULL,
+    suggestions    json NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now()
 );

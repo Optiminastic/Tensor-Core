@@ -40,14 +40,11 @@ func TimePtr(t pgtype.Timestamptz) *time.Time {
 	return &v
 }
 
-// StrPtrFromIface converts a nullable text/enum column read as interface{} to
-// *string (nil when NULL). pgx yields a string for a non-null text value.
-func StrPtrFromIface(v any) *string {
-	if v == nil {
-		return nil
+// Timestamptz builds a nullable timestamptz from a *time.Time (invalid/NULL when
+// nil). It is the inverse of TimePtr for binding query parameters.
+func Timestamptz(t *time.Time) pgtype.Timestamptz {
+	if t == nil {
+		return pgtype.Timestamptz{}
 	}
-	if s, ok := v.(string); ok {
-		return &s
-	}
-	return nil
+	return pgtype.Timestamptz{Time: *t, Valid: true}
 }
