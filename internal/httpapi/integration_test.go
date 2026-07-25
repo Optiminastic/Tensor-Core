@@ -37,7 +37,10 @@ func setupStore(t *testing.T) *db.Store {
 	if err := db.Migrate(dsn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	store, err := db.Open(ctx, dsn)
+	if err := db.MigrateRiver(ctx, dsn); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
+	store, err := db.Open(ctx, dsn, db.Options{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -173,7 +176,7 @@ func testServer(t *testing.T, store *db.Store, guards *auth.Guards) http.Handler
 		AuthAudience: "tensor-core",
 		CORSOrigins:  []string{"http://localhost:3001"},
 	}
-	return NewServer(cfg, store, guards).Router()
+	return NewServer(cfg, store, guards, nil).Router()
 }
 
 func doJSON(router http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {

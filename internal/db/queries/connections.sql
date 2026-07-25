@@ -11,6 +11,13 @@ SELECT id, brand_slug, provider, status, external_account_id,
        expires_at, connected_by, created_at, updated_at
 FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
 
+-- GetConnectionWithToken is the ONLY query that reads the access token back out.
+-- It exists for the server-to-server publish path (e.g. creating a Shopify draft
+-- product) and must never be exposed on a caller-facing endpoint.
+-- name: GetConnectionWithToken :one
+SELECT status, external_account_id, access_token
+FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
+
 -- name: UpsertConnection :one
 INSERT INTO brand_connections (
     id, brand_slug, provider, status, external_account_id,

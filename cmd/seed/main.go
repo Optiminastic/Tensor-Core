@@ -25,8 +25,11 @@ func main() {
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
+	if err := db.MigrateRiver(ctx, cfg.DatabaseURL); err != nil {
+		log.Fatalf("river migrate: %v", err)
+	}
 
-	store, err := db.Open(ctx, cfg.DatabaseURL)
+	store, err := db.Open(ctx, cfg.DatabaseURL, db.Options{})
 	if err != nil {
 		log.Fatalf("connect to database: %v", err)
 	}
@@ -40,7 +43,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("seed brands: %v", err)
 	}
+	costSets, err := brandpolicy.SyncDefaultCostAssumptions(ctx, store)
+	if err != nil {
+		log.Fatalf("seed cost assumptions: %v", err)
+	}
 
-	log.Printf("seeded: %d permissions, %d roles, %d grants, %d brands",
-		authRes.Permissions, authRes.Roles, authRes.Grants, brands)
+	log.Printf("seeded: %d permissions, %d roles, %d grants, %d brands, %d cost sets",
+		authRes.Permissions, authRes.Roles, authRes.Grants, brands, costSets)
 }

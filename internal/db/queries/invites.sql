@@ -40,3 +40,18 @@ SELECT i.id, i.email, r.name::text AS role_name, i.expires_at,
 FROM user_invites i
 JOIN roles r ON r.id = i.role_id
 ORDER BY i.created_at DESC;
+
+-- name: ListInvitesWithRolePage :many
+-- Keyset page of the invite list, newest first, strictly before the (created_at,
+-- id) cursor. A null cursor returns the first page. created_at is selected so the
+-- caller can build the next cursor; it is not part of the response body.
+SELECT i.id, i.email, r.name::text AS role_name, i.expires_at,
+       i.accepted_at, i.revoked_at, i.created_by, i.created_at
+FROM user_invites i
+JOIN roles r ON r.id = i.role_id
+WHERE (
+    sqlc.narg('cursor_created_at')::timestamptz IS NULL
+    OR (i.created_at, i.id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+)
+ORDER BY i.created_at DESC, i.id DESC
+LIMIT sqlc.arg('page_limit');

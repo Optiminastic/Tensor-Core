@@ -18,6 +18,8 @@ CREATE TABLE cost_assumption_sets (
     finishing_labour          numeric(10, 2) NOT NULL,
     consumables               numeric(10, 2) NOT NULL,
     failure_pct               numeric(5, 4) NOT NULL,
+    fixed_costs               json NOT NULL DEFAULT '{}',
+    margins                   json NOT NULL DEFAULT '{}',
     is_default                boolean NOT NULL,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now()
@@ -100,6 +102,7 @@ CREATE TABLE user_invites (
     updated_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_user_invites_email ON user_invites (email);
+CREATE INDEX ix_user_invites_created ON user_invites (created_at DESC, id DESC);
 
 CREATE TABLE brands (
     id                  uuid PRIMARY KEY,
@@ -167,6 +170,7 @@ CREATE TABLE designs (
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_designs_brand_slug ON designs (brand_slug);
+CREATE INDEX ix_designs_brand_created ON designs (brand_slug, created_at DESC, id DESC);
 
 CREATE TABLE slice_jobs (
     id         uuid PRIMARY KEY,
@@ -178,6 +182,7 @@ CREATE TABLE slice_jobs (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_slice_jobs_design_id ON slice_jobs (design_id);
+CREATE UNIQUE INDEX uq_slice_jobs_design_attempt ON slice_jobs (design_id, attempt);
 
 CREATE TABLE slice_metrics (
     job_id                    uuid PRIMARY KEY REFERENCES slice_jobs (id) ON DELETE CASCADE,
@@ -199,14 +204,35 @@ CREATE TABLE slice_metrics (
 );
 
 CREATE TABLE design_pricing (
-    design_id      uuid PRIMARY KEY REFERENCES designs (id) ON DELETE CASCADE,
-    design_cp      numeric(12, 2) NOT NULL,
-    breakdown      json NOT NULL,
-    verdict        text NOT NULL,
-    cp_pct         numeric(6, 4) NOT NULL,
-    recommended_sp integer,
-    reasons        json NOT NULL,
-    suggestions    json NOT NULL,
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    updated_at     timestamptz NOT NULL DEFAULT now()
+    design_id             uuid PRIMARY KEY REFERENCES designs (id) ON DELETE CASCADE,
+    design_cp             numeric(12, 2) NOT NULL,
+    breakdown             json NOT NULL,
+    verdict               text NOT NULL,
+    cp_pct                numeric(6, 4) NOT NULL,
+    recommended_sp        integer,
+    raw_sp                numeric(12, 2) NOT NULL DEFAULT 0,
+    cp_pct_at_recommended numeric(6, 4),
+    passes_normal         boolean NOT NULL DEFAULT false,
+    survives_stress       boolean NOT NULL DEFAULT false,
+    sp_warnings           json NOT NULL DEFAULT '[]',
+    reasons               json NOT NULL,
+    suggestions           json NOT NULL,
+    approved_sp           integer,
+    approved_by           varchar(64),
+    approved_at           timestamptz,
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    updated_at            timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE shopify_products (
+    design_id    uuid PRIMARY KEY REFERENCES designs (id) ON DELETE CASCADE,
+    brand_slug   text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,
+    product_gid  text NOT NULL,
+    variant_gid  text NOT NULL DEFAULT '',
+    handle       text NOT NULL DEFAULT '',
+    admin_url    text NOT NULL DEFAULT '',
+    status       text NOT NULL,
+    published_by varchar(64),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
 );

@@ -1,51 +1,68 @@
 package httpapi
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
 // Server holds the HTTP layer's dependencies and builds the router.
 type Server struct {
-	cfg    config.Settings
-	store  *db.Store
-	guards *auth.Guards
+	cfg     config.Settings
+	store   *db.Store
+	guards  *auth.Guards
+	logger  *slog.Logger
+	shopify *shopify.Client
 
 	// Design pipeline dependencies. Nil until EnablePipeline is called; the
 	// design routes fail closed (503) when they are absent.
-	storage    *storage.Client
-	dispatcher *slicing.Dispatcher
+	storage  *storage.Client
+	enqueuer *slicing.Enqueuer
 }
 
-// NewServer wires the HTTP layer.
-func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards) *Server {
-	return &Server{cfg: cfg, store: store, guards: guards}
+// NewServer wires the HTTP layer. logger may be nil, in which case the request
+// middleware falls back to slog's default. The Shopify client is built once here
+// and shared across publishes so connections are reused.
+func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger *slog.Logger) *Server {
+	return &Server{
+		cfg:     cfg,
+		store:   store,
+		guards:  guards,
+		logger:  logger,
+		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
+	}
 }
 
-// EnablePipeline attaches the object store and slicer dispatcher so the design
-// routes can accept uploads and enqueue slices.
-func (s *Server) EnablePipeline(objects *storage.Client, dispatcher *slicing.Dispatcher) {
+// EnablePipeline attaches the object store and River slice enqueuer so the design
+// routes can accept uploads and enqueue slices transactionally.
+func (s *Server) EnablePipeline(objects *storage.Client, enqueuer *slicing.Enqueuer) {
 	s.storage = objects
-	s.dispatcher = dispatcher
+	s.enqueuer = enqueuer
 }
 
 // Router builds the Gin engine with CORS, health, and every router mounted at
 // the same prefixes as the FastAPI app.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(s.recoverPanic())
+	r.Use(s.requestContext())
 	r.Use(s.cors())
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "environment": s.cfg.Environment})
 	})
+	r.GET("/ready", s.readiness)
 
 	s.registerPricing(r)
 	s.registerConfig(r)
@@ -57,6 +74,21 @@ func (s *Server) Router() *gin.Engine {
 	s.registerInternal(r)
 
 	return r
+}
+
+// readiness is a real readiness probe (distinct from the always-ok /health
+// liveness check): it pings the database so an orchestrator only routes traffic
+// once the pool can actually serve queries. It returns 503 with the standard
+// {"detail"} shape when the database is unreachable.
+func (s *Server) readiness(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.store.Pool.Ping(ctx); err != nil {
+		obs.FromContext(c.Request.Context()).Error("readiness: database unreachable", "error", err)
+		detail(c, http.StatusServiceUnavailable, "The service is not ready.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
 // cors mirrors the FastAPI CORSMiddleware: the configured origins, credentials
