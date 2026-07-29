@@ -217,21 +217,25 @@ type xml3MFTriangle struct {
 	V3 int `xml:"v3,attr"`
 }
 
+// max3MFModelBytes bounds the decompressed model XML read from a 3MF archive, so
+// a crafted archive (a zip bomb) cannot exhaust memory.
+const max3MFModelBytes = 512 << 20 // 512 MiB
+
 // Load3MF opens the 3MF archive at path and parses its model mesh(es).
 func Load3MF(path string) (Mesh, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return Mesh{}, err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	for _, f := range zr.File {
 		if strings.EqualFold(filepath.ToSlash(f.Name), "3D/3dmodel.model") {
 			rc, err := f.Open()
 			if err != nil {
 				return Mesh{}, err
 			}
-			defer rc.Close()
-			return parse3MFModel(rc)
+			defer func() { _ = rc.Close() }()
+			return parse3MFModel(io.LimitReader(rc, max3MFModelBytes))
 		}
 	}
 	return Mesh{}, errors.New("orientation: 3MF has no 3D/3dmodel.model")

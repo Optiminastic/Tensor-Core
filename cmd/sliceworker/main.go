@@ -55,7 +55,13 @@ func main() {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	sliceTimeout := time.Duration(cfg.SliceTimeoutSeconds) * time.Second
+	// A non-positive timeout would make context.WithTimeout expire immediately and
+	// fail every slice; clamp it to the default.
+	timeoutSeconds := cfg.SliceTimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 300
+	}
+	sliceTimeout := time.Duration(timeoutSeconds) * time.Second
 
 	orientOpts := orientation.Options{
 		OverhangThresholdDeg: cfg.OrientationOverhangDeg,

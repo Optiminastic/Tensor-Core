@@ -270,7 +270,15 @@ func (s *Server) downloadGcode(c *gin.Context) {
 		return
 	}
 	m, err := s.store.Q.GetLatestMetricsForDesign(c.Request.Context(), d.ID)
-	if err != nil || m.GcodeKey == "" {
+	if err != nil {
+		if isNoRows(err) {
+			detail(c, http.StatusNotFound, "No G-code is available for this design yet.")
+			return
+		}
+		detail(c, http.StatusInternalServerError, "Could not load the design's G-code.")
+		return
+	}
+	if m.GcodeKey == "" {
 		detail(c, http.StatusNotFound, "No G-code is available for this design yet.")
 		return
 	}
@@ -309,7 +317,7 @@ func (s *Server) streamObject(c *gin.Context, key, filename string) {
 		detail(c, http.StatusInternalServerError, "Could not read the file.")
 		return
 	}
-	defer obj.Body.Close()
+	defer func() { _ = obj.Body.Close() }()
 
 	disposition := fmt.Sprintf("attachment; filename=%q", filename)
 	c.DataFromReader(http.StatusOK, obj.Size, "application/octet-stream", obj.Body,

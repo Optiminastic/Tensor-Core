@@ -365,7 +365,7 @@ func (c *Client) doOnce(ctx context.Context, endpoint, token string, body []byte
 	if err != nil {
 		return &APIError{msg: fmt.Sprintf("could not reach Shopify: %v", err), err: err}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return &APIError{

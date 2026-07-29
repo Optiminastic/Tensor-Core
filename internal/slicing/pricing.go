@@ -91,17 +91,22 @@ func ProcessSliceResult(
 }
 
 // FailJob marks a job failed with a reason and drops its design to "failed", so a
-// design never sits stuck when the slice cannot proceed. Best effort.
+// design never sits stuck when the slice cannot proceed. Best effort, but the two
+// writes run in one transaction so a design is never left failed-job / active-design.
 func FailJob(ctx context.Context, store *db.Store, jobID uuid.UUID, reason string) {
 	msg := reason
-	_ = store.Q.UpdateSliceJobStatus(ctx, gen.UpdateSliceJobStatusParams{
-		Status: jobFailed, Error: &msg, ID: jobID,
+	_ = store.InTx(ctx, func(q *gen.Queries) error {
+		if err := q.UpdateSliceJobStatus(ctx, gen.UpdateSliceJobStatusParams{
+			Status: jobFailed, Error: &msg, ID: jobID,
+		}); err != nil {
+			return err
+		}
+		job, err := q.GetSliceJobByID(ctx, jobID)
+		if err != nil {
+			return err
+		}
+		return q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designFailed, ID: job.DesignID})
 	})
-	job, err := store.Q.GetSliceJobByID(ctx, jobID)
-	if err != nil {
-		return
-	}
-	_ = store.Q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designFailed, ID: job.DesignID})
 }
 
 type verdict struct {

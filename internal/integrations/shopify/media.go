@@ -112,7 +112,7 @@ func (c *Client) postToTarget(ctx context.Context, target stagedTarget, img Prod
 	if err != nil {
 		return &APIError{msg: fmt.Sprintf("could not upload image to Shopify: %v", err), err: err}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiErr("Shopify image upload failed (%d)", resp.StatusCode)
 	}

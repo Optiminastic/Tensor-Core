@@ -22,8 +22,10 @@ const requestIDHeader = "X-Request-Id"
 // structured access line when the request completes.
 func (s *Server) requestContext() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// A client-supplied id is echoed and logged, so reject an over-long or
+		// non-token value and generate our own instead.
 		reqID := c.GetHeader(requestIDHeader)
-		if reqID == "" {
+		if !validRequestID(reqID) {
 			reqID = uuid.NewString()
 		}
 		c.Header(requestIDHeader, reqID)
@@ -43,6 +45,25 @@ func (s *Server) requestContext() gin.HandlerFunc {
 			slog.Duration("latency", time.Since(start)),
 		)
 	}
+}
+
+const maxRequestIDLen = 128
+
+// validRequestID accepts a non-empty, bounded token of URL-safe characters, so a
+// client cannot inject arbitrary or oversized content into the response header
+// and every log line for the request.
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // baseLogger returns the server's logger, falling back to slog's default when

@@ -23,6 +23,9 @@ const (
 	maxPublishImages  = 8
 	maxPublishImageMB = 20
 	maxSEODescription = 320
+	// maxPriceINR bounds an explicit price override so it can never overflow the
+	// int32 columns / Shopify variant it flows into.
+	maxPriceINR = 100_000_000
 )
 
 // publishForm is the product data a Project Lead confirms before publishing. It
@@ -84,7 +87,11 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		return
 	}
 
-	user, _ := auth.UserFrom(c)
+	user, ok := auth.UserFrom(c)
+	if !ok {
+		detail(c, http.StatusUnauthorized, "Your session is not valid.")
+		return
+	}
 
 	// Record the approval up front; it must survive a Shopify failure.
 	if err := s.approve(ctx, id, price, user.ID); err != nil {
@@ -187,8 +194,8 @@ func parsePublishForm(c *gin.Context) (publishForm, []shopify.ProductImage, bool
 
 	if raw := strings.TrimSpace(c.PostForm("price")); raw != "" {
 		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			detail(c, http.StatusUnprocessableEntity, "Price must be a positive whole number.")
+		if err != nil || n <= 0 || n > maxPriceINR {
+			detail(c, http.StatusUnprocessableEntity, "Price must be a positive whole number within range.")
 			return publishForm{}, nil, false
 		}
 		form.Price = &n

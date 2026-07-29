@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ import (
 func pageCtx(query string) (*gin.Context, *httptest.ResponseRecorder) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodGet, "/?"+query, nil)
+	c.Request = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/?"+query, nil)
 	return c, w
 }
 
