@@ -3,7 +3,11 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"html"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -14,16 +18,27 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
-const shopifyProvider = "shopify"
+const (
+	shopifyProvider   = "shopify"
+	maxPublishImages  = 8
+	maxPublishImageMB = 20
+	maxSEODescription = 320
+)
 
-// publishRequest is the "few details" a Project Lead confirms; the rest is filled
-// in Shopify. price defaults to the recommended selling price.
-type publishRequest struct {
-	Title       string   `json:"title" binding:"required,min=1,max=255"`
-	Price       *int     `json:"price" binding:"omitempty,gt=0"`
-	ProductType string   `json:"product_type" binding:"omitempty,max=255"`
-	Tags        []string `json:"tags"`
-	Vendor      string   `json:"vendor" binding:"omitempty,max=255"`
+// publishForm is the product data a Project Lead confirms before publishing. It
+// arrives as multipart/form-data so image files can ride along. price defaults to
+// the recommended selling price.
+type publishForm struct {
+	Title          string
+	Price          *int
+	ProductType    string
+	Tags           []string
+	Vendor         string
+	Description    string
+	SEOTitle       string
+	SEODescription string
+	SKU            string
+	WeightGrams    float64
 }
 
 type publishResponse struct {
@@ -42,8 +57,8 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var req publishRequest
-	if !bindJSON(c, &req) {
+	form, images, ok := parsePublishForm(c)
+	if !ok {
 		return
 	}
 	ctx := c.Request.Context()
@@ -63,7 +78,7 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the design's pricing.")
 		return
 	}
-	price, ok := resolvePrice(req.Price, pricing.RecommendedSp)
+	price, ok := resolvePrice(form.Price, pricing.RecommendedSp)
 	if !ok {
 		detail(c, http.StatusUnprocessableEntity, "A selling price is required to publish.")
 		return
@@ -88,12 +103,18 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 
 	metrics, metricsErr := s.store.Q.GetLatestMetricsForDesign(ctx, id)
 	draft := shopify.ProductDraft{
-		Title:       req.Title,
-		Vendor:      s.vendorFor(ctx, req.Vendor, design.BrandSlug),
-		ProductType: req.ProductType,
-		Tags:        req.Tags,
-		PriceINR:    price,
-		Metafields:  buildMetafields(design, pricing, metrics, metricsErr == nil),
+		Title:           form.Title,
+		Vendor:          s.vendorFor(ctx, form.Vendor, design.BrandSlug),
+		ProductType:     form.ProductType,
+		Tags:            form.Tags,
+		PriceINR:        price,
+		DescriptionHTML: descriptionToHTML(form.Description),
+		SEOTitle:        form.SEOTitle,
+		SEODescription:  form.SEODescription,
+		SKU:             form.SKU,
+		WeightGrams:     form.WeightGrams,
+		Metafields:      buildMetafields(design, pricing, metrics, metricsErr == nil),
+		Images:          images,
 	}
 
 	// Create the draft product, or reuse the one a prior attempt already recorded,
@@ -103,12 +124,15 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		return
 	}
 
-	// Set the price on the (new or reused) variant. Idempotent, so a retry is safe.
-	if price > 0 && ref.VariantGID != "" {
-		if err := s.shopify.SetPrice(ctx, shop, token, ref.GID, ref.VariantGID, price); err != nil {
+	// Set the price, SKU and weight on the (new or reused) variant. Idempotent, so
+	// a retry is safe.
+	if ref.VariantGID != "" && (price > 0 || form.SKU != "" || form.WeightGrams > 0) {
+		if err := s.shopify.SetVariant(ctx, shop, token, ref.GID, ref.VariantGID, shopify.VariantDetails{
+			PriceINR: price, SKU: form.SKU, WeightGrams: form.WeightGrams,
+		}); err != nil {
 			// Product exists and is recorded; the design stays "approved" and a
 			// retry will reuse it. Shopify-side failure.
-			obs.FromContext(ctx).Error("shopify set price failed", "design", id, "error", err)
+			obs.FromContext(ctx).Error("shopify set variant failed", "design", id, "error", err)
 			detail(c, http.StatusBadGateway, err.Error())
 			return
 		}
@@ -134,6 +158,136 @@ func resolvePrice(override *int, recommended *int32) (int, bool) {
 		return int(*recommended), true
 	}
 	return 0, false
+}
+
+// parsePublishForm reads the multipart product form and its image files, writing
+// an error response and returning ok=false on any invalid input.
+func parsePublishForm(c *gin.Context) (publishForm, []shopify.ProductImage, bool) {
+	if err := c.Request.ParseMultipartForm(int64(maxPublishImageMB) << 20); err != nil {
+		detail(c, http.StatusBadRequest, "Could not read the product form.")
+		return publishForm{}, nil, false
+	}
+
+	title := strings.TrimSpace(c.PostForm("title"))
+	if title == "" || len(title) > 255 {
+		detail(c, http.StatusUnprocessableEntity, "A product title (1-255 characters) is required.")
+		return publishForm{}, nil, false
+	}
+
+	form := publishForm{
+		Title:          title,
+		ProductType:    trimMax(c.PostForm("product_type"), 255),
+		Vendor:         trimMax(c.PostForm("vendor"), 255),
+		Description:    c.PostForm("description"),
+		SEOTitle:       trimMax(c.PostForm("seo_title"), 255),
+		SEODescription: trimMax(c.PostForm("seo_description"), maxSEODescription),
+		SKU:            trimMax(c.PostForm("sku"), 255),
+		Tags:           splitTags(c.PostForm("tags")),
+	}
+
+	if raw := strings.TrimSpace(c.PostForm("price")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			detail(c, http.StatusUnprocessableEntity, "Price must be a positive whole number.")
+			return publishForm{}, nil, false
+		}
+		form.Price = &n
+	}
+	if raw := strings.TrimSpace(c.PostForm("weight_grams")); raw != "" {
+		w, err := strconv.ParseFloat(raw, 64)
+		if err != nil || w < 0 {
+			detail(c, http.StatusUnprocessableEntity, "Weight must be zero or a positive number.")
+			return publishForm{}, nil, false
+		}
+		form.WeightGrams = w
+	}
+
+	images, ok := readPublishImages(c)
+	if !ok {
+		return publishForm{}, nil, false
+	}
+	return form, images, true
+}
+
+// readPublishImages reads the "images" file parts, enforcing the count, per-file
+// size, and image content-type limits.
+func readPublishImages(c *gin.Context) ([]shopify.ProductImage, bool) {
+	if c.Request.MultipartForm == nil {
+		return nil, true
+	}
+	files := c.Request.MultipartForm.File["images"]
+	if len(files) > maxPublishImages {
+		detail(c, http.StatusUnprocessableEntity,
+			fmt.Sprintf("At most %d images can be attached.", maxPublishImages))
+		return nil, false
+	}
+	images := make([]shopify.ProductImage, 0, len(files))
+	for _, fh := range files {
+		if fh.Size > int64(maxPublishImageMB)<<20 {
+			detail(c, http.StatusUnprocessableEntity,
+				fmt.Sprintf("Each image must be under %d MB.", maxPublishImageMB))
+			return nil, false
+		}
+		contentType := fh.Header.Get("Content-Type")
+		if !strings.HasPrefix(contentType, "image/") {
+			detail(c, http.StatusUnprocessableEntity, "Only image files can be attached.")
+			return nil, false
+		}
+		f, err := fh.Open()
+		if err != nil {
+			detail(c, http.StatusBadRequest, "Could not read an uploaded image.")
+			return nil, false
+		}
+		data, err := io.ReadAll(f)
+		_ = f.Close()
+		if err != nil {
+			detail(c, http.StatusBadRequest, "Could not read an uploaded image.")
+			return nil, false
+		}
+		images = append(images, shopify.ProductImage{
+			Filename: fh.Filename, MimeType: contentType, Data: data,
+		})
+	}
+	return images, true
+}
+
+// descriptionToHTML turns plain text into simple HTML: blank-line-separated
+// blocks become paragraphs and single newlines become breaks. The text is
+// escaped first, so any HTML in the input is shown literally, never injected.
+func descriptionToHTML(text string) string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if trimmed == "" {
+		return ""
+	}
+	paras := make([]string, 0)
+	for _, block := range strings.Split(trimmed, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		escaped := strings.ReplaceAll(html.EscapeString(block), "\n", "<br>")
+		paras = append(paras, "<p>"+escaped+"</p>")
+	}
+	return strings.Join(paras, "")
+}
+
+func trimMax(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > max {
+		return string(r[:max])
+	}
+	return s
+}
+
+func splitTags(raw string) []string {
+	parts := strings.Split(raw, ",")
+	tags := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			tags = append(tags, p)
+		}
+	}
+	return tags
 }
 
 // shopifyCredentials extracts the shop domain + token from a connection row,

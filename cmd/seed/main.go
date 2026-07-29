@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL is not set")

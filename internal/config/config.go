@@ -69,6 +69,12 @@ type Settings struct {
 	PrinterAvgPowerKW   float64
 	SliceConcurrency    int
 
+	// Orientation analysis (advisory least-support recommendation): the
+	// self-support overhang limit in degrees, and a cap on mesh triangles scored
+	// so very large models stay fast.
+	OrientationOverhangDeg  float64
+	OrientationMaxTriangles int
+
 	// Shopify Admin API version used when publishing an approved design, and the
 	// per-request timeout for the outbound Admin API calls.
 	ShopifyAPIVersion string
@@ -122,6 +128,9 @@ func Load() Settings {
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),
 		PrinterAvgPowerKW:   floatEnvOr("PRINTER_AVG_POWER_KW", 0.11),
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
+
+		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
+		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
 		ShopifyTimeout:    secondsEnvOr("SHOPIFY_TIMEOUT_SECONDS", 15),

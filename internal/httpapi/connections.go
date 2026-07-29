@@ -18,9 +18,10 @@ import (
 // this service only stores the resulting connection so the platform can be
 // called on the brand's behalf.
 var connectionProviders = map[string]struct{}{
-	"google_ads": {},
-	"meta_ads":   {},
-	"shopify":    {},
+	"google_ads":       {},
+	"google_analytics": {},
+	"meta_ads":         {},
+	"shopify":          {},
 }
 
 // A connection is in exactly one of these states.

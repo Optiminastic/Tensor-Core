@@ -63,20 +63,21 @@ type designResponse struct {
 }
 
 type metricsResponse struct {
-	PrintTimeHr            float64 `json:"print_time_hr"`
-	EffectiveMachineTimeHr float64 `json:"effective_machine_time_hr"`
-	FilamentG              float64 `json:"filament_g"`
-	PurgeG                 float64 `json:"purge_g"`
-	SupportG               float64 `json:"support_g"`
-	ColourChanges          int     `json:"colour_changes"`
-	ElectricityKwh         float64 `json:"electricity_kwh"`
-	UnitsPerBed            int     `json:"units_per_bed"`
-	LayerHeightMm          float64 `json:"layer_height_mm"`
-	InfillDensityPct       float64 `json:"infill_density_pct"`
-	WallLoops              int     `json:"wall_loops"`
-	SupportUsed            bool    `json:"support_used"`
-	FilamentLengthMm       float64 `json:"filament_length_mm"`
-	GcodeKey               string  `json:"gcode_key"`
+	PrintTimeHr            float64         `json:"print_time_hr"`
+	EffectiveMachineTimeHr float64         `json:"effective_machine_time_hr"`
+	FilamentG              float64         `json:"filament_g"`
+	PurgeG                 float64         `json:"purge_g"`
+	SupportG               float64         `json:"support_g"`
+	ColourChanges          int             `json:"colour_changes"`
+	ElectricityKwh         float64         `json:"electricity_kwh"`
+	UnitsPerBed            int             `json:"units_per_bed"`
+	LayerHeightMm          float64         `json:"layer_height_mm"`
+	InfillDensityPct       float64         `json:"infill_density_pct"`
+	WallLoops              int             `json:"wall_loops"`
+	SupportUsed            bool            `json:"support_used"`
+	FilamentLengthMm       float64         `json:"filament_length_mm"`
+	GcodeKey               string          `json:"gcode_key"`
+	Orientation            json.RawMessage `json:"orientation"`
 }
 
 type pricingResponse struct {
@@ -362,6 +363,8 @@ func (s *Server) latestMetrics(ctx context.Context, id uuid.UUID) (*metricsRespo
 		UnitsPerBed: int(m.UnitsPerBed), LayerHeightMm: m.LayerHeightMm,
 		InfillDensityPct: m.InfillDensityPct, WallLoops: int(m.WallLoops),
 		SupportUsed: m.SupportUsed, FilamentLengthMm: m.FilamentLengthMm, GcodeKey: m.GcodeKey,
+		// Stored as JSON (or NULL); a nil RawMessage marshals to `null`.
+		Orientation: json.RawMessage(m.Orientation),
 	}, nil
 }
 

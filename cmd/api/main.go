@@ -24,7 +24,7 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
 
 	// Structured JSON logging for the whole process.

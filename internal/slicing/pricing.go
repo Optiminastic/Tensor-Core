@@ -16,6 +16,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/designadvice"
+	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/pricing"
 )
 
@@ -44,7 +45,22 @@ func (m PerUnitMetrics) toInsertParams(jobID uuid.UUID) gen.InsertSliceMetricsPa
 		UnitsPerBed: int32(m.UnitsPerBed), LayerHeightMm: m.LayerHeightMm,
 		InfillDensityPct: m.InfillDensityPct, WallLoops: int32(m.WallLoops),
 		SupportUsed: m.SupportUsed, FilamentLengthMm: m.FilamentLengthMm, GcodeKey: m.GcodeKey,
+		Orientation: orientationJSON(m.Orientation),
 	}
+}
+
+// orientationJSON marshals the orientation recommendation for storage, or nil
+// (SQL NULL) when there is none. A marshal error is non-fatal advice, so it is
+// dropped rather than failing the slice.
+func orientationJSON(rec *orientation.Recommendation) []byte {
+	if rec == nil {
+		return nil
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // MarkSlicing flips a design to "slicing" when the worker picks up its job.
@@ -163,13 +179,26 @@ func priceDesign(ctx context.Context, q *gen.Queries, designID uuid.UUID, brandS
 		return err
 	}
 
+	orientHint, orientReduction := orientationAdvice(in.Orientation)
 	suggestions := designadvice.Suggest(designadvice.Input{
 		Verdict: v.status, FilamentG: in.FilamentG, EffectiveMachineTimeHr: in.EffectiveMachineTimeHr,
 		InfillPct: in.InfillDensityPct, SupportUsed: in.SupportUsed, UnitsPerBed: in.UnitsPerBed,
-		EntryMachineHours: entryHoursOf(policy),
+		EntryMachineHours:       entryHoursOf(policy),
+		OrientationHint:         orientHint,
+		OrientationReductionPct: orientReduction,
 	})
 
 	return persistPricing(ctx, q, designID, breakdown, v, selling, suggestions)
+}
+
+// orientationAdvice extracts the suggestion hint + estimated reduction from a
+// recommendation, but only when it proposes a real change (an already-optimal
+// model yields no advice).
+func orientationAdvice(rec *orientation.Recommendation) (string, float64) {
+	if rec == nil || rec.AlreadyOptimal {
+		return "", 0
+	}
+	return rec.Description, rec.EstReductionPct
 }
 
 func classify(

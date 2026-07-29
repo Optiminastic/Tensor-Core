@@ -37,15 +37,21 @@ type Metafield struct {
 	Value     string
 }
 
-// ProductDraft is the set of details Tensor sends; the merchant finishes the rest
-// (images, description, variants, collections) in Shopify.
+// ProductDraft is the set of details Tensor sends; the merchant finishes any
+// remaining fields (variants, collections) in Shopify.
 type ProductDraft struct {
-	Title       string
-	Vendor      string
-	ProductType string
-	Tags        []string
-	PriceINR    int
-	Metafields  []Metafield
+	Title           string
+	Vendor          string
+	ProductType     string
+	Tags            []string
+	PriceINR        int
+	DescriptionHTML string
+	SEOTitle        string
+	SEODescription  string
+	SKU             string
+	WeightGrams     float64
+	Metafields      []Metafield
+	Images          []ProductImage
 }
 
 // ProductRef points back at the created draft so the UI can link to it. VariantGID
@@ -119,10 +125,26 @@ func (c *Client) CreateProduct(ctx context.Context, shop, token string, draft Pr
 	}, nil
 }
 
+// VariantDetails are the default variant's editable fields. Zero values are
+// omitted, so setting only a price leaves SKU and weight untouched.
+type VariantDetails struct {
+	PriceINR    int
+	SKU         string
+	WeightGrams float64
+}
+
 // SetPrice sets the default variant's price. It is idempotent: setting the same
 // price again is a harmless no-op, so a publish retry can safely call it.
 func (c *Client) SetPrice(ctx context.Context, shop, token, productGID, variantGID string, priceINR int) error {
-	return c.setVariantPrice(ctx, shop, token, productGID, variantGID, priceINR)
+	return c.setVariant(ctx, shop, token, productGID, variantGID, VariantDetails{PriceINR: priceINR})
+}
+
+// SetVariant sets the default variant's price, SKU and weight in one update. It
+// is idempotent, so a publish retry can safely call it.
+func (c *Client) SetVariant(
+	ctx context.Context, shop, token, productGID, variantGID string, d VariantDetails,
+) error {
+	return c.setVariant(ctx, shop, token, productGID, variantGID, d)
 }
 
 // CreateDraftProduct creates a DRAFT product and sets its price in one call. It is
@@ -140,8 +162,8 @@ func (c *Client) CreateDraftProduct(ctx context.Context, shop, token string, dra
 	return ref, nil
 }
 
-const productCreateMutation = `mutation CreateDraftProduct($product: ProductCreateInput!) {
-  productCreate(product: $product) {
+const productCreateMutation = `mutation CreateDraftProduct($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+  productCreate(product: $product, media: $media) {
     product { id handle variants(first: 1) { nodes { id } } }
     userErrors { field message }
   }
@@ -168,6 +190,23 @@ func (c *Client) productCreate(ctx context.Context, shop, token string, draft Pr
 		"status":      "DRAFT",
 		"metafields":  metafields,
 	}
+	if draft.DescriptionHTML != "" {
+		product["descriptionHtml"] = draft.DescriptionHTML
+	}
+	if seo := seoInput(draft); seo != nil {
+		product["seo"] = seo
+	}
+
+	// Stage and upload the images first; their resource URLs become product media.
+	media, err := c.buildMedia(ctx, shop, token, draft.Images)
+	if err != nil {
+		return createdProduct{}, err
+	}
+
+	variables := map[string]any{"product": product}
+	if len(media) > 0 {
+		variables["media"] = media
+	}
 
 	var out struct {
 		Data struct {
@@ -185,7 +224,7 @@ func (c *Client) productCreate(ctx context.Context, shop, token string, draft Pr
 			} `json:"productCreate"`
 		} `json:"data"`
 	}
-	if err := c.do(ctx, shop, token, productCreateMutation, map[string]any{"product": product}, &out); err != nil {
+	if err := c.do(ctx, shop, token, productCreateMutation, variables, &out); err != nil {
 		return createdProduct{}, err
 	}
 	if msg := firstUserError(out.Data.ProductCreate.UserErrors); msg != "" {
@@ -202,6 +241,36 @@ func (c *Client) productCreate(ctx context.Context, shop, token string, draft Pr
 	return created, nil
 }
 
+// seoInput builds the product SEO object, or nil when neither field is set.
+func seoInput(draft ProductDraft) map[string]any {
+	seo := map[string]any{}
+	if draft.SEOTitle != "" {
+		seo["title"] = draft.SEOTitle
+	}
+	if draft.SEODescription != "" {
+		seo["description"] = draft.SEODescription
+	}
+	if len(seo) == 0 {
+		return nil
+	}
+	return seo
+}
+
+// buildMedia stages the draft's images and maps them to product media inputs.
+func (c *Client) buildMedia(ctx context.Context, shop, token string, images []ProductImage) ([]map[string]any, error) {
+	resources, err := c.uploadImages(ctx, shop, token, images)
+	if err != nil {
+		return nil, err
+	}
+	media := make([]map[string]any, 0, len(resources))
+	for _, url := range resources {
+		media = append(media, map[string]any{
+			"originalSource": url, "mediaContentType": "IMAGE",
+		})
+	}
+	return media, nil
+}
+
 const variantPriceMutation = `mutation SetVariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
   productVariantsBulkUpdate(productId: $productId, variants: $variants) {
     productVariants { id }
@@ -209,10 +278,29 @@ const variantPriceMutation = `mutation SetVariantPrice($productId: ID!, $variant
   }
 }`
 
-func (c *Client) setVariantPrice(ctx context.Context, shop, token, productGID, variantGID string, priceINR int) error {
+func (c *Client) setVariant(
+	ctx context.Context, shop, token, productGID, variantGID string, d VariantDetails,
+) error {
+	variant := map[string]any{"id": variantGID}
+	if d.PriceINR > 0 {
+		variant["price"] = fmt.Sprintf("%d", d.PriceINR)
+	}
+	inventoryItem := map[string]any{}
+	if d.SKU != "" {
+		inventoryItem["sku"] = d.SKU
+	}
+	if d.WeightGrams > 0 {
+		inventoryItem["measurement"] = map[string]any{
+			"weight": map[string]any{"value": d.WeightGrams, "unit": "GRAMS"},
+		}
+	}
+	if len(inventoryItem) > 0 {
+		variant["inventoryItem"] = inventoryItem
+	}
+
 	variables := map[string]any{
 		"productId": productGID,
-		"variants":  []map[string]string{{"id": variantGID, "price": fmt.Sprintf("%d", priceINR)}},
+		"variants":  []map[string]any{variant},
 	}
 	var out struct {
 		Data struct {
@@ -225,7 +313,7 @@ func (c *Client) setVariantPrice(ctx context.Context, shop, token, productGID, v
 		return err
 	}
 	if msg := firstUserError(out.Data.ProductVariantsBulkUpdate.UserErrors); msg != "" {
-		return apiErr("Shopify rejected the price: %s", msg)
+		return apiErr("Shopify rejected the variant details: %s", msg)
 	}
 	return nil
 }

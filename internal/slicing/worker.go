@@ -16,6 +16,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
@@ -35,20 +36,23 @@ type SliceWorker struct {
 	bambuRoot         string
 	sliceTimeout      time.Duration
 	printerAvgPowerKW float64
+	orientOpts        orientation.Options
 	logger            *slog.Logger
 }
 
 // NewSliceWorker builds the worker. logger may be nil (falls back to slog default).
 func NewSliceWorker(
 	store *db.Store, objects *storage.Client, bambuRoot string,
-	sliceTimeout time.Duration, printerAvgPowerKW float64, logger *slog.Logger,
+	sliceTimeout time.Duration, printerAvgPowerKW float64,
+	orientOpts orientation.Options, logger *slog.Logger,
 ) *SliceWorker {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &SliceWorker{
 		store: store, objects: objects, bambuRoot: bambuRoot,
-		sliceTimeout: sliceTimeout, printerAvgPowerKW: printerAvgPowerKW, logger: logger,
+		sliceTimeout: sliceTimeout, printerAvgPowerKW: printerAvgPowerKW,
+		orientOpts: orientOpts, logger: logger,
 	}
 }
 
@@ -95,6 +99,10 @@ func (w *SliceWorker) slice(ctx context.Context, args SliceArgs) (PerUnitMetrics
 		return PerUnitMetrics{}, fmt.Errorf("download stl: %w", err)
 	}
 
+	// Advisory orientation analysis from the mesh. Never fails the slice: a parse
+	// error or unsupported format (STEP) just leaves the recommendation absent.
+	orient := w.recommendOrientation(stlPath, args.StlKey)
+
 	profiles, err := ResolveProfiles(w.bambuRoot, args.Material, args.Quality)
 	if err != nil {
 		return PerUnitMetrics{}, err
@@ -135,5 +143,24 @@ func (w *SliceWorker) slice(ctx context.Context, args SliceArgs) (PerUnitMetrics
 	if err := w.objects.Upload(ctx, gcodeKey, out.Gcode3mfPath, gcodeMimeType); err != nil {
 		return PerUnitMetrics{}, fmt.Errorf("upload gcode: %w", err)
 	}
-	return ToPerUnit(metrics, units, w.printerAvgPowerKW, gcodeKey), nil
+	perUnit := ToPerUnit(metrics, units, w.printerAvgPowerKW, gcodeKey)
+	perUnit.Orientation = orient
+	return perUnit, nil
+}
+
+// recommendOrientation reads the model mesh and computes the least-support
+// resting orientation. It is best-effort: any failure (parse error, unsupported
+// format) returns nil so the slice and costing proceed unaffected. The model's
+// true extension comes from the storage key, not the temp file name.
+func (w *SliceWorker) recommendOrientation(modelPath, stlKey string) *orientation.Recommendation {
+	mesh, err := orientation.LoadModel(modelPath, filepath.Ext(stlKey))
+	if err != nil {
+		w.logger.Info("orientation skipped", "key", stlKey, "reason", err)
+		return nil
+	}
+	rec, ok := orientation.Recommend(mesh, w.orientOpts)
+	if !ok {
+		return nil
+	}
+	return &rec
 }

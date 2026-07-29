@@ -81,7 +81,7 @@ WHERE id = sqlc.arg('id');
 INSERT INTO slice_metrics (
     job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
     colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
-    wall_loops, support_used, filament_length_mm, gcode_key
+    wall_loops, support_used, filament_length_mm, gcode_key, orientation
 ) VALUES (
     sqlc.arg('job_id'), sqlc.arg('print_time_hr')::float8,
     sqlc.arg('effective_machine_time_hr')::float8, sqlc.arg('filament_g')::float8,
@@ -89,7 +89,7 @@ INSERT INTO slice_metrics (
     sqlc.arg('electricity_kwh')::float8, sqlc.arg('units_per_bed'),
     sqlc.arg('layer_height_mm')::float8, sqlc.arg('infill_density_pct')::float8,
     sqlc.arg('wall_loops'), sqlc.arg('support_used'), sqlc.arg('filament_length_mm')::float8,
-    sqlc.arg('gcode_key')
+    sqlc.arg('gcode_key'), sqlc.narg('orientation')::jsonb
 );
 
 -- name: GetLatestMetricsForDesign :one
@@ -101,7 +101,7 @@ SELECT m.job_id, m.print_time_hr::float8 AS print_time_hr,
        m.layer_height_mm::float8 AS layer_height_mm,
        m.infill_density_pct::float8 AS infill_density_pct, m.wall_loops,
        m.support_used, m.filament_length_mm::float8 AS filament_length_mm,
-       m.gcode_key, m.created_at
+       m.gcode_key, m.orientation, m.created_at
 FROM slice_metrics m
 JOIN slice_jobs j ON j.id = m.job_id
 WHERE j.design_id = $1

@@ -200,6 +200,7 @@ CREATE TABLE slice_metrics (
     support_used              boolean NOT NULL DEFAULT false,
     filament_length_mm        numeric(12, 2) NOT NULL DEFAULT 0,
     gcode_key                 text NOT NULL DEFAULT '',
+    orientation               jsonb,
     created_at                timestamptz NOT NULL DEFAULT now()
 );
 

@@ -19,6 +19,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -26,7 +27,7 @@ import (
 const stopTimeout = 30 * time.Second
 
 func main() {
-	_ = godotenv.Load()
+	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
 	logger := obs.New("info")
 
@@ -56,9 +57,13 @@ func main() {
 	}
 	sliceTimeout := time.Duration(cfg.SliceTimeoutSeconds) * time.Second
 
+	orientOpts := orientation.Options{
+		OverhangThresholdDeg: cfg.OrientationOverhangDeg,
+		MaxTriangles:         cfg.OrientationMaxTriangles,
+	}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, slicing.NewSliceWorker(
-		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, logger,
+		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, orientOpts, logger,
 	))
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{

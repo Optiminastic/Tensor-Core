@@ -1,6 +1,10 @@
 package slicing
 
-import "math"
+import (
+	"math"
+
+	"github.com/Optiminastic/tensor-core/internal/orientation"
+)
 
 const secondsPerHour = 3600.0
 
@@ -22,6 +26,11 @@ type PerUnitMetrics struct {
 	SupportUsed            bool
 	FilamentLengthMm       float64
 	GcodeKey               string
+
+	// Orientation is the least-support resting recommendation computed from the
+	// model mesh (nil when the format is unsupported or the mesh could not be
+	// read). Advisory only; it never changes the costed metrics above.
+	Orientation *orientation.Recommendation
 }
 
 // ToPerUnit divides the plate totals by units_per_bed and estimates energy from
