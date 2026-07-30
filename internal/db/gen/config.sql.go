@@ -20,6 +20,7 @@ SELECT id, name, brand,
        finishing_labour::float8 AS finishing_labour,
        consumables::float8 AS consumables,
        failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
        is_default, created_at, updated_at
 FROM cost_assumption_sets WHERE id = $1
 `
@@ -34,6 +35,8 @@ type GetCostAssumptionRow struct {
 	FinishingLabour        float64
 	Consumables            float64
 	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 	CreatedAt              pgtype.Timestamptz
 	UpdatedAt              pgtype.Timestamptz
@@ -52,6 +55,66 @@ func (q *Queries) GetCostAssumption(ctx context.Context, id uuid.UUID) (GetCostA
 		&i.FinishingLabour,
 		&i.Consumables,
 		&i.FailurePct,
+		&i.FixedCosts,
+		&i.Margins,
+		&i.IsDefault,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDefaultCostAssumptionForBrand = `-- name: GetDefaultCostAssumptionForBrand :one
+SELECT id, name, brand,
+       filament_cost_per_kg::float8 AS filament_cost_per_kg,
+       electricity_cost_per_unit::float8 AS electricity_cost_per_unit,
+       machine_hour_cost::float8 AS machine_hour_cost,
+       finishing_labour::float8 AS finishing_labour,
+       consumables::float8 AS consumables,
+       failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
+       is_default, created_at, updated_at
+FROM cost_assumption_sets
+WHERE is_default = true AND (brand = $1 OR brand IS NULL)
+ORDER BY (brand IS NOT NULL) DESC
+LIMIT 1
+`
+
+type GetDefaultCostAssumptionForBrandRow struct {
+	ID                     uuid.UUID
+	Name                   string
+	Brand                  *string
+	FilamentCostPerKg      float64
+	ElectricityCostPerUnit float64
+	MachineHourCost        float64
+	FinishingLabour        float64
+	Consumables            float64
+	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
+	IsDefault              bool
+	CreatedAt              pgtype.Timestamptz
+	UpdatedAt              pgtype.Timestamptz
+}
+
+// GetDefaultCostAssumptionForBrand returns the cost assumptions the pricing path
+// should use for a brand: the brand's own default set if it has one, else the
+// global default (brand IS NULL). Brand-specific rows sort first.
+func (q *Queries) GetDefaultCostAssumptionForBrand(ctx context.Context, brand *string) (GetDefaultCostAssumptionForBrandRow, error) {
+	row := q.db.QueryRow(ctx, getDefaultCostAssumptionForBrand, brand)
+	var i GetDefaultCostAssumptionForBrandRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Brand,
+		&i.FilamentCostPerKg,
+		&i.ElectricityCostPerUnit,
+		&i.MachineHourCost,
+		&i.FinishingLabour,
+		&i.Consumables,
+		&i.FailurePct,
+		&i.FixedCosts,
+		&i.Margins,
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -95,12 +158,14 @@ func (q *Queries) GetMaterial(ctx context.Context, id uuid.UUID) (GetMaterialRow
 const insertCostAssumption = `-- name: InsertCostAssumption :one
 INSERT INTO cost_assumption_sets (
     id, name, brand, filament_cost_per_kg, electricity_cost_per_unit,
-    machine_hour_cost, finishing_labour, consumables, failure_pct, is_default
+    machine_hour_cost, finishing_labour, consumables, failure_pct,
+    fixed_costs, margins, is_default
 ) VALUES (
     $1, $2, $3,
     $4::float8, $5::float8,
     $6::float8, $7::float8,
-    $8::float8, $9::float8, $10
+    $8::float8, $9::float8,
+    $10::json, $11::json, $12
 )
 RETURNING id, name, brand,
           filament_cost_per_kg::float8 AS filament_cost_per_kg,
@@ -109,6 +174,7 @@ RETURNING id, name, brand,
           finishing_labour::float8 AS finishing_labour,
           consumables::float8 AS consumables,
           failure_pct::float8 AS failure_pct,
+          fixed_costs, margins,
           is_default, created_at, updated_at
 `
 
@@ -122,6 +188,8 @@ type InsertCostAssumptionParams struct {
 	FinishingLabour        float64
 	Consumables            float64
 	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 }
 
@@ -135,6 +203,8 @@ type InsertCostAssumptionRow struct {
 	FinishingLabour        float64
 	Consumables            float64
 	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 	CreatedAt              pgtype.Timestamptz
 	UpdatedAt              pgtype.Timestamptz
@@ -151,6 +221,8 @@ func (q *Queries) InsertCostAssumption(ctx context.Context, arg InsertCostAssump
 		arg.FinishingLabour,
 		arg.Consumables,
 		arg.FailurePct,
+		arg.FixedCosts,
+		arg.Margins,
 		arg.IsDefault,
 	)
 	var i InsertCostAssumptionRow
@@ -164,6 +236,8 @@ func (q *Queries) InsertCostAssumption(ctx context.Context, arg InsertCostAssump
 		&i.FinishingLabour,
 		&i.Consumables,
 		&i.FailurePct,
+		&i.FixedCosts,
+		&i.Margins,
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -272,6 +346,7 @@ SELECT id, name, brand,
        finishing_labour::float8 AS finishing_labour,
        consumables::float8 AS consumables,
        failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
        is_default, created_at, updated_at
 FROM cost_assumption_sets ORDER BY name
 `
@@ -286,6 +361,8 @@ type ListCostAssumptionsRow struct {
 	FinishingLabour        float64
 	Consumables            float64
 	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 	CreatedAt              pgtype.Timestamptz
 	UpdatedAt              pgtype.Timestamptz
@@ -310,6 +387,8 @@ func (q *Queries) ListCostAssumptions(ctx context.Context) ([]ListCostAssumption
 			&i.FinishingLabour,
 			&i.Consumables,
 			&i.FailurePct,
+			&i.FixedCosts,
+			&i.Margins,
 			&i.IsDefault,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -426,9 +505,11 @@ UPDATE cost_assumption_sets SET
     finishing_labour = COALESCE($7::float8, finishing_labour),
     consumables = COALESCE($8::float8, consumables),
     failure_pct = COALESCE($9::float8, failure_pct),
-    is_default = COALESCE($10, is_default),
+    fixed_costs = COALESCE($10::json, fixed_costs),
+    margins = COALESCE($11::json, margins),
+    is_default = COALESCE($12, is_default),
     updated_at = now()
-WHERE id = $11
+WHERE id = $13
 RETURNING id, name, brand,
           filament_cost_per_kg::float8 AS filament_cost_per_kg,
           electricity_cost_per_unit::float8 AS electricity_cost_per_unit,
@@ -436,6 +517,7 @@ RETURNING id, name, brand,
           finishing_labour::float8 AS finishing_labour,
           consumables::float8 AS consumables,
           failure_pct::float8 AS failure_pct,
+          fixed_costs, margins,
           is_default, created_at, updated_at
 `
 
@@ -449,6 +531,8 @@ type UpdateCostAssumptionParams struct {
 	FinishingLabour        *float64
 	Consumables            *float64
 	FailurePct             *float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              *bool
 	ID                     uuid.UUID
 }
@@ -463,6 +547,8 @@ type UpdateCostAssumptionRow struct {
 	FinishingLabour        float64
 	Consumables            float64
 	FailurePct             float64
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 	CreatedAt              pgtype.Timestamptz
 	UpdatedAt              pgtype.Timestamptz
@@ -479,6 +565,8 @@ func (q *Queries) UpdateCostAssumption(ctx context.Context, arg UpdateCostAssump
 		arg.FinishingLabour,
 		arg.Consumables,
 		arg.FailurePct,
+		arg.FixedCosts,
+		arg.Margins,
 		arg.IsDefault,
 		arg.ID,
 	)
@@ -493,6 +581,8 @@ func (q *Queries) UpdateCostAssumption(ctx context.Context, arg UpdateCostAssump
 		&i.FinishingLabour,
 		&i.Consumables,
 		&i.FailurePct,
+		&i.FixedCosts,
+		&i.Margins,
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,

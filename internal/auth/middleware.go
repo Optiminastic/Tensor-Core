@@ -15,6 +15,10 @@ const contextUserKey = "tensor.user"
 type Guards struct {
 	verifier       *Verifier
 	internalSecret string
+	// Optional permission-freshness enforcement (see freshness.go). Nil unless
+	// EnablePermissionFreshness has been called.
+	versionLoader VersionLoader
+	versionCache  *versionCache
 }
 
 // NewGuards wires the guards to the token verifier and the internal shared
@@ -58,7 +62,13 @@ func (g *Guards) RequireUser() gin.HandlerFunc {
 			return
 		}
 
-		c.Set(contextUserKey, NewAuthenticatedUser(claims))
+		user := NewAuthenticatedUser(claims)
+		// Reject a token whose grants have since changed (fails closed when the
+		// current version cannot be read). No-op unless enforcement is enabled.
+		if !g.permissionsFresh(c, user) {
+			return
+		}
+		c.Set(contextUserKey, user)
 		c.Next()
 	}
 }

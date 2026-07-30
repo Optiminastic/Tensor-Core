@@ -77,7 +77,34 @@ type inviteReadResponse struct {
 }
 
 func (s *Server) listInvites(c *gin.Context) {
-	rows, err := s.store.Q.ListInvitesWithRole(c.Request.Context())
+	ctx := c.Request.Context()
+	page, ok := parsePageParams(c)
+	if !ok {
+		return
+	}
+
+	// Default (no ?limit): the full list, unchanged.
+	if !page.paginate {
+		rows, err := s.store.Q.ListInvitesWithRole(ctx)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list invites.")
+			return
+		}
+		out := make([]inviteReadResponse, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, inviteReadResponse{
+				ID: r.ID.String(), Email: r.Email, Role: r.RoleName, ExpiresAt: db.Time(r.ExpiresAt),
+				AcceptedAt: db.TimePtr(r.AcceptedAt), RevokedAt: db.TimePtr(r.RevokedAt), CreatedBy: r.CreatedBy,
+			})
+		}
+		c.JSON(http.StatusOK, out)
+		return
+	}
+
+	// Paginated: one keyset page, same body shape, next cursor in the header.
+	rows, err := s.store.Q.ListInvitesWithRolePage(ctx, gen.ListInvitesWithRolePageParams{
+		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
+	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list invites.")
 		return
@@ -88,6 +115,10 @@ func (s *Server) listInvites(c *gin.Context) {
 			ID: r.ID.String(), Email: r.Email, Role: r.RoleName, ExpiresAt: db.Time(r.ExpiresAt),
 			AcceptedAt: db.TimePtr(r.AcceptedAt), RevokedAt: db.TimePtr(r.RevokedAt), CreatedBy: r.CreatedBy,
 		})
+	}
+	if n := len(rows); n > 0 {
+		last := rows[n-1]
+		setNextCursor(c, n, page.limit, last.CreatedAt.Time, last.ID)
 	}
 	c.JSON(http.StatusOK, out)
 }

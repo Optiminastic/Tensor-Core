@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
@@ -38,7 +39,7 @@ func Load(ctx context.Context, q *gen.Queries, brand pricing.Brand) (*Policy, er
 
 	var ladder []int
 	if err := json.Unmarshal(row.Ladder, &ladder); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("brandpolicy: decode ladder for %s: %w", brand, err)
 	}
 
 	policy := &Policy{

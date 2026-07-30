@@ -49,6 +49,7 @@ SELECT id, name, brand,
        finishing_labour::float8 AS finishing_labour,
        consumables::float8 AS consumables,
        failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
        is_default, created_at, updated_at
 FROM cost_assumption_sets ORDER BY name;
 
@@ -60,18 +61,39 @@ SELECT id, name, brand,
        finishing_labour::float8 AS finishing_labour,
        consumables::float8 AS consumables,
        failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
        is_default, created_at, updated_at
 FROM cost_assumption_sets WHERE id = $1;
+
+-- GetDefaultCostAssumptionForBrand returns the cost assumptions the pricing path
+-- should use for a brand: the brand's own default set if it has one, else the
+-- global default (brand IS NULL). Brand-specific rows sort first.
+-- name: GetDefaultCostAssumptionForBrand :one
+SELECT id, name, brand,
+       filament_cost_per_kg::float8 AS filament_cost_per_kg,
+       electricity_cost_per_unit::float8 AS electricity_cost_per_unit,
+       machine_hour_cost::float8 AS machine_hour_cost,
+       finishing_labour::float8 AS finishing_labour,
+       consumables::float8 AS consumables,
+       failure_pct::float8 AS failure_pct,
+       fixed_costs, margins,
+       is_default, created_at, updated_at
+FROM cost_assumption_sets
+WHERE is_default = true AND (brand = sqlc.narg('brand') OR brand IS NULL)
+ORDER BY (brand IS NOT NULL) DESC
+LIMIT 1;
 
 -- name: InsertCostAssumption :one
 INSERT INTO cost_assumption_sets (
     id, name, brand, filament_cost_per_kg, electricity_cost_per_unit,
-    machine_hour_cost, finishing_labour, consumables, failure_pct, is_default
+    machine_hour_cost, finishing_labour, consumables, failure_pct,
+    fixed_costs, margins, is_default
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('name'), sqlc.narg('brand'),
     sqlc.arg('filament_cost_per_kg')::float8, sqlc.arg('electricity_cost_per_unit')::float8,
     sqlc.arg('machine_hour_cost')::float8, sqlc.arg('finishing_labour')::float8,
-    sqlc.arg('consumables')::float8, sqlc.arg('failure_pct')::float8, sqlc.arg('is_default')
+    sqlc.arg('consumables')::float8, sqlc.arg('failure_pct')::float8,
+    sqlc.arg('fixed_costs')::json, sqlc.arg('margins')::json, sqlc.arg('is_default')
 )
 RETURNING id, name, brand,
           filament_cost_per_kg::float8 AS filament_cost_per_kg,
@@ -80,6 +102,7 @@ RETURNING id, name, brand,
           finishing_labour::float8 AS finishing_labour,
           consumables::float8 AS consumables,
           failure_pct::float8 AS failure_pct,
+          fixed_costs, margins,
           is_default, created_at, updated_at;
 
 -- name: UpdateCostAssumption :one
@@ -92,6 +115,8 @@ UPDATE cost_assumption_sets SET
     finishing_labour = COALESCE(sqlc.narg('finishing_labour')::float8, finishing_labour),
     consumables = COALESCE(sqlc.narg('consumables')::float8, consumables),
     failure_pct = COALESCE(sqlc.narg('failure_pct')::float8, failure_pct),
+    fixed_costs = COALESCE(sqlc.narg('fixed_costs')::json, fixed_costs),
+    margins = COALESCE(sqlc.narg('margins')::json, margins),
     is_default = COALESCE(sqlc.narg('is_default'), is_default),
     updated_at = now()
 WHERE id = sqlc.arg('id')
@@ -102,4 +127,5 @@ RETURNING id, name, brand,
           finishing_labour::float8 AS finishing_labour,
           consumables::float8 AS consumables,
           failure_pct::float8 AS failure_pct,
+          fixed_costs, margins,
           is_default, created_at, updated_at;

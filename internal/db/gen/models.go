@@ -51,6 +51,8 @@ type CostAssumptionSet struct {
 	FinishingLabour        pgtype.Numeric
 	Consumables            pgtype.Numeric
 	FailurePct             pgtype.Numeric
+	FixedCosts             []byte
+	Margins                []byte
 	IsDefault              bool
 	CreatedAt              pgtype.Timestamptz
 	UpdatedAt              pgtype.Timestamptz
@@ -74,16 +76,24 @@ type Design struct {
 }
 
 type DesignPricing struct {
-	DesignID      uuid.UUID
-	DesignCp      pgtype.Numeric
-	Breakdown     []byte
-	Verdict       string
-	CpPct         pgtype.Numeric
-	RecommendedSp *int32
-	Reasons       []byte
-	Suggestions   []byte
-	CreatedAt     pgtype.Timestamptz
-	UpdatedAt     pgtype.Timestamptz
+	DesignID           uuid.UUID
+	DesignCp           pgtype.Numeric
+	Breakdown          []byte
+	Verdict            string
+	CpPct              pgtype.Numeric
+	RecommendedSp      *int32
+	RawSp              pgtype.Numeric
+	CpPctAtRecommended pgtype.Numeric
+	PassesNormal       bool
+	SurvivesStress     bool
+	SpWarnings         []byte
+	Reasons            []byte
+	Suggestions        []byte
+	ApprovedSp         *int32
+	ApprovedBy         *string
+	ApprovedAt         pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 type MachineProfile struct {
@@ -141,6 +151,19 @@ type RolePermission struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type ShopifyProduct struct {
+	DesignID    uuid.UUID
+	BrandSlug   string
+	ProductGid  string
+	VariantGid  string
+	Handle      string
+	AdminUrl    string
+	Status      string
+	PublishedBy *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type SliceJob struct {
 	ID        uuid.UUID
 	DesignID  uuid.UUID
@@ -167,6 +190,7 @@ type SliceMetric struct {
 	SupportUsed            bool
 	FilamentLengthMm       pgtype.Numeric
 	GcodeKey               string
+	Orientation            []byte
 	CreatedAt              pgtype.Timestamptz
 }
 

@@ -1,11 +1,15 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver for goose
 	"github.com/pressly/goose/v3"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
 )
 
 //go:embed migrations/*.sql
@@ -26,4 +30,23 @@ func Migrate(dsn string) error {
 		return err
 	}
 	return goose.Up(sqlDB, "migrations")
+}
+
+// MigrateRiver applies River's own schema (river_job, river_leader, ...) against
+// the DSN. River is a third migrator alongside goose and Better Auth; each owns a
+// disjoint set of tables, so running all three in sequence is safe and idempotent.
+// Run this after Migrate.
+func MigrateRiver(ctx context.Context, dsn string) error {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		return err
+	}
+	_, err = migrator.Migrate(ctx, rivermigrate.DirectionUp, nil)
+	return err
 }

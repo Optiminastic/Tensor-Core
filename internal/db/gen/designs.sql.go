@@ -12,6 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveDesignPricing = `-- name: ApproveDesignPricing :exec
+UPDATE design_pricing SET
+    approved_sp = $1,
+    approved_by = $2,
+    approved_at = now(),
+    updated_at = now()
+WHERE design_id = $3
+`
+
+type ApproveDesignPricingParams struct {
+	ApprovedSp *int32
+	ApprovedBy *string
+	DesignID   uuid.UUID
+}
+
+func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPricingParams) error {
+	_, err := q.db.Exec(ctx, approveDesignPricing, arg.ApprovedSp, arg.ApprovedBy, arg.DesignID)
+	return err
+}
+
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
@@ -60,22 +80,33 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 
 const getDesignPricing = `-- name: GetDesignPricing :one
 SELECT design_id, design_cp::float8 AS design_cp, breakdown, verdict,
-       cp_pct::float8 AS cp_pct, recommended_sp, reasons, suggestions,
+       cp_pct::float8 AS cp_pct, recommended_sp,
+       raw_sp::float8 AS raw_sp, cp_pct_at_recommended::float8 AS cp_pct_at_recommended,
+       passes_normal, survives_stress, sp_warnings, reasons, suggestions,
+       approved_sp, approved_by, approved_at,
        created_at, updated_at
 FROM design_pricing WHERE design_id = $1
 `
 
 type GetDesignPricingRow struct {
-	DesignID      uuid.UUID
-	DesignCp      float64
-	Breakdown     []byte
-	Verdict       string
-	CpPct         float64
-	RecommendedSp *int32
-	Reasons       []byte
-	Suggestions   []byte
-	CreatedAt     pgtype.Timestamptz
-	UpdatedAt     pgtype.Timestamptz
+	DesignID           uuid.UUID
+	DesignCp           float64
+	Breakdown          []byte
+	Verdict            string
+	CpPct              float64
+	RecommendedSp      *int32
+	RawSp              float64
+	CpPctAtRecommended float64
+	PassesNormal       bool
+	SurvivesStress     bool
+	SpWarnings         []byte
+	Reasons            []byte
+	Suggestions        []byte
+	ApprovedSp         *int32
+	ApprovedBy         *string
+	ApprovedAt         pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 func (q *Queries) GetDesignPricing(ctx context.Context, designID uuid.UUID) (GetDesignPricingRow, error) {
@@ -88,8 +119,16 @@ func (q *Queries) GetDesignPricing(ctx context.Context, designID uuid.UUID) (Get
 		&i.Verdict,
 		&i.CpPct,
 		&i.RecommendedSp,
+		&i.RawSp,
+		&i.CpPctAtRecommended,
+		&i.PassesNormal,
+		&i.SurvivesStress,
+		&i.SpWarnings,
 		&i.Reasons,
 		&i.Suggestions,
+		&i.ApprovedSp,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -125,7 +164,7 @@ SELECT m.job_id, m.print_time_hr::float8 AS print_time_hr,
        m.layer_height_mm::float8 AS layer_height_mm,
        m.infill_density_pct::float8 AS infill_density_pct, m.wall_loops,
        m.support_used, m.filament_length_mm::float8 AS filament_length_mm,
-       m.gcode_key, m.created_at
+       m.gcode_key, m.orientation, m.created_at
 FROM slice_metrics m
 JOIN slice_jobs j ON j.id = m.job_id
 WHERE j.design_id = $1
@@ -149,6 +188,7 @@ type GetLatestMetricsForDesignRow struct {
 	SupportUsed            bool
 	FilamentLengthMm       float64
 	GcodeKey               string
+	Orientation            []byte
 	CreatedAt              pgtype.Timestamptz
 }
 
@@ -171,7 +211,32 @@ func (q *Queries) GetLatestMetricsForDesign(ctx context.Context, designID uuid.U
 		&i.SupportUsed,
 		&i.FilamentLengthMm,
 		&i.GcodeKey,
+		&i.Orientation,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getShopifyProduct = `-- name: GetShopifyProduct :one
+SELECT design_id, brand_slug, product_gid, variant_gid, handle, admin_url, status,
+       published_by, created_at, updated_at
+FROM shopify_products WHERE design_id = $1
+`
+
+func (q *Queries) GetShopifyProduct(ctx context.Context, designID uuid.UUID) (ShopifyProduct, error) {
+	row := q.db.QueryRow(ctx, getShopifyProduct, designID)
+	var i ShopifyProduct
+	err := row.Scan(
+		&i.DesignID,
+		&i.BrandSlug,
+		&i.ProductGid,
+		&i.VariantGid,
+		&i.Handle,
+		&i.AdminUrl,
+		&i.Status,
+		&i.PublishedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -318,7 +383,7 @@ const insertSliceMetrics = `-- name: InsertSliceMetrics :exec
 INSERT INTO slice_metrics (
     job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
     colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
-    wall_loops, support_used, filament_length_mm, gcode_key
+    wall_loops, support_used, filament_length_mm, gcode_key, orientation
 ) VALUES (
     $1, $2::float8,
     $3::float8, $4::float8,
@@ -326,7 +391,7 @@ INSERT INTO slice_metrics (
     $8::float8, $9,
     $10::float8, $11::float8,
     $12, $13, $14::float8,
-    $15
+    $15, $16::jsonb
 )
 `
 
@@ -346,6 +411,7 @@ type InsertSliceMetricsParams struct {
 	SupportUsed            bool
 	FilamentLengthMm       float64
 	GcodeKey               string
+	Orientation            []byte
 }
 
 func (q *Queries) InsertSliceMetrics(ctx context.Context, arg InsertSliceMetricsParams) error {
@@ -365,6 +431,7 @@ func (q *Queries) InsertSliceMetrics(ctx context.Context, arg InsertSliceMetrics
 		arg.SupportUsed,
 		arg.FilamentLengthMm,
 		arg.GcodeKey,
+		arg.Orientation,
 	)
 	return err
 }
@@ -402,6 +469,87 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 	items := []ListDesignsByBrandRow{}
 	for rows.Next() {
 		var i ListDesignsByBrandRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BrandSlug,
+			&i.Name,
+			&i.CreatedBy,
+			&i.Status,
+			&i.StlKey,
+			&i.Material,
+			&i.Colour,
+			&i.Finish,
+			&i.UnitsPerBed,
+			&i.Quality,
+			&i.InfillPct,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDesignsByBrandPage = `-- name: ListDesignsByBrandPage :many
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       created_at, updated_at
+FROM designs
+WHERE brand_slug = $1
+  AND (
+    $2::timestamptz IS NULL
+    OR (created_at, id) < ($2::timestamptz, $3::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT $4
+`
+
+type ListDesignsByBrandPageParams struct {
+	BrandSlug       string
+	CursorCreatedAt pgtype.Timestamptz
+	CursorID        *uuid.UUID
+	PageLimit       int32
+}
+
+type ListDesignsByBrandPageRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// Keyset page: rows strictly before the (created_at, id) cursor, newest first. A
+// null cursor returns the first page. Ordering matches ListDesignsByBrand with id
+// as a stable tiebreaker.
+func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByBrandPageParams) ([]ListDesignsByBrandPageRow, error) {
+	rows, err := q.db.Query(ctx, listDesignsByBrandPage,
+		arg.BrandSlug,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDesignsByBrandPageRow{}
+	for rows.Next() {
+		var i ListDesignsByBrandPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.BrandSlug,
@@ -508,28 +656,40 @@ func (q *Queries) UpdateSliceJobStatus(ctx context.Context, arg UpdateSliceJobSt
 
 const upsertDesignPricing = `-- name: UpsertDesignPricing :exec
 INSERT INTO design_pricing (
-    design_id, design_cp, breakdown, verdict, cp_pct, recommended_sp, reasons, suggestions
+    design_id, design_cp, breakdown, verdict, cp_pct, recommended_sp,
+    raw_sp, cp_pct_at_recommended, passes_normal, survives_stress, sp_warnings,
+    reasons, suggestions
 ) VALUES (
     $1, $2::float8, $3::json,
     $4, $5::float8, $6,
-    $7::json, $8::json
+    $7::float8, $8::float8,
+    $9, $10, $11::json,
+    $12::json, $13::json
 )
 ON CONFLICT (design_id) DO UPDATE SET
     design_cp = EXCLUDED.design_cp, breakdown = EXCLUDED.breakdown,
     verdict = EXCLUDED.verdict, cp_pct = EXCLUDED.cp_pct,
-    recommended_sp = EXCLUDED.recommended_sp, reasons = EXCLUDED.reasons,
+    recommended_sp = EXCLUDED.recommended_sp, raw_sp = EXCLUDED.raw_sp,
+    cp_pct_at_recommended = EXCLUDED.cp_pct_at_recommended,
+    passes_normal = EXCLUDED.passes_normal, survives_stress = EXCLUDED.survives_stress,
+    sp_warnings = EXCLUDED.sp_warnings, reasons = EXCLUDED.reasons,
     suggestions = EXCLUDED.suggestions, updated_at = now()
 `
 
 type UpsertDesignPricingParams struct {
-	DesignID      uuid.UUID
-	DesignCp      float64
-	Breakdown     []byte
-	Verdict       string
-	CpPct         float64
-	RecommendedSp *int32
-	Reasons       []byte
-	Suggestions   []byte
+	DesignID           uuid.UUID
+	DesignCp           float64
+	Breakdown          []byte
+	Verdict            string
+	CpPct              float64
+	RecommendedSp      *int32
+	RawSp              float64
+	CpPctAtRecommended *float64
+	PassesNormal       bool
+	SurvivesStress     bool
+	SpWarnings         []byte
+	Reasons            []byte
+	Suggestions        []byte
 }
 
 func (q *Queries) UpsertDesignPricing(ctx context.Context, arg UpsertDesignPricingParams) error {
@@ -540,8 +700,51 @@ func (q *Queries) UpsertDesignPricing(ctx context.Context, arg UpsertDesignPrici
 		arg.Verdict,
 		arg.CpPct,
 		arg.RecommendedSp,
+		arg.RawSp,
+		arg.CpPctAtRecommended,
+		arg.PassesNormal,
+		arg.SurvivesStress,
+		arg.SpWarnings,
 		arg.Reasons,
 		arg.Suggestions,
+	)
+	return err
+}
+
+const upsertShopifyProduct = `-- name: UpsertShopifyProduct :exec
+INSERT INTO shopify_products (
+    design_id, brand_slug, product_gid, variant_gid, handle, admin_url, status, published_by
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7, $8
+)
+ON CONFLICT (design_id) DO UPDATE SET
+    product_gid = EXCLUDED.product_gid, variant_gid = EXCLUDED.variant_gid, handle = EXCLUDED.handle,
+    admin_url = EXCLUDED.admin_url, status = EXCLUDED.status,
+    published_by = EXCLUDED.published_by, updated_at = now()
+`
+
+type UpsertShopifyProductParams struct {
+	DesignID    uuid.UUID
+	BrandSlug   string
+	ProductGid  string
+	VariantGid  string
+	Handle      string
+	AdminUrl    string
+	Status      string
+	PublishedBy *string
+}
+
+func (q *Queries) UpsertShopifyProduct(ctx context.Context, arg UpsertShopifyProductParams) error {
+	_, err := q.db.Exec(ctx, upsertShopifyProduct,
+		arg.DesignID,
+		arg.BrandSlug,
+		arg.ProductGid,
+		arg.VariantGid,
+		arg.Handle,
+		arg.AdminUrl,
+		arg.Status,
+		arg.PublishedBy,
 	)
 	return err
 }

@@ -13,6 +13,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
 // detail writes {"detail": msg} with the given status.
@@ -20,9 +23,41 @@ func detail(c *gin.Context, status int, msg string) {
 	c.JSON(status, gin.H{"detail": msg})
 }
 
+// isNoRows reports whether err is pgx's "no rows" sentinel. Handlers use it to
+// tell "the row does not exist yet" apart from a real database error, so the
+// latter is never silently rendered as an empty field.
+func isNoRows(err error) bool {
+	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// dbError maps a database error to the response, centralising the 404-vs-500
+// decision that used to be hand-rolled at every read site: pgx.ErrNoRows becomes
+// a 404 with notFoundMsg, and any other error is logged server-side (with the
+// request id) and returned as a 500 with genericMsg. The underlying cause is
+// never sent to the client but is always logged, closing the "500 cause
+// discarded" gap without leaking internals.
+func dbError(c *gin.Context, err error, notFoundMsg, genericMsg string) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		detail(c, http.StatusNotFound, notFoundMsg)
+		return
+	}
+	obs.FromContext(c.Request.Context()).Error("database error",
+		"error", err,
+		"route", c.FullPath(),
+	)
+	detail(c, http.StatusInternalServerError, genericMsg)
+}
+
+// maxJSONBodyBytes caps JSON request bodies so a malicious or buggy client
+// cannot exhaust memory with an unbounded payload. It is intentionally generous
+// for config/pricing JSON; the multipart design upload has its own separate,
+// much larger limit and does not pass through here.
+const maxJSONBodyBytes = 1 << 20 // 1 MiB
+
 // bindJSON binds and validates the request body, writing a 422 with a string
 // detail on failure. Returns false when the caller should stop.
 func bindJSON(c *gin.Context, obj any) bool {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBodyBytes)
 	if err := c.ShouldBindJSON(obj); err != nil {
 		detail(c, http.StatusUnprocessableEntity, validationMessage(err))
 		return false
@@ -42,7 +77,7 @@ func validationMessage(err error) string {
 // readBody reads and restores the request body so it can be parsed more than
 // once (used by PATCH handlers that need to detect which fields were sent).
 func readBody(c *gin.Context) ([]byte, bool) {
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONBodyBytes))
 	if err != nil {
 		detail(c, http.StatusBadRequest, "Could not read the request body.")
 		return nil, false

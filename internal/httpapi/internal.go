@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
@@ -22,84 +21,6 @@ func (s *Server) registerInternal(r *gin.Engine) {
 	g.POST("/bootstrap-admin", s.internalBootstrapAdmin)
 	g.GET("/invites/:token", s.internalCheckInvite)
 	g.POST("/invites/accept", s.internalAcceptInvite)
-	g.POST("/slice-result", s.internalSliceResult)
-}
-
-type sliceResultRequest struct {
-	JobID   string             `json:"job_id" binding:"required"`
-	Status  string             `json:"status" binding:"required,oneof=done failed"`
-	Error   string             `json:"error"`
-	Metrics *sliceMetricsInput `json:"metrics"`
-}
-
-// internalSliceResult is the worker's callback. On "failed" it marks the job and
-// design failed; on "done" it stores the metrics, then runs the cost engine to
-// produce the Design CP, verdict and suggestions.
-func (s *Server) internalSliceResult(c *gin.Context) {
-	var req sliceResultRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	jobID, err := uuid.Parse(req.JobID)
-	if err != nil {
-		detail(c, http.StatusUnprocessableEntity, "The job id is not valid.")
-		return
-	}
-	ctx := c.Request.Context()
-
-	job, err := s.store.Q.GetSliceJobByID(ctx, jobID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, "That slice job does not exist.")
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not load the slice job.")
-		return
-	}
-
-	if req.Status == jobFailed {
-		reason := req.Error
-		if reason == "" {
-			reason = "The slice failed."
-		}
-		s.failJob(ctx, jobID, reason)
-		c.Status(http.StatusNoContent)
-		return
-	}
-
-	if req.Metrics == nil {
-		detail(c, http.StatusUnprocessableEntity, "A done result must include metrics.")
-		return
-	}
-	if !s.recordSlice(c, job, *req.Metrics) {
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-// recordSlice persists the metrics, closes the job, and prices the design.
-func (s *Server) recordSlice(c *gin.Context, job gen.SliceJob, metrics sliceMetricsInput) bool {
-	ctx := c.Request.Context()
-	if err := s.store.Q.InsertSliceMetrics(ctx, metrics.toInsertParams(job.ID)); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not store the slice metrics.")
-		return false
-	}
-	if err := s.store.Q.UpdateSliceJobStatus(ctx, gen.UpdateSliceJobStatusParams{
-		Status: jobDone, Error: nil, ID: job.ID,
-	}); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not update the slice job.")
-		return false
-	}
-	design, err := s.store.Q.GetDesignByID(ctx, job.DesignID)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not load the design.")
-		return false
-	}
-	if err := s.priceDesign(ctx, job.DesignID, design.BrandSlug, metrics); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not price the design.")
-		return false
-	}
-	return true
 }
 
 func (s *Server) internalUserAuthz(c *gin.Context) {

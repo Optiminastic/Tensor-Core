@@ -10,9 +10,10 @@ The backend owns the domain: PostgreSQL, the costing and pricing engine, admin c
 ## Structure
 ```
 cmd/
-  api/       HTTP entrypoint (health, routers, CORS, graceful shutdown)
-  seed/      migrate + seed RBAC catalog and brands (idempotent)
-  migrate/   apply migrations only
+  api/         HTTP entrypoint (health, routers, CORS, graceful shutdown); enqueues slices
+  sliceworker/ River worker: consumes slice jobs, runs Bambu Studio, prices the design
+  seed/        migrate (goose + River) + seed RBAC catalog and brands (idempotent)
+  migrate/     apply migrations only (goose + River)
 internal/
   config/    Settings from the environment
   pricing/   costing/pricing engine - PURE (no DB, no I/O, no globals beyond constants)
@@ -22,7 +23,21 @@ internal/
     selling_price.go GenerateSellingPrice, RemainingMargin, SnapUpToLadder
     status.go       EvaluateStatus -> Green / Yellow / Red
     round.go        Python-compatible round-half-to-even + formatting
+  slicing/   the slice pipeline (Go, replaces the Python worker):
+    profiles.go  material/quality -> Bambu H2S profile paths + filament density
+    bambu.go     RunSlice: Bambu Studio headless under xvfb (subprocess)
+    gcode.go     parse result.json + slice_info + plate gcode -> SliceMetrics (+ gcode_test.go)
+    metrics.go   ToPerUnit: whole-plate SliceMetrics -> per-unit PerUnitMetrics
+    queue.go     River SliceArgs + Enqueuer (transactional InsertTx) + insert-only client
+    worker.go    SliceWorker: river.Worker[SliceArgs] - the STL-in, priced-design-out job
+    pricing.go   ProcessSliceResult / priceDesign / FailJob (slice -> price, ctx+store only)
+  orientation/ least-support resting-orientation recommender from mesh geometry (pure):
+    mesh.go      Vec3 math + STL (binary/ASCII) and 3MF (zip+xml) loaders -> Mesh
+    optimize.go  Recommend: score candidate "down" faces by downward-overhang area
+                 (Tweaker-style); advisory only, never changes the costed slice
   brandpolicy/ the ONLY DB read on the pricing path; loads a brand's policy
+  storage/   S3/MinIO client (STL in, G-code out) - Put/Get/Download/Upload
+  integrations/shopify/  Admin GraphQL client for publishing an approved design
   auth/      jwt.go (verify against JWKS, EdDSA), catalog.go (permissions + grants),
              service.go (ResolveUserAuthz, BumpPermissionsVersion), invites.go,
              seed.go (sync catalog into DB), middleware.go (Gin guards), models.go
@@ -32,7 +47,7 @@ internal/
     queries/     sqlc source
     gen/         sqlc-generated (checked in; never edit by hand)
     schema.sql   plain DDL for sqlc codegen ONLY (keep in sync with 0001)
-    store.go convert.go migrate.go
+    store.go convert.go migrate.go (Migrate = goose, MigrateRiver = River)
 ```
 
 ## Hard rules

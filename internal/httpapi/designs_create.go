@@ -1,7 +1,7 @@
 package httpapi
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -34,10 +34,10 @@ type designForm struct {
 	InfillPct   float64
 }
 
-// pipelineReady fails closed with 503 when object storage or the dispatcher is
-// not configured, so the upload routes never half-work.
+// pipelineReady fails closed with 503 when object storage or the slice enqueuer
+// is not configured, so the upload routes never half-work.
 func (s *Server) pipelineReady(c *gin.Context) bool {
-	if s.storage == nil || s.dispatcher == nil {
+	if s.storage == nil || s.enqueuer == nil {
 		detail(c, http.StatusServiceUnavailable, "The design pipeline is not configured.")
 		return false
 	}
@@ -74,11 +74,8 @@ func (s *Server) createDesign(c *gin.Context) {
 		return
 	}
 
-	row, jobID, ok := s.insertDesignAndJob(c, designID, stlKey, user.ID, form)
+	row, ok := s.insertDesignAndJob(c, designID, stlKey, user.ID, form)
 	if !ok {
-		return
-	}
-	if !s.enqueueSlice(c, designID, jobID, stlKey, form) {
 		return
 	}
 	c.JSON(http.StatusCreated, designDTO(row.ID, row.BrandSlug, row.Name, row.CreatedBy, row.Status,
@@ -195,14 +192,17 @@ func (s *Server) uploadModel(c *gin.Context, key string, fh *multipart.FileHeade
 	return true
 }
 
-// insertDesignAndJob creates the design (queued) and its first slice job atomically.
+// insertDesignAndJob creates the design (queued), its first slice job, and the
+// River slice job - all in one transaction. Because the River enqueue joins the
+// same tx, a design can never be committed without its slice being queued (and a
+// rollback leaves neither), which removes the old post-commit dual-write bug.
 func (s *Server) insertDesignAndJob(
 	c *gin.Context, designID uuid.UUID, stlKey, createdBy string, form designForm,
-) (gen.InsertDesignRow, uuid.UUID, bool) {
+) (gen.InsertDesignRow, bool) {
 	ctx := c.Request.Context()
 	var row gen.InsertDesignRow
 	jobID := uuid.New()
-	err := s.store.InTx(ctx, func(q *gen.Queries) error {
+	err := s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
 		d, err := q.InsertDesign(ctx, gen.InsertDesignParams{
 			ID: designID, BrandSlug: form.Brand, Name: form.Name, CreatedBy: createdBy,
 			Status: designQueued, StlKey: stlKey, Material: form.Material, Colour: form.Colour,
@@ -213,33 +213,30 @@ func (s *Server) insertDesignAndJob(
 			return err
 		}
 		row = d
-		_, err = q.InsertSliceJob(ctx, gen.InsertSliceJobParams{
+		if _, err := q.InsertSliceJob(ctx, gen.InsertSliceJobParams{
 			ID: jobID, DesignID: designID, Status: jobQueued, Attempt: 1,
-		})
-		return err
+		}); err != nil {
+			return err
+		}
+		return s.enqueueSliceTx(ctx, tx, jobID, designID, stlKey, form)
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not create the design.")
-		return gen.InsertDesignRow{}, uuid.Nil, false
+		return gen.InsertDesignRow{}, false
 	}
-	return row, jobID, true
+	return row, true
 }
 
-// enqueueSlice hands the job to the dispatcher and moves the design to "slicing".
-// On failure it marks the job and design failed so nothing sits stuck in "queued".
-func (s *Server) enqueueSlice(c *gin.Context, designID, jobID uuid.UUID, stlKey string, form designForm) bool {
-	ctx := c.Request.Context()
-	specs := slicing.Specs{
+// enqueueSliceTx inserts the River slice job on the given transaction. It carries
+// everything the worker needs; the worker flips the design to "slicing" itself.
+func (s *Server) enqueueSliceTx(
+	ctx context.Context, tx pgx.Tx, jobID, designID uuid.UUID, stlKey string, form designForm,
+) error {
+	return s.enqueuer.EnqueueTx(ctx, tx, slicing.SliceArgs{
+		JobID: jobID, DesignID: designID, BrandSlug: form.Brand, StlKey: stlKey,
 		Material: form.Material, Quality: form.Quality,
 		UnitsPerBed: int(form.UnitsPerBed), InfillPct: form.InfillPct,
-	}
-	if err := s.dispatcher.Enqueue(ctx, jobID.String(), stlKey, specs); err != nil {
-		s.failJob(ctx, jobID, "could not reach the slicer")
-		detail(c, http.StatusBadGateway, "Could not queue the design for slicing.")
-		return false
-	}
-	_ = s.store.Q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designSlicing, ID: designID})
-	return true
+	})
 }
 
 func (s *Server) resubmitDesign(c *gin.Context) {
@@ -254,11 +251,7 @@ func (s *Server) resubmitDesign(c *gin.Context) {
 
 	d, err := s.store.Q.GetDesignByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, "That design does not exist.")
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not load the design.")
+		dbError(c, err, "That design does not exist.", "Could not load the design.")
 		return
 	}
 
@@ -266,11 +259,7 @@ func (s *Server) resubmitDesign(c *gin.Context) {
 	if !ok {
 		return
 	}
-	jobID, ok := s.applyResubmit(c, id, form)
-	if !ok {
-		return
-	}
-	if !s.enqueueSlice(c, id, jobID, d.StlKey, form) {
+	if !s.applyResubmit(c, id, d.StlKey, form) {
 		return
 	}
 
@@ -317,17 +306,21 @@ func (s *Server) parseResubmit(c *gin.Context, brand string) (designForm, bool) 
 	return form, true
 }
 
-// applyResubmit updates the design's specs, resets it to queued, and opens a new
-// slice job at the next attempt number - all atomically.
-func (s *Server) applyResubmit(c *gin.Context, id uuid.UUID, form designForm) (uuid.UUID, bool) {
+// applyResubmit updates the design's specs, resets it to queued, opens a new slice
+// job at the next attempt number, and enqueues the River slice job - all in one
+// transaction, so the re-slice is queued exactly when the design is reset.
+func (s *Server) applyResubmit(c *gin.Context, id uuid.UUID, stlKey string, form designForm) bool {
 	ctx := c.Request.Context()
-	attempt, err := s.store.Q.NextAttemptForDesign(ctx, id)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not prepare the re-slice.")
-		return uuid.Nil, false
-	}
 	jobID := uuid.New()
-	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+	// The next attempt number is read inside the transaction, and a unique
+	// (design_id, attempt) constraint backs it, so two concurrent resubmits of the
+	// same design cannot both claim the same attempt: one commits, the other's
+	// insert conflicts and rolls the whole re-slice back.
+	err := s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		attempt, err := q.NextAttemptForDesign(ctx, id)
+		if err != nil {
+			return err
+		}
 		if err := q.UpdateDesignSpecs(ctx, gen.UpdateDesignSpecsParams{
 			Material: form.Material, Colour: form.Colour, Finish: form.Finish,
 			UnitsPerBed: form.UnitsPerBed, Quality: form.Quality, InfillPct: form.InfillPct,
@@ -335,14 +328,16 @@ func (s *Server) applyResubmit(c *gin.Context, id uuid.UUID, form designForm) (u
 		}); err != nil {
 			return err
 		}
-		_, err := q.InsertSliceJob(ctx, gen.InsertSliceJobParams{
+		if _, err := q.InsertSliceJob(ctx, gen.InsertSliceJobParams{
 			ID: jobID, DesignID: id, Status: jobQueued, Attempt: attempt,
-		})
-		return err
+		}); err != nil {
+			return err
+		}
+		return s.enqueueSliceTx(ctx, tx, jobID, id, stlKey, form)
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not queue the re-slice.")
-		return uuid.Nil, false
+		return false
 	}
-	return jobID, true
+	return true
 }

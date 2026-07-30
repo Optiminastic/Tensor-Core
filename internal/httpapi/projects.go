@@ -2,13 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
@@ -110,11 +108,7 @@ func (s *Server) getProject(c *gin.Context) {
 	}
 	r, err := s.store.Q.GetProject(c.Request.Context(), id)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, "Project not found")
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not load the project.")
+		dbError(c, err, "Project not found", "Could not load the project.")
 		return
 	}
 	c.JSON(http.StatusOK, projectDTO(r.ID, r.Name, r.Brand, r.Description, r.Status, r.CreatedBy, r.CreatedAt, r.UpdatedAt))
@@ -136,17 +130,18 @@ func (s *Server) updateProject(c *gin.Context) {
 	}
 
 	params := gen.UpdateProjectParams{ID: id}
-	if v, ok := raw["name"]; ok {
-		var name string
-		if !decodeField(c, v, &name) {
-			return
-		}
-		if len(name) < 1 || len(name) > 120 {
-			detail(c, http.StatusUnprocessableEntity, "Name must be 1 to 120 characters.")
-			return
-		}
-		params.Name = &name
+	if !patchField(c, raw, "name",
+		func(name string) string {
+			if len(name) < 1 || len(name) > 120 {
+				return "Name must be 1 to 120 characters."
+			}
+			return ""
+		},
+		func(name string) { params.Name = &name }) {
+		return
 	}
+	// brand carries a DB existence check that writes its own response, so it stays
+	// explicit rather than fitting patchField's pure-validate shape.
 	if v, ok := raw["brand"]; ok {
 		var brand string
 		if !decodeField(c, v, &brand) {
@@ -161,37 +156,33 @@ func (s *Server) updateProject(c *gin.Context) {
 		}
 		params.Brand = &brand
 	}
-	if v, ok := raw["description"]; ok {
-		var desc *string
-		if !decodeField(c, v, &desc) {
-			return
-		}
-		if desc != nil && len(*desc) > 500 {
-			detail(c, http.StatusUnprocessableEntity, "Description must be at most 500 characters.")
-			return
-		}
-		params.SetDescription = true
-		params.Description = desc
+	if !patchField(c, raw, "description",
+		func(desc *string) string {
+			if desc != nil && len(*desc) > 500 {
+				return "Description must be at most 500 characters."
+			}
+			return ""
+		},
+		func(desc *string) {
+			params.SetDescription = true
+			params.Description = desc
+		}) {
+		return
 	}
-	if v, ok := raw["status"]; ok {
-		var status string
-		if !decodeField(c, v, &status) {
-			return
-		}
-		if status != "active" && status != "archived" {
-			detail(c, http.StatusUnprocessableEntity, "Status must be 'active' or 'archived'.")
-			return
-		}
-		params.Status = status
+	if !patchField(c, raw, "status",
+		func(status string) string {
+			if status != "active" && status != "archived" {
+				return "Status must be 'active' or 'archived'."
+			}
+			return ""
+		},
+		func(status string) { params.Status = status }) {
+		return
 	}
 
 	r, err := s.store.Q.UpdateProject(c.Request.Context(), params)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, "Project not found")
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not update the project.")
+		dbError(c, err, "Project not found", "Could not update the project.")
 		return
 	}
 	c.JSON(http.StatusOK, projectDTO(r.ID, r.Name, r.Brand, r.Description, r.Status, r.CreatedBy, r.CreatedAt, r.UpdatedAt))

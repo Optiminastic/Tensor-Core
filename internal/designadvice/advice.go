@@ -12,6 +12,9 @@ const (
 	highInfillPct       = 25.0
 	heavyFilamentGrams  = 80.0
 	singleUnitBatchHint = 1
+	// Minimum estimated overhang reduction (fraction) before the generic "reorient
+	// it" advice is replaced with the specific computed rotation.
+	orientationSuggestPct = 0.15
 )
 
 // Input is the design's per-unit slice facts plus the verdict and the brand's
@@ -24,6 +27,11 @@ type Input struct {
 	SupportUsed            bool
 	UnitsPerBed            int
 	EntryMachineHours      *float64
+
+	// OrientationHint is the computed rotation instruction (empty when none was
+	// found); OrientationReductionPct is its estimated overhang reduction (0..1).
+	OrientationHint         string
+	OrientationReductionPct float64
 }
 
 // Suggest returns ordered fix suggestions, most impactful first. A green design
@@ -32,7 +40,7 @@ func Suggest(in Input) []string {
 	out := make([]string, 0, 4)
 
 	if in.SupportUsed {
-		out = append(out, "This design needs support material. Reorienting it or adding chamfers instead of overhangs can remove supports, cutting both filament and print time.")
+		out = append(out, supportSuggestion(in))
 	}
 	if in.InfillPct > highInfillPct {
 		out = append(out, fmt.Sprintf("Infill is %.0f%%. Most decorative parts hold up at 15%%; lowering it reduces filament and print time.", in.InfillPct))
@@ -50,4 +58,16 @@ func Suggest(in Input) []string {
 		out = append(out, "Design CP is too high for the target price. The largest levers are print time and filament - reduce infill, reorient to drop supports, or batch more units per bed.")
 	}
 	return out
+}
+
+// supportSuggestion prefers the specific computed rotation when the orientation
+// analysis found a worthwhile improvement, falling back to the generic advice.
+func supportSuggestion(in Input) string {
+	if in.OrientationHint != "" && in.OrientationReductionPct >= orientationSuggestPct {
+		return fmt.Sprintf(
+			"%s That could cut the support-generating overhang by roughly %.0f%%.",
+			in.OrientationHint, in.OrientationReductionPct*100,
+		)
+	}
+	return "This design needs support material. Reorienting it or adding chamfers instead of overhangs can remove supports, cutting both filament and print time."
 }

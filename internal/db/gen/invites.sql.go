@@ -153,6 +153,68 @@ func (q *Queries) ListInvitesWithRole(ctx context.Context) ([]ListInvitesWithRol
 	return items, nil
 }
 
+const listInvitesWithRolePage = `-- name: ListInvitesWithRolePage :many
+SELECT i.id, i.email, r.name::text AS role_name, i.expires_at,
+       i.accepted_at, i.revoked_at, i.created_by, i.created_at
+FROM user_invites i
+JOIN roles r ON r.id = i.role_id
+WHERE (
+    $1::timestamptz IS NULL
+    OR (i.created_at, i.id) < ($1::timestamptz, $2::uuid)
+)
+ORDER BY i.created_at DESC, i.id DESC
+LIMIT $3
+`
+
+type ListInvitesWithRolePageParams struct {
+	CursorCreatedAt pgtype.Timestamptz
+	CursorID        *uuid.UUID
+	PageLimit       int32
+}
+
+type ListInvitesWithRolePageRow struct {
+	ID         uuid.UUID
+	Email      string
+	RoleName   string
+	ExpiresAt  pgtype.Timestamptz
+	AcceptedAt pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	CreatedBy  *string
+	CreatedAt  pgtype.Timestamptz
+}
+
+// Keyset page of the invite list, newest first, strictly before the (created_at,
+// id) cursor. A null cursor returns the first page. created_at is selected so the
+// caller can build the next cursor; it is not part of the response body.
+func (q *Queries) ListInvitesWithRolePage(ctx context.Context, arg ListInvitesWithRolePageParams) ([]ListInvitesWithRolePageRow, error) {
+	rows, err := q.db.Query(ctx, listInvitesWithRolePage, arg.CursorCreatedAt, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListInvitesWithRolePageRow{}
+	for rows.Next() {
+		var i ListInvitesWithRolePageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.RoleName,
+			&i.ExpiresAt,
+			&i.AcceptedAt,
+			&i.RevokedAt,
+			&i.CreatedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markInviteAccepted = `-- name: MarkInviteAccepted :exec
 UPDATE user_invites
 SET accepted_at = now(), accepted_user_id = $2, updated_at = now()

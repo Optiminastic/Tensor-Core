@@ -54,6 +54,20 @@ func BumpPermissionsVersion(ctx context.Context, q *gen.Queries, userID string) 
 	return int(v), err
 }
 
+// CurrentPermissionsVersion reads a user's current permissions version, mapping a
+// missing row to 0 (a user who has never had a grant change). It backs the guard
+// layer's freshness check.
+func CurrentPermissionsVersion(ctx context.Context, q *gen.Queries, userID string) (int, error) {
+	v, err := q.GetPermissionsVersion(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return int(v), nil
+}
+
 func sortedRoleNames(set map[RoleName]struct{}) []RoleName {
 	out := make([]RoleName, 0, len(set))
 	for r := range set {

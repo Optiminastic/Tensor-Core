@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
@@ -147,11 +145,7 @@ func (s *Server) getBrand(c *gin.Context) {
 	}
 	r, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not load the brand.")
+		dbError(c, err, notConfigured(pricing.Brand(slug)), "Could not load the brand.")
 		return
 	}
 	dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
@@ -281,11 +275,7 @@ func (s *Server) updateBrand(c *gin.Context) {
 
 	current, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not load the brand.")
+		dbError(c, err, notConfigured(pricing.Brand(slug)), "Could not load the brand.")
 		return
 	}
 
@@ -309,11 +299,7 @@ func (s *Server) updateBrand(c *gin.Context) {
 
 	r, err := s.store.Q.UpdateBrand(c.Request.Context(), params)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
-			return
-		}
-		detail(c, http.StatusInternalServerError, "Could not update the brand.")
+		dbError(c, err, notConfigured(pricing.Brand(slug)), "Could not update the brand.")
 		return
 	}
 	dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
@@ -341,47 +327,36 @@ func (s *Server) applyBrandUpdate(c *gin.Context, raw map[string]json.RawMessage
 		}
 		params.Name = &name
 	}
-	if v, ok := raw["logo_url"]; ok {
-		var url *string
-		if !decodeField(c, v, &url) {
-			return false
-		}
+	if !patchField(c, raw, "logo_url", noValidation[*string], func(url *string) {
 		params.SetLogoUrl = true
 		params.LogoUrl = url
+	}) {
+		return false
 	}
-	if v, ok := raw["starting_price"]; ok {
-		var price float64
-		if !decodeField(c, v, &price) {
-			return false
-		}
-		if price <= 0 {
-			detail(c, http.StatusUnprocessableEntity, "Starting price must be positive.")
-			return false
-		}
-		params.StartingPrice = &price
+	if !patchField(c, raw, "starting_price",
+		func(price float64) string {
+			if price <= 0 {
+				return "Starting price must be positive."
+			}
+			return ""
+		},
+		func(price float64) { params.StartingPrice = &price }) {
+		return false
 	}
-	if v, ok := raw["shopify_url"]; ok {
-		var url *string
-		if !decodeField(c, v, &url) {
-			return false
-		}
+	if !patchField(c, raw, "shopify_url", noValidation[*string], func(url *string) {
 		params.SetShopifyUrl = true
 		params.ShopifyUrl = url
+	}) {
+		return false
 	}
-	if v, ok := raw["description"]; ok {
-		var desc *string
-		if !decodeField(c, v, &desc) {
-			return false
-		}
+	if !patchField(c, raw, "description", noValidation[*string], func(desc *string) {
 		params.SetDescription = true
 		params.Description = desc
+	}) {
+		return false
 	}
-	if v, ok := raw["is_active"]; ok {
-		var active bool
-		if !decodeField(c, v, &active) {
-			return false
-		}
-		params.IsActive = &active
+	if !patchField(c, raw, "is_active", noValidation[bool], func(active bool) { params.IsActive = &active }) {
+		return false
 	}
 	if v, ok := raw["ladder"]; ok {
 		ladderJSON, ok := validateLadder(c, v)
@@ -404,29 +379,31 @@ func (s *Server) applyBrandUpdate(c *gin.Context, raw map[string]json.RawMessage
 		}
 		params.CpYellowMax = &f
 	}
-	if v, ok := raw["entry_machine_hours"]; ok {
-		var hours *float64
-		if !decodeField(c, v, &hours) {
-			return false
-		}
-		if hours != nil && *hours <= 0 {
-			detail(c, http.StatusUnprocessableEntity, "Entry machine-hours must be positive.")
-			return false
-		}
-		params.SetEntryMachineHours = true
-		params.EntryMachineHours = hours
+	if !patchField(c, raw, "entry_machine_hours",
+		func(hours *float64) string {
+			if hours != nil && *hours <= 0 {
+				return "Entry machine-hours must be positive."
+			}
+			return ""
+		},
+		func(hours *float64) {
+			params.SetEntryMachineHours = true
+			params.EntryMachineHours = hours
+		}) {
+		return false
 	}
-	if v, ok := raw["entry_rung"]; ok {
-		var rung *int32
-		if !decodeField(c, v, &rung) {
-			return false
-		}
-		if rung != nil && *rung <= 0 {
-			detail(c, http.StatusUnprocessableEntity, "Entry rung must be positive.")
-			return false
-		}
-		params.SetEntryRung = true
-		params.EntryRung = rung
+	if !patchField(c, raw, "entry_rung",
+		func(rung *int32) string {
+			if rung != nil && *rung <= 0 {
+				return "Entry rung must be positive."
+			}
+			return ""
+		},
+		func(rung *int32) {
+			params.SetEntryRung = true
+			params.EntryRung = rung
+		}) {
+		return false
 	}
 	return true
 }

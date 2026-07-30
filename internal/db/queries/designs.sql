@@ -27,6 +27,22 @@ SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 
+-- name: ListDesignsByBrandPage :many
+-- Keyset page: rows strictly before the (created_at, id) cursor, newest first. A
+-- null cursor returns the first page. Ordering matches ListDesignsByBrand with id
+-- as a stable tiebreaker.
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       created_at, updated_at
+FROM designs
+WHERE brand_slug = sqlc.arg('brand_slug')
+  AND (
+    sqlc.narg('cursor_created_at')::timestamptz IS NULL
+    OR (created_at, id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('page_limit');
+
 -- name: UpdateDesignStatus :exec
 UPDATE designs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');
@@ -65,7 +81,7 @@ WHERE id = sqlc.arg('id');
 INSERT INTO slice_metrics (
     job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
     colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
-    wall_loops, support_used, filament_length_mm, gcode_key
+    wall_loops, support_used, filament_length_mm, gcode_key, orientation
 ) VALUES (
     sqlc.arg('job_id'), sqlc.arg('print_time_hr')::float8,
     sqlc.arg('effective_machine_time_hr')::float8, sqlc.arg('filament_g')::float8,
@@ -73,7 +89,7 @@ INSERT INTO slice_metrics (
     sqlc.arg('electricity_kwh')::float8, sqlc.arg('units_per_bed'),
     sqlc.arg('layer_height_mm')::float8, sqlc.arg('infill_density_pct')::float8,
     sqlc.arg('wall_loops'), sqlc.arg('support_used'), sqlc.arg('filament_length_mm')::float8,
-    sqlc.arg('gcode_key')
+    sqlc.arg('gcode_key'), sqlc.narg('orientation')::jsonb
 );
 
 -- name: GetLatestMetricsForDesign :one
@@ -85,7 +101,7 @@ SELECT m.job_id, m.print_time_hr::float8 AS print_time_hr,
        m.layer_height_mm::float8 AS layer_height_mm,
        m.infill_density_pct::float8 AS infill_density_pct, m.wall_loops,
        m.support_used, m.filament_length_mm::float8 AS filament_length_mm,
-       m.gcode_key, m.created_at
+       m.gcode_key, m.orientation, m.created_at
 FROM slice_metrics m
 JOIN slice_jobs j ON j.id = m.job_id
 WHERE j.design_id = $1
@@ -94,20 +110,55 @@ LIMIT 1;
 
 -- name: UpsertDesignPricing :exec
 INSERT INTO design_pricing (
-    design_id, design_cp, breakdown, verdict, cp_pct, recommended_sp, reasons, suggestions
+    design_id, design_cp, breakdown, verdict, cp_pct, recommended_sp,
+    raw_sp, cp_pct_at_recommended, passes_normal, survives_stress, sp_warnings,
+    reasons, suggestions
 ) VALUES (
     sqlc.arg('design_id'), sqlc.arg('design_cp')::float8, sqlc.arg('breakdown')::json,
     sqlc.arg('verdict'), sqlc.arg('cp_pct')::float8, sqlc.narg('recommended_sp'),
+    sqlc.arg('raw_sp')::float8, sqlc.narg('cp_pct_at_recommended')::float8,
+    sqlc.arg('passes_normal'), sqlc.arg('survives_stress'), sqlc.arg('sp_warnings')::json,
     sqlc.arg('reasons')::json, sqlc.arg('suggestions')::json
 )
 ON CONFLICT (design_id) DO UPDATE SET
     design_cp = EXCLUDED.design_cp, breakdown = EXCLUDED.breakdown,
     verdict = EXCLUDED.verdict, cp_pct = EXCLUDED.cp_pct,
-    recommended_sp = EXCLUDED.recommended_sp, reasons = EXCLUDED.reasons,
+    recommended_sp = EXCLUDED.recommended_sp, raw_sp = EXCLUDED.raw_sp,
+    cp_pct_at_recommended = EXCLUDED.cp_pct_at_recommended,
+    passes_normal = EXCLUDED.passes_normal, survives_stress = EXCLUDED.survives_stress,
+    sp_warnings = EXCLUDED.sp_warnings, reasons = EXCLUDED.reasons,
     suggestions = EXCLUDED.suggestions, updated_at = now();
 
 -- name: GetDesignPricing :one
 SELECT design_id, design_cp::float8 AS design_cp, breakdown, verdict,
-       cp_pct::float8 AS cp_pct, recommended_sp, reasons, suggestions,
+       cp_pct::float8 AS cp_pct, recommended_sp,
+       raw_sp::float8 AS raw_sp, cp_pct_at_recommended::float8 AS cp_pct_at_recommended,
+       passes_normal, survives_stress, sp_warnings, reasons, suggestions,
+       approved_sp, approved_by, approved_at,
        created_at, updated_at
 FROM design_pricing WHERE design_id = $1;
+
+-- name: ApproveDesignPricing :exec
+UPDATE design_pricing SET
+    approved_sp = sqlc.narg('approved_sp'),
+    approved_by = sqlc.narg('approved_by'),
+    approved_at = now(),
+    updated_at = now()
+WHERE design_id = sqlc.arg('design_id');
+
+-- name: UpsertShopifyProduct :exec
+INSERT INTO shopify_products (
+    design_id, brand_slug, product_gid, variant_gid, handle, admin_url, status, published_by
+) VALUES (
+    sqlc.arg('design_id'), sqlc.arg('brand_slug'), sqlc.arg('product_gid'), sqlc.arg('variant_gid'),
+    sqlc.arg('handle'), sqlc.arg('admin_url'), sqlc.arg('status'), sqlc.narg('published_by')
+)
+ON CONFLICT (design_id) DO UPDATE SET
+    product_gid = EXCLUDED.product_gid, variant_gid = EXCLUDED.variant_gid, handle = EXCLUDED.handle,
+    admin_url = EXCLUDED.admin_url, status = EXCLUDED.status,
+    published_by = EXCLUDED.published_by, updated_at = now();
+
+-- name: GetShopifyProduct :one
+SELECT design_id, brand_slug, product_gid, variant_gid, handle, admin_url, status,
+       published_by, created_at, updated_at
+FROM shopify_products WHERE design_id = $1;

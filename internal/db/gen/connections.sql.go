@@ -69,6 +69,32 @@ func (q *Queries) GetConnection(ctx context.Context, arg GetConnectionParams) (G
 	return i, err
 }
 
+const getConnectionWithToken = `-- name: GetConnectionWithToken :one
+SELECT status, external_account_id, access_token
+FROM brand_connections WHERE brand_slug = $1 AND provider = $2
+`
+
+type GetConnectionWithTokenParams struct {
+	BrandSlug string
+	Provider  string
+}
+
+type GetConnectionWithTokenRow struct {
+	Status            string
+	ExternalAccountID *string
+	AccessToken       *string
+}
+
+// GetConnectionWithToken is the ONLY query that reads the access token back out.
+// It exists for the server-to-server publish path (e.g. creating a Shopify draft
+// product) and must never be exposed on a caller-facing endpoint.
+func (q *Queries) GetConnectionWithToken(ctx context.Context, arg GetConnectionWithTokenParams) (GetConnectionWithTokenRow, error) {
+	row := q.db.QueryRow(ctx, getConnectionWithToken, arg.BrandSlug, arg.Provider)
+	var i GetConnectionWithTokenRow
+	err := row.Scan(&i.Status, &i.ExternalAccountID, &i.AccessToken)
+	return i, err
+}
+
 const listConnectionsForBrand = `-- name: ListConnectionsForBrand :many
 
 SELECT id, brand_slug, provider, status, external_account_id,
