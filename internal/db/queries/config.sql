@@ -41,6 +41,30 @@ VALUES (sqlc.arg('id'), sqlc.arg('name'), sqlc.arg('machine_hour_cost')::float8,
 RETURNING id, name, machine_hour_cost::float8 AS machine_hour_cost,
           is_active, created_at, updated_at;
 
+-- Operational machine views for the print queue (machine_profiles.status). The
+-- cost fields are omitted here; the config endpoints above own those.
+
+-- name: ListMachineOps :many
+SELECT id, name, status, is_active FROM machine_profiles ORDER BY name;
+
+-- name: GetMachineOps :one
+SELECT id, name, status, is_active FROM machine_profiles WHERE id = $1;
+
+-- name: UpdateMachineStatus :one
+UPDATE machine_profiles SET status = sqlc.arg('status'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, name, status, is_active;
+
+-- name: SuggestMachine :one
+-- The least-loaded online machine: fewest active (open/in_progress) batches.
+SELECT m.id, m.name, m.status
+FROM machine_profiles m
+LEFT JOIN batches b ON b.machine_id = m.id AND b.status IN ('open', 'in_progress')
+WHERE m.status = 'online'
+GROUP BY m.id, m.name, m.status
+ORDER BY count(b.id) ASC, m.name ASC
+LIMIT 1;
+
 -- name: ListCostAssumptions :many
 SELECT id, name, brand,
        filament_cost_per_kg::float8 AS filament_cost_per_kg,

@@ -79,6 +79,16 @@ type Settings struct {
 	// per-request timeout for the outbound Admin API calls.
 	ShopifyAPIVersion string
 	ShopifyTimeout    time.Duration
+
+	// Shopify order import (inbound): the single app's OAuth credentials, this
+	// backend's own reachable URL (for the OAuth redirect + webhook callback), the
+	// frontend URL to bounce back to after connecting, and the key used to encrypt
+	// each store's access token at rest.
+	ShopifyClientID     string
+	ShopifyClientSecret string
+	PublicBaseURL       string
+	FrontendURL         string
+	TokenEncryptionKey  string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -134,7 +144,21 @@ func Load() Settings {
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
 		ShopifyTimeout:    secondsEnvOr("SHOPIFY_TIMEOUT_SECONDS", 15),
+
+		ShopifyClientID:     os.Getenv("SHOPIFY_CLIENT_ID"),
+		ShopifyClientSecret: os.Getenv("SHOPIFY_CLIENT_SECRET"),
+		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
+		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
 	}
+}
+
+// ShopifyImportConfigured reports whether the inbound Shopify order-import flow
+// has everything it needs. When false, the integration endpoints fail closed with
+// a 503 rather than half-working.
+func (s Settings) ShopifyImportConfigured() bool {
+	return s.ShopifyClientID != "" && s.ShopifyClientSecret != "" &&
+		s.PublicBaseURL != "" && s.TokenEncryptionKey != ""
 }
 
 // IsProduction reports whether the service is running outside development, where

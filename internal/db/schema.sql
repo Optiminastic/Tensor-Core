@@ -30,6 +30,9 @@ CREATE TABLE machine_profiles (
     name              varchar(120) NOT NULL UNIQUE,
     machine_hour_cost numeric(10, 2) NOT NULL,
     is_active         boolean NOT NULL,
+    -- Operational status for the print queue: online | busy | offline | maintenance.
+    -- Only 'online' machines are eligible to run a batch.
+    status            varchar(32) NOT NULL DEFAULT 'offline',
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
@@ -237,3 +240,221 @@ CREATE TABLE shopify_products (
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- The production pipeline (migration 0010). Actor ids are Better Auth user ids
+-- (varchar(64), no FK). Model files live in object storage keyed by storage_key.
+
+CREATE TABLE file_assets (
+    id           uuid PRIMARY KEY,
+    filename     varchar(255) NOT NULL,
+    content_type varchar(127) NOT NULL,
+    size_bytes   bigint NOT NULL,
+    storage_key  text NOT NULL,
+    is_template  boolean NOT NULL DEFAULT false,
+    uploaded_by  varchar(64) NOT NULL,
+    bbox_x_mm    numeric(10, 2),
+    bbox_y_mm    numeric(10, 2),
+    bbox_z_mm    numeric(10, 2),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_file_assets_uploaded_by ON file_assets (uploaded_by);
+
+CREATE TABLE orders (
+    id                 uuid PRIMARY KEY,
+    shop_connection_id uuid,
+    shopify_order_id   bigint NOT NULL,
+    order_number       varchar(64) NOT NULL,
+    customer_name      varchar(255),
+    financial_status   varchar(32) NOT NULL,
+    total_price        numeric(10, 2) NOT NULL,
+    currency           varchar(3) NOT NULL,
+    line_items         jsonb NOT NULL DEFAULT '[]',
+    status             varchar(32) NOT NULL DEFAULT 'queued',
+    imported_at        timestamptz NOT NULL DEFAULT now(),
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    updated_at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ix_orders_shopify_order_id ON orders (shopify_order_id);
+CREATE INDEX ix_orders_imported ON orders (imported_at DESC, id DESC);
+
+CREATE TABLE production_jobs (
+    id                            uuid PRIMARY KEY,
+    job_number                    varchar(64) NOT NULL,
+    order_id                      uuid REFERENCES orders (id) ON DELETE SET NULL,
+    batch_id                      uuid,
+    description                   varchar(255) NOT NULL,
+    quantity                      integer NOT NULL DEFAULT 1,
+    status                        varchar(32) NOT NULL DEFAULT 'queued',
+    assembly_status               varchar(32) NOT NULL DEFAULT 'pending',
+    qc_status                     varchar(32) NOT NULL DEFAULT 'pending',
+    packaging_status              varchar(32) NOT NULL DEFAULT 'pending',
+    shopify_order_id              bigint,
+    sku                           varchar(128),
+    product_name                  varchar(255),
+    material                      varchar(255),
+    colour                        varchar(255),
+    nozzle_profile                varchar(255),
+    filament_grams_required       numeric(10, 2),
+    print_file_id                 uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    estimated_print_time_minutes  integer,
+    due_date                      timestamptz,
+    priority                      integer NOT NULL DEFAULT 0,
+    personalisation_name          varchar(255),
+    personalisation_font          varchar(255),
+    personalisation_colour        varchar(255),
+    personalisation_variant       varchar(255),
+    personalisation_status        varchar(32) NOT NULL DEFAULT 'pending',
+    name_confirmed                boolean NOT NULL DEFAULT false,
+    photo_confirmed               boolean NOT NULL DEFAULT false,
+    font_confirmed                boolean NOT NULL DEFAULT false,
+    colour_confirmed              boolean NOT NULL DEFAULT false,
+    variant_confirmed             boolean NOT NULL DEFAULT false,
+    customer_approval_received    boolean NOT NULL DEFAULT false,
+    personalisation_notes         varchar(1000),
+    personalisation_photo_file_id uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    personalisation_validated_by  varchar(64),
+    personalisation_validated_at  timestamptz,
+    reprint_of_job_id             uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
+    held                          boolean NOT NULL DEFAULT false,
+    created_at                    timestamptz NOT NULL DEFAULT now(),
+    updated_at                    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_production_jobs_order_id ON production_jobs (order_id);
+CREATE INDEX ix_production_jobs_batch_id ON production_jobs (batch_id);
+CREATE INDEX ix_production_jobs_created ON production_jobs (created_at DESC, id DESC);
+CREATE INDEX ix_production_jobs_personalisation ON production_jobs (personalisation_status);
+CREATE INDEX ix_production_jobs_reprint_of ON production_jobs (reprint_of_job_id);
+CREATE INDEX ix_production_jobs_shopify_order_id ON production_jobs (shopify_order_id);
+
+CREATE TABLE production_job_failures (
+    id                    uuid PRIMARY KEY,
+    job_id                uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
+    stage                 varchar(16) NOT NULL,
+    reason                varchar(64) NOT NULL,
+    notes                 varchar(1000),
+    filament_wasted_grams numeric(10, 2),
+    time_wasted_minutes   integer,
+    created_by            varchar(64) NOT NULL,
+    created_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_production_job_failures_job_id ON production_job_failures (job_id);
+
+CREATE TABLE batches (
+    id                              uuid PRIMARY KEY,
+    batch_number                    varchar(64) NOT NULL,
+    machine_id                      uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
+    status                          varchar(32) NOT NULL DEFAULT 'open',
+    approved_by                     varchar(64),
+    approved_at                     timestamptz,
+    material_shortage               boolean NOT NULL DEFAULT false,
+    merged_file_id                  uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    preview_file_id                 uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    units_per_bed                   integer,
+    total_print_time_minutes        integer,
+    effective_time_per_unit_minutes numeric(10, 2),
+    total_filament_grams            numeric(10, 2),
+    bed_utilization_percent         numeric(5, 2),
+    packing_strategy                varchar(32),
+    created_at                      timestamptz NOT NULL DEFAULT now(),
+    updated_at                      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_batches_created ON batches (created_at DESC, id DESC);
+CREATE INDEX ix_batches_machine_status ON batches (machine_id, status);
+
+ALTER TABLE production_jobs
+    ADD CONSTRAINT fk_production_jobs_batch_id
+    FOREIGN KEY (batch_id) REFERENCES batches (id) ON DELETE SET NULL;
+
+CREATE TABLE filament_inventory (
+    id                  uuid PRIMARY KEY,
+    material            varchar(255) NOT NULL,
+    colour              varchar(255),
+    grams_available     numeric(10, 2) NOT NULL DEFAULT 0,
+    reorder_level_grams numeric(10, 2) NOT NULL DEFAULT 0,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_filament_material_colour
+    ON filament_inventory (material, COALESCE(colour, ''));
+
+CREATE TABLE production_job_assembly_checks (
+    id                uuid PRIMARY KEY,
+    job_id            uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
+    parts_combined    boolean NOT NULL DEFAULT false,
+    hardware_attached boolean NOT NULL DEFAULT false,
+    addons_attached   boolean NOT NULL DEFAULT false,
+    fit_check_ok      boolean NOT NULL DEFAULT false,
+    photo_file_id     uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    notes             varchar(1000),
+    assembled_by      varchar(64) NOT NULL,
+    assembled_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_assembly_checks_job_id ON production_job_assembly_checks (job_id);
+
+CREATE TABLE production_job_qc_checks (
+    id                      uuid PRIMARY KEY,
+    job_id                  uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
+    correct_personalisation boolean NOT NULL DEFAULT false,
+    correct_colour          boolean NOT NULL DEFAULT false,
+    surface_finish_ok       boolean NOT NULL DEFAULT false,
+    no_cracks               boolean NOT NULL DEFAULT false,
+    no_layer_defects        boolean NOT NULL DEFAULT false,
+    dimensions_ok           boolean NOT NULL DEFAULT false,
+    assembly_fit_ok         boolean NOT NULL DEFAULT false,
+    addons_working          boolean NOT NULL DEFAULT false,
+    packaging_safe          boolean NOT NULL DEFAULT false,
+    photo_file_id           uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    decision                varchar(16) NOT NULL,
+    notes                   varchar(1000),
+    inspected_by            varchar(64) NOT NULL,
+    inspected_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_qc_checks_job_id ON production_job_qc_checks (job_id);
+
+CREATE TABLE production_job_packaging_details (
+    id                uuid PRIMARY KEY,
+    job_id            uuid NOT NULL UNIQUE REFERENCES production_jobs (id) ON DELETE CASCADE,
+    packaging_type    varchar(128) NOT NULL,
+    addons            varchar(500),
+    gift_message      varchar(500),
+    fragile           boolean NOT NULL DEFAULT false,
+    courier_partner   varchar(128),
+    invoice_reference varchar(128),
+    photo_file_id     uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    packed_by         varchar(64) NOT NULL,
+    packed_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE dispatch_orders (
+    id              uuid PRIMARY KEY,
+    order_id        uuid NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+    carrier         varchar(100),
+    tracking_number varchar(100),
+    status          varchar(32) NOT NULL DEFAULT 'pending',
+    dispatched_at   timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_dispatch_orders_order_id ON dispatch_orders (order_id);
+CREATE INDEX ix_dispatch_orders_created ON dispatch_orders (created_at DESC, id DESC);
+
+CREATE TABLE shopify_connections (
+    id                      uuid PRIMARY KEY,
+    shop_domain             varchar(255) NOT NULL,
+    encrypted_access_token  text NOT NULL,
+    scopes                  text,
+    webhook_subscription_id varchar(255),
+    is_active               boolean NOT NULL DEFAULT true,
+    connected_at            timestamptz NOT NULL DEFAULT now(),
+    disconnected_at         timestamptz,
+    created_at              timestamptz NOT NULL DEFAULT now(),
+    updated_at              timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX ix_shopify_connections_active_domain
+    ON shopify_connections (shop_domain) WHERE is_active;
+
+ALTER TABLE orders
+    ADD CONSTRAINT fk_orders_shop_connection_id
+    FOREIGN KEY (shop_connection_id) REFERENCES shopify_connections (id) ON DELETE SET NULL;
+CREATE UNIQUE INDEX uq_orders_shop_order_number
+    ON orders (shop_connection_id, order_number);

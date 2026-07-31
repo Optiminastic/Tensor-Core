@@ -16,11 +16,15 @@ const (
 	RoleProjectLead         RoleName = "PROJECT_LEAD"
 	RolePerformanceMarketer RoleName = "PERFORMANCE_MARKETER"
 	RoleOperator            RoleName = "OPERATOR"
+	// RolePackagingQc runs the QC and packaging stations. It maps the print-queue
+	// packaging_qc role: it records QC/assembly/packaging but never advances a job
+	// directly (no production:update) and never sees costs.
+	RolePackagingQc RoleName = "PACKAGING_QC"
 )
 
 // AllRoles lists every role in a stable order.
 var AllRoles = []RoleName{
-	RoleAdmin, RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator,
+	RoleAdmin, RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator, RolePackagingQc,
 }
 
 // Valid reports whether r is one of the known roles.
@@ -63,7 +67,34 @@ var (
 	ConfigManage = PermissionSpec{"config", "manage", "Edit cost assumptions, materials and machines"}
 
 	ShopifyPublish = PermissionSpec{"shopify", "publish", "Publish an approved SKU to Shopify"}
-	ProductionRead = PermissionSpec{"production", "read", "View production jobs and the print queue"}
+
+	// The production pipeline (ported from print-queue-be). production:read is the
+	// existing view permission; the rest gate the order -> job -> batch -> QC ->
+	// packaging -> dispatch flow.
+	ProductionRead   = PermissionSpec{"production", "read", "View production jobs and the print queue"}
+	ProductionCreate = PermissionSpec{"production", "create", "Create production jobs from an order"}
+	ProductionUpdate = PermissionSpec{"production", "update", "Advance a production job through its lifecycle"}
+	ProductionFail   = PermissionSpec{"production", "fail", "Fail a production job and queue a reprint"}
+
+	OrderRead = PermissionSpec{"order", "read", "View imported Shopify orders"}
+
+	BatchRead   = PermissionSpec{"batch", "read", "View print batches"}
+	BatchManage = PermissionSpec{"batch", "manage", "Create, plan and approve print batches"}
+
+	DispatchRead   = PermissionSpec{"dispatch", "read", "View dispatch orders"}
+	DispatchManage = PermissionSpec{"dispatch", "manage", "Create and mark dispatch orders"}
+
+	QcSubmit        = PermissionSpec{"qc", "submit", "Record a quality-control check"}
+	AssemblySubmit  = PermissionSpec{"assembly", "submit", "Record an assembly check"}
+	PackagingSubmit = PermissionSpec{"packaging", "submit", "Record packaging details"}
+
+	MachineRead   = PermissionSpec{"machine", "read", "View operational machine status"}
+	MachineManage = PermissionSpec{"machine", "manage", "Create machines and set their status"}
+
+	FilamentRead   = PermissionSpec{"filament", "read", "View filament inventory"}
+	FilamentManage = PermissionSpec{"filament", "manage", "Adjust filament inventory levels"}
+
+	IntegrationManage = PermissionSpec{"integration", "manage", "Connect and disconnect external stores (Shopify)"}
 
 	UserRead   = PermissionSpec{"user", "read", "View users and their roles"}
 	UserManage = PermissionSpec{"user", "manage", "Create users and assign roles"}
@@ -77,12 +108,20 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (21 permissions).
+// AllPermissions is the full catalog in seed order (36 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
 	PricingRead, PricingGenerate, PricingOverride,
 	ConfigRead, ConfigManage,
-	ShopifyPublish, ProductionRead,
+	ShopifyPublish,
+	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
+	OrderRead,
+	BatchRead, BatchManage,
+	DispatchRead, DispatchManage,
+	QcSubmit, AssemblySubmit, PackagingSubmit,
+	MachineRead, MachineManage,
+	FilamentRead, FilamentManage,
+	IntegrationManage,
 	UserRead, UserManage,
 	ProjectRead, ProjectManage,
 	BrandRead, BrandManage,
@@ -100,9 +139,29 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		DesignRead, DesignApprove, DesignReject,
 		PricingRead, PricingGenerate, PricingOverride,
 		ShopifyPublish, ConfigRead, AuditRead,
+		// Runs the whole production pipeline.
+		OrderRead,
+		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
+		BatchRead, BatchManage,
+		DispatchRead, DispatchManage,
+		QcSubmit, AssemblySubmit, PackagingSubmit,
+		MachineRead, MachineManage,
+		FilamentRead, FilamentManage,
 	},
 	RolePerformanceMarketer: {DesignRead, PricingRead},
-	RoleOperator:            {DesignRead, ProductionRead},
+	// Machine operator: runs prints, records assembly, fails a job, manages
+	// machine status and reads filament. Never sees costs; never does QC/packaging.
+	RoleOperator: {
+		DesignRead,
+		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit,
+		MachineRead, MachineManage, FilamentRead,
+	},
+	// QC/packaging station: records QC, assembly and packaging through their
+	// dedicated endpoints. No production:update (cannot advance a job directly),
+	// no cost or pricing visibility.
+	RolePackagingQc: {
+		ProductionRead, QcSubmit, AssemblySubmit, PackagingSubmit,
+	},
 }
 
 // RoleDescriptions is the one-line description of each role.
@@ -111,7 +170,8 @@ var RoleDescriptions = map[RoleName]string{
 	RoleDesigner:            "Uploads and revises designs; cannot approve or price",
 	RoleProjectLead:         "Approves designs, generates prices, publishes to Shopify",
 	RolePerformanceMarketer: "Reads pricing and margins to plan ad spend",
-	RoleOperator:            "Runs production jobs; cannot see cost assumptions",
+	RoleOperator:            "Runs production jobs and machines; cannot see cost assumptions",
+	RolePackagingQc:         "Runs the QC and packaging stations; cannot see cost assumptions",
 }
 
 // GrantsFor returns the permission specs granted to a role (nil for unknown).

@@ -13,6 +13,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/secretbox"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -24,6 +25,9 @@ type Server struct {
 	guards  *auth.Guards
 	logger  *slog.Logger
 	shopify *shopify.Client
+	// secrets seals Shopify access tokens at rest. Nil when TOKEN_ENCRYPTION_KEY is
+	// unset; the Shopify integration routes then fail closed (503).
+	secrets *secretbox.Box
 
 	// Design pipeline dependencies. Nil until EnablePipeline is called; the
 	// design routes fail closed (503) when they are absent.
@@ -35,12 +39,15 @@ type Server struct {
 // middleware falls back to slog's default. The Shopify client is built once here
 // and shared across publishes so connections are reused.
 func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger *slog.Logger) *Server {
+	// A nil box is fine: the Shopify routes check shopifyReady and 503 without it.
+	box, _ := secretbox.New(cfg.TokenEncryptionKey)
 	return &Server{
 		cfg:     cfg,
 		store:   store,
 		guards:  guards,
 		logger:  logger,
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
+		secrets: box,
 	}
 }
 
@@ -71,6 +78,15 @@ func (s *Server) Router() *gin.Engine {
 	s.registerBrands(r)
 	s.registerConnections(r)
 	s.registerDesigns(r)
+	s.registerFiles(r)
+	s.registerOrders(r)
+	s.registerProductionJobs(r)
+	s.registerBatches(r)
+	s.registerFilament(r)
+	s.registerMachineOps(r)
+	s.registerDispatch(r)
+	s.registerShopify(r)
+	s.registerWebhooks(r)
 	s.registerInternal(r)
 
 	return r

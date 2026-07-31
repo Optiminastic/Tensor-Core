@@ -12,7 +12,7 @@ The backend owns the domain: PostgreSQL, the costing and pricing engine, admin c
 cmd/
   api/         HTTP entrypoint (health, routers, CORS, graceful shutdown); enqueues slices
   sliceworker/ River worker: consumes slice jobs, runs Bambu Studio, prices the design
-  seed/        migrate (goose + River) + seed RBAC catalog and brands (idempotent)
+  seed/        migrate (goose + River) + seed RBAC catalog and default cost set (idempotent; no brands - user-created)
   migrate/     apply migrations only (goose + River)
 internal/
   config/    Settings from the environment
@@ -36,12 +36,28 @@ internal/
     optimize.go  Recommend: score candidate "down" faces by downward-overhang area
                  (Tweaker-style); advisory only, never changes the costed slice
   brandpolicy/ the ONLY DB read on the pricing path; loads a brand's policy
+  production/ the print-queue lifecycle rules (pure, ported from print-queue-be):
+    lifecycle.go  job/assembly/qc/packaging/personalisation + batch/machine statuses,
+                  role-gated PATCH field set, LineItem shape, personalisation auto-validate
+    planner.go    batch planner: group by (material,colour,nozzle), due-date cluster,
+                  multi-strategy pack search -> PlannedBatch + Unbatchable
+  bedpack/   guillotine Best-Area-Fit bed packer (pure): Pack, UtilisationPercent
+  meshio/    STL merge/write (pure): rotate/translate/normalise + binary STL, reuses
+             orientation's loaders to merge placed jobs into one plate
+  secretbox/ AES-256-GCM seal/open for Shopify access tokens at rest (pure)
   storage/   S3/MinIO client (STL in, G-code out) - Put/Get/Download/Upload
-  integrations/shopify/  Admin GraphQL client for publishing an approved design
+  integrations/shopify/  Admin GraphQL client. client.go publishes an approved design;
+             oauth.go is the inbound order-import side: OAuth authorize/callback HMAC,
+             code exchange, orders/paid webhook register/delete
   auth/      jwt.go (verify against JWKS, EdDSA), catalog.go (permissions + grants),
              service.go (ResolveUserAuthz, BumpPermissionsVersion), invites.go,
              seed.go (sync catalog into DB), middleware.go (Gin guards), models.go
   httpapi/   Gin routers/handlers, one file per router; errors.go is the {"detail"} shape
+             production pipeline: orders.go, production_jobs.go, production_qc.go
+             (assembly/qc/packaging), files.go, batches.go, filament.go,
+             machines_ops.go, dispatch.go, shopify_oauth.go (store connect),
+             webhooks.go (orders/paid import) (+ production_helpers.go); guarded by
+             production/order/batch/filament/machine/qc/packaging/assembly/dispatch/integration permissions
   db/
     migrations/  goose SQL (0001 baseline, idempotent, never touches Better Auth tables)
     queries/     sqlc source
@@ -71,7 +87,7 @@ Authentication (who you are) belongs to Better Auth in the frontend. **This serv
 - **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, guarded at the router level. No secret configured means 503, not open.
 - Add a new permission to `AllPermissions` and the relevant `roleGrants` entry, then re-run the seed. `ADMIN` is the whole catalog by construction.
 
-Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`. Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator must never see cost assumptions) - those tests are the spec, do not relax them.
+Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`. The catalog holds 36 permissions across 6 roles (79 grants). Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions) - those tests are the spec, do not relax them.
 
 ### Contract with the frontend
 Every route, method, JSON shape, status code, and error `detail` string must stay identical - the frontend validates responses with Zod. Domain responses are snake_case; `permissionsVersion` and `adminExists` are camelCase. POST-create returns 201; revoke/bootstrap/accept return 204.

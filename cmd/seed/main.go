@@ -1,5 +1,6 @@
-// Command seed applies the migrations and seeds the RBAC catalog and the two
-// brands. It is idempotent -- safe to run repeatedly.
+// Command seed applies the migrations and seeds the RBAC catalog and the
+// default cost assumptions. Brands are user-created, so none are seeded. It is
+// idempotent -- safe to run repeatedly.
 package main
 
 import (
@@ -39,15 +40,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("seed auth: %v", err)
 	}
-	brands, err := brandpolicy.SyncBrands(ctx, store)
-	if err != nil {
-		log.Fatalf("seed brands: %v", err)
-	}
 	costSets, err := brandpolicy.SyncDefaultCostAssumptions(ctx, store)
 	if err != nil {
 		log.Fatalf("seed cost assumptions: %v", err)
 	}
 
-	log.Printf("seeded: %d permissions, %d roles, %d grants, %d brands, %d cost sets",
-		authRes.Permissions, authRes.Roles, authRes.Grants, brands, costSets)
+	log.Printf("seeded: %d permissions, %d roles, %d grants, %d cost sets",
+		authRes.Permissions, authRes.Roles, authRes.Grants, costSets)
 }

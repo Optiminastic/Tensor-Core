@@ -122,6 +122,29 @@ func (q *Queries) GetDefaultCostAssumptionForBrand(ctx context.Context, brand *s
 	return i, err
 }
 
+const getMachineOps = `-- name: GetMachineOps :one
+SELECT id, name, status, is_active FROM machine_profiles WHERE id = $1
+`
+
+type GetMachineOpsRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+func (q *Queries) GetMachineOps(ctx context.Context, id uuid.UUID) (GetMachineOpsRow, error) {
+	row := q.db.QueryRow(ctx, getMachineOps, id)
+	var i GetMachineOpsRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Status,
+		&i.IsActive,
+	)
+	return i, err
+}
+
 const getMaterial = `-- name: GetMaterial :one
 SELECT id, name, material_type, cost_per_kg::float8 AS cost_per_kg,
        colour, is_active, created_at, updated_at
@@ -403,6 +426,45 @@ func (q *Queries) ListCostAssumptions(ctx context.Context) ([]ListCostAssumption
 	return items, nil
 }
 
+const listMachineOps = `-- name: ListMachineOps :many
+
+SELECT id, name, status, is_active FROM machine_profiles ORDER BY name
+`
+
+type ListMachineOpsRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+// Operational machine views for the print queue (machine_profiles.status). The
+// cost fields are omitted here; the config endpoints above own those.
+func (q *Queries) ListMachineOps(ctx context.Context) ([]ListMachineOpsRow, error) {
+	rows, err := q.db.Query(ctx, listMachineOps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMachineOpsRow{}
+	for rows.Next() {
+		var i ListMachineOpsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Status,
+			&i.IsActive,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMachines = `-- name: ListMachines :many
 SELECT id, name, machine_hour_cost::float8 AS machine_hour_cost,
        is_active, created_at, updated_at
@@ -493,6 +555,30 @@ func (q *Queries) ListMaterials(ctx context.Context) ([]ListMaterialsRow, error)
 		return nil, err
 	}
 	return items, nil
+}
+
+const suggestMachine = `-- name: SuggestMachine :one
+SELECT m.id, m.name, m.status
+FROM machine_profiles m
+LEFT JOIN batches b ON b.machine_id = m.id AND b.status IN ('open', 'in_progress')
+WHERE m.status = 'online'
+GROUP BY m.id, m.name, m.status
+ORDER BY count(b.id) ASC, m.name ASC
+LIMIT 1
+`
+
+type SuggestMachineRow struct {
+	ID     uuid.UUID
+	Name   string
+	Status string
+}
+
+// The least-loaded online machine: fewest active (open/in_progress) batches.
+func (q *Queries) SuggestMachine(ctx context.Context) (SuggestMachineRow, error) {
+	row := q.db.QueryRow(ctx, suggestMachine)
+	var i SuggestMachineRow
+	err := row.Scan(&i.ID, &i.Name, &i.Status)
+	return i, err
 }
 
 const updateCostAssumption = `-- name: UpdateCostAssumption :one
@@ -586,6 +672,36 @@ func (q *Queries) UpdateCostAssumption(ctx context.Context, arg UpdateCostAssump
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateMachineStatus = `-- name: UpdateMachineStatus :one
+UPDATE machine_profiles SET status = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, name, status, is_active
+`
+
+type UpdateMachineStatusParams struct {
+	Status string
+	ID     uuid.UUID
+}
+
+type UpdateMachineStatusRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+func (q *Queries) UpdateMachineStatus(ctx context.Context, arg UpdateMachineStatusParams) (UpdateMachineStatusRow, error) {
+	row := q.db.QueryRow(ctx, updateMachineStatus, arg.Status, arg.ID)
+	var i UpdateMachineStatusRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Status,
+		&i.IsActive,
 	)
 	return i, err
 }
