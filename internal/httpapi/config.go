@@ -28,6 +28,7 @@ func (s *Server) registerConfig(r *gin.Engine) {
 
 	g.GET("/machines", read, s.listMachines)
 	g.POST("/machines", manage, s.createMachine)
+	g.PATCH("/machines/:id", manage, s.updateMachineCost)
 
 	g.GET("/cost-assumptions", read, s.listCostAssumptions)
 	g.POST("/cost-assumptions", manage, s.createCostAssumption)
@@ -213,6 +214,38 @@ func (s *Server) createMachine(c *gin.Context) {
 	c.JSON(http.StatusCreated, machineResponse{
 		ID: r.ID.String(), Name: r.Name, MachineHourCost: r.MachineHourCost,
 		IsActive: r.IsActive, CreatedAt: db.Time(r.CreatedAt), UpdatedAt: db.Time(r.UpdatedAt),
+	})
+}
+
+type machineCostRequest struct {
+	MachineHourCost float64 `json:"machine_hour_cost" binding:"gte=0"`
+}
+
+// updateMachineCost sets a machine's hourly cost. This is the ONLY machine field
+// on the cost surface (config:manage); its slicing/ops config lives on /machines.
+func (s *Server) updateMachineCost(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req machineCostRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if _, err := s.store.Q.GetMachineConfig(c.Request.Context(), id); err != nil {
+		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
+		return
+	}
+	m, err := s.store.Q.UpdateMachineCost(c.Request.Context(), gen.UpdateMachineCostParams{
+		ID: id, MachineHourCost: req.MachineHourCost,
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not update the machine cost.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id": m.ID.String(), "name": m.Name,
+		"machine_hour_cost": m.MachineHourCost, "is_active": m.IsActive,
 	})
 }
 

@@ -33,6 +33,15 @@ CREATE TABLE machine_profiles (
     -- Operational status for the print queue: online | busy | offline | maintenance.
     -- Only 'online' machines are eligible to run a batch.
     status            varchar(32) NOT NULL DEFAULT 'offline',
+    -- Slicing config (migration 0016): the Bambu profile the machine slices with.
+    family              varchar(16) NOT NULL DEFAULT 'H2S',
+    nozzle_mm           numeric(3, 2) NOT NULL DEFAULT 0.4,
+    flow                varchar(16) NOT NULL DEFAULT 'standard',
+    default_colour      varchar(40),
+    layer_height_min_mm numeric(4, 2) NOT NULL DEFAULT 0.08,
+    layer_height_max_mm numeric(4, 2) NOT NULL DEFAULT 0.28,
+    supported_filaments jsonb NOT NULL DEFAULT '[]',
+    is_default          boolean NOT NULL DEFAULT false,
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
@@ -169,10 +178,27 @@ CREATE TABLE designs (
     units_per_bed integer NOT NULL,
     quality       varchar(20) NOT NULL,
     infill_pct    numeric(5, 2) NOT NULL,
+    notes         varchar(2000),
+    preview_key   text NOT NULL DEFAULT '',
+    -- The machine this design slices on (migration 0016); NULL falls back to the
+    -- built-in H2S 0.4 profile.
+    machine_id    uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_designs_brand_slug ON designs (brand_slug);
+
+-- The design review workflow thread (migration 0014): one append-only row per
+-- submit/approve/reject/comment event. author_id is a Better Auth user id (no FK).
+CREATE TABLE design_reviews (
+    id         uuid PRIMARY KEY,
+    design_id  uuid NOT NULL REFERENCES designs (id) ON DELETE CASCADE,
+    author_id  varchar(64) NOT NULL,
+    kind       varchar(16) NOT NULL,
+    body       text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_design_reviews_design ON design_reviews (design_id, created_at);
 CREATE INDEX ix_designs_brand_created ON designs (brand_slug, created_at DESC, id DESC);
 
 CREATE TABLE slice_jobs (

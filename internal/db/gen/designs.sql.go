@@ -34,8 +34,8 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
-       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+       preview_key, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
@@ -52,6 +52,8 @@ type GetDesignByIDRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Notes       *string
+	PreviewKey  string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -72,6 +74,8 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.UnitsPerBed,
 		&i.Quality,
 		&i.InfillPct,
+		&i.Notes,
+		&i.PreviewKey,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -265,16 +269,16 @@ const insertDesign = `-- name: InsertDesign :one
 
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
     $9, $10, $11,
-    $12::float8
+    $12::float8, $13, $14
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
-          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-          created_at, updated_at
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, created_at, updated_at
 `
 
 type InsertDesignParams struct {
@@ -290,6 +294,8 @@ type InsertDesignParams struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Notes       *string
+	PreviewKey  string
 }
 
 type InsertDesignRow struct {
@@ -305,6 +311,8 @@ type InsertDesignRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Notes       *string
+	PreviewKey  string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -325,6 +333,8 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		arg.UnitsPerBed,
 		arg.Quality,
 		arg.InfillPct,
+		arg.Notes,
+		arg.PreviewKey,
 	)
 	var i InsertDesignRow
 	err := row.Scan(
@@ -340,8 +350,44 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		&i.UnitsPerBed,
 		&i.Quality,
 		&i.InfillPct,
+		&i.Notes,
+		&i.PreviewKey,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertDesignReview = `-- name: InsertDesignReview :one
+INSERT INTO design_reviews (id, design_id, author_id, kind, body)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, design_id, author_id, kind, body, created_at
+`
+
+type InsertDesignReviewParams struct {
+	ID       uuid.UUID
+	DesignID uuid.UUID
+	AuthorID string
+	Kind     string
+	Body     *string
+}
+
+func (q *Queries) InsertDesignReview(ctx context.Context, arg InsertDesignReviewParams) (DesignReview, error) {
+	row := q.db.QueryRow(ctx, insertDesignReview,
+		arg.ID,
+		arg.DesignID,
+		arg.AuthorID,
+		arg.Kind,
+		arg.Body,
+	)
+	var i DesignReview
+	err := row.Scan(
+		&i.ID,
+		&i.DesignID,
+		&i.AuthorID,
+		&i.Kind,
+		&i.Body,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -436,10 +482,41 @@ func (q *Queries) InsertSliceMetrics(ctx context.Context, arg InsertSliceMetrics
 	return err
 }
 
+const listDesignReviews = `-- name: ListDesignReviews :many
+SELECT id, design_id, author_id, kind, body, created_at FROM design_reviews WHERE design_id = $1 ORDER BY created_at ASC, id ASC
+`
+
+func (q *Queries) ListDesignReviews(ctx context.Context, designID uuid.UUID) ([]DesignReview, error) {
+	rows, err := q.db.Query(ctx, listDesignReviews, designID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DesignReview{}
+	for rows.Next() {
+		var i DesignReview
+		if err := rows.Scan(
+			&i.ID,
+			&i.DesignID,
+			&i.AuthorID,
+			&i.Kind,
+			&i.Body,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDesignsByBrand = `-- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       preview_key, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC
 `
 
@@ -456,6 +533,7 @@ type ListDesignsByBrandRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	PreviewKey  string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -482,6 +560,7 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 			&i.UnitsPerBed,
 			&i.Quality,
 			&i.InfillPct,
+			&i.PreviewKey,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -498,7 +577,7 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 const listDesignsByBrandPage = `-- name: ListDesignsByBrandPage :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       preview_key, created_at, updated_at
 FROM designs
 WHERE brand_slug = $1
   AND (
@@ -529,6 +608,7 @@ type ListDesignsByBrandPageRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	PreviewKey  string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -563,6 +643,7 @@ func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByB
 			&i.UnitsPerBed,
 			&i.Quality,
 			&i.InfillPct,
+			&i.PreviewKey,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

@@ -31,11 +31,16 @@ type SliceOutput struct {
 // rather than letting the caller trip over a missing file.
 func RunSlice(
 	ctx context.Context, bambuRoot string, profiles ResolvedProfiles,
-	stlPath string, infillPct float64, unitsPerBed int, outdir string, timeout time.Duration,
+	stlPath string, infillPct float64, unitsPerBed int, settings SliceSettings,
+	outdir string, timeout time.Duration,
 ) (SliceOutput, error) {
 	copies := unitsPerBed
 	if copies < 1 {
 		copies = 1
+	}
+	enableSupport := 0
+	if settings.SupportEnabled() {
+		enableSupport = 1
 	}
 	appRun := filepath.Join(bambuRoot, "AppRun")
 	args := []string{
@@ -46,12 +51,15 @@ func RunSlice(
 		"--orient", "1",
 		"--slice", "0",
 		// Auto-support: Bambu adds support only where overhangs need it, so support
-		// material is a real, costed metric instead of always off.
-		"--enable-support=1",
+		// material is a real, costed metric. On by default; the caller can turn it off.
+		fmt.Sprintf("--enable-support=%d", enableSupport),
 		fmt.Sprintf("--sparse-infill-density=%g%%", infillPct),
 		"--outputdir", outdir,
 		"--export-3mf", exportName,
 	}
+	// Advanced overrides (layer height, walls, infill pattern, support angle). Each
+	// is allowlisted and clamped by SliceSettings, so nothing arbitrary reaches here.
+	args = append(args, settings.Flags()...)
 	for i := 0; i < copies; i++ {
 		args = append(args, stlPath)
 	}

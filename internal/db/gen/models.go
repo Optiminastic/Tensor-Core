@@ -91,6 +91,9 @@ type Design struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   pgtype.Numeric
+	Notes       *string
+	PreviewKey  string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -114,6 +117,15 @@ type DesignPricing struct {
 	ApprovedAt         pgtype.Timestamptz
 	CreatedAt          pgtype.Timestamptz
 	UpdatedAt          pgtype.Timestamptz
+}
+
+type DesignReview struct {
+	ID        uuid.UUID
+	DesignID  uuid.UUID
+	AuthorID  string
+	Kind      string
+	Body      *string
+	CreatedAt pgtype.Timestamptz
 }
 
 type DispatchOrder struct {
@@ -152,13 +164,21 @@ type FileAsset struct {
 }
 
 type MachineProfile struct {
-	ID              uuid.UUID
-	Name            string
-	MachineHourCost pgtype.Numeric
-	IsActive        bool
-	Status          string
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                 uuid.UUID
+	Name               string
+	MachineHourCost    pgtype.Numeric
+	IsActive           bool
+	Status             string
+	Family             string
+	NozzleMm           pgtype.Numeric
+	Flow               string
+	DefaultColour      *string
+	LayerHeightMinMm   pgtype.Numeric
+	LayerHeightMaxMm   pgtype.Numeric
+	SupportedFilaments []byte
+	IsDefault          bool
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 type MaterialProfile struct {

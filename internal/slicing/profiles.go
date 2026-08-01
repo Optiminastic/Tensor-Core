@@ -80,6 +80,69 @@ func ResolveProfiles(bambuRoot, material, quality string) (ResolvedProfiles, err
 	}, nil
 }
 
+// ResolveMachineProfiles resolves the Bambu profiles for a machine-driven slice:
+// the machine JSON from (family, nozzle), the given filament preset (density is
+// the machine's for that filament), and the process preset matched to the layer
+// height. The worker has the profile files, so a bad combo fails here loudly.
+func ResolveMachineProfiles(
+	bambuRoot, family string, nozzleMM float64, filamentPreset string,
+	density, layerHeightMM float64,
+) (ResolvedProfiles, error) {
+	machinePath, err := bblProfile(bambuRoot, "machine", MachineProfileName(family, nozzleMM))
+	if err != nil {
+		return ResolvedProfiles{}, err
+	}
+	filamentPath, err := bblProfile(bambuRoot, "filament", filamentPreset)
+	if err != nil {
+		return ResolvedProfiles{}, err
+	}
+	process, err := findProcessPreset(bambuRoot, family, nozzleMM, SnapLayerHeight(nozzleMM, layerHeightMM))
+	if err != nil {
+		return ResolvedProfiles{}, err
+	}
+	processPath, err := bblProfile(bambuRoot, "process", process)
+	if err != nil {
+		return ResolvedProfiles{}, err
+	}
+	return ResolvedProfiles{
+		MachinePath: machinePath, ProcessPath: processPath,
+		FilamentPath: filamentPath, DensityGCm3: density,
+	}, nil
+}
+
+// findProcessPreset scans the bundled process profiles for one matching the layer
+// height and machine, preferring a "Standard" tier. The 0.4 nozzle is the base
+// (suffix "@BBL <family>"); other nozzles carry a nozzle suffix.
+func findProcessPreset(bambuRoot, family string, nozzleMM, layerHeightMM float64) (string, error) {
+	dir := filepath.Join(bambuRoot, "resources", "profiles", "BBL", "process")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read process profiles: %w", err)
+	}
+	prefix := fmt.Sprintf("%.2fmm ", layerHeightMM)
+	suffix := "@BBL " + family
+	if nozzleMM != 0.4 {
+		suffix = fmt.Sprintf("@BBL %s %s nozzle", family, trimNozzle(nozzleMM))
+	}
+	best := ""
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".json")
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		if strings.Contains(name, "Standard") {
+			return name, nil
+		}
+		if best == "" {
+			best = name
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no process preset for %.2fmm on %s %g nozzle", layerHeightMM, family, nozzleMM)
+	}
+	return best, nil
+}
+
 func bblProfile(root, kind, name string) (string, error) {
 	path := filepath.Join(root, "resources", "profiles", "BBL", kind, name+".json")
 	if _, err := os.Stat(path); err != nil {

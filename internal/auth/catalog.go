@@ -134,7 +134,7 @@ var AllPermissions = []PermissionSpec{
 // ADMIN-only.
 var roleGrants = map[RoleName][]PermissionSpec{
 	RoleAdmin:    AllPermissions,
-	RoleDesigner: {DesignCreate, DesignRead, DesignUpdate, DesignSubmit},
+	RoleDesigner: {DesignCreate, DesignRead, DesignUpdate, DesignSubmit, MachineRead},
 	RoleProjectLead: {
 		DesignRead, DesignApprove, DesignReject,
 		PricingRead, PricingGenerate, PricingOverride,

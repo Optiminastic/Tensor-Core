@@ -53,6 +53,10 @@ internal/
              service.go (ResolveUserAuthz, BumpPermissionsVersion), invites.go,
              seed.go (sync catalog into DB), middleware.go (Gin guards), models.go
   httpapi/   Gin routers/handlers, one file per router; errors.go is the {"detail"} shape
+             design review: designs_review.go (submit/approve/reject/comment/reviews);
+             lifecycle queued->slicing->priced->submitted->approved->published, with
+             changes_requested on send-back. Approve is decoupled from publish
+             (publish requires an approved design), guarded by design:submit/approve/reject.
              production pipeline: orders.go, production_jobs.go, production_qc.go
              (assembly/qc/packaging), files.go, batches.go, filament.go,
              machines_ops.go, dispatch.go, shopify_oauth.go (store connect),

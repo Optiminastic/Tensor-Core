@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,17 +18,35 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
 // Design lifecycle statuses (the `designs.status` column).
 const (
-	designQueued    = "queued"
-	designSlicing   = "slicing"
-	designPriced    = "priced"
-	designFailed    = "failed"
-	designApproved  = "approved"
-	designPublished = "published"
+	designQueued           = "queued"
+	designSlicing          = "slicing"
+	designPriced           = "priced"
+	designFailed           = "failed"
+	designSubmitted        = "submitted"
+	designChangesRequested = "changes_requested"
+	designApproved         = "approved"
+	designPublished        = "published"
+)
+
+// Review event kinds recorded on the design_reviews thread.
+const (
+	reviewComment = "comment"
+	reviewSubmit  = "submit"
+	reviewApprove = "approve"
+	reviewReject  = "reject"
+)
+
+// verdictGreen / verdictYellow are the submittable pre-check verdicts; a Red
+// design must be revised before it can go to the Project Lead.
+const (
+	verdictGreen  = "green"
+	verdictYellow = "yellow"
 )
 
 // Slice job statuses (the `slice_jobs.status` column).
@@ -58,6 +78,7 @@ type designResponse struct {
 	UnitsPerBed int       `json:"units_per_bed"`
 	Quality     string    `json:"quality"`
 	InfillPct   float64   `json:"infill_pct"`
+	HasPreview  bool      `json:"has_preview"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -112,6 +133,7 @@ type jobResponse struct {
 
 type designDetailResponse struct {
 	designResponse
+	Notes   *string          `json:"notes"`
 	Job     *jobResponse     `json:"job"`
 	Metrics *metricsResponse `json:"metrics"`
 	Pricing *pricingResponse `json:"pricing"`
@@ -122,13 +144,14 @@ type designDetailResponse struct {
 // rows) to the wire shape. Wide-param like brandDTO, and for the same reason.
 func designDTO(
 	id uuid.UUID, brandSlug, name, createdBy, status, material string, colour *string,
-	finish string, unitsPerBed int32, quality string, infillPct float64,
+	finish string, unitsPerBed int32, quality string, infillPct float64, previewKey string,
 	created, updated pgtype.Timestamptz,
 ) designResponse {
 	return designResponse{
 		ID: id.String(), BrandSlug: brandSlug, Name: name, CreatedBy: createdBy, Status: status,
 		Material: material, Colour: colour, Finish: finish, UnitsPerBed: int(unitsPerBed),
-		Quality: quality, InfillPct: infillPct, CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
+		Quality: quality, InfillPct: infillPct, HasPreview: previewKey != "",
+		CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
 	}
 }
 
@@ -140,7 +163,14 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.GET("/:id", s.guards.RequirePermission(auth.DesignRead.Key()), s.getDesign)
 	g.GET("/:id/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
 	g.GET("/:id/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
+	g.GET("/:id/gcode/plate", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcodePlate)
+	g.GET("/:id/preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPreview)
 	g.POST("/:id/resubmit", s.guards.RequirePermission(auth.DesignCreate.Key()), s.resubmitDesign)
+	g.POST("/:id/submit", s.guards.RequirePermission(auth.DesignSubmit.Key()), s.submitDesign)
+	g.POST("/:id/approve", s.guards.RequirePermission(auth.DesignApprove.Key()), s.approveDesign)
+	g.POST("/:id/reject", s.guards.RequirePermission(auth.DesignReject.Key()), s.rejectDesign)
+	g.POST("/:id/comments", s.guards.RequirePermission(auth.DesignRead.Key()), s.commentOnDesign)
+	g.GET("/:id/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
 	g.POST("/:id/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
 }
 
@@ -168,7 +198,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 		out := make([]designResponse, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.CreatedAt, r.UpdatedAt))
+				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.CreatedAt, r.UpdatedAt))
 		}
 		c.JSON(http.StatusOK, out)
 		return
@@ -185,7 +215,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 	out := make([]designResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.CreatedAt, r.UpdatedAt))
+			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.CreatedAt, r.UpdatedAt))
 	}
 	if n := len(rows); n > 0 {
 		last := rows[n-1]
@@ -235,7 +265,8 @@ func (s *Server) getDesign(c *gin.Context) {
 
 	resp := designDetailResponse{
 		designResponse: designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
-			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.CreatedAt, d.UpdatedAt),
+			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.CreatedAt, d.UpdatedAt),
+		Notes:   d.Notes,
 		Job:     job,
 		Metrics: metrics,
 		Pricing: pricing,
@@ -285,6 +316,65 @@ func (s *Server) downloadGcode(c *gin.Context) {
 	s.streamObject(c, m.GcodeKey, safeName(d.Name)+".gcode.3mf")
 }
 
+// downloadGcodePlate streams the plate G-code as plain text, extracted from the
+// sliced Bambu 3MF project. The browser's layer preview renders from this, so it
+// does not have to unzip the archive itself.
+func (s *Server) downloadGcodePlate(c *gin.Context) {
+	d, ok := s.designForDownload(c)
+	if !ok {
+		return
+	}
+	m, err := s.store.Q.GetLatestMetricsForDesign(c.Request.Context(), d.ID)
+	if err != nil {
+		if isNoRows(err) {
+			detail(c, http.StatusNotFound, "No G-code is available for this design yet.")
+			return
+		}
+		detail(c, http.StatusInternalServerError, "Could not load the design's G-code.")
+		return
+	}
+	if m.GcodeKey == "" {
+		detail(c, http.StatusNotFound, "No G-code is available for this design yet.")
+		return
+	}
+
+	plate, err := s.extractPlateGcode(c.Request.Context(), m.GcodeKey)
+	if err != nil {
+		if storage.IsNotFound(err) {
+			detail(c, http.StatusNotFound, "That G-code is no longer available.")
+			return
+		}
+		detail(c, http.StatusInternalServerError, "Could not read the G-code.")
+		return
+	}
+	if plate == "" {
+		detail(c, http.StatusNotFound, "This slice has no plate G-code.")
+		return
+	}
+
+	c.Header("Content-Disposition", "inline")
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(plate))
+}
+
+// extractPlateGcode downloads the sliced .3mf for key to a temp file and returns
+// its plate G-code text, reusing the worker's archive reader. The temp file is
+// always removed before returning.
+func (s *Server) extractPlateGcode(ctx context.Context, key string) (string, error) {
+	tmp, err := os.CreateTemp("", "plate-*.gcode.3mf")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := s.storage.Download(ctx, key, tmpPath); err != nil {
+		return "", err
+	}
+	return slicing.LoadPlateGcode(tmpPath)
+}
+
 // designForDownload runs the shared pre-flight for the file downloads: pipeline
 // readiness, id parsing, and loading the design. It writes the error response
 // and returns ok=false when the caller should stop.
@@ -322,6 +412,44 @@ func (s *Server) streamObject(c *gin.Context, key, filename string) {
 	disposition := fmt.Sprintf("attachment; filename=%q", filename)
 	c.DataFromReader(http.StatusOK, obj.Size, "application/octet-stream", obj.Body,
 		map[string]string{"Content-Disposition": disposition})
+}
+
+// downloadPreview streams a design's cover image inline (so an <img> renders it),
+// unlike the model/gcode attachment downloads.
+func (s *Server) downloadPreview(c *gin.Context) {
+	d, ok := s.designForDownload(c)
+	if !ok {
+		return
+	}
+	if d.PreviewKey == "" {
+		detail(c, http.StatusNotFound, "This design has no preview image.")
+		return
+	}
+	s.streamInline(c, d.PreviewKey)
+}
+
+// streamInline serves an object inline with a content type inferred from its key,
+// for images shown in the browser rather than downloaded.
+func (s *Server) streamInline(c *gin.Context, key string) {
+	obj, err := s.storage.Get(c.Request.Context(), key)
+	if err != nil {
+		if storage.IsNotFound(err) {
+			detail(c, http.StatusNotFound, "That image is no longer available.")
+			return
+		}
+		detail(c, http.StatusInternalServerError, "Could not read the image.")
+		return
+	}
+	defer func() { _ = obj.Body.Close() }()
+
+	ctype := mime.TypeByExtension(filepath.Ext(key))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	c.DataFromReader(http.StatusOK, obj.Size, ctype, obj.Body, map[string]string{
+		"Content-Disposition": "inline",
+		"Cache-Control":       "private, max-age=300",
+	})
 }
 
 // safeName reduces a design name to filename-safe ASCII for downloads.

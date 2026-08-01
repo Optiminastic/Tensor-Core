@@ -4,27 +4,27 @@
 -- name: InsertDesign :one
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('name'), sqlc.arg('created_by'),
     sqlc.arg('status'), sqlc.arg('stl_key'), sqlc.arg('material'), sqlc.narg('colour'),
     sqlc.arg('finish'), sqlc.arg('units_per_bed'), sqlc.arg('quality'),
-    sqlc.arg('infill_pct')::float8
+    sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key')
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
-          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-          created_at, updated_at;
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, created_at, updated_at;
 
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
-       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+       preview_key, created_at, updated_at
 FROM designs WHERE id = $1;
 
 -- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       preview_key, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 
 -- name: ListDesignsByBrandPage :many
@@ -33,7 +33,7 @@ FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 -- as a stable tiebreaker.
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       preview_key, created_at, updated_at
 FROM designs
 WHERE brand_slug = sqlc.arg('brand_slug')
   AND (
@@ -46,6 +46,14 @@ LIMIT sqlc.arg('page_limit');
 -- name: UpdateDesignStatus :exec
 UPDATE designs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');
+
+-- name: InsertDesignReview :one
+INSERT INTO design_reviews (id, design_id, author_id, kind, body)
+VALUES (sqlc.arg('id'), sqlc.arg('design_id'), sqlc.arg('author_id'), sqlc.arg('kind'), sqlc.narg('body'))
+RETURNING *;
+
+-- name: ListDesignReviews :many
+SELECT * FROM design_reviews WHERE design_id = $1 ORDER BY created_at ASC, id ASC;
 
 -- name: UpdateDesignSpecs :exec
 UPDATE designs SET

@@ -41,6 +41,69 @@ VALUES (sqlc.arg('id'), sqlc.arg('name'), sqlc.arg('machine_hour_cost')::float8,
 RETURNING id, name, machine_hour_cost::float8 AS machine_hour_cost,
           is_active, created_at, updated_at;
 
+-- Machine slicing config (migration 0016). These views deliberately EXCLUDE
+-- machine_hour_cost - the Machine Settings surface (Operator-visible) owns config;
+-- cost stays on the cost endpoints below.
+
+-- name: ListMachinesConfig :many
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, flow, default_colour,
+       layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm,
+       supported_filaments, status, is_active, is_default, created_at, updated_at
+FROM machine_profiles ORDER BY name;
+
+-- name: GetMachineConfig :one
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, flow, default_colour,
+       layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm,
+       supported_filaments, status, is_active, is_default, created_at, updated_at
+FROM machine_profiles WHERE id = $1;
+
+-- name: InsertMachineConfig :one
+INSERT INTO machine_profiles (
+    id, name, family, nozzle_mm, flow, default_colour,
+    layer_height_min_mm, layer_height_max_mm, supported_filaments,
+    status, is_active, is_default, machine_hour_cost
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('name'), sqlc.arg('family'), sqlc.arg('nozzle_mm')::float8,
+    sqlc.arg('flow'), sqlc.narg('default_colour'),
+    sqlc.arg('layer_height_min_mm')::float8, sqlc.arg('layer_height_max_mm')::float8,
+    sqlc.arg('supported_filaments'), sqlc.arg('status'), sqlc.arg('is_active'),
+    sqlc.arg('is_default'), 0
+)
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, flow, default_colour,
+          layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm,
+          supported_filaments, status, is_active, is_default, created_at, updated_at;
+
+-- name: UpdateMachineConfig :one
+UPDATE machine_profiles SET
+    name = COALESCE(sqlc.narg('name'), name),
+    family = COALESCE(sqlc.narg('family'), family),
+    nozzle_mm = COALESCE(sqlc.narg('nozzle_mm')::float8, nozzle_mm),
+    flow = COALESCE(sqlc.narg('flow'), flow),
+    default_colour = CASE WHEN sqlc.arg('set_default_colour')::bool THEN sqlc.narg('default_colour') ELSE default_colour END,
+    layer_height_min_mm = COALESCE(sqlc.narg('layer_height_min_mm')::float8, layer_height_min_mm),
+    layer_height_max_mm = COALESCE(sqlc.narg('layer_height_max_mm')::float8, layer_height_max_mm),
+    supported_filaments = COALESCE(sqlc.narg('supported_filaments'), supported_filaments),
+    status = COALESCE(sqlc.narg('status'), status),
+    is_active = COALESCE(sqlc.narg('is_active'), is_active),
+    is_default = COALESCE(sqlc.narg('is_default'), is_default),
+    updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, flow, default_colour,
+          layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm,
+          supported_filaments, status, is_active, is_default, created_at, updated_at;
+
+-- name: UpdateMachineCost :one
+UPDATE machine_profiles SET machine_hour_cost = sqlc.arg('machine_hour_cost')::float8, updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, name, machine_hour_cost::float8 AS machine_hour_cost, is_active;
+
+-- name: DeleteMachine :exec
+DELETE FROM machine_profiles WHERE id = $1;
+
 -- Operational machine views for the print queue (machine_profiles.status). The
 -- cost fields are omitted here; the config endpoints above own those.
 

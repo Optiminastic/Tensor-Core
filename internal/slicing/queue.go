@@ -25,14 +25,19 @@ const sliceMaxAttempts = 3
 // SliceArgs is everything the worker needs to slice one design: the domain job and
 // design ids, the brand (for pricing), the STL object key, and the slice specs.
 type SliceArgs struct {
-	JobID       uuid.UUID `json:"job_id"`
-	DesignID    uuid.UUID `json:"design_id"`
-	BrandSlug   string    `json:"brand_slug"`
-	StlKey      string    `json:"stl_key"`
-	Material    string    `json:"material"`
-	Quality     string    `json:"quality"`
-	UnitsPerBed int       `json:"units_per_bed"`
-	InfillPct   float64   `json:"infill_pct"`
+	JobID       uuid.UUID     `json:"job_id"`
+	DesignID    uuid.UUID     `json:"design_id"`
+	BrandSlug   string        `json:"brand_slug"`
+	StlKey      string        `json:"stl_key"`
+	Material    string        `json:"material"`
+	Quality     string        `json:"quality"`
+	UnitsPerBed int           `json:"units_per_bed"`
+	InfillPct   float64       `json:"infill_pct"`
+	Settings    SliceSettings `json:"settings"`
+	// Machine-driven slicing (nil = legacy fixed H2S 0.4 profile). FilamentPreset
+	// optionally overrides the material->filament default with a machine filament.
+	MachineID      *uuid.UUID `json:"machine_id,omitempty"`
+	FilamentPreset string     `json:"filament_preset,omitempty"`
 }
 
 // Kind is River's stable job type name; it must not change once jobs exist.

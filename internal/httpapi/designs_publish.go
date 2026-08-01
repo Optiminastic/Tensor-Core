@@ -60,10 +60,6 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 	if !ok {
 		return
 	}
-	form, images, ok := parsePublishForm(c)
-	if !ok {
-		return
-	}
 	ctx := c.Request.Context()
 
 	design, err := s.store.Q.GetDesignByID(ctx, id)
@@ -71,8 +67,17 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		dbError(c, err, "That design does not exist.", "Could not load the design.")
 		return
 	}
-	if design.Status != designPriced && design.Status != designApproved {
-		detail(c, http.StatusConflict, "Only a priced design can be approved and published.")
+	// Publishing is decoupled from approval: a design must be approved by the
+	// Project Lead (via POST /designs/:id/approve) before it can be pushed to
+	// Shopify. Re-publishing an already-published design is allowed (retry). The
+	// state is checked before the (multipart) form is parsed, to fail fast.
+	if design.Status != designApproved && design.Status != designPublished {
+		detail(c, http.StatusConflict, "Only an approved design can be published to Shopify.")
+		return
+	}
+
+	form, images, ok := parsePublishForm(c)
+	if !ok {
 		return
 	}
 
@@ -81,7 +86,8 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the design's pricing.")
 		return
 	}
-	price, ok := resolvePrice(form.Price, pricing.RecommendedSp)
+	// The approved SP is the source of truth for the price; the form may override it.
+	price, ok := resolvePrice(form.Price, pricing.ApprovedSp)
 	if !ok {
 		detail(c, http.StatusUnprocessableEntity, "A selling price is required to publish.")
 		return
@@ -90,12 +96,6 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 	user, ok := auth.UserFrom(c)
 	if !ok {
 		detail(c, http.StatusUnauthorized, "Your session is not valid.")
-		return
-	}
-
-	// Record the approval up front; it must survive a Shopify failure.
-	if err := s.approve(ctx, id, price, user.ID); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not approve the design.")
 		return
 	}
 
@@ -307,19 +307,6 @@ func shopifyCredentials(conn gen.GetConnectionWithTokenRow, err error) (shop, to
 		return "", "", false
 	}
 	return *conn.ExternalAccountID, *conn.AccessToken, true
-}
-
-func (s *Server) approve(ctx context.Context, id uuid.UUID, price int, userID string) error {
-	approvedSp := int32(price)
-	approvedBy := userID
-	return s.store.InTx(ctx, func(q *gen.Queries) error {
-		if err := q.ApproveDesignPricing(ctx, gen.ApproveDesignPricingParams{
-			ApprovedSp: &approvedSp, ApprovedBy: &approvedBy, DesignID: id,
-		}); err != nil {
-			return err
-		}
-		return q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designApproved, ID: id})
-	})
 }
 
 // ensureShopifyProduct returns the design's Shopify draft product, creating it on

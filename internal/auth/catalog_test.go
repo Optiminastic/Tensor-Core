@@ -91,13 +91,13 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 37 (admin) + 4 (designer) + 25 (project lead) + 2 (marketer) + 8 (operator)
-	// + 4 (packaging_qc) = 80.
+	// 37 (admin) + 5 (designer, +machine:read for the machine picker) + 25 (project
+	// lead) + 2 (marketer) + 8 (operator) + 4 (packaging_qc) = 81.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 80 {
-		t.Fatalf("total grants = %d, want 80", total)
+	if total != 81 {
+		t.Fatalf("total grants = %d, want 81", total)
 	}
 }

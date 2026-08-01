@@ -22,6 +22,14 @@ import (
 // keeps a runaway file from filling storage.
 const maxUploadBytes = 60 << 20 // 60 MB
 
+// maxPreviewBytes caps the preview image. allowedImageExt is the set the designer
+// may upload as the design's cover.
+const maxPreviewBytes = 10 << 20 // 10 MB
+
+var allowedImageExt = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true,
+}
+
 // designForm is the validated multipart upload: the answers plus the model file.
 type designForm struct {
 	Brand       string
@@ -32,6 +40,13 @@ type designForm struct {
 	Colour      *string
 	UnitsPerBed int32
 	InfillPct   float64
+	Notes       *string
+	// Advanced slice overrides. Empty on upload; a re-slice can carry them.
+	Settings slicing.SliceSettings
+	// The machine to slice on (nil = legacy H2S 0.4) and, optionally, the exact
+	// machine filament to use.
+	MachineID      *uuid.UUID
+	FilamentPreset string
 }
 
 // pipelineReady fails closed with 503 when object storage or the slice enqueuer
@@ -66,21 +81,29 @@ func (s *Server) createDesign(c *gin.Context) {
 	if !ok {
 		return
 	}
+	previewHeader, previewExt, ok := parsePreview(c)
+	if !ok {
+		return
+	}
 
 	user, _ := auth.UserFrom(c)
 	designID := uuid.New()
 	stlKey := fmt.Sprintf("designs/%s/model%s", designID, ext)
+	previewKey := fmt.Sprintf("designs/%s/preview%s", designID, previewExt)
 	if !s.uploadModel(c, stlKey, fileHeader) {
 		return
 	}
+	if !s.uploadModel(c, previewKey, previewHeader) {
+		return
+	}
 
-	row, ok := s.insertDesignAndJob(c, designID, stlKey, user.ID, form)
+	row, ok := s.insertDesignAndJob(c, designID, stlKey, previewKey, user.ID, form)
 	if !ok {
 		return
 	}
 	c.JSON(http.StatusCreated, designDTO(row.ID, row.BrandSlug, row.Name, row.CreatedBy, row.Status,
 		row.Material, row.Colour, row.Finish, row.UnitsPerBed, row.Quality, row.InfillPct,
-		row.CreatedAt, row.UpdatedAt))
+		row.PreviewKey, row.CreatedAt, row.UpdatedAt))
 }
 
 // parseDesignForm reads and validates every multipart field and the file header.
@@ -105,6 +128,13 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 	if colour := strings.TrimSpace(c.PostForm("colour")); colour != "" {
 		f.Colour = &colour
 	}
+	if notes := strings.TrimSpace(c.PostForm("notes")); notes != "" {
+		if len(notes) > 2000 {
+			detail(c, http.StatusUnprocessableEntity, "Notes must be 2000 characters or fewer.")
+			return f, nil, false
+		}
+		f.Notes = &notes
+	}
 	units, ok := parseUnits(c, c.PostForm("units_per_bed"))
 	if !ok {
 		return f, nil, false
@@ -115,6 +145,16 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 		return f, nil, false
 	}
 	f.InfillPct = infill
+
+	if mid := strings.TrimSpace(c.PostForm("machine_id")); mid != "" {
+		id, err := uuid.Parse(mid)
+		if err != nil {
+			detail(c, http.StatusUnprocessableEntity, "Invalid machine id.")
+			return f, nil, false
+		}
+		f.MachineID = &id
+	}
+	f.FilamentPreset = strings.TrimSpace(c.PostForm("filament_preset"))
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -177,6 +217,30 @@ func validateModelFile(c *gin.Context, fh *multipart.FileHeader) (string, bool) 
 	return ext, true
 }
 
+// parsePreview reads and validates the required cover image, returning its header
+// and lower-cased extension.
+func parsePreview(c *gin.Context) (*multipart.FileHeader, string, bool) {
+	fh, err := c.FormFile("preview")
+	if err != nil {
+		detail(c, http.StatusUnprocessableEntity, "A preview image is required.")
+		return nil, "", false
+	}
+	ext := strings.ToLower(filepath.Ext(fh.Filename))
+	if !allowedImageExt[ext] {
+		detail(c, http.StatusUnprocessableEntity, "The preview must be a PNG, JPG, WEBP or GIF image.")
+		return nil, "", false
+	}
+	if fh.Size <= 0 {
+		detail(c, http.StatusUnprocessableEntity, "The preview image is empty.")
+		return nil, "", false
+	}
+	if fh.Size > maxPreviewBytes {
+		detail(c, http.StatusRequestEntityTooLarge, "The preview image is larger than the 10 MB limit.")
+		return nil, "", false
+	}
+	return fh, ext, true
+}
+
 // uploadModel streams the upload straight to object storage.
 func (s *Server) uploadModel(c *gin.Context, key string, fh *multipart.FileHeader) bool {
 	f, err := fh.Open()
@@ -197,7 +261,7 @@ func (s *Server) uploadModel(c *gin.Context, key string, fh *multipart.FileHeade
 // same tx, a design can never be committed without its slice being queued (and a
 // rollback leaves neither), which removes the old post-commit dual-write bug.
 func (s *Server) insertDesignAndJob(
-	c *gin.Context, designID uuid.UUID, stlKey, createdBy string, form designForm,
+	c *gin.Context, designID uuid.UUID, stlKey, previewKey, createdBy string, form designForm,
 ) (gen.InsertDesignRow, bool) {
 	ctx := c.Request.Context()
 	var row gen.InsertDesignRow
@@ -207,7 +271,7 @@ func (s *Server) insertDesignAndJob(
 			ID: designID, BrandSlug: form.Brand, Name: form.Name, CreatedBy: createdBy,
 			Status: designQueued, StlKey: stlKey, Material: form.Material, Colour: form.Colour,
 			Finish: form.Finish, UnitsPerBed: form.UnitsPerBed, Quality: form.Quality,
-			InfillPct: form.InfillPct,
+			InfillPct: form.InfillPct, Notes: form.Notes, PreviewKey: previewKey,
 		})
 		if err != nil {
 			return err
@@ -236,6 +300,7 @@ func (s *Server) enqueueSliceTx(
 		JobID: jobID, DesignID: designID, BrandSlug: form.Brand, StlKey: stlKey,
 		Material: form.Material, Quality: form.Quality,
 		UnitsPerBed: int(form.UnitsPerBed), InfillPct: form.InfillPct,
+		Settings: form.Settings, MachineID: form.MachineID, FilamentPreset: form.FilamentPreset,
 	})
 }
 
@@ -270,7 +335,7 @@ func (s *Server) resubmitDesign(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, designDTO(updated.ID, updated.BrandSlug, updated.Name, updated.CreatedBy,
 		updated.Status, updated.Material, updated.Colour, updated.Finish, updated.UnitsPerBed,
-		updated.Quality, updated.InfillPct, updated.CreatedAt, updated.UpdatedAt))
+		updated.Quality, updated.InfillPct, updated.PreviewKey, updated.CreatedAt, updated.UpdatedAt))
 }
 
 type resubmitRequest struct {
@@ -280,6 +345,15 @@ type resubmitRequest struct {
 	Colour      *string `json:"colour"`
 	UnitsPerBed int     `json:"units_per_bed" binding:"required,min=1,max=100"`
 	InfillPct   float64 `json:"infill_pct" binding:"gte=0,lte=100"`
+	// Advanced slice overrides (all optional). Clamped/allowlisted server-side by
+	// SliceSettings.Normalize before they can reach the slicer CLI.
+	LayerHeightMM  *float64 `json:"layer_height_mm"`
+	WallLoops      *int     `json:"wall_loops"`
+	InfillPattern  *string  `json:"infill_pattern"`
+	Support        *bool    `json:"support"`
+	SupportDeg     *int     `json:"support_threshold_deg"`
+	MachineID      *string  `json:"machine_id"`
+	FilamentPreset *string  `json:"filament_preset"`
 }
 
 // parseResubmit binds the new answers (the STL is reused) and validates them.
@@ -297,11 +371,28 @@ func (s *Server) parseResubmit(c *gin.Context, brand string) (designForm, bool) 
 	form := designForm{
 		Brand: brand, Material: material, Finish: finish, Quality: quality,
 		UnitsPerBed: int32(req.UnitsPerBed), InfillPct: req.InfillPct,
+		Settings: slicing.SliceSettings{
+			LayerHeightMM: req.LayerHeightMM, WallLoops: req.WallLoops,
+			InfillPattern: req.InfillPattern, Support: req.Support, SupportDeg: req.SupportDeg,
+		}.Normalize(),
 	}
 	if req.Colour != nil {
 		if colour := strings.TrimSpace(*req.Colour); colour != "" {
 			form.Colour = &colour
 		}
+	}
+	if req.MachineID != nil {
+		if mid := strings.TrimSpace(*req.MachineID); mid != "" {
+			id, err := uuid.Parse(mid)
+			if err != nil {
+				detail(c, http.StatusUnprocessableEntity, "Invalid machine id.")
+				return designForm{}, false
+			}
+			form.MachineID = &id
+		}
+	}
+	if req.FilamentPreset != nil {
+		form.FilamentPreset = strings.TrimSpace(*req.FilamentPreset)
 	}
 	return form, true
 }
