@@ -54,12 +54,21 @@ type Settings struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 
-	// Design pipeline: object storage for STL/G-code.
+	// Design pipeline: object storage for STL/G-code. The client is S3-compatible
+	// (MinIO in dev, AWS S3 in shared/prod deployments).
 	MinIOEndpoint  string
+	MinIORegion    string
 	MinIOAccessKey string
 	MinIOSecretKey string
 	MinIOBucket    string
-	MinIOSecure    bool
+	// MinIOPrefix partitions a shared bucket per project (e.g. "Tensor/"). Empty in
+	// dev, where MinIO owns the whole bucket. Object keys in the DB stay bare.
+	MinIOPrefix string
+	MinIOSecure bool
+	// MinIOAutoCreate ensures the bucket exists on startup. True for dev MinIO;
+	// must be false against a shared bucket whose IAM user is prefix-scoped and
+	// cannot HeadBucket/CreateBucket at the bucket root.
+	MinIOAutoCreate bool
 
 	// Slice worker (cmd/sliceworker): the Bambu Studio install, per-slice timeout,
 	// the calibratable average printer draw used to estimate energy, and how many
@@ -128,11 +137,14 @@ func Load() Settings {
 		DBConnectTimeout:   secondsEnvOr("DB_CONNECT_TIMEOUT_SECONDS", 10),
 		DBStatementTimeout: secondsEnvOr("DB_STATEMENT_TIMEOUT_SECONDS", 15),
 
-		MinIOEndpoint:  envOr("MINIO_ENDPOINT", "localhost:9100"),
-		MinIOAccessKey: envOr("MINIO_ACCESS_KEY", "tensor"),
-		MinIOSecretKey: envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
-		MinIOBucket:    envOr("MINIO_BUCKET", "designs"),
-		MinIOSecure:    boolEnvOr("MINIO_SECURE", false),
+		MinIOEndpoint:   envOr("MINIO_ENDPOINT", "localhost:9100"),
+		MinIORegion:     os.Getenv("MINIO_REGION"),
+		MinIOAccessKey:  envOr("MINIO_ACCESS_KEY", "tensor"),
+		MinIOSecretKey:  envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
+		MinIOBucket:     envOr("MINIO_BUCKET", "designs"),
+		MinIOPrefix:     os.Getenv("MINIO_PREFIX"),
+		MinIOSecure:     boolEnvOr("MINIO_SECURE", false),
+		MinIOAutoCreate: boolEnvOr("MINIO_AUTO_CREATE", true),
 
 		BambuRoot:           envOr("BAMBU_ROOT", "/opt/bambu/squashfs-root"),
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),

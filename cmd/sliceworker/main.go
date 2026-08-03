@@ -44,9 +44,16 @@ func main() {
 	}
 	defer store.Close()
 
-	objects, err := storage.New(
-		ctx, cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOSecure,
-	)
+	objects, err := storage.New(ctx, storage.Config{
+		Endpoint:   cfg.MinIOEndpoint,
+		Region:     cfg.MinIORegion,
+		AccessKey:  cfg.MinIOAccessKey,
+		SecretKey:  cfg.MinIOSecretKey,
+		Bucket:     cfg.MinIOBucket,
+		Prefix:     cfg.MinIOPrefix,
+		Secure:     cfg.MinIOSecure,
+		AutoCreate: cfg.MinIOAutoCreate,
+	})
 	if err != nil {
 		log.Fatalf("object storage unavailable: %v", err)
 	}

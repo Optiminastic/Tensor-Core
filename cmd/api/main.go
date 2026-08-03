@@ -85,9 +85,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("build river client: %v", err)
 	}
-	if objects, err := storage.New(
-		ctx, cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOSecure,
-	); err != nil {
+	if objects, err := storage.New(ctx, storage.Config{
+		Endpoint:   cfg.MinIOEndpoint,
+		Region:     cfg.MinIORegion,
+		AccessKey:  cfg.MinIOAccessKey,
+		SecretKey:  cfg.MinIOSecretKey,
+		Bucket:     cfg.MinIOBucket,
+		Prefix:     cfg.MinIOPrefix,
+		Secure:     cfg.MinIOSecure,
+		AutoCreate: cfg.MinIOAutoCreate,
+	}); err != nil {
 		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
 	} else {
 		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient))
