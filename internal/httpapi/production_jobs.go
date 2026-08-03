@@ -248,6 +248,14 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		return
 	}
 
+	// Resolve catalogued SKUs to their design: attach the design's model (STL) and
+	// fill material/colour from the catalog. Unresolved SKUs keep the order's own
+	// line-item values, so a non-catalog order still works exactly as before.
+	if err := s.enrichJobsFromCatalog(ctx, params, items); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not resolve the order's SKUs to designs.")
+		return
+	}
+
 	created := make([]productionJobResponse, 0, len(params))
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		for _, p := range params {
@@ -288,7 +296,7 @@ func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.Inse
 			Description: descriptionOf(li), Quantity: quantity,
 			Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 			QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-			Sku: nonEmptyPtr(li.ProductID), ProductName: nonEmptyPtr(li.ProductName),
+			Sku: nonEmptyPtr(firstNonEmpty(li.SKU, li.ProductID)), ProductName: nonEmptyPtr(li.ProductName),
 			Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
 			FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
 			EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),

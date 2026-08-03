@@ -55,6 +55,34 @@ type publishResponse struct {
 // product from it in one step. Approval is persisted first, so a missing/failed
 // Shopify connection leaves the design "approved" (retryable) rather than losing
 // the decision. Guarded by shopify:publish (PROJECT_LEAD / ADMIN).
+// resolvePublishSku persists a supplied SKU on the design and returns the SKU to
+// stamp on the Shopify variant. A blank form SKU falls back to the design's
+// stored SKU (so re-publishing keeps it). It writes the error response and
+// returns ok=false on an invalid or already-used SKU.
+func (s *Server) resolvePublishSku(c *gin.Context, id uuid.UUID, storedSku *string, formSku string) (string, bool) {
+	trimmed := strings.TrimSpace(formSku)
+	if trimmed == "" {
+		if storedSku != nil {
+			return *storedSku, true
+		}
+		return "", true
+	}
+	if !skuPattern.MatchString(trimmed) {
+		detail(c, http.StatusUnprocessableEntity,
+			"A SKU may contain letters, digits and - . _ / , up to 64 characters.")
+		return "", false
+	}
+	if _, err := s.store.Q.SetDesignSku(c.Request.Context(), gen.SetDesignSkuParams{ID: id, Sku: &trimmed}); err != nil {
+		if isUniqueViolation(err) {
+			detail(c, http.StatusConflict, "That SKU is already used by another design.")
+			return "", false
+		}
+		detail(c, http.StatusInternalServerError, "Could not save the SKU.")
+		return "", false
+	}
+	return trimmed, true
+}
+
 func (s *Server) publishDesignToShopify(c *gin.Context) {
 	id, ok := parseUUIDParam(c, "id")
 	if !ok {
@@ -77,6 +105,14 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 	}
 
 	form, images, ok := parsePublishForm(c)
+	if !ok {
+		return
+	}
+
+	// Persist the SKU on the design - it is the catalog key an order resolves
+	// against, not just a Shopify attribute. A supplied SKU is saved (and becomes
+	// the variant SKU); when omitted, the design's stored SKU is reused.
+	skuToPublish, ok := s.resolvePublishSku(c, id, design.Sku, form.SKU)
 	if !ok {
 		return
 	}
@@ -118,7 +154,7 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		DescriptionHTML: descriptionToHTML(form.Description),
 		SEOTitle:        form.SEOTitle,
 		SEODescription:  form.SEODescription,
-		SKU:             form.SKU,
+		SKU:             skuToPublish,
 		WeightGrams:     form.WeightGrams,
 		Metafields:      buildMetafields(design, pricing, metrics, metricsErr == nil),
 		Images:          images,
@@ -133,9 +169,9 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 
 	// Set the price, SKU and weight on the (new or reused) variant. Idempotent, so
 	// a retry is safe.
-	if ref.VariantGID != "" && (price > 0 || form.SKU != "" || form.WeightGrams > 0) {
+	if ref.VariantGID != "" && (price > 0 || skuToPublish != "" || form.WeightGrams > 0) {
 		if err := s.shopify.SetVariant(ctx, shop, token, ref.GID, ref.VariantGID, shopify.VariantDetails{
-			PriceINR: price, SKU: form.SKU, WeightGrams: form.WeightGrams,
+			PriceINR: price, SKU: skuToPublish, WeightGrams: form.WeightGrams,
 		}); err != nil {
 			// Product exists and is recorded; the design stays "approved" and a
 			// retry will reuse it. Shopify-side failure.

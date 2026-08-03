@@ -4,27 +4,31 @@
 -- name: InsertDesign :one
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('name'), sqlc.arg('created_by'),
     sqlc.arg('status'), sqlc.arg('stl_key'), sqlc.arg('material'), sqlc.narg('colour'),
     sqlc.arg('finish'), sqlc.arg('units_per_bed'), sqlc.arg('quality'),
-    sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key')
+    sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key'), sqlc.narg('sku')
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-          preview_key, created_at, updated_at;
+          preview_key, sku, created_at, updated_at;
+
+-- NextDesignSkuSeq draws the next value for an auto-generated SKU's numeric suffix.
+-- name: NextDesignSkuSeq :one
+SELECT nextval('designs_sku_seq')::bigint AS seq;
 
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs WHERE id = $1;
 
 -- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 
 -- name: ListDesignsByBrandPage :many
@@ -33,7 +37,7 @@ FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 -- as a stable tiebreaker.
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs
 WHERE brand_slug = sqlc.arg('brand_slug')
   AND (
@@ -61,6 +65,30 @@ UPDATE designs SET
     finish = sqlc.arg('finish'), units_per_bed = sqlc.arg('units_per_bed'),
     quality = sqlc.arg('quality'), infill_pct = sqlc.arg('infill_pct')::float8,
     status = sqlc.arg('status'), updated_at = now()
+WHERE id = sqlc.arg('id');
+
+-- SetDesignSku assigns (or clears) the catalog SKU. The partial unique index
+-- designs_sku_key rejects a duplicate assigned SKU with a 23505 the handler maps
+-- to a 409.
+-- name: SetDesignSku :one
+UPDATE designs SET sku = sqlc.narg('sku'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, created_at, updated_at;
+
+-- GetDesignBySku resolves an order line's SKU to its design so a production job
+-- can be built straight from the catalog (STL + material + colour).
+-- name: GetDesignBySku :one
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, template_file_id, created_at, updated_at
+FROM designs WHERE sku = $1;
+
+-- SetDesignTemplateFile records the file_asset that stands in for the design's
+-- model in the production queue, so it is created once and reused for reprints.
+-- name: SetDesignTemplateFile :exec
+UPDATE designs SET template_file_id = sqlc.arg('template_file_id'), updated_at = now()
 WHERE id = sqlc.arg('id');
 
 -- name: GetLatestJobForDesign :one

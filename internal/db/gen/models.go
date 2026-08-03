@@ -79,23 +79,25 @@ type CostAssumptionSet struct {
 }
 
 type Design struct {
-	ID          uuid.UUID
-	BrandSlug   string
-	Name        string
-	CreatedBy   string
-	Status      string
-	StlKey      string
-	Material    string
-	Colour      *string
-	Finish      string
-	UnitsPerBed int32
-	Quality     string
-	InfillPct   pgtype.Numeric
-	Notes       *string
-	PreviewKey  string
-	MachineID   *uuid.UUID
-	CreatedAt   pgtype.Timestamptz
-	UpdatedAt   pgtype.Timestamptz
+	ID             uuid.UUID
+	BrandSlug      string
+	Name           string
+	CreatedBy      string
+	Status         string
+	StlKey         string
+	Material       string
+	Colour         *string
+	Finish         string
+	UnitsPerBed    int32
+	Quality        string
+	InfillPct      pgtype.Numeric
+	Notes          *string
+	PreviewKey     string
+	MachineID      *uuid.UUID
+	Sku            *string
+	TemplateFileID *uuid.UUID
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
 }
 
 type DesignPricing struct {

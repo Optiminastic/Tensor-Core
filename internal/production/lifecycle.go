@@ -151,6 +151,7 @@ func AllowedPatchFields(roles []string) map[string]bool {
 // distinguishable from an empty value.
 type LineItem struct {
 	ProductID                    string     `json:"product_id"`
+	SKU                          string     `json:"sku"`
 	ProductName                  string     `json:"product_name"`
 	Category                     *string    `json:"category"`
 	Quantity                     int        `json:"quantity"`

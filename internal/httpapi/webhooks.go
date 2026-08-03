@@ -131,6 +131,7 @@ func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 
 		out = append(out, production.LineItem{
 			ProductID:                    productID(li),
+			SKU:                          li.SKU,
 			ProductName:                  firstNonEmpty(li.Name, li.Title, "Unknown product"),
 			Quantity:                     li.Quantity,
 			Unit:                         "pcs",

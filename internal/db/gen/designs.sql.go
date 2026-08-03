@@ -35,7 +35,7 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
@@ -54,6 +54,7 @@ type GetDesignByIDRow struct {
 	InfillPct   float64
 	Notes       *string
 	PreviewKey  string
+	Sku         *string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -76,6 +77,61 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.InfillPct,
 		&i.Notes,
 		&i.PreviewKey,
+		&i.Sku,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDesignBySku = `-- name: GetDesignBySku :one
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, template_file_id, created_at, updated_at
+FROM designs WHERE sku = $1
+`
+
+type GetDesignBySkuRow struct {
+	ID             uuid.UUID
+	BrandSlug      string
+	Name           string
+	CreatedBy      string
+	Status         string
+	StlKey         string
+	Material       string
+	Colour         *string
+	Finish         string
+	UnitsPerBed    int32
+	Quality        string
+	InfillPct      float64
+	PreviewKey     string
+	Sku            *string
+	TemplateFileID *uuid.UUID
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+// GetDesignBySku resolves an order line's SKU to its design so a production job
+// can be built straight from the catalog (STL + material + colour).
+func (q *Queries) GetDesignBySku(ctx context.Context, sku *string) (GetDesignBySkuRow, error) {
+	row := q.db.QueryRow(ctx, getDesignBySku, sku)
+	var i GetDesignBySkuRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.PreviewKey,
+		&i.Sku,
+		&i.TemplateFileID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -269,16 +325,16 @@ const insertDesign = `-- name: InsertDesign :one
 
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
     $9, $10, $11,
-    $12::float8, $13, $14
+    $12::float8, $13, $14, $15
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-          preview_key, created_at, updated_at
+          preview_key, sku, created_at, updated_at
 `
 
 type InsertDesignParams struct {
@@ -296,6 +352,7 @@ type InsertDesignParams struct {
 	InfillPct   float64
 	Notes       *string
 	PreviewKey  string
+	Sku         *string
 }
 
 type InsertDesignRow struct {
@@ -313,6 +370,7 @@ type InsertDesignRow struct {
 	InfillPct   float64
 	Notes       *string
 	PreviewKey  string
+	Sku         *string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -335,6 +393,7 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		arg.InfillPct,
 		arg.Notes,
 		arg.PreviewKey,
+		arg.Sku,
 	)
 	var i InsertDesignRow
 	err := row.Scan(
@@ -352,6 +411,7 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		&i.InfillPct,
 		&i.Notes,
 		&i.PreviewKey,
+		&i.Sku,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -516,7 +576,7 @@ func (q *Queries) ListDesignReviews(ctx context.Context, designID uuid.UUID) ([]
 const listDesignsByBrand = `-- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC
 `
 
@@ -534,6 +594,7 @@ type ListDesignsByBrandRow struct {
 	Quality     string
 	InfillPct   float64
 	PreviewKey  string
+	Sku         *string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -561,6 +622,7 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 			&i.Quality,
 			&i.InfillPct,
 			&i.PreviewKey,
+			&i.Sku,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -577,7 +639,7 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 const listDesignsByBrandPage = `-- name: ListDesignsByBrandPage :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, created_at, updated_at
+       preview_key, sku, created_at, updated_at
 FROM designs
 WHERE brand_slug = $1
   AND (
@@ -609,6 +671,7 @@ type ListDesignsByBrandPageRow struct {
 	Quality     string
 	InfillPct   float64
 	PreviewKey  string
+	Sku         *string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -644,6 +707,7 @@ func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByB
 			&i.Quality,
 			&i.InfillPct,
 			&i.PreviewKey,
+			&i.Sku,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -667,6 +731,96 @@ func (q *Queries) NextAttemptForDesign(ctx context.Context, designID uuid.UUID) 
 	var next_attempt int32
 	err := row.Scan(&next_attempt)
 	return next_attempt, err
+}
+
+const nextDesignSkuSeq = `-- name: NextDesignSkuSeq :one
+SELECT nextval('designs_sku_seq')::bigint AS seq
+`
+
+// NextDesignSkuSeq draws the next value for an auto-generated SKU's numeric suffix.
+func (q *Queries) NextDesignSkuSeq(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, nextDesignSkuSeq)
+	var seq int64
+	err := row.Scan(&seq)
+	return seq, err
+}
+
+const setDesignSku = `-- name: SetDesignSku :one
+UPDATE designs SET sku = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, created_at, updated_at
+`
+
+type SetDesignSkuParams struct {
+	Sku *string
+	ID  uuid.UUID
+}
+
+type SetDesignSkuRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	Notes       *string
+	PreviewKey  string
+	Sku         *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// SetDesignSku assigns (or clears) the catalog SKU. The partial unique index
+// designs_sku_key rejects a duplicate assigned SKU with a 23505 the handler maps
+// to a 409.
+func (q *Queries) SetDesignSku(ctx context.Context, arg SetDesignSkuParams) (SetDesignSkuRow, error) {
+	row := q.db.QueryRow(ctx, setDesignSku, arg.Sku, arg.ID)
+	var i SetDesignSkuRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Notes,
+		&i.PreviewKey,
+		&i.Sku,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setDesignTemplateFile = `-- name: SetDesignTemplateFile :exec
+UPDATE designs SET template_file_id = $1, updated_at = now()
+WHERE id = $2
+`
+
+type SetDesignTemplateFileParams struct {
+	TemplateFileID *uuid.UUID
+	ID             uuid.UUID
+}
+
+// SetDesignTemplateFile records the file_asset that stands in for the design's
+// model in the production queue, so it is created once and reused for reprints.
+func (q *Queries) SetDesignTemplateFile(ctx context.Context, arg SetDesignTemplateFileParams) error {
+	_, err := q.db.Exec(ctx, setDesignTemplateFile, arg.TemplateFileID, arg.ID)
+	return err
 }
 
 const updateDesignSpecs = `-- name: UpdateDesignSpecs :exec

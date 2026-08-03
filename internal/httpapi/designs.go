@@ -78,6 +78,7 @@ type designResponse struct {
 	UnitsPerBed int       `json:"units_per_bed"`
 	Quality     string    `json:"quality"`
 	InfillPct   float64   `json:"infill_pct"`
+	SKU         *string   `json:"sku"`
 	HasPreview  bool      `json:"has_preview"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
@@ -145,12 +146,12 @@ type designDetailResponse struct {
 func designDTO(
 	id uuid.UUID, brandSlug, name, createdBy, status, material string, colour *string,
 	finish string, unitsPerBed int32, quality string, infillPct float64, previewKey string,
-	created, updated pgtype.Timestamptz,
+	sku *string, created, updated pgtype.Timestamptz,
 ) designResponse {
 	return designResponse{
 		ID: id.String(), BrandSlug: brandSlug, Name: name, CreatedBy: createdBy, Status: status,
 		Material: material, Colour: colour, Finish: finish, UnitsPerBed: int(unitsPerBed),
-		Quality: quality, InfillPct: infillPct, HasPreview: previewKey != "",
+		Quality: quality, InfillPct: infillPct, SKU: sku, HasPreview: previewKey != "",
 		CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
 	}
 }
@@ -172,6 +173,7 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.POST("/:id/comments", s.guards.RequirePermission(auth.DesignRead.Key()), s.commentOnDesign)
 	g.GET("/:id/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
 	g.POST("/:id/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
+	g.PATCH("/:id/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
 }
 
 // listDesigns returns a brand's designs, newest first. The brand is a required
@@ -198,7 +200,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 		out := make([]designResponse, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.CreatedAt, r.UpdatedAt))
+				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.Sku, r.CreatedAt, r.UpdatedAt))
 		}
 		c.JSON(http.StatusOK, out)
 		return
@@ -215,7 +217,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 	out := make([]designResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.CreatedAt, r.UpdatedAt))
+			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.Sku, r.CreatedAt, r.UpdatedAt))
 	}
 	if n := len(rows); n > 0 {
 		last := rows[n-1]
@@ -265,7 +267,7 @@ func (s *Server) getDesign(c *gin.Context) {
 
 	resp := designDetailResponse{
 		designResponse: designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
-			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.CreatedAt, d.UpdatedAt),
+			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.Sku, d.CreatedAt, d.UpdatedAt),
 		Notes:   d.Notes,
 		Job:     job,
 		Metrics: metrics,

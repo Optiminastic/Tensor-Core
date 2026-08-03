@@ -183,10 +183,19 @@ CREATE TABLE designs (
     -- The machine this design slices on (migration 0016); NULL falls back to the
     -- built-in H2S 0.4 profile.
     machine_id    uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
+    -- The unique catalog SKU (migration 0017); NULL until assigned. An order's SKU
+    -- resolves to exactly this design.
+    sku           varchar(64),
+    -- The design's stand-in file_asset for the production queue (migration 0017);
+    -- created lazily from stl_key, reused for every reprint.
+    template_file_id uuid REFERENCES file_assets (id) ON DELETE SET NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_designs_brand_slug ON designs (brand_slug);
+CREATE UNIQUE INDEX designs_sku_key ON designs (sku) WHERE sku IS NOT NULL;
+-- Supplies the numeric suffix for auto-generated design SKUs (migration 0018).
+CREATE SEQUENCE IF NOT EXISTS designs_sku_seq;
 
 -- The design review workflow thread (migration 0014): one append-only row per
 -- submit/approve/reject/comment event. author_id is a Better Auth user id (no FK).

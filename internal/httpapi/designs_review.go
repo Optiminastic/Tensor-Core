@@ -41,7 +41,7 @@ func (s *Server) respondDesign(c *gin.Context, id uuid.UUID) {
 		return
 	}
 	c.JSON(http.StatusOK, designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
-		d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.CreatedAt, d.UpdatedAt))
+		d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.Sku, d.CreatedAt, d.UpdatedAt))
 }
 
 type submitRequest struct {

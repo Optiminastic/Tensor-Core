@@ -103,7 +103,7 @@ func (s *Server) createDesign(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, designDTO(row.ID, row.BrandSlug, row.Name, row.CreatedBy, row.Status,
 		row.Material, row.Colour, row.Finish, row.UnitsPerBed, row.Quality, row.InfillPct,
-		row.PreviewKey, row.CreatedAt, row.UpdatedAt))
+		row.PreviewKey, row.Sku, row.CreatedAt, row.UpdatedAt))
 }
 
 // parseDesignForm reads and validates every multipart field and the file header.
@@ -267,9 +267,17 @@ func (s *Server) insertDesignAndJob(
 	var row gen.InsertDesignRow
 	jobID := uuid.New()
 	err := s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		// Every design gets a permanent, system-generated SKU at creation - no one
+		// types one in. The sequence guarantees the numeric suffix is unique.
+		seq, err := q.NextDesignSkuSeq(ctx)
+		if err != nil {
+			return err
+		}
+		sku := generateSKU(form.Brand, form.Material, form.Colour, seq)
 		d, err := q.InsertDesign(ctx, gen.InsertDesignParams{
 			ID: designID, BrandSlug: form.Brand, Name: form.Name, CreatedBy: createdBy,
 			Status: designQueued, StlKey: stlKey, Material: form.Material, Colour: form.Colour,
+			Sku:    &sku,
 			Finish: form.Finish, UnitsPerBed: form.UnitsPerBed, Quality: form.Quality,
 			InfillPct: form.InfillPct, Notes: form.Notes, PreviewKey: previewKey,
 		})
@@ -335,7 +343,7 @@ func (s *Server) resubmitDesign(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, designDTO(updated.ID, updated.BrandSlug, updated.Name, updated.CreatedBy,
 		updated.Status, updated.Material, updated.Colour, updated.Finish, updated.UnitsPerBed,
-		updated.Quality, updated.InfillPct, updated.PreviewKey, updated.CreatedAt, updated.UpdatedAt))
+		updated.Quality, updated.InfillPct, updated.PreviewKey, updated.Sku, updated.CreatedAt, updated.UpdatedAt))
 }
 
 type resubmitRequest struct {

@@ -14,6 +14,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Optiminastic/tensor-core/internal/obs"
 )
@@ -28,6 +29,14 @@ func detail(c *gin.Context, status int, msg string) {
 // latter is never silently rendered as an empty field.
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// isUniqueViolation reports whether err is Postgres' unique_violation (SQLSTATE
+// 23505), so a handler can map a duplicate-key insert/update to a 409 instead of
+// a generic 500. Used for the designs_sku_key partial unique index.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // dbError maps a database error to the response, centralising the 404-vs-500
