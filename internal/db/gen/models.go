@@ -151,6 +151,23 @@ type FileAsset struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
+type Machine struct {
+	ID                    uuid.UUID
+	MachineID             string
+	Name                  string
+	ImageUrl              *string
+	Status                string
+	Filaments             []byte
+	CurrentBatchID        *uuid.UUID
+	CurrentLayer          *int32
+	TotalLayers           *int32
+	BatchTotalTimeMinutes *int32
+	PrintStartedAt        pgtype.Timestamptz
+	TotalWasteGrams       pgtype.Numeric
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+}
+
 type MachineProfile struct {
 	ID              uuid.UUID
 	Name            string

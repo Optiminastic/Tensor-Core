@@ -377,6 +377,28 @@ CREATE TABLE filament_inventory (
 CREATE UNIQUE INDEX uq_filament_material_colour
     ON filament_inventory (material, COALESCE(colour, ''));
 
+-- The physical printer fleet - one row per physical unit, live print-state.
+-- Distinct from machine_profiles (the printer model/slicing profile).
+CREATE TABLE machines (
+    id                        uuid PRIMARY KEY,
+    machine_id                varchar(64) NOT NULL UNIQUE,
+    name                      varchar(120) NOT NULL DEFAULT 'Bambu H2C',
+    image_url                 text,
+    status                    varchar(16) NOT NULL DEFAULT 'idle'
+                              CHECK (status IN ('idle', 'running', 'off')),
+    filaments                 jsonb NOT NULL DEFAULT '[]',
+    current_batch_id          uuid REFERENCES batches (id) ON DELETE SET NULL,
+    current_layer             integer,
+    total_layers              integer,
+    batch_total_time_minutes  integer,
+    print_started_at          timestamptz,
+    total_waste_grams         numeric(10, 2) NOT NULL DEFAULT 0,
+    created_at                timestamptz NOT NULL DEFAULT now(),
+    updated_at                timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_machines_status ON machines (status);
+CREATE INDEX ix_machines_current_batch ON machines (current_batch_id);
+
 CREATE TABLE production_job_assembly_checks (
     id                uuid PRIMARY KEY,
     job_id            uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
