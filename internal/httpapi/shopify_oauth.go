@@ -39,6 +39,10 @@ func (s *Server) shopifyReady(c *gin.Context) bool {
 
 func (s *Server) callbackURL() string { return s.cfg.PublicBaseURL + "/webhooks/shopify/orders-paid" }
 
+func (s *Server) createCallbackURL() string {
+	return s.cfg.PublicBaseURL + "/webhooks/shopify/orders-create"
+}
+
 func (s *Server) shopifyAuthorize(c *gin.Context) {
 	if !s.shopifyReady(c) {
 		return
@@ -97,6 +101,17 @@ func (s *Server) shopifyCallback(c *gin.Context) {
 	subID, err := s.shopify.RegisterOrdersPaidWebhook(ctx, shop, token, s.callbackURL())
 	if err != nil {
 		obs.FromContext(ctx).Error("shopify webhook registration failed", "error", err)
+		fail()
+		return
+	}
+	// Also registered, but its subscription id isn't persisted (the schema has
+	// one webhook_subscription_id column, sized for the original orders/paid
+	// integration) - a store disconnect won't auto-unregister this one from
+	// Shopify. ORDERS_CREATE is what catches a COD order, which may sit at
+	// financial_status "pending" indefinitely and would otherwise never fire
+	// ORDERS_PAID.
+	if _, err := s.shopify.RegisterOrdersCreateWebhook(ctx, shop, token, s.createCallbackURL()); err != nil {
+		obs.FromContext(ctx).Error("shopify orders/create webhook registration failed", "error", err)
 		fail()
 		return
 	}

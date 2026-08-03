@@ -166,8 +166,21 @@ const webhookCreateMutation = `mutation RegisterWebhook($topic: WebhookSubscript
 // RegisterOrdersPaidWebhook subscribes the store to the ORDERS_PAID topic pointing
 // at callbackURL, returning the subscription id.
 func (c *Client) RegisterOrdersPaidWebhook(ctx context.Context, shop, token, callbackURL string) (string, error) {
+	return c.registerWebhook(ctx, shop, token, "ORDERS_PAID", callbackURL)
+}
+
+// RegisterOrdersCreateWebhook subscribes the store to the ORDERS_CREATE topic
+// pointing at callbackURL, returning the subscription id. Unlike ORDERS_PAID
+// (fires once financial_status becomes "paid"), this fires for every new order
+// regardless of payment state - it is what lets a COD order, which may stay
+// "pending" indefinitely, show up live instead of never arriving.
+func (c *Client) RegisterOrdersCreateWebhook(ctx context.Context, shop, token, callbackURL string) (string, error) {
+	return c.registerWebhook(ctx, shop, token, "ORDERS_CREATE", callbackURL)
+}
+
+func (c *Client) registerWebhook(ctx context.Context, shop, token, topic, callbackURL string) (string, error) {
 	variables := map[string]any{
-		"topic": "ORDERS_PAID",
+		"topic": topic,
 		"sub":   map[string]any{"callbackUrl": callbackURL, "format": "JSON"},
 	}
 	var out struct {

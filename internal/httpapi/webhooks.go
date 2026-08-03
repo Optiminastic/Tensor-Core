@@ -23,11 +23,28 @@ func (s *Server) registerWebhooks(r *gin.Engine) {
 	g := r.Group("/webhooks/shopify")
 	// Authenticated by the request HMAC, not a user token.
 	g.POST("/orders-paid", s.ordersPaidWebhook)
+	g.POST("/orders-create", s.ordersCreateWebhook)
 }
 
-// ordersPaidWebhook receives Shopify's orders/paid callback, verifies the body
-// HMAC, resolves the store, and upserts the order (idempotent on replay).
+// ordersPaidWebhook receives Shopify's orders/paid callback: fires once an
+// order's financial_status becomes "paid".
 func (s *Server) ordersPaidWebhook(c *gin.Context) {
+	s.upsertOrderFromWebhook(c, "paid")
+}
+
+// ordersCreateWebhook receives Shopify's orders/create callback: fires for
+// every new order regardless of payment state, so a COD order - which may sit
+// at financial_status "pending" indefinitely - shows up immediately instead of
+// only if it is ever marked paid.
+func (s *Server) ordersCreateWebhook(c *gin.Context) {
+	s.upsertOrderFromWebhook(c, "pending")
+}
+
+// upsertOrderFromWebhook is shared by orders-paid and orders-create: both verify
+// the body HMAC, resolve the store, and upsert the order (idempotent on replay -
+// whichever of the two fires second just refreshes financial_status/total_price).
+// fallbackStatus is used only when Shopify's payload omits financial_status.
+func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 	if s.cfg.ShopifyClientSecret == "" {
 		detail(c, http.StatusServiceUnavailable, "The Shopify integration is not configured.")
 		return
@@ -65,11 +82,11 @@ func (s *Server) ordersPaidWebhook(c *gin.Context) {
 	if _, err := s.store.Q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
 		ID: uuid.New(), ShopConnectionID: &connID, ShopifyOrderID: payload.ID,
 		OrderNumber: payload.Name, CustomerName: payload.customerName(),
-		FinancialStatus: defaultStr(payload.FinancialStatus, "paid"),
+		FinancialStatus: defaultStr(payload.FinancialStatus, fallbackStatus),
 		TotalPrice:      parsePrice(payload.TotalPrice), Currency: defaultStr(payload.Currency, "USD"),
 		LineItems: lineItemsJSON, Status: "queued",
 	}); err != nil {
-		obs.FromContext(ctx).Error("orders/paid upsert failed", "error", err)
+		obs.FromContext(ctx).Error("shopify order webhook upsert failed", "error", err)
 		detail(c, http.StatusInternalServerError, "Could not import the order.")
 		return
 	}
