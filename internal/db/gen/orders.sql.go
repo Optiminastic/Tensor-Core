@@ -14,8 +14,9 @@ import (
 
 const getOrderByID = `-- name: GetOrderByID :one
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
+       shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, imported_at, created_at, updated_at
+       status, source, imported_at, created_at, updated_at
 FROM orders WHERE id = $1
 `
 
@@ -28,11 +29,15 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.ShopifyOrderID,
 		&i.OrderNumber,
 		&i.CustomerName,
+		&i.ShopifyCustomerID,
+		&i.CustomerEmail,
+		&i.CustomerPhone,
 		&i.FinancialStatus,
 		&i.TotalPrice,
 		&i.Currency,
 		&i.LineItems,
 		&i.Status,
+		&i.Source,
 		&i.ImportedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -44,33 +49,43 @@ const insertOrder = `-- name: InsertOrder :one
 
 INSERT INTO orders (
     id, shop_connection_id, shopify_order_id, order_number, customer_name,
-    financial_status, total_price, currency, line_items, status
+    shopify_customer_id, customer_email, customer_phone,
+    financial_status, total_price, currency, line_items, status, source
 ) VALUES (
     $1, $2, $3,
-    $4, $5, $6,
-    $7::float8, $8, $9, $10
+    $4, $5,
+    $6, $7, $8,
+    $9, $10::float8, $11,
+    $12, $13, $14
 )
 RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name,
+          shopify_customer_id, customer_email, customer_phone,
           financial_status, total_price, currency, line_items,
-          status, imported_at, created_at, updated_at
+          status, source, imported_at, created_at, updated_at
 `
 
 type InsertOrderParams struct {
-	ID               uuid.UUID
-	ShopConnectionID *uuid.UUID
-	ShopifyOrderID   int64
-	OrderNumber      string
-	CustomerName     *string
-	FinancialStatus  string
-	TotalPrice       float64
-	Currency         string
-	LineItems        []byte
-	Status           string
+	ID                uuid.UUID
+	ShopConnectionID  *uuid.UUID
+	ShopifyOrderID    int64
+	OrderNumber       string
+	CustomerName      *string
+	ShopifyCustomerID *int64
+	CustomerEmail     *string
+	CustomerPhone     *string
+	FinancialStatus   string
+	TotalPrice        float64
+	Currency          string
+	LineItems         []byte
+	Status            string
+	Source            string
 }
 
 // Orders imported from Shopify. total_price cast to float8; line_items is jsonb
 // ([]byte in Go). InsertOrder is used for seeding/testing in Phase 1; the Shopify
-// webhook upsert arrives with the Shopify phase.
+// webhook upsert arrives with the Shopify phase. source distinguishes a real
+// webhook-imported order from a seeded dummy one; both share this table so the
+// frontend can toggle between them via ListOrders/ListOrdersPage's source filter.
 func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order, error) {
 	row := q.db.QueryRow(ctx, insertOrder,
 		arg.ID,
@@ -78,11 +93,15 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		arg.ShopifyOrderID,
 		arg.OrderNumber,
 		arg.CustomerName,
+		arg.ShopifyCustomerID,
+		arg.CustomerEmail,
+		arg.CustomerPhone,
 		arg.FinancialStatus,
 		arg.TotalPrice,
 		arg.Currency,
 		arg.LineItems,
 		arg.Status,
+		arg.Source,
 	)
 	var i Order
 	err := row.Scan(
@@ -91,11 +110,15 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.ShopifyOrderID,
 		&i.OrderNumber,
 		&i.CustomerName,
+		&i.ShopifyCustomerID,
+		&i.CustomerEmail,
+		&i.CustomerPhone,
 		&i.FinancialStatus,
 		&i.TotalPrice,
 		&i.Currency,
 		&i.LineItems,
 		&i.Status,
+		&i.Source,
 		&i.ImportedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -105,13 +128,17 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 
 const listOrders = `-- name: ListOrders :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
+       shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, imported_at, created_at, updated_at
-FROM orders ORDER BY imported_at DESC, id DESC
+       status, source, imported_at, created_at, updated_at
+FROM orders
+WHERE $1::text IS NULL OR source = $1
+ORDER BY imported_at DESC, id DESC
 `
 
-func (q *Queries) ListOrders(ctx context.Context) ([]Order, error) {
-	rows, err := q.db.Query(ctx, listOrders)
+// A null source returns every order regardless of origin.
+func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listOrders, source)
 	if err != nil {
 		return nil, err
 	}
@@ -125,11 +152,15 @@ func (q *Queries) ListOrders(ctx context.Context) ([]Order, error) {
 			&i.ShopifyOrderID,
 			&i.OrderNumber,
 			&i.CustomerName,
+			&i.ShopifyCustomerID,
+			&i.CustomerEmail,
+			&i.CustomerPhone,
 			&i.FinancialStatus,
 			&i.TotalPrice,
 			&i.Currency,
 			&i.LineItems,
 			&i.Status,
+			&i.Source,
 			&i.ImportedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -146,27 +177,35 @@ func (q *Queries) ListOrders(ctx context.Context) ([]Order, error) {
 
 const listOrdersPage = `-- name: ListOrdersPage :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
+       shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, imported_at, created_at, updated_at
+       status, source, imported_at, created_at, updated_at
 FROM orders
 WHERE (
     $1::timestamptz IS NULL
     OR (imported_at, id) < ($1::timestamptz, $2::uuid)
 )
+AND ($3::text IS NULL OR source = $3)
 ORDER BY imported_at DESC, id DESC
-LIMIT $3
+LIMIT $4
 `
 
 type ListOrdersPageParams struct {
 	CursorImportedAt pgtype.Timestamptz
 	CursorID         *uuid.UUID
+	Source           *string
 	PageLimit        int32
 }
 
 // Keyset page over (imported_at, id), newest first. A null cursor returns the
-// first page.
+// first page. A null source returns every order regardless of origin.
 func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) ([]Order, error) {
-	rows, err := q.db.Query(ctx, listOrdersPage, arg.CursorImportedAt, arg.CursorID, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listOrdersPage,
+		arg.CursorImportedAt,
+		arg.CursorID,
+		arg.Source,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -180,11 +219,15 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 			&i.ShopifyOrderID,
 			&i.OrderNumber,
 			&i.CustomerName,
+			&i.ShopifyCustomerID,
+			&i.CustomerEmail,
+			&i.CustomerPhone,
 			&i.FinancialStatus,
 			&i.TotalPrice,
 			&i.Currency,
 			&i.LineItems,
 			&i.Status,
+			&i.Source,
 			&i.ImportedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -202,34 +245,41 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 const upsertPaidOrder = `-- name: UpsertPaidOrder :one
 INSERT INTO orders (
     id, shop_connection_id, shopify_order_id, order_number, customer_name,
+    shopify_customer_id, customer_email, customer_phone,
     financial_status, total_price, currency, line_items, status
 ) VALUES (
     $1, $2, $3,
-    $4, $5, $6,
-    $7::float8, $8, $9, $10
+    $4, $5,
+    $6, $7, $8,
+    $9, $10::float8, $11,
+    $12, $13
 )
 ON CONFLICT (shopify_order_id) DO UPDATE SET
     financial_status = EXCLUDED.financial_status,
     total_price      = EXCLUDED.total_price,
     updated_at       = now()
-RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, financial_status, total_price, currency, line_items, status, imported_at, created_at, updated_at
+RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, created_at, updated_at
 `
 
 type UpsertPaidOrderParams struct {
-	ID               uuid.UUID
-	ShopConnectionID *uuid.UUID
-	ShopifyOrderID   int64
-	OrderNumber      string
-	CustomerName     *string
-	FinancialStatus  string
-	TotalPrice       float64
-	Currency         string
-	LineItems        []byte
-	Status           string
+	ID                uuid.UUID
+	ShopConnectionID  *uuid.UUID
+	ShopifyOrderID    int64
+	OrderNumber       string
+	CustomerName      *string
+	ShopifyCustomerID *int64
+	CustomerEmail     *string
+	CustomerPhone     *string
+	FinancialStatus   string
+	TotalPrice        float64
+	Currency          string
+	LineItems         []byte
+	Status            string
 }
 
 // Idempotent import from the orders/paid webhook: keyed on shopify_order_id, a
-// replay only refreshes the mutable financial fields.
+// replay only refreshes the mutable financial fields. source defaults to
+// 'shopify_webhook', so a webhook-imported order is never mistaken for seed data.
 func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams) (Order, error) {
 	row := q.db.QueryRow(ctx, upsertPaidOrder,
 		arg.ID,
@@ -237,6 +287,9 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		arg.ShopifyOrderID,
 		arg.OrderNumber,
 		arg.CustomerName,
+		arg.ShopifyCustomerID,
+		arg.CustomerEmail,
+		arg.CustomerPhone,
 		arg.FinancialStatus,
 		arg.TotalPrice,
 		arg.Currency,
@@ -250,11 +303,15 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		&i.ShopifyOrderID,
 		&i.OrderNumber,
 		&i.CustomerName,
+		&i.ShopifyCustomerID,
+		&i.CustomerEmail,
+		&i.CustomerPhone,
 		&i.FinancialStatus,
 		&i.TotalPrice,
 		&i.Currency,
 		&i.LineItems,
 		&i.Status,
+		&i.Source,
 		&i.ImportedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,

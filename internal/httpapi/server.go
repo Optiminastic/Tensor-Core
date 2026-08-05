@@ -13,6 +13,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/secretbox"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
@@ -33,6 +34,12 @@ type Server struct {
 	// design routes fail closed (503) when they are absent.
 	storage  *storage.Client
 	enqueuer *slicing.Enqueuer
+
+	// Production pipeline dependencies. Nil until EnableProductionQueue is
+	// called; webhook order import then just saves data without scheduling job
+	// creation (Stage 2 never fires), matching how the design pipeline degrades.
+	jobEnqueuer   *production.JobCreationEnqueuer
+	batchEnqueuer *production.BatchPlanEnqueuer
 }
 
 // NewServer wires the HTTP layer. logger may be nil, in which case the request
@@ -58,6 +65,15 @@ func (s *Server) EnablePipeline(objects *storage.Client, enqueuer *slicing.Enque
 	s.enqueuer = enqueuer
 }
 
+// EnableProductionQueue attaches the River job-creation and batch-plan
+// enqueuers so order webhooks can transactionally schedule Stage 2 (and, once
+// jobs land, a debounced Stage 5 replan). Both wrap the same insert-only River
+// client EnablePipeline's enqueuer uses - one client enqueues any Kind.
+func (s *Server) EnableProductionQueue(jobs *production.JobCreationEnqueuer, batches *production.BatchPlanEnqueuer) {
+	s.jobEnqueuer = jobs
+	s.batchEnqueuer = batches
+}
+
 // Router builds the Gin engine with CORS, health, and every router mounted at
 // the same prefixes as the FastAPI app.
 func (s *Server) Router() *gin.Engine {
@@ -77,6 +93,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerProjects(r)
 	s.registerBrands(r)
 	s.registerConnections(r)
+	s.registerShopifyProducts(r)
 	s.registerDesigns(r)
 	s.registerFiles(r)
 	s.registerOrders(r)

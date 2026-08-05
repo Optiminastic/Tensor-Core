@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
@@ -117,4 +119,20 @@ func roleStrings(roles []auth.RoleName) []string {
 func nowPtr() *time.Time {
 	t := time.Now().UTC()
 	return &t
+}
+
+// queryUUID parses an optional UUID query param, writing the standard 422
+// response and returning ok=false on an invalid (non-empty, unparsable) value.
+// A blank/absent value is not an error - it comes back as (nil, true).
+func queryUUID(c *gin.Context, param string) (*uuid.UUID, bool) {
+	raw := c.Query(param)
+	if raw == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		detail(c, http.StatusUnprocessableEntity, "The "+param+" is not a valid identifier.")
+		return nil, false
+	}
+	return &id, true
 }

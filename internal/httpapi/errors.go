@@ -14,9 +14,21 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Optiminastic/tensor-core/internal/obs"
 )
+
+// postgresUniqueViolation is Postgres' SQLSTATE for a unique-constraint
+// conflict (e.g. INSERT/UPDATE colliding with a UNIQUE index).
+const postgresUniqueViolation = "23505"
+
+// isUniqueViolation reports whether err is a Postgres unique-constraint
+// violation, so a handler can answer 409 instead of a generic 500.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == postgresUniqueViolation
+}
 
 // detail writes {"detail": msg} with the given status.
 func detail(c *gin.Context, status int, msg string) {

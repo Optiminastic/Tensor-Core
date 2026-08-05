@@ -3,14 +3,18 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
@@ -40,6 +44,12 @@ type batchResponse struct {
 	CreatedAt                   time.Time  `json:"created_at"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 	JobsCount                   *int64     `json:"jobs_count,omitempty"`
+	// PlateBbox* is the merged plate's overall combined size, in mm - only
+	// attached on the single-batch GET (see attachPlateBbox), never on list
+	// responses, so listing batches never pays for a per-row file lookup.
+	PlateBboxXMm *float64 `json:"plate_bbox_x_mm,omitempty"`
+	PlateBboxYMm *float64 `json:"plate_bbox_y_mm,omitempty"`
+	PlateBboxZMm *float64 `json:"plate_bbox_z_mm,omitempty"`
 }
 
 func batchDTO(b gen.Batch) batchResponse {
@@ -195,7 +205,30 @@ func (s *Server) getBatch(c *gin.Context) {
 	if count, err := s.store.Q.CountJobsInBatch(ctx, &id); err == nil {
 		dto.JobsCount = &count
 	}
+	s.attachPlateBbox(ctx, &dto, b.MergedFileID, b.PreviewFileID)
 	c.JSON(http.StatusOK, dto)
+}
+
+// attachPlateBbox best-effort loads the merged plate's overall dimensions
+// (the approved merged file if the batch has one, else the Draft preview) so
+// the batch detail page can show how much of the bed the combined plate
+// actually uses. Never fails the response - a missing or not-yet-built file
+// just leaves the fields nil.
+func (s *Server) attachPlateBbox(ctx context.Context, dto *batchResponse, mergedFileID, previewFileID *uuid.UUID) {
+	fileID := mergedFileID
+	if fileID == nil {
+		fileID = previewFileID
+	}
+	if fileID == nil {
+		return
+	}
+	file, err := s.store.Q.GetFileAsset(ctx, *fileID)
+	if err != nil {
+		return
+	}
+	dto.PlateBboxXMm = db.NumFloatPtr(file.BboxXMm)
+	dto.PlateBboxYMm = db.NumFloatPtr(file.BboxYMm)
+	dto.PlateBboxZMm = db.NumFloatPtr(file.BboxZMm)
 }
 
 type autoCreateResponse struct {
@@ -206,54 +239,24 @@ type autoCreateResponse struct {
 func (s *Server) autoCreateBatches(c *gin.Context) {
 	// No storage needed here: footprints come from the file_assets bbox in the DB.
 	// Merging the plate STL (which needs storage) happens at preview/approve.
-	ctx := c.Request.Context()
-	jobs, err := s.store.Q.ListBatchableJobs(ctx)
-	if err != nil {
+	created, unbatchable, err := s.AutoCreateBatches(c.Request.Context())
+	switch {
+	case errors.Is(err, errListBatchableJobs):
 		detail(c, http.StatusInternalServerError, "Could not read batchable jobs.")
 		return
-	}
-
-	planJobs, err := s.planJobsFor(ctx, jobs)
-	if err != nil {
+	case errors.Is(err, errPlanBatchableJobs):
 		detail(c, http.StatusInternalServerError, "Could not read the jobs' print files.")
 		return
-	}
-	planned, unbatchable := production.Plan(planJobs)
-
-	created := make([]batchResponse, 0, len(planned))
-	err = s.store.InTx(ctx, func(q *gen.Queries) error {
-		for _, p := range planned {
-			number, err := production.NewBatchNumber()
-			if err != nil {
-				return err
-			}
-			shortage := !s.filamentAvailable(ctx, q, batchMaterial(p.Jobs), p.TotalFilamentGrams)
-			b, err := q.InsertBatch(ctx, gen.InsertBatchParams{
-				ID: uuid.New(), BatchNumber: number, Status: production.BatchPendingApproval,
-				MaterialShortage: shortage, UnitsPerBed: int32ptr(p.UnitsPerBed),
-				TotalPrintTimeMinutes:       int32PtrFromInt(p.TotalPrintTimeMinutes),
-				EffectiveTimePerUnitMinutes: p.EffectiveTimePerUnitMinutes,
-				TotalFilamentGrams:          &p.TotalFilamentGrams,
-				BedUtilizationPercent:       &p.BedUtilisationPercent,
-				PackingStrategy:             &p.PackingStrategy,
-			})
-			if err != nil {
-				return err
-			}
-			if err := q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{
-				BatchID: ptr(b.ID), JobIds: jobIDsOf(p.Jobs),
-			}); err != nil {
-				return err
-			}
-			created = append(created, batchDTO(b))
-		}
-		return nil
-	})
-	if err != nil {
+	case err != nil:
 		detail(c, http.StatusInternalServerError, "Could not create the batches.")
 		return
 	}
-	c.JSON(http.StatusOK, autoCreateResponse{Created: created, Unbatchable: unbatchable})
+
+	out := make([]batchResponse, 0, len(created))
+	for _, b := range created {
+		out = append(out, batchDTO(b))
+	}
+	c.JSON(http.StatusOK, autoCreateResponse{Created: out, Unbatchable: unbatchable})
 }
 
 func (s *Server) previewBatch(c *gin.Context) {
@@ -287,7 +290,7 @@ func (s *Server) previewBatch(c *gin.Context) {
 		detail(c, herr.status, herr.msg)
 		return
 	}
-	fileID, err := s.storePlate(ctx, id, "preview", batch.BatchNumber, plate.data, c)
+	fileID, err := s.storePlate(ctx, id, "preview", batch.BatchNumber, plate.data, plate.bbox, c)
 	if err != nil {
 		return
 	}
@@ -299,7 +302,10 @@ func (s *Server) previewBatch(c *gin.Context) {
 }
 
 type approveBatchRequest struct {
-	MachineID string `json:"machine_id" binding:"required"`
+	// MachineID is optional: a Draft batch already has one assigned by the
+	// batch worker's scheduler (see AutoCreateBatches/assignMachineForBatch).
+	// Pass it only to override that choice.
+	MachineID *string `json:"machine_id"`
 }
 
 func (s *Server) approveBatch(c *gin.Context) {
@@ -314,11 +320,6 @@ func (s *Server) approveBatch(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	machineID, err := uuid.Parse(req.MachineID)
-	if err != nil {
-		detail(c, http.StatusUnprocessableEntity, "The machine_id is not a valid identifier.")
-		return
-	}
 	ctx := c.Request.Context()
 
 	batch, err := s.store.Q.GetBatchByID(ctx, id)
@@ -326,7 +327,27 @@ func (s *Server) approveBatch(c *gin.Context) {
 		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
 		return
 	}
-	if _, err := s.store.Q.GetMachineOps(ctx, machineID); err != nil {
+	if batch.Status != production.BatchPendingApproval {
+		detail(c, http.StatusConflict, "This batch has already been approved.")
+		return
+	}
+
+	var machineID *uuid.UUID
+	if req.MachineID != nil {
+		parsed, err := uuid.Parse(*req.MachineID)
+		if err != nil {
+			detail(c, http.StatusUnprocessableEntity, "The machine_id is not a valid identifier.")
+			return
+		}
+		machineID = &parsed
+	} else {
+		machineID = batch.MachineID
+	}
+	if machineID == nil {
+		detail(c, http.StatusUnprocessableEntity, "This batch has no machine assigned yet; provide a machine_id.")
+		return
+	}
+	if _, err := s.store.Q.GetMachineOps(ctx, *machineID); err != nil {
 		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
 		return
 	}
@@ -346,32 +367,69 @@ func (s *Server) approveBatch(c *gin.Context) {
 		}
 	}
 
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
-	if herr != nil {
-		detail(c, herr.status, herr.msg)
-		return
-	}
-	mergedID, err := s.storePlate(ctx, id, "plate", batch.BatchNumber, plate.data, c)
-	if err != nil {
+	mergedID, unitsPerBed, utilisation, ok := s.mergedPlateFor(ctx, c, batch, jobs)
+	if !ok {
 		return
 	}
 
 	total, eff := batchTimeFromJobs(jobs)
 	filament := sumFilament(jobs)
-	material := batchMaterialFromJobs(jobs)
+	split := filamentSplitForJobs(jobs)
+	shortage := !s.filamentAvailableByColour(ctx, s.store.Q, split)
 	approvedBy := currentUserID(c)
-	b, err := s.store.Q.ApproveBatch(ctx, gen.ApproveBatchParams{
-		ID: id, MachineID: &machineID, ApprovedBy: &approvedBy, MergedFileID: &mergedID,
-		MaterialShortage: !s.filamentAvailable(ctx, s.store.Q, material, filament),
-		UnitsPerBed:      int32ptr(plate.unitsPerBed), TotalPrintTimeMinutes: total,
-		EffectiveTimePerUnitMinutes: eff, TotalFilamentGrams: &filament,
-		BedUtilizationPercent: &plate.utilisation,
+
+	var b gen.Batch
+	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		// Reserve filament in the same transaction as the Draft->Locked
+		// transition below, so a lost race against the guard (WHERE
+		// status = 'pending_approval') can never leave stock debited without
+		// the batch actually moving to open, or vice versa.
+		if err := s.adjustFilamentByColour(ctx, q, split, -1); err != nil {
+			return err
+		}
+		var err error
+		b, err = q.ApproveBatch(ctx, gen.ApproveBatchParams{
+			ID: id, MachineID: machineID, ApprovedBy: &approvedBy, MergedFileID: &mergedID,
+			MaterialShortage: shortage, UnitsPerBed: unitsPerBed, TotalPrintTimeMinutes: total,
+			EffectiveTimePerUnitMinutes: eff, TotalFilamentGrams: &filament,
+			BedUtilizationPercent: utilisation,
+		})
+		return err
 	})
+	if isNoRows(err) {
+		detail(c, http.StatusConflict, "This batch has already been approved.")
+		return
+	}
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not approve the batch.")
 		return
 	}
 	c.JSON(http.StatusOK, batchDTO(b))
+}
+
+// mergedPlateFor resolves a batch's merged plate file, reusing the cached
+// Draft-time preview (built by the batch worker - see AutoCreateBatches) when
+// present, instead of re-merging on the request path. Falls back to building
+// it synchronously for a batch that never got one cached (created via POST
+// /batches, or the worker's cache attempt failed). Writes the error response
+// itself and returns ok=false on any failure, same convention as
+// resolveOptionalMachine/resolveOptionalFile.
+func (s *Server) mergedPlateFor(
+	ctx context.Context, c *gin.Context, batch gen.Batch, jobs []gen.ProductionJob,
+) (fileID uuid.UUID, unitsPerBed *int32, utilisation *float64, ok bool) {
+	if batch.PreviewFileID != nil {
+		return *batch.PreviewFileID, batch.UnitsPerBed, db.NumFloatPtr(batch.BedUtilizationPercent), true
+	}
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
+	if herr != nil {
+		detail(c, herr.status, herr.msg)
+		return uuid.Nil, nil, nil, false
+	}
+	id, err := s.storePlate(ctx, batch.ID, "plate", batch.BatchNumber, plate.data, plate.bbox, c)
+	if err != nil {
+		return uuid.Nil, nil, nil, false
+	}
+	return id, int32ptr(plate.unitsPerBed), &plate.utilisation, true
 }
 
 // --- merge orchestration ------------------------------------------------------
@@ -380,6 +438,7 @@ type plateResult struct {
 	data        []byte
 	unitsPerBed int
 	utilisation float64
+	bbox        meshio.Bbox
 }
 
 type httpErr struct {
@@ -439,8 +498,10 @@ func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob,
 			Triangles: meshByJob[p.RefID], XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
 		})
 	}
-	data := meshio.MergeBinarySTL(batchNumber, parts)
-	return plateResult{data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercent(units)}, nil
+	data, bbox := meshio.MergeBinarySTL(batchNumber, parts)
+	return plateResult{
+		data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercent(units), bbox: bbox,
+	}, nil
 }
 
 // loadModelMesh downloads a file asset to a temp path and parses its mesh.
@@ -464,8 +525,10 @@ func (s *Server) loadModelMesh(ctx context.Context, file gen.FileAsset) (orienta
 	return mesh, nil
 }
 
-// storePlate uploads merged plate bytes and records a file asset, returning its id.
-func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchNumber string, data []byte, c *gin.Context) (uuid.UUID, error) {
+// storePlate uploads merged plate bytes and records a file asset (with the
+// plate's overall bbox, so its dimensions can be displayed/downloaded
+// alongside it), returning its id.
+func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchNumber string, data []byte, bbox meshio.Bbox, c *gin.Context) (uuid.UUID, error) {
 	key := fmt.Sprintf("batches/%s/%s.stl", batchID, kind)
 	if err := s.storage.Put(ctx, key, bytes.NewReader(data), int64(len(data)), "model/stl"); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not store the merged plate.")
@@ -475,6 +538,7 @@ func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchN
 	if _, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
 		ID: fileID, Filename: batchNumber + "-" + kind + ".stl", ContentType: "model/stl",
 		SizeBytes: int64(len(data)), StorageKey: key, UploadedBy: currentUserID(c),
+		BboxXMm: &bbox.XMM, BboxYMm: &bbox.YMM, BboxZMm: &bbox.ZMM,
 	}); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not record the merged plate.")
 		return uuid.Nil, err
@@ -503,6 +567,31 @@ func (s *Server) fetchStored(ctx context.Context, fileID uuid.UUID) ([]byte, boo
 
 // --- helpers ------------------------------------------------------------------
 
+// decodeColours parses a job's colours jsonb into a plain slice for the
+// planner. An empty/invalid value is an empty set, never an error - a job with
+// no colours recorded simply groups with other colourless jobs.
+func decodeColours(raw []byte) []string {
+	var out []string
+	if len(raw) == 0 {
+		return []string{}
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return []string{}
+	}
+	return out
+}
+
+// numAsString renders a nullable numeric snapshot (nozzle/quality) as a
+// grouping-key string - "" when null, so two null values still group together
+// rather than becoming distinct "0" buckets.
+func numAsString(n pgtype.Numeric) string {
+	f := db.NumFloatPtr(n)
+	if f == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*f, 'f', -1, 64)
+}
+
 // planJobsFor builds planner inputs from jobs, reading each job's print-file
 // bounding box (a job with no measurable file gets a zero footprint, which the
 // planner reports as unbatchable).
@@ -524,7 +613,11 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 		}
 		out = append(out, production.PlanJob{
 			ID: j.ID.String(), JobNumber: j.JobNumber,
-			Material: deref(j.Material), Colour: deref(j.Colour), Nozzle: deref(j.NozzleProfile),
+			Material: deref(j.Material), Colours: decodeColours(j.Colours),
+			NozzleLeft: numAsString(j.LeftNozzleMm), NozzleRight: numAsString(j.RightNozzleMm),
+			QualityMM: numAsString(j.QualityMm), MachineFamily: deref(j.MachineFamily),
+			SupportUsed: j.SupportUsed != nil && *j.SupportUsed,
+			InfillPct:   db.NumFloat(j.InfillPct), Priority: int(j.Priority),
 			Quantity: int(j.Quantity), EstimatedMinutes: int32PtrToIntPtr(j.EstimatedPrintTimeMinutes),
 			DueDate: db.TimePtr(j.DueDate), FilamentGrams: db.NumFloat(j.FilamentGramsRequired), Footprint: box,
 		})
@@ -554,15 +647,6 @@ func batchMaterial(jobs []production.PlanJob) *string {
 		if j.Material != "" {
 			m := j.Material
 			return &m
-		}
-	}
-	return nil
-}
-
-func batchMaterialFromJobs(jobs []gen.ProductionJob) *string {
-	for _, j := range jobs {
-		if j.Material != nil && *j.Material != "" {
-			return j.Material
 		}
 	}
 	return nil

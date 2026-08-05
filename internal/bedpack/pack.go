@@ -9,7 +9,7 @@ import "math"
 // Bed dimensions and the gap kept between parts, in millimetres. A part must fit
 // within (bed - its footprint - gap) to be placed.
 const (
-	BedXMM = 300.0
+	BedXMM = 330.0
 	BedYMM = 320.0
 	BedZMM = 300.0
 	GapMM  = 10.0

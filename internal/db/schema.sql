@@ -26,16 +26,31 @@ CREATE TABLE cost_assumption_sets (
 );
 
 CREATE TABLE machine_profiles (
-    id                uuid PRIMARY KEY,
-    name              varchar(120) NOT NULL UNIQUE,
-    machine_hour_cost numeric(10, 2) NOT NULL,
-    is_active         boolean NOT NULL,
+    id                   uuid PRIMARY KEY,
+    name                 varchar(120) NOT NULL UNIQUE,
+    machine_hour_cost    numeric(10, 2) NOT NULL,
+    is_active            boolean NOT NULL,
     -- Operational status for the print queue: online | busy | offline | maintenance.
     -- Only 'online' machines are eligible to run a batch.
-    status            varchar(32) NOT NULL DEFAULT 'offline',
-    created_at        timestamptz NOT NULL DEFAULT now(),
-    updated_at        timestamptz NOT NULL DEFAULT now()
+    status               varchar(32) NOT NULL DEFAULT 'offline',
+    -- Slicing config, exposed via /machines (distinct from /config/machines'
+    -- cost-only view). right_nozzle_mm is null for single-nozzle machines.
+    family               varchar(16) NOT NULL DEFAULT 'H2S',
+    nozzle_mm            numeric(3, 2) NOT NULL DEFAULT 0.4,
+    right_nozzle_mm      numeric(3, 2),
+    flow                 varchar(16) NOT NULL DEFAULT 'standard',
+    -- The right nozzle's flow setting (dual-nozzle machines only); null for a
+    -- single-nozzle profile, matching right_nozzle_mm's nullability.
+    right_flow           varchar(16),
+    default_colour       varchar(40),
+    layer_height_min_mm  numeric(4, 2) NOT NULL DEFAULT 0.08,
+    layer_height_max_mm  numeric(4, 2) NOT NULL DEFAULT 0.28,
+    supported_filaments  jsonb NOT NULL DEFAULT '[]',
+    is_default           boolean NOT NULL DEFAULT false,
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX uq_machine_profiles_default ON machine_profiles (is_default) WHERE is_default;
 
 CREATE TABLE material_profiles (
     id            uuid PRIMARY KEY,
@@ -169,11 +184,16 @@ CREATE TABLE designs (
     units_per_bed integer NOT NULL,
     quality       varchar(20) NOT NULL,
     infill_pct    numeric(5, 2) NOT NULL,
+    sku           varchar(64),
+    -- Which printer profile this design was sliced for; the job-creation
+    -- worker snapshots its nozzle/quality facts onto a matched job.
+    machine_id    uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_designs_brand_slug ON designs (brand_slug);
 CREATE INDEX ix_designs_brand_created ON designs (brand_slug, created_at DESC, id DESC);
+CREATE UNIQUE INDEX uq_designs_sku ON designs (sku) WHERE sku IS NOT NULL;
 
 CREATE TABLE slice_jobs (
     id         uuid PRIMARY KEY,
@@ -260,22 +280,42 @@ CREATE TABLE file_assets (
 CREATE INDEX ix_file_assets_uploaded_by ON file_assets (uploaded_by);
 
 CREATE TABLE orders (
-    id                 uuid PRIMARY KEY,
-    shop_connection_id uuid,
-    shopify_order_id   bigint NOT NULL,
-    order_number       varchar(64) NOT NULL,
-    customer_name      varchar(255),
-    financial_status   varchar(32) NOT NULL,
-    total_price        numeric(10, 2) NOT NULL,
-    currency           varchar(3) NOT NULL,
-    line_items         jsonb NOT NULL DEFAULT '[]',
-    status             varchar(32) NOT NULL DEFAULT 'queued',
-    imported_at        timestamptz NOT NULL DEFAULT now(),
-    created_at         timestamptz NOT NULL DEFAULT now(),
-    updated_at         timestamptz NOT NULL DEFAULT now()
+    id                  uuid PRIMARY KEY,
+    shop_connection_id  uuid,
+    shopify_order_id    bigint NOT NULL,
+    order_number        varchar(64) NOT NULL,
+    customer_name       varchar(255),
+    shopify_customer_id bigint,
+    customer_email      varchar(255),
+    customer_phone      varchar(64),
+    financial_status    varchar(32) NOT NULL,
+    total_price         numeric(10, 2) NOT NULL,
+    currency            varchar(3) NOT NULL,
+    line_items          jsonb NOT NULL DEFAULT '[]',
+    status              varchar(32) NOT NULL DEFAULT 'queued',
+    source              varchar(20) NOT NULL DEFAULT 'shopify_webhook'
+        CHECK (source IN ('shopify_webhook', 'seed')),
+    imported_at         timestamptz NOT NULL DEFAULT now(),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX ix_orders_shopify_order_id ON orders (shopify_order_id);
 CREATE INDEX ix_orders_imported ON orders (imported_at DESC, id DESC);
+CREATE INDEX ix_orders_source ON orders (source);
+
+CREATE TABLE order_line_items (
+    id                  uuid PRIMARY KEY,
+    order_id            uuid NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
+    shopify_order_id    bigint NOT NULL,
+    shopify_customer_id bigint,
+    sku                 varchar(120),
+    product_name        varchar(255) NOT NULL,
+    product_image_url   text,
+    quantity            integer NOT NULL DEFAULT 1,
+    created_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_order_line_items_order ON order_line_items (order_id);
+CREATE INDEX ix_order_line_items_shopify_order ON order_line_items (shopify_order_id);
 
 CREATE TABLE production_jobs (
     id                            uuid PRIMARY KEY,
@@ -316,6 +356,19 @@ CREATE TABLE production_jobs (
     personalisation_validated_at  timestamptz,
     reprint_of_job_id             uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
     held                          boolean NOT NULL DEFAULT false,
+    -- Multi-colour set (e.g. ["Red","Yellow","Black"]) and the grouping/
+    -- validation-stage snapshots: support usage and infill from the matched
+    -- design's slice, dual-nozzle + quality from its printer profile, and the
+    -- fixed issue-reason taxonomy from job creation (null = no issue).
+    colours                       jsonb NOT NULL DEFAULT '[]',
+    support_used                  boolean,
+    infill_pct                    numeric(5, 2),
+    left_nozzle_mm                numeric(3, 2),
+    right_nozzle_mm               numeric(3, 2),
+    flow_pct                      numeric(6, 2),
+    quality_mm                    numeric(4, 3),
+    machine_family                varchar(16),
+    issue_reason                  varchar(32),
     created_at                    timestamptz NOT NULL DEFAULT now(),
     updated_at                    timestamptz NOT NULL DEFAULT now()
 );
@@ -325,6 +378,8 @@ CREATE INDEX ix_production_jobs_created ON production_jobs (created_at DESC, id 
 CREATE INDEX ix_production_jobs_personalisation ON production_jobs (personalisation_status);
 CREATE INDEX ix_production_jobs_reprint_of ON production_jobs (reprint_of_job_id);
 CREATE INDEX ix_production_jobs_shopify_order_id ON production_jobs (shopify_order_id);
+CREATE INDEX ix_production_jobs_colours ON production_jobs USING gin (colours);
+CREATE INDEX ix_production_jobs_issue ON production_jobs (issue_reason) WHERE issue_reason IS NOT NULL;
 
 CREATE TABLE production_job_failures (
     id                    uuid PRIMARY KEY,
@@ -355,6 +410,9 @@ CREATE TABLE batches (
     total_filament_grams            numeric(10, 2),
     bed_utilization_percent         numeric(5, 2),
     packing_strategy                varchar(32),
+    -- Set true the moment approveBatch debits filament stock, so a lost race
+    -- against the pending_approval-only guard can't double-reserve.
+    filament_reserved               boolean NOT NULL DEFAULT false,
     created_at                      timestamptz NOT NULL DEFAULT now(),
     updated_at                      timestamptz NOT NULL DEFAULT now()
 );
@@ -393,11 +451,16 @@ CREATE TABLE machines (
     batch_total_time_minutes  integer,
     print_started_at          timestamptz,
     total_waste_grams         numeric(10, 2) NOT NULL DEFAULT 0,
+    -- Which slicing config (machine_profiles row) this physical unit runs. The
+    -- scheduler resolves a batch's machine_id (a machine_profiles id) to a
+    -- specific fleet machine by matching this column.
+    machine_profile_id       uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_machines_status ON machines (status);
 CREATE INDEX ix_machines_current_batch ON machines (current_batch_id);
+CREATE INDEX idx_machines_machine_profile_id ON machines (machine_profile_id);
 
 CREATE TABLE production_job_assembly_checks (
     id                uuid PRIMARY KEY,

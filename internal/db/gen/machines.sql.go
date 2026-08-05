@@ -31,7 +31,7 @@ func (q *Queries) AdjustFleetMachineWaste(ctx context.Context, arg AdjustFleetMa
 }
 
 const getFleetMachine = `-- name: GetFleetMachine :one
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at FROM machines WHERE id = $1
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at FROM machines WHERE id = $1
 `
 
 func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, error) {
@@ -50,6 +50,7 @@ func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, e
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -63,7 +64,7 @@ INSERT INTO machines (
     $1, $2, $3, $4,
     $5, $6
 )
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at
 `
 
 type InsertFleetMachineParams struct {
@@ -98,6 +99,7 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -106,7 +108,7 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 
 const listFleetMachines = `-- name: ListFleetMachines :many
 
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at FROM machines ORDER BY machine_id
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at FROM machines ORDER BY machine_id
 `
 
 // The physical printer fleet (table: machines), distinct from machine_profiles
@@ -135,6 +137,7 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 			&i.BatchTotalTimeMinutes,
 			&i.PrintStartedAt,
 			&i.TotalWasteGrams,
+			&i.MachineProfileID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -148,12 +151,165 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 	return items, nil
 }
 
+const listFleetMachinesWithFamily = `-- name: ListFleetMachinesWithFamily :many
+SELECT m.id, m.machine_id, m.name, m.image_url, m.status, m.filaments, m.current_batch_id, m.current_layer, m.total_layers, m.batch_total_time_minutes, m.print_started_at, m.total_waste_grams, m.machine_profile_id, m.created_at, m.updated_at, mp.family AS profile_family
+FROM machines m
+LEFT JOIN machine_profiles mp ON mp.id = m.machine_profile_id
+ORDER BY m.machine_id
+`
+
+type ListFleetMachinesWithFamilyRow struct {
+	ID                    uuid.UUID
+	MachineID             string
+	Name                  string
+	ImageUrl              *string
+	Status                string
+	Filaments             []byte
+	CurrentBatchID        *uuid.UUID
+	CurrentLayer          *int32
+	TotalLayers           *int32
+	BatchTotalTimeMinutes *int32
+	PrintStartedAt        pgtype.Timestamptz
+	TotalWasteGrams       pgtype.Numeric
+	MachineProfileID      *uuid.UUID
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+	ProfileFamily         *string
+}
+
+// Every fleet machine with its linked profile's family (null if unlinked or
+// off, both of which the scheduler skips) - what the earliest-free-machine
+// scheduler ranks over for a given batch's required machine family.
+func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetMachinesWithFamilyRow, error) {
+	rows, err := q.db.Query(ctx, listFleetMachinesWithFamily)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFleetMachinesWithFamilyRow{}
+	for rows.Next() {
+		var i ListFleetMachinesWithFamilyRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.MachineID,
+			&i.Name,
+			&i.ImageUrl,
+			&i.Status,
+			&i.Filaments,
+			&i.CurrentBatchID,
+			&i.CurrentLayer,
+			&i.TotalLayers,
+			&i.BatchTotalTimeMinutes,
+			&i.PrintStartedAt,
+			&i.TotalWasteGrams,
+			&i.MachineProfileID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ProfileFamily,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listQueuedBatchesForFleetMachine = `-- name: ListQueuedBatchesForFleetMachine :many
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.created_at, b.updated_at
+FROM batches b
+JOIN machines m ON m.machine_profile_id = b.machine_id
+WHERE m.id = $1
+  AND b.status IN ('open', 'in_progress')
+ORDER BY b.created_at ASC, b.id ASC
+`
+
+// Batches already open/in_progress on this fleet machine's linked profile,
+// oldest first (FCFS) - both the scheduler's load calculation and the
+// GET /machine-fleet/:id/queue endpoint.
+func (q *Queries) ListQueuedBatchesForFleetMachine(ctx context.Context, fleetMachineID uuid.UUID) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listQueuedBatchesForFleetMachine, fleetMachineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Batch{}
+	for rows.Next() {
+		var i Batch
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setFleetMachineProfile = `-- name: SetFleetMachineProfile :one
+UPDATE machines SET machine_profile_id = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at
+`
+
+type SetFleetMachineProfileParams struct {
+	MachineProfileID *uuid.UUID
+	ID               uuid.UUID
+}
+
+// Links a physical unit to the slicing config it runs. Used by the seed step
+// and, later, by fleet admin tooling.
+func (q *Queries) SetFleetMachineProfile(ctx context.Context, arg SetFleetMachineProfileParams) (Machine, error) {
+	row := q.db.QueryRow(ctx, setFleetMachineProfile, arg.MachineProfileID, arg.ID)
+	var i Machine
+	err := row.Scan(
+		&i.ID,
+		&i.MachineID,
+		&i.Name,
+		&i.ImageUrl,
+		&i.Status,
+		&i.Filaments,
+		&i.CurrentBatchID,
+		&i.CurrentLayer,
+		&i.TotalLayers,
+		&i.BatchTotalTimeMinutes,
+		&i.PrintStartedAt,
+		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateFleetMachineFilaments = `-- name: UpdateFleetMachineFilaments :one
 UPDATE machines SET
     filaments  = $1,
     updated_at = now()
 WHERE id = $2
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at
 `
 
 type UpdateFleetMachineFilamentsParams struct {
@@ -177,6 +333,7 @@ func (q *Queries) UpdateFleetMachineFilaments(ctx context.Context, arg UpdateFle
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -193,7 +350,7 @@ UPDATE machines SET
     print_started_at         = $6,
     updated_at                = now()
 WHERE id = $7
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at
 `
 
 type UpdateFleetMachineStateParams struct {
@@ -234,6 +391,7 @@ func (q *Queries) UpdateFleetMachineState(ctx context.Context, arg UpdateFleetMa
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

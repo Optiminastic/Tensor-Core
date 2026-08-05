@@ -35,7 +35,7 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
@@ -52,6 +52,8 @@ type GetDesignByIDRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -72,6 +74,60 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.UnitsPerBed,
 		&i.Quality,
 		&i.InfillPct,
+		&i.Sku,
+		&i.MachineID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getDesignBySKU = `-- name: GetDesignBySKU :one
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       sku, machine_id, created_at, updated_at
+FROM designs WHERE sku = $1 AND status IN ('approved', 'published')
+`
+
+type GetDesignBySKURow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// Used by the job-creation worker to match an order line item's SKU to its
+// approved design. Only approved/published designs are sellable/printable.
+func (q *Queries) GetDesignBySKU(ctx context.Context, sku *string) (GetDesignBySKURow, error) {
+	row := q.db.QueryRow(ctx, getDesignBySKU, sku)
+	var i GetDesignBySKURow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Sku,
+		&i.MachineID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -265,16 +321,16 @@ const insertDesign = `-- name: InsertDesign :one
 
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct
+    material, colour, finish, units_per_bed, quality, infill_pct, machine_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
     $9, $10, $11,
-    $12::float8
+    $12::float8, $13
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-          created_at, updated_at
+          sku, machine_id, created_at, updated_at
 `
 
 type InsertDesignParams struct {
@@ -290,6 +346,7 @@ type InsertDesignParams struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	MachineID   *uuid.UUID
 }
 
 type InsertDesignRow struct {
@@ -305,6 +362,8 @@ type InsertDesignRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -325,6 +384,7 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		arg.UnitsPerBed,
 		arg.Quality,
 		arg.InfillPct,
+		arg.MachineID,
 	)
 	var i InsertDesignRow
 	err := row.Scan(
@@ -340,6 +400,8 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		&i.UnitsPerBed,
 		&i.Quality,
 		&i.InfillPct,
+		&i.Sku,
+		&i.MachineID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -439,7 +501,7 @@ func (q *Queries) InsertSliceMetrics(ctx context.Context, arg InsertSliceMetrics
 const listDesignsByBrand = `-- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC
 `
 
@@ -456,6 +518,8 @@ type ListDesignsByBrandRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -482,6 +546,8 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 			&i.UnitsPerBed,
 			&i.Quality,
 			&i.InfillPct,
+			&i.Sku,
+			&i.MachineID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -498,7 +564,7 @@ func (q *Queries) ListDesignsByBrand(ctx context.Context, brandSlug string) ([]L
 const listDesignsByBrandPage = `-- name: ListDesignsByBrandPage :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs
 WHERE brand_slug = $1
   AND (
@@ -529,6 +595,8 @@ type ListDesignsByBrandPageRow struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -563,6 +631,8 @@ func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByB
 			&i.UnitsPerBed,
 			&i.Quality,
 			&i.InfillPct,
+			&i.Sku,
+			&i.MachineID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -586,6 +656,123 @@ func (q *Queries) NextAttemptForDesign(ctx context.Context, designID uuid.UUID) 
 	var next_attempt int32
 	err := row.Scan(&next_attempt)
 	return next_attempt, err
+}
+
+const updateDesignMachine = `-- name: UpdateDesignMachine :one
+UPDATE designs SET machine_id = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+          sku, machine_id, created_at, updated_at
+`
+
+type UpdateDesignMachineParams struct {
+	MachineID *uuid.UUID
+	ID        uuid.UUID
+}
+
+type UpdateDesignMachineRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// Relinks a design to a different machine_profiles row (see
+// internal/httpapi/design_machine_link.go#findOrCreateMachineProfile) - the
+// "Machine" tab's edit form.
+func (q *Queries) UpdateDesignMachine(ctx context.Context, arg UpdateDesignMachineParams) (UpdateDesignMachineRow, error) {
+	row := q.db.QueryRow(ctx, updateDesignMachine, arg.MachineID, arg.ID)
+	var i UpdateDesignMachineRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Sku,
+		&i.MachineID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateDesignSku = `-- name: UpdateDesignSku :one
+UPDATE designs SET sku = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+          sku, machine_id, created_at, updated_at
+`
+
+type UpdateDesignSkuParams struct {
+	Sku *string
+	ID  uuid.UUID
+}
+
+type UpdateDesignSkuRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	Sku         *string
+	MachineID   *uuid.UUID
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// A nil sku clears it (frontend contract: empty string -> clear). The caller
+// maps a unique_violation on this to a 409 - see designs.go#setDesignSku.
+func (q *Queries) UpdateDesignSku(ctx context.Context, arg UpdateDesignSkuParams) (UpdateDesignSkuRow, error) {
+	row := q.db.QueryRow(ctx, updateDesignSku, arg.Sku, arg.ID)
+	var i UpdateDesignSkuRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Sku,
+		&i.MachineID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateDesignSpecs = `-- name: UpdateDesignSpecs :exec

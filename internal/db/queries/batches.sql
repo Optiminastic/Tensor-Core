@@ -41,9 +41,15 @@ RETURNING *;
 
 -- name: ApproveBatch :one
 -- Records the approval: assigns the machine, stamps approver/time, links the merged
--- plate, refreshes the snapshot metrics, and opens the batch for printing.
+-- plate, refreshes the snapshot metrics, marks filament reserved, and opens the
+-- batch for printing. A null machine_id keeps whatever the batch worker already
+-- assigned at Draft creation (see AutoCreateBatches) - an operator only needs to
+-- pass one to override it. Only fires from pending_approval (Draft) - the WHERE
+-- guard makes the Draft->Locked transition atomic with the filament reservation
+-- the caller does in the same tx, so a lost race can never double-reserve or
+-- re-approve; zero rows back means the batch was not in pending_approval.
 UPDATE batches SET
-    machine_id                      = sqlc.arg('machine_id'),
+    machine_id                      = COALESCE(sqlc.narg('machine_id')::uuid, machine_id),
     approved_by                     = sqlc.narg('approved_by'),
     approved_at                     = now(),
     merged_file_id                  = sqlc.narg('merged_file_id'),
@@ -53,9 +59,10 @@ UPDATE batches SET
     effective_time_per_unit_minutes = sqlc.narg('effective_time_per_unit_minutes')::float8,
     total_filament_grams            = sqlc.narg('total_filament_grams')::float8,
     bed_utilization_percent         = sqlc.narg('bed_utilization_percent')::float8,
+    filament_reserved               = true,
     status                          = 'open',
     updated_at                      = now()
-WHERE id = sqlc.arg('id')
+WHERE id = sqlc.arg('id') AND status = 'pending_approval'
 RETURNING *;
 
 -- name: SetBatchPreviewFile :one

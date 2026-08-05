@@ -111,7 +111,7 @@ func TestIntegrationOrdersPaidWebhook(t *testing.T) {
 
 	// The imported order feeds from-order: one job with the mapped material and a
 	// validated personalisation (name supplied, nothing else required).
-	orders, err := store.Q.ListOrders(context.Background())
+	orders, err := store.Q.ListOrders(context.Background(), nil)
 	if err != nil || len(orders) != 1 {
 		t.Fatalf("orders after webhook = %d (err %v), want 1", len(orders), err)
 	}

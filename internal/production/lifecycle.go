@@ -73,6 +73,22 @@ const (
 	MachineMaintenance = "maintenance"
 )
 
+// Issue reasons (production_jobs.issue_reason): the Validation stage's fixed
+// taxonomy. A job with any of these set is excluded from batching until fixed,
+// but is never dropped - it stays visible with a reason. This is a separate
+// axis from `status` (the print lifecycle) and `personalisation_status`; the
+// three job-list display states (issue / pending / ready-for-batching) are
+// derived by the API layer, not stored as a third status column.
+const (
+	IssueSKUMissing         = "sku_missing"
+	IssueNoApprovedDesign   = "no_approved_design"
+	IssueSTLMissing         = "stl_missing"
+	IssueColourMissing      = "colour_missing"
+	IssueMaterialMissing    = "material_missing"
+	IssueProfileMissing     = "profile_missing"
+	IssueFilamentOutOfStock = "filament_out_of_stock"
+)
+
 var batchStatusTargets = set(BatchOpen, BatchInProgress, BatchCompleted)
 var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMaintenance)
 
@@ -151,6 +167,7 @@ func AllowedPatchFields(roles []string) map[string]bool {
 // distinguishable from an empty value.
 type LineItem struct {
 	ProductID                    string     `json:"product_id"`
+	SKU                          *string    `json:"sku"`
 	ProductName                  string     `json:"product_name"`
 	Category                     *string    `json:"category"`
 	Quantity                     int        `json:"quantity"`
@@ -217,6 +234,36 @@ func AutoValidatePersonalisation(li LineItem) (string, Confirms) {
 		Approval: !li.CustomerApprovalRequired || li.CustomerApprovalReceived,
 	}
 	return StatusFor(c), c
+}
+
+// PersonalisationLog explains what's still pending for a personalisation-
+// required job, one line per unmet confirmation - the order/job detail
+// pages render this as the "what's ready / what's pending and why" log. Nil
+// when personalisation isn't required for this job at all.
+func PersonalisationLog(c Confirms, required bool) []string {
+	if !required {
+		return nil
+	}
+	var out []string
+	if !c.Name {
+		out = append(out, "Name not confirmed")
+	}
+	if !c.Font {
+		out = append(out, "Font not confirmed")
+	}
+	if !c.Colour {
+		out = append(out, "Colour not confirmed")
+	}
+	if !c.Variant {
+		out = append(out, "Variant not confirmed")
+	}
+	if !c.Photo {
+		out = append(out, "Photo not uploaded")
+	}
+	if !c.Approval {
+		out = append(out, "Customer approval not received")
+	}
+	return out
 }
 
 // NewJobNumber returns a job identifier of the form JOB-XXXXXX (6 uppercase hex).

@@ -32,6 +32,7 @@ type designForm struct {
 	Colour      *string
 	UnitsPerBed int32
 	InfillPct   float64
+	Machine     nozzleSpec
 }
 
 // pipelineReady fails closed with 503 when object storage or the slice enqueuer
@@ -79,7 +80,7 @@ func (s *Server) createDesign(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, designDTO(row.ID, row.BrandSlug, row.Name, row.CreatedBy, row.Status,
-		row.Material, row.Colour, row.Finish, row.UnitsPerBed, row.Quality, row.InfillPct,
+		row.Material, row.Colour, row.Finish, row.UnitsPerBed, row.Quality, row.InfillPct, row.Sku,
 		row.CreatedAt, row.UpdatedAt))
 }
 
@@ -96,7 +97,7 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 		detail(c, http.StatusUnprocessableEntity, "Name must be 1 to 160 characters.")
 		return f, nil, false
 	}
-	f.Material = strings.ToUpper(strings.TrimSpace(c.PostForm("material")))
+	f.Material = strings.TrimSpace(c.PostForm("material"))
 	f.Finish = strings.ToLower(strings.TrimSpace(c.PostForm("finish")))
 	f.Quality = strings.ToLower(strings.TrimSpace(c.PostForm("quality")))
 	if !validateSpecValues(c, f.Material, f.Finish, f.Quality) {
@@ -115,6 +116,11 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 		return f, nil, false
 	}
 	f.InfillPct = infill
+	machine, ok := parseNozzleSpec(c)
+	if !ok {
+		return f, nil, false
+	}
+	f.Machine = machine
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -127,7 +133,7 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 // validateSpecValues checks the enum-like answers against the accepted sets.
 func validateSpecValues(c *gin.Context, material, finish, quality string) bool {
 	if !validMaterials[material] {
-		detail(c, http.StatusUnprocessableEntity, "Material must be one of PLA, PETG, ABS.")
+		detail(c, http.StatusUnprocessableEntity, "Material must be one of PLA Basics, PA-CF.")
 		return false
 	}
 	if !validFinishes[finish] {
@@ -135,10 +141,46 @@ func validateSpecValues(c *gin.Context, material, finish, quality string) bool {
 		return false
 	}
 	if !validQualities[quality] {
-		detail(c, http.StatusUnprocessableEntity, "Quality must be one of draft, standard, fine.")
+		detail(c, http.StatusUnprocessableEntity,
+			"Quality must be one of 0.08-high, 0.12-high, 0.16-high, 0.16-standard, "+
+				"0.20-high, 0.20-standard, 0.24-standard.")
 		return false
 	}
 	return true
+}
+
+// parseNozzleSpec reads and validates the design form's dual-nozzle slicing
+// config (left/right nozzle diameter and flow), resolved to a machine_profiles
+// row inside insertDesignAndJob - see design_machine_link.go.
+func parseNozzleSpec(c *gin.Context) (nozzleSpec, bool) {
+	left, ok := parseNozzleMM(c, c.PostForm("left_nozzle_mm"), "left_nozzle_mm")
+	if !ok {
+		return nozzleSpec{}, false
+	}
+	right, ok := parseNozzleMM(c, c.PostForm("right_nozzle_mm"), "right_nozzle_mm")
+	if !ok {
+		return nozzleSpec{}, false
+	}
+	leftFlow := strings.ToLower(strings.TrimSpace(c.PostForm("left_flow")))
+	if !validFlow[leftFlow] {
+		detail(c, http.StatusUnprocessableEntity, "left_flow must be one of standard, high_flow.")
+		return nozzleSpec{}, false
+	}
+	rightFlow := strings.ToLower(strings.TrimSpace(c.PostForm("right_flow")))
+	if !validFlow[rightFlow] {
+		detail(c, http.StatusUnprocessableEntity, "right_flow must be one of standard, high_flow.")
+		return nozzleSpec{}, false
+	}
+	return nozzleSpec{LeftNozzleMM: left, RightNozzleMM: right, LeftFlow: leftFlow, RightFlow: rightFlow}, true
+}
+
+func parseNozzleMM(c *gin.Context, raw, field string) (float64, bool) {
+	mm, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || !validNozzleMM[mm] {
+		detail(c, http.StatusUnprocessableEntity, field+" must be one of 0.2, 0.4, 0.6, 0.8.")
+		return 0, false
+	}
+	return mm, true
 }
 
 func parseUnits(c *gin.Context, raw string) (int32, bool) {
@@ -203,11 +245,15 @@ func (s *Server) insertDesignAndJob(
 	var row gen.InsertDesignRow
 	jobID := uuid.New()
 	err := s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		machineID, err := s.findOrCreateMachineProfile(ctx, q, form.Machine)
+		if err != nil {
+			return err
+		}
 		d, err := q.InsertDesign(ctx, gen.InsertDesignParams{
 			ID: designID, BrandSlug: form.Brand, Name: form.Name, CreatedBy: createdBy,
 			Status: designQueued, StlKey: stlKey, Material: form.Material, Colour: form.Colour,
 			Finish: form.Finish, UnitsPerBed: form.UnitsPerBed, Quality: form.Quality,
-			InfillPct: form.InfillPct,
+			InfillPct: form.InfillPct, MachineID: &machineID,
 		})
 		if err != nil {
 			return err
@@ -270,7 +316,7 @@ func (s *Server) resubmitDesign(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, designDTO(updated.ID, updated.BrandSlug, updated.Name, updated.CreatedBy,
 		updated.Status, updated.Material, updated.Colour, updated.Finish, updated.UnitsPerBed,
-		updated.Quality, updated.InfillPct, updated.CreatedAt, updated.UpdatedAt))
+		updated.Quality, updated.InfillPct, updated.Sku, updated.CreatedAt, updated.UpdatedAt))
 }
 
 type resubmitRequest struct {
@@ -288,7 +334,7 @@ func (s *Server) parseResubmit(c *gin.Context, brand string) (designForm, bool) 
 	if !bindJSON(c, &req) {
 		return designForm{}, false
 	}
-	material := strings.ToUpper(strings.TrimSpace(req.Material))
+	material := strings.TrimSpace(req.Material)
 	finish := strings.ToLower(strings.TrimSpace(req.Finish))
 	quality := strings.ToLower(strings.TrimSpace(req.Quality))
 	if !validateSpecValues(c, material, finish, quality) {

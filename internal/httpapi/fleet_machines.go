@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -35,7 +37,7 @@ type fleetMachineResponse struct {
 	UpdatedAt             time.Time       `json:"updated_at"`
 }
 
-func fleetMachineDTO(m gen.Machine) fleetMachineResponse {
+func (s *Server) fleetMachineDTO(ctx context.Context, m gen.Machine) fleetMachineResponse {
 	var currentBatchID *string
 	if m.CurrentBatchID != nil {
 		id := m.CurrentBatchID.String()
@@ -44,13 +46,70 @@ func fleetMachineDTO(m gen.Machine) fleetMachineResponse {
 	startedAt := db.TimePtr(m.PrintStartedAt)
 	return fleetMachineResponse{
 		ID: m.ID.String(), MachineID: m.MachineID, Name: m.Name, ImageURL: m.ImageUrl,
-		Status: m.Status, Filaments: json.RawMessage(m.Filaments),
+		Status: m.Status, Filaments: s.computeLiveFilaments(ctx, m),
 		CurrentBatchID: currentBatchID, CurrentLayer: m.CurrentLayer, TotalLayers: m.TotalLayers,
 		BatchTotalTimeMinutes: m.BatchTotalTimeMinutes, PrintStartedAt: startedAt,
 		RemainingSeconds: remainingSeconds(m.BatchTotalTimeMinutes, startedAt),
 		TotalWasteGrams:  db.NumFloat(m.TotalWasteGrams),
 		CreatedAt:        db.Time(m.CreatedAt), UpdatedAt: db.Time(m.UpdatedAt),
 	}
+}
+
+// fleetFilamentResponse is one colour/material a machine is currently using,
+// paired with that bucket's live level in the shared filament pool.
+type fleetFilamentResponse struct {
+	Colour         string  `json:"colour"`
+	Type           string  `json:"type"`
+	RemainingGrams float64 `json:"remaining_grams"`
+}
+
+// computeLiveFilaments derives what a machine is currently consuming - the
+// distinct (material, colour) pairs needed by whatever batch is actively
+// printing on it, or the next one queued if it's idle - each paired with
+// that colour's current level in the single shared filament_inventory pool
+// (see filament_colour.go; there is one warehouse pool, not a separate
+// stock per machine). machines.filaments is a schema column nothing ever
+// writes to (dead groundwork); this computes a live view in its place
+// rather than trusting that always-empty JSONB blob.
+func (s *Server) computeLiveFilaments(ctx context.Context, m gen.Machine) json.RawMessage {
+	empty := json.RawMessage("[]")
+
+	batchID := m.CurrentBatchID
+	if batchID == nil {
+		queued, err := s.store.Q.ListQueuedBatchesForFleetMachine(ctx, m.ID)
+		if err != nil || len(queued) == 0 {
+			return empty
+		}
+		batchID = &queued[0].ID
+	}
+	jobs, err := s.store.Q.ListJobsForBatch(ctx, batchID)
+	if err != nil || len(jobs) == 0 {
+		return empty
+	}
+
+	split := filamentSplitForJobs(jobs)
+	out := make([]fleetFilamentResponse, 0, len(split))
+	for key := range split {
+		var grams float64
+		if row, err := s.store.Q.GetFilamentByMaterialColour(ctx, gen.GetFilamentByMaterialColourParams{
+			Material: key.Material, Colour: colourPtr(key.Colour),
+		}); err == nil {
+			grams = db.NumFloat(row.GramsAvailable)
+		}
+		out = append(out, fleetFilamentResponse{Colour: key.Colour, Type: key.Material, RemainingGrams: grams})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].Colour < out[j].Colour
+	})
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return empty
+	}
+	return data
 }
 
 // remainingSeconds computes a live countdown from a total duration and a start
@@ -73,17 +132,19 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.MachineRead.Key()), s.listFleetMachines)
 	g.GET("/:id", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachine)
+	g.GET("/:id/queue", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachineQueue)
 }
 
 func (s *Server) listFleetMachines(c *gin.Context) {
-	rows, err := s.store.Q.ListFleetMachines(c.Request.Context())
+	ctx := c.Request.Context()
+	rows, err := s.store.Q.ListFleetMachines(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list machines.")
 		return
 	}
 	out := make([]fleetMachineResponse, 0, len(rows))
 	for _, m := range rows {
-		out = append(out, fleetMachineDTO(m))
+		out = append(out, s.fleetMachineDTO(ctx, m))
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -93,10 +154,36 @@ func (s *Server) getFleetMachine(c *gin.Context) {
 	if !ok {
 		return
 	}
-	m, err := s.store.Q.GetFleetMachine(c.Request.Context(), id)
+	ctx := c.Request.Context()
+	m, err := s.store.Q.GetFleetMachine(ctx, id)
 	if err != nil {
 		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
 		return
 	}
-	c.JSON(http.StatusOK, fleetMachineDTO(m))
+	c.JSON(http.StatusOK, s.fleetMachineDTO(ctx, m))
+}
+
+// getFleetMachineQueue lists every batch already queued (open or in_progress)
+// on this physical unit's linked profile, oldest first - what Machine
+// Management shows as "queued on this machine", not just its current print.
+func (s *Server) getFleetMachineQueue(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	if _, err := s.store.Q.GetFleetMachine(ctx, id); err != nil {
+		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
+		return
+	}
+	rows, err := s.store.Q.ListQueuedBatchesForFleetMachine(ctx, id)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list the machine's queue.")
+		return
+	}
+	out := make([]batchResponse, 0, len(rows))
+	for _, b := range rows {
+		out = append(out, batchDTO(b))
+	}
+	c.JSON(http.StatusOK, out)
 }

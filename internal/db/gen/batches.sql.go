@@ -14,7 +14,7 @@ import (
 
 const approveBatch = `-- name: ApproveBatch :one
 UPDATE batches SET
-    machine_id                      = $1,
+    machine_id                      = COALESCE($1::uuid, machine_id),
     approved_by                     = $2,
     approved_at                     = now(),
     merged_file_id                  = $3,
@@ -24,10 +24,11 @@ UPDATE batches SET
     effective_time_per_unit_minutes = $7::float8,
     total_filament_grams            = $8::float8,
     bed_utilization_percent         = $9::float8,
+    filament_reserved               = true,
     status                          = 'open',
     updated_at                      = now()
-WHERE id = $10
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+WHERE id = $10 AND status = 'pending_approval'
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at
 `
 
 type ApproveBatchParams struct {
@@ -44,7 +45,13 @@ type ApproveBatchParams struct {
 }
 
 // Records the approval: assigns the machine, stamps approver/time, links the merged
-// plate, refreshes the snapshot metrics, and opens the batch for printing.
+// plate, refreshes the snapshot metrics, marks filament reserved, and opens the
+// batch for printing. A null machine_id keeps whatever the batch worker already
+// assigned at Draft creation (see AutoCreateBatches) - an operator only needs to
+// pass one to override it. Only fires from pending_approval (Draft) - the WHERE
+// guard makes the Draft->Locked transition atomic with the filament reservation
+// the caller does in the same tx, so a lost race can never double-reserve or
+// re-approve; zero rows back means the batch was not in pending_approval.
 func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Batch, error) {
 	row := q.db.QueryRow(ctx, approveBatch,
 		arg.MachineID,
@@ -75,6 +82,7 @@ func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Bat
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.FilamentReserved,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -82,7 +90,7 @@ func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Bat
 }
 
 const getBatchByID = `-- name: GetBatchByID :one
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches WHERE id = $1
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at FROM batches WHERE id = $1
 `
 
 func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error) {
@@ -104,6 +112,7 @@ func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error)
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.FilamentReserved,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -122,7 +131,7 @@ INSERT INTO batches (
     $8::float8, $9::float8,
     $10::float8, $11
 )
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at
 `
 
 type InsertBatchParams struct {
@@ -173,6 +182,7 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.FilamentReserved,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -180,7 +190,7 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 }
 
 const listBatches = `-- name: ListBatches :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
 `
 
 func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
@@ -208,6 +218,7 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 			&i.TotalFilamentGrams,
 			&i.BedUtilizationPercent,
 			&i.PackingStrategy,
+			&i.FilamentReserved,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -222,7 +233,7 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 }
 
 const listBatchesPage = `-- name: ListBatchesPage :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at FROM batches
 WHERE (
     $1::timestamptz IS NULL
     OR (created_at, id) < ($1::timestamptz, $2::uuid)
@@ -262,6 +273,7 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 			&i.TotalFilamentGrams,
 			&i.BedUtilizationPercent,
 			&i.PackingStrategy,
+			&i.FilamentReserved,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -278,7 +290,7 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 const setBatchPreviewFile = `-- name: SetBatchPreviewFile :one
 UPDATE batches SET preview_file_id = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at
 `
 
 type SetBatchPreviewFileParams struct {
@@ -305,6 +317,7 @@ func (q *Queries) SetBatchPreviewFile(ctx context.Context, arg SetBatchPreviewFi
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.FilamentReserved,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -317,7 +330,7 @@ UPDATE batches SET
     machine_id = CASE WHEN $2::bool THEN $3 ELSE machine_id END,
     updated_at = now()
 WHERE id = $4
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at
 `
 
 type UpdateBatchParams struct {
@@ -352,6 +365,7 @@ func (q *Queries) UpdateBatch(ctx context.Context, arg UpdateBatchParams) (Batch
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.FilamentReserved,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

@@ -318,6 +318,110 @@ func (c *Client) setVariant(
 	return nil
 }
 
+// ProductSummary is one product in a store's catalog, as shown in a listing.
+type ProductSummary struct {
+	GID            string
+	Title          string
+	Handle         string
+	Status         string
+	Vendor         string
+	ProductType    string
+	TotalInventory int
+	ImageURL       string
+	ImageAlt       string
+	MinPrice       string
+	MaxPrice       string
+	CurrencyCode   string
+	UpdatedAt      string
+	AdminURL       string
+}
+
+const listProductsQuery = `query ListProducts($first: Int!) {
+  products(first: $first, sortKey: UPDATED_AT, reverse: true) {
+    nodes {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      totalInventory
+      featuredImage { url altText }
+      priceRangeV2 {
+        minVariantPrice { amount currencyCode }
+        maxVariantPrice { amount currencyCode }
+      }
+      updatedAt
+    }
+  }
+}`
+
+// maxProductsPerPage is Shopify's own cap on a single products(first:) page.
+const maxProductsPerPage = 250
+
+// ListProducts fetches up to limit products from the store's catalog, most
+// recently updated first. It is a single page (no cursor pagination yet) -
+// fine for a brand's own store, which is not expected to run past a few
+// hundred products.
+func (c *Client) ListProducts(ctx context.Context, shop, token string, limit int) ([]ProductSummary, error) {
+	if limit <= 0 || limit > maxProductsPerPage {
+		limit = maxProductsPerPage
+	}
+	var out struct {
+		Data struct {
+			Products struct {
+				Nodes []struct {
+					ID             string `json:"id"`
+					Title          string `json:"title"`
+					Handle         string `json:"handle"`
+					Status         string `json:"status"`
+					Vendor         string `json:"vendor"`
+					ProductType    string `json:"productType"`
+					TotalInventory int    `json:"totalInventory"`
+					FeaturedImage  *struct {
+						URL     string  `json:"url"`
+						AltText *string `json:"altText"`
+					} `json:"featuredImage"`
+					PriceRangeV2 struct {
+						MinVariantPrice struct {
+							Amount       string `json:"amount"`
+							CurrencyCode string `json:"currencyCode"`
+						} `json:"minVariantPrice"`
+						MaxVariantPrice struct {
+							Amount string `json:"amount"`
+						} `json:"maxVariantPrice"`
+					} `json:"priceRangeV2"`
+					UpdatedAt string `json:"updatedAt"`
+				} `json:"nodes"`
+			} `json:"products"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, shop, token, listProductsQuery, map[string]any{"first": limit}, &out); err != nil {
+		return nil, err
+	}
+
+	products := make([]ProductSummary, 0, len(out.Data.Products.Nodes))
+	for _, n := range out.Data.Products.Nodes {
+		p := ProductSummary{
+			GID: n.ID, Title: n.Title, Handle: n.Handle, Status: n.Status,
+			Vendor: n.Vendor, ProductType: n.ProductType, TotalInventory: n.TotalInventory,
+			MinPrice:     n.PriceRangeV2.MinVariantPrice.Amount,
+			MaxPrice:     n.PriceRangeV2.MaxVariantPrice.Amount,
+			CurrencyCode: n.PriceRangeV2.MinVariantPrice.CurrencyCode,
+			UpdatedAt:    n.UpdatedAt,
+			AdminURL:     adminURL(shop, n.ID),
+		}
+		if n.FeaturedImage != nil {
+			p.ImageURL = n.FeaturedImage.URL
+			if n.FeaturedImage.AltText != nil {
+				p.ImageAlt = *n.FeaturedImage.AltText
+			}
+		}
+		products = append(products, p)
+	}
+	return products, nil
+}
+
 type userError struct {
 	Field   []string `json:"field"`
 	Message string   `json:"message"`

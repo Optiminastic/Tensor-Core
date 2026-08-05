@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
@@ -79,14 +80,52 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 	}
 
 	connID := conn.ID
-	if _, err := s.store.Q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
-		ID: uuid.New(), ShopConnectionID: &connID, ShopifyOrderID: payload.ID,
-		OrderNumber: payload.Name, CustomerName: payload.customerName(),
-		FinancialStatus: defaultStr(payload.FinancialStatus, fallbackStatus),
-		TotalPrice:      parsePrice(payload.TotalPrice), Currency: defaultStr(payload.Currency, "USD"),
-		LineItems: lineItemsJSON, Status: "queued",
-	}); err != nil {
-		obs.FromContext(ctx).Error("shopify order webhook upsert failed", "error", err)
+	var order gen.Order
+	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		var err error
+		order, err = q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
+			ID: uuid.New(), ShopConnectionID: &connID, ShopifyOrderID: payload.ID,
+			OrderNumber: payload.Name, CustomerName: payload.customerName(),
+			ShopifyCustomerID: payload.customerID(), CustomerEmail: payload.customerEmail(),
+			CustomerPhone:   payload.customerPhone(),
+			FinancialStatus: defaultStr(payload.FinancialStatus, fallbackStatus),
+			TotalPrice:      parsePrice(payload.TotalPrice), Currency: defaultStr(payload.Currency, "USD"),
+			LineItems: lineItemsJSON, Status: "queued",
+		})
+		if err != nil {
+			return err
+		}
+
+		// Rebuild this order's product rows from scratch so a webhook replay never
+		// accumulates duplicates. Shopify's order webhook doesn't carry a product
+		// image, so product_image_url is left null for real orders.
+		if err := q.DeleteLineItemsForOrder(ctx, order.ID); err != nil {
+			return err
+		}
+		for _, li := range payload.LineItems {
+			if _, err := q.InsertOrderLineItem(ctx, gen.InsertOrderLineItemParams{
+				ID: uuid.New(), OrderID: order.ID, ShopifyOrderID: payload.ID,
+				ShopifyCustomerID: payload.customerID(), Sku: nonEmptyPtr(li.SKU),
+				ProductName: firstNonEmpty(li.Name, li.Title, "Unknown product"),
+				Quantity:    int32(li.Quantity),
+			}); err != nil {
+				return err
+			}
+		}
+
+		// Stage 2 handoff: schedule job creation in the same transaction as the
+		// order/line-items write, so sync never commits while silently failing to
+		// schedule it. Skipped (not failed) when the production queue isn't wired
+		// up - order sync still works standalone, same as EnablePipeline.
+		if s.jobEnqueuer != nil {
+			if err := s.jobEnqueuer.EnqueueTx(ctx, tx, production.CreateJobsArgs{OrderID: order.ID}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		obs.FromContext(ctx).Error("shopify order webhook import failed", "error", err)
 		detail(c, http.StatusInternalServerError, "Could not import the order.")
 		return
 	}
@@ -106,8 +145,11 @@ type shopifyOrderPayload struct {
 }
 
 type shopifyCustomer struct {
+	ID        int64  `json:"id"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
+	Email     string `json:"email"`
+	Phone     string `json:"phone"`
 }
 
 func (p shopifyOrderPayload) customerName() *string {
@@ -116,6 +158,28 @@ func (p shopifyOrderPayload) customerName() *string {
 	}
 	name := strings.TrimSpace(p.Customer.FirstName + " " + p.Customer.LastName)
 	return nonEmptyPtr(name)
+}
+
+func (p shopifyOrderPayload) customerID() *int64 {
+	if p.Customer == nil || p.Customer.ID == 0 {
+		return nil
+	}
+	id := p.Customer.ID
+	return &id
+}
+
+func (p shopifyOrderPayload) customerEmail() *string {
+	if p.Customer == nil {
+		return nil
+	}
+	return nonEmptyPtr(p.Customer.Email)
+}
+
+func (p shopifyOrderPayload) customerPhone() *string {
+	if p.Customer == nil {
+		return nil
+	}
+	return nonEmptyPtr(p.Customer.Phone)
 }
 
 type shopifyLineItem struct {
@@ -148,6 +212,7 @@ func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 
 		out = append(out, production.LineItem{
 			ProductID:                    productID(li),
+			SKU:                          nonEmptyPtr(li.SKU),
 			ProductName:                  firstNonEmpty(li.Name, li.Title, "Unknown product"),
 			Quantity:                     li.Quantity,
 			Unit:                         "pcs",

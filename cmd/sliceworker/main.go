@@ -44,9 +44,15 @@ func main() {
 	}
 	defer store.Close()
 
-	objects, err := storage.New(
-		ctx, cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOSecure,
-	)
+	objects, err := storage.New(ctx, storage.Options{
+		Endpoint:           cfg.MinIOEndpoint,
+		AccessKey:          cfg.MinIOAccessKey,
+		SecretKey:          cfg.MinIOSecretKey,
+		Bucket:             cfg.MinIOBucket,
+		KeyPrefix:          cfg.MinIOKeyPrefix,
+		Secure:             cfg.MinIOSecure,
+		AssumeBucketExists: cfg.MinIOAssumeBucketExists,
+	})
 	if err != nil {
 		log.Fatalf("object storage unavailable: %v", err)
 	}
@@ -67,9 +73,12 @@ func main() {
 		OverhangThresholdDeg: cfg.OrientationOverhangDeg,
 		MaxTriangles:         cfg.OrientationMaxTriangles,
 	}
+	if cfg.FakeSlice {
+		log.Println("FAKE_SLICE is enabled: every slice will be fabricated, not run through Bambu Studio")
+	}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, slicing.NewSliceWorker(
-		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, orientOpts, logger,
+		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, orientOpts, logger, cfg.FakeSlice,
 	))
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{

@@ -55,6 +55,88 @@ UPDATE machine_profiles SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, name, status, is_active;
 
+-- Slicing-config machine profiles, exposed via /machines (internal/httpapi/
+-- machines_ops.go). Cost (machine_hour_cost) is never read/written here - it
+-- stays owned by the /config/machines queries above.
+
+-- name: ListMachineProfilesFull :many
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles ORDER BY name;
+
+-- name: GetMachineProfileFull :one
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles WHERE id = $1;
+
+-- name: FindMachineProfileByNozzleFlow :one
+-- Exact-match lookup for the design-upload auto-link: a profile already
+-- configured with this family + nozzle + flow combination. Nozzle values are
+-- compared as text so a null right_nozzle_mm/right_flow matches a null
+-- argument (COALESCE to a sentinel avoids NULL <> NULL never matching).
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles
+WHERE family = sqlc.arg('family')
+  AND nozzle_mm = sqlc.arg('nozzle_mm')::float8
+  AND COALESCE(right_nozzle_mm::float8, -1) = COALESCE(sqlc.narg('right_nozzle_mm')::float8, -1)
+  AND flow = sqlc.arg('flow')
+  AND COALESCE(right_flow, '') = COALESCE(sqlc.narg('right_flow'), '')
+LIMIT 1;
+
+-- name: InsertMachineProfileFull :one
+-- machine_hour_cost defaults to 0 - it is set separately via /config/machines,
+-- never through this slicing-config surface.
+INSERT INTO machine_profiles (
+    id, name, machine_hour_cost, is_active, family, nozzle_mm, right_nozzle_mm,
+    flow, right_flow, default_colour, layer_height_min_mm, layer_height_max_mm,
+    supported_filaments, status, is_default
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('name'), 0, sqlc.arg('is_active'), sqlc.arg('family'),
+    sqlc.arg('nozzle_mm')::float8, sqlc.narg('right_nozzle_mm')::float8, sqlc.arg('flow'),
+    sqlc.narg('right_flow'), sqlc.narg('default_colour'), sqlc.arg('layer_height_min_mm')::float8,
+    sqlc.arg('layer_height_max_mm')::float8, sqlc.arg('supported_filaments'),
+    sqlc.arg('status'), sqlc.arg('is_default')
+)
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+          flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+          status, is_active, is_default;
+
+-- name: UpdateMachineProfileFull :one
+UPDATE machine_profiles SET
+    name                 = COALESCE(sqlc.narg('name'), name),
+    family               = COALESCE(sqlc.narg('family'), family),
+    nozzle_mm            = COALESCE(sqlc.narg('nozzle_mm')::float8, nozzle_mm),
+    right_nozzle_mm      = CASE WHEN sqlc.arg('set_right_nozzle_mm')::bool
+                                THEN sqlc.narg('right_nozzle_mm')::float8 ELSE right_nozzle_mm END,
+    flow                 = COALESCE(sqlc.narg('flow'), flow),
+    right_flow           = CASE WHEN sqlc.arg('set_right_flow')::bool
+                                THEN sqlc.narg('right_flow') ELSE right_flow END,
+    default_colour       = CASE WHEN sqlc.arg('set_default_colour')::bool
+                                THEN sqlc.narg('default_colour') ELSE default_colour END,
+    layer_height_min_mm  = COALESCE(sqlc.narg('layer_height_min_mm')::float8, layer_height_min_mm),
+    layer_height_max_mm  = COALESCE(sqlc.narg('layer_height_max_mm')::float8, layer_height_max_mm),
+    supported_filaments  = COALESCE(sqlc.narg('supported_filaments'), supported_filaments),
+    status               = COALESCE(sqlc.narg('status'), status),
+    is_active            = COALESCE(sqlc.narg('is_active'), is_active),
+    is_default           = COALESCE(sqlc.narg('is_default'), is_default),
+    updated_at           = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+          flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+          status, is_active, is_default;
+
+-- name: DeleteMachineProfile :execrows
+DELETE FROM machine_profiles WHERE id = $1;
+
 -- name: SuggestMachine :one
 -- The least-loaded online machine: fewest active (open/in_progress) batches.
 SELECT m.id, m.name, m.status

@@ -22,7 +22,7 @@ func rect(w, d float64) []orientation.Triangle {
 func approx(a, b float64) bool { return math.Abs(a-b) < 0.01 }
 
 func TestMergeTranslatesToOffset(t *testing.T) {
-	data := MergeBinarySTL("test", []Placed{
+	data, bbox := MergeBinarySTL("test", []Placed{
 		{Triangles: rect(10, 10), XOffsetMM: 100, YOffsetMM: 50},
 	})
 	mesh, err := orientation.LoadSTL(data)
@@ -35,11 +35,14 @@ func TestMergeTranslatesToOffset(t *testing.T) {
 	if !approx(mesh.Max.X, 110) || !approx(mesh.Max.Y, 60) {
 		t.Errorf("max = %+v, want (110,60,_)", mesh.Max)
 	}
+	if !approx(bbox.XMM, 10) || !approx(bbox.YMM, 10) {
+		t.Errorf("bbox = %+v, want (10,10,_)", bbox)
+	}
 }
 
 func TestMergeRotationSwapsDimensions(t *testing.T) {
 	// A 20x10 part, rotated 90 degrees, should measure 10 wide by 20 deep.
-	data := MergeBinarySTL("rot", []Placed{
+	data, bbox := MergeBinarySTL("rot", []Placed{
 		{Triangles: rect(20, 10), Rotated: true},
 	})
 	mesh, err := orientation.LoadSTL(data)
@@ -49,10 +52,13 @@ func TestMergeRotationSwapsDimensions(t *testing.T) {
 	if !approx(mesh.Max.X-mesh.Min.X, 10) || !approx(mesh.Max.Y-mesh.Min.Y, 20) {
 		t.Errorf("dims = (%v,%v), want (10,20)", mesh.Max.X-mesh.Min.X, mesh.Max.Y-mesh.Min.Y)
 	}
+	if !approx(bbox.XMM, 10) || !approx(bbox.YMM, 20) {
+		t.Errorf("bbox = %+v, want (10,20,_)", bbox)
+	}
 }
 
 func TestMergeCombinesParts(t *testing.T) {
-	data := MergeBinarySTL("multi", []Placed{
+	data, bbox := MergeBinarySTL("multi", []Placed{
 		{Triangles: rect(10, 10), XOffsetMM: 0, YOffsetMM: 0},
 		{Triangles: rect(10, 10), XOffsetMM: 50, YOffsetMM: 0},
 	})
@@ -66,5 +72,8 @@ func TestMergeCombinesParts(t *testing.T) {
 	// The union spans from the first part's origin to the second part's far edge.
 	if !approx(mesh.Min.X, 0) || !approx(mesh.Max.X, 60) {
 		t.Errorf("x-span = [%v,%v], want [0,60]", mesh.Min.X, mesh.Max.X)
+	}
+	if !approx(bbox.XMM, 60) || !approx(bbox.YMM, 10) {
+		t.Errorf("bbox = %+v, want (60,10,_)", bbox)
 	}
 }

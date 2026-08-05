@@ -36,6 +36,35 @@ func (q *Queries) GetFileAsset(ctx context.Context, id uuid.UUID) (FileAsset, er
 	return i, err
 }
 
+const getFileAssetByStorageKey = `-- name: GetFileAssetByStorageKey :one
+SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
+       bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
+FROM file_assets WHERE storage_key = $1 ORDER BY created_at DESC LIMIT 1
+`
+
+// Used by the job-creation worker to check whether a design's STL already has
+// a file_assets row (with its bbox already computed) before downloading and
+// computing one - storage_key has no unique constraint, so this takes the
+// most recently created match.
+func (q *Queries) GetFileAssetByStorageKey(ctx context.Context, storageKey string) (FileAsset, error) {
+	row := q.db.QueryRow(ctx, getFileAssetByStorageKey, storageKey)
+	var i FileAsset
+	err := row.Scan(
+		&i.ID,
+		&i.Filename,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.StorageKey,
+		&i.IsTemplate,
+		&i.UploadedBy,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertFileAsset = `-- name: InsertFileAsset :one
 
 INSERT INTO file_assets (

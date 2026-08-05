@@ -19,43 +19,72 @@ import (
 // as its context allows; the full transfer is still bounded by the caller's ctx.
 const responseHeaderTimeout = 30 * time.Second
 
-// Client is a bucket-bound object store handle.
+// Client is a bucket-bound object store handle. Every key is namespaced under
+// prefix, so multiple apps can safely share one bucket.
 type Client struct {
 	mc     *minio.Client
 	bucket string
+	prefix string
 }
 
-// New builds the client and ensures the bucket exists (created on first run).
-func New(ctx context.Context, endpoint, accessKey, secretKey, bucket string, secure bool) (*Client, error) {
-	transport, err := minio.DefaultTransport(secure)
+// Options configures New. KeyPrefix is prepended to every object key - set it
+// when Bucket is shared with other applications (e.g. "Tensor/") so this
+// client can never read or write another app's objects.
+//
+// AssumeBucketExists skips the BucketExists/MakeBucket check. Set it when the
+// bucket is managed outside this service (e.g. a shared bucket where this
+// client's IAM credentials are scoped to KeyPrefix only and cannot even
+// HeadBucket at the bucket root, let alone create one).
+type Options struct {
+	Endpoint           string
+	AccessKey          string
+	SecretKey          string
+	Bucket             string
+	KeyPrefix          string
+	Secure             bool
+	AssumeBucketExists bool
+}
+
+// New builds the client, ensuring the bucket exists (created on first run)
+// unless Options.AssumeBucketExists opts out of that check.
+func New(ctx context.Context, opts Options) (*Client, error) {
+	transport, err := minio.DefaultTransport(opts.Secure)
 	if err != nil {
 		return nil, fmt.Errorf("minio transport: %w", err)
 	}
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 
-	mc, err := minio.New(endpoint, &minio.Options{
-		Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure:    secure,
+	mc, err := minio.New(opts.Endpoint, &minio.Options{
+		Creds:     credentials.NewStaticV4(opts.AccessKey, opts.SecretKey, ""),
+		Secure:    opts.Secure,
 		Transport: transport,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("minio: %w", err)
 	}
-	exists, err := mc.BucketExists(ctx, bucket)
+	if opts.AssumeBucketExists {
+		return &Client{mc: mc, bucket: opts.Bucket, prefix: opts.KeyPrefix}, nil
+	}
+	exists, err := mc.BucketExists(ctx, opts.Bucket)
 	if err != nil {
 		return nil, fmt.Errorf("minio bucket check: %w", err)
 	}
 	if !exists {
-		if err := mc.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
+		if err := mc.MakeBucket(ctx, opts.Bucket, minio.MakeBucketOptions{}); err != nil {
 			return nil, fmt.Errorf("minio make bucket: %w", err)
 		}
 	}
-	return &Client{mc: mc, bucket: bucket}, nil
+	return &Client{mc: mc, bucket: opts.Bucket, prefix: opts.KeyPrefix}, nil
+}
+
+// objectKey namespaces key under the client's prefix.
+func (c *Client) objectKey(key string) string {
+	return c.prefix + key
 }
 
 // Put streams size bytes from r to the given object key.
 func (c *Client) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
-	_, err := c.mc.PutObject(ctx, c.bucket, key, r, size, minio.PutObjectOptions{ContentType: contentType})
+	_, err := c.mc.PutObject(ctx, c.bucket, c.objectKey(key), r, size, minio.PutObjectOptions{ContentType: contentType})
 	if err != nil {
 		return fmt.Errorf("minio put %s: %w", key, err)
 	}
@@ -64,7 +93,7 @@ func (c *Client) Put(ctx context.Context, key string, r io.Reader, size int64, c
 
 // Download fetches the object at key to a local file (used by the slice worker).
 func (c *Client) Download(ctx context.Context, key, destPath string) error {
-	if err := c.mc.FGetObject(ctx, c.bucket, key, destPath, minio.GetObjectOptions{}); err != nil {
+	if err := c.mc.FGetObject(ctx, c.bucket, c.objectKey(key), destPath, minio.GetObjectOptions{}); err != nil {
 		return fmt.Errorf("minio download %s: %w", key, err)
 	}
 	return nil
@@ -72,7 +101,7 @@ func (c *Client) Download(ctx context.Context, key, destPath string) error {
 
 // Upload stores a local file at the given object key (used by the slice worker).
 func (c *Client) Upload(ctx context.Context, key, srcPath, contentType string) error {
-	_, err := c.mc.FPutObject(ctx, c.bucket, key, srcPath, minio.PutObjectOptions{ContentType: contentType})
+	_, err := c.mc.FPutObject(ctx, c.bucket, c.objectKey(key), srcPath, minio.PutObjectOptions{ContentType: contentType})
 	if err != nil {
 		return fmt.Errorf("minio upload %s: %w", key, err)
 	}
@@ -91,7 +120,7 @@ type Object struct {
 // missing key surfaces as an error for which IsNotFound reports true, so a
 // handler can answer 404 rather than 500.
 func (c *Client) Get(ctx context.Context, key string) (*Object, error) {
-	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	obj, err := c.mc.GetObject(ctx, c.bucket, c.objectKey(key), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("minio get %s: %w", key, err)
 	}

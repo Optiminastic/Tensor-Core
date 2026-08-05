@@ -47,3 +47,30 @@ UPDATE machines SET
     total_waste_grams = total_waste_grams + sqlc.arg('delta')::float8,
     updated_at         = now()
 WHERE id = sqlc.arg('id');
+
+-- name: SetFleetMachineProfile :one
+-- Links a physical unit to the slicing config it runs. Used by the seed step
+-- and, later, by fleet admin tooling.
+UPDATE machines SET machine_profile_id = sqlc.arg('machine_profile_id'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: ListFleetMachinesWithFamily :many
+-- Every fleet machine with its linked profile's family (null if unlinked or
+-- off, both of which the scheduler skips) - what the earliest-free-machine
+-- scheduler ranks over for a given batch's required machine family.
+SELECT m.*, mp.family AS profile_family
+FROM machines m
+LEFT JOIN machine_profiles mp ON mp.id = m.machine_profile_id
+ORDER BY m.machine_id;
+
+-- name: ListQueuedBatchesForFleetMachine :many
+-- Batches already open/in_progress on this fleet machine's linked profile,
+-- oldest first (FCFS) - both the scheduler's load calculation and the
+-- GET /machine-fleet/:id/queue endpoint.
+SELECT b.*
+FROM batches b
+JOIN machines m ON m.machine_profile_id = b.machine_id
+WHERE m.id = sqlc.arg('fleet_machine_id')
+  AND b.status IN ('open', 'in_progress')
+ORDER BY b.created_at ASC, b.id ASC;

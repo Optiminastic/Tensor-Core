@@ -25,6 +25,7 @@ type Batch struct {
 	TotalFilamentGrams          pgtype.Numeric
 	BedUtilizationPercent       pgtype.Numeric
 	PackingStrategy             *string
+	FilamentReserved            bool
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 }
@@ -91,6 +92,8 @@ type Design struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   pgtype.Numeric
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -164,18 +167,29 @@ type Machine struct {
 	BatchTotalTimeMinutes *int32
 	PrintStartedAt        pgtype.Timestamptz
 	TotalWasteGrams       pgtype.Numeric
+	MachineProfileID      *uuid.UUID
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 }
 
 type MachineProfile struct {
-	ID              uuid.UUID
-	Name            string
-	MachineHourCost pgtype.Numeric
-	IsActive        bool
-	Status          string
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                 uuid.UUID
+	Name               string
+	MachineHourCost    pgtype.Numeric
+	IsActive           bool
+	Status             string
+	Family             string
+	NozzleMm           pgtype.Numeric
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   pgtype.Numeric
+	LayerHeightMaxMm   pgtype.Numeric
+	SupportedFilaments []byte
+	IsDefault          bool
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 type MaterialProfile struct {
@@ -190,19 +204,35 @@ type MaterialProfile struct {
 }
 
 type Order struct {
-	ID               uuid.UUID
-	ShopConnectionID *uuid.UUID
-	ShopifyOrderID   int64
-	OrderNumber      string
-	CustomerName     *string
-	FinancialStatus  string
-	TotalPrice       pgtype.Numeric
-	Currency         string
-	LineItems        []byte
-	Status           string
-	ImportedAt       pgtype.Timestamptz
-	CreatedAt        pgtype.Timestamptz
-	UpdatedAt        pgtype.Timestamptz
+	ID                uuid.UUID
+	ShopConnectionID  *uuid.UUID
+	ShopifyOrderID    int64
+	OrderNumber       string
+	CustomerName      *string
+	ShopifyCustomerID *int64
+	CustomerEmail     *string
+	CustomerPhone     *string
+	FinancialStatus   string
+	TotalPrice        pgtype.Numeric
+	Currency          string
+	LineItems         []byte
+	Status            string
+	Source            string
+	ImportedAt        pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type OrderLineItem struct {
+	ID                uuid.UUID
+	OrderID           uuid.UUID
+	ShopifyOrderID    int64
+	ShopifyCustomerID *int64
+	Sku               *string
+	ProductName       string
+	ProductImageUrl   *string
+	Quantity          int32
+	CreatedAt         pgtype.Timestamptz
 }
 
 type Permission struct {
@@ -253,6 +283,15 @@ type ProductionJob struct {
 	PersonalisationValidatedAt pgtype.Timestamptz
 	ReprintOfJobID             *uuid.UUID
 	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	IssueReason                *string
 	CreatedAt                  pgtype.Timestamptz
 	UpdatedAt                  pgtype.Timestamptz
 }

@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -56,11 +59,29 @@ type productionJobResponse struct {
 	PersonalisationValidatedAt *time.Time `json:"personalisation_validated_at"`
 	ReprintOfJobID             *string    `json:"reprint_of_job_id"`
 	Held                       bool       `json:"held"`
-	CreatedAt                  time.Time  `json:"created_at"`
-	UpdatedAt                  time.Time  `json:"updated_at"`
+	Colours                    []string   `json:"colours"`
+	SupportUsed                *bool      `json:"support_used"`
+	InfillPct                  *float64   `json:"infill_pct"`
+	LeftNozzleMm               *float64   `json:"left_nozzle_mm"`
+	RightNozzleMm              *float64   `json:"right_nozzle_mm"`
+	FlowPct                    *float64   `json:"flow_pct"`
+	QualityMm                  *float64   `json:"quality_mm"`
+	MachineFamily              *string    `json:"machine_family"`
+	IssueReason                *string    `json:"issue_reason"`
+	// PersonalisationLog explains what's ready/still pending and why - a
+	// checklist derived from the six confirm booleans above, nil when
+	// personalisation isn't required for this job at all.
+	PersonalisationLog []string  `json:"personalisation_log"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func productionJobDTO(j gen.ProductionJob) productionJobResponse {
+	confirms := production.Confirms{
+		Name: j.NameConfirmed, Photo: j.PhotoConfirmed, Font: j.FontConfirmed,
+		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
+	}
+	required := j.PersonalisationStatus != production.PersonalisationNotRequired
 	return productionJobResponse{
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
@@ -77,7 +98,12 @@ func productionJobDTO(j gen.ProductionJob) productionJobResponse {
 		PersonalisationNotes: j.PersonalisationNotes, PersonalisationPhotoFileID: uuidPtrStr(j.PersonalisationPhotoFileID),
 		PersonalisationValidatedBy: j.PersonalisationValidatedBy, PersonalisationValidatedAt: db.TimePtr(j.PersonalisationValidatedAt),
 		ReprintOfJobID: uuidPtrStr(j.ReprintOfJobID), Held: j.Held,
-		CreatedAt: db.Time(j.CreatedAt), UpdatedAt: db.Time(j.UpdatedAt),
+		Colours: decodeColours(j.Colours), SupportUsed: j.SupportUsed, InfillPct: db.NumFloatPtr(j.InfillPct),
+		LeftNozzleMm: db.NumFloatPtr(j.LeftNozzleMm), RightNozzleMm: db.NumFloatPtr(j.RightNozzleMm),
+		FlowPct: db.NumFloatPtr(j.FlowPct), QualityMm: db.NumFloatPtr(j.QualityMm),
+		MachineFamily: j.MachineFamily, IssueReason: j.IssueReason,
+		PersonalisationLog: production.PersonalisationLog(confirms, required),
+		CreatedAt:          db.Time(j.CreatedAt), UpdatedAt: db.Time(j.UpdatedAt),
 	}
 }
 
@@ -109,9 +135,18 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
 	ctx := c.Request.Context()
 
+	orderFilter, ok := queryUUID(c, "order_id")
+	if !ok {
+		return
+	}
+	batchFilter, ok := queryUUID(c, "batch_id")
+	if !ok {
+		return
+	}
+
 	if !page.paginate {
 		rows, err := s.store.Q.ListProductionJobs(ctx, gen.ListProductionJobsParams{
-			Status: statusFilter, QcStatus: qcFilter,
+			Status: statusFilter, QcStatus: qcFilter, OrderID: orderFilter, BatchID: batchFilter,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
@@ -122,7 +157,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 
 	rows, err := s.store.Q.ListProductionJobsPage(ctx, gen.ListProductionJobsPageParams{
-		Status: statusFilter, QcStatus: qcFilter,
+		Status: statusFilter, QcStatus: qcFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
 	})
 	if err != nil {
@@ -214,61 +249,91 @@ func (s *Server) createProductionJob(c *gin.Context) {
 
 // --- from-order ---------------------------------------------------------------
 
+// errJobsAlreadyCreated is CreateJobsForOrder's idempotency-guard outcome -
+// distinct from a real failure so the HTTP handler can answer 409 and the
+// River worker (job_creation_worker.go) can ack without retrying.
+var errJobsAlreadyCreated = errors.New("production jobs already exist for this order")
+
 func (s *Server) createJobsFromOrder(c *gin.Context) {
 	orderID, ok := parseUUIDParam(c, "order_id")
 	if !ok {
 		return
 	}
-	ctx := c.Request.Context()
+	jobs, err := s.CreateJobsForOrder(c.Request.Context(), orderID)
+	if err != nil {
+		switch {
+		case errors.Is(err, errJobsAlreadyCreated):
+			detail(c, http.StatusConflict, "Production jobs have already been created for this order.")
+		case isNoRows(err):
+			detail(c, http.StatusNotFound, "That order does not exist.")
+		default:
+			detail(c, http.StatusInternalServerError, "Could not create the production jobs.")
+		}
+		return
+	}
+	out := make([]productionJobResponse, 0, len(jobs))
+	for _, j := range jobs {
+		out = append(out, productionJobDTO(j))
+	}
+	c.JSON(http.StatusCreated, out)
+}
 
+// CreateJobsForOrder is the Job Creation Worker's core (Stage 2 + Stage 3
+// combined: SKU-match and validate in the same pass). Shared by the kept
+// manual backfill endpoint above and the River worker
+// (job_creation_worker.go) - not a second, divergent implementation of
+// either. Idempotent: a second call for an order that already has jobs
+// returns errJobsAlreadyCreated rather than duplicating them.
+func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]gen.ProductionJob, error) {
 	order, err := s.store.Q.GetOrderByID(ctx, orderID)
 	if err != nil {
-		dbError(c, err, "That order does not exist.", "Could not load the order.")
-		return
+		return nil, fmt.Errorf("load order: %w", err)
 	}
 	existing, err := s.store.Q.CountJobsForOrder(ctx, &orderID)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not check the order's jobs.")
-		return
+		return nil, fmt.Errorf("check existing jobs: %w", err)
 	}
 	if existing > 0 {
-		detail(c, http.StatusConflict, "Production jobs have already been created for this order.")
-		return
+		return nil, errJobsAlreadyCreated
 	}
 
 	var items []production.LineItem
 	if err := json.Unmarshal(order.LineItems, &items); err != nil {
-		detail(c, http.StatusInternalServerError, "The order's line items are corrupt.")
-		return
+		return nil, fmt.Errorf("order line items are corrupt: %w", err)
 	}
-
-	params, err := jobsFromLineItems(order, items)
+	params, err := s.buildJobsForOrder(ctx, order, items)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not prepare the production jobs.")
-		return
+		return nil, fmt.Errorf("prepare jobs: %w", err)
 	}
 
-	created := make([]productionJobResponse, 0, len(params))
+	var created []gen.ProductionJob
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		for _, p := range params {
 			job, err := q.InsertProductionJob(ctx, p)
 			if err != nil {
 				return err
 			}
-			created = append(created, productionJobDTO(job))
+			created = append(created, job)
 		}
 		return nil
 	})
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not create the production jobs.")
-		return
+		return nil, fmt.Errorf("insert jobs: %w", err)
 	}
-	c.JSON(http.StatusCreated, created)
+	return created, nil
 }
 
-// jobsFromLineItems decomposes an order's line items into job insert params, one
-// per line, snapshotting the print facts and auto-validating personalisation.
-func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.InsertProductionJobParams, error) {
+// buildJobsForOrder decomposes an order's line items into job insert params,
+// one per line: the Job Creation Worker (Stage 2) and Validation (Stage 3)
+// combined into one pass. Each line's SKU is matched against the design
+// catalog (matchDesignForSKU); a match's print facts override the Shopify-
+// property-sourced fallback (which is a best guess, per mapShopifyLineItems'
+// own comment). No match still creates the job - flagged with issue_reason,
+// never dropped, matching the "never allow bad jobs into batching" rule (a
+// flagged job is simply excluded from ListBatchableJobs until fixed).
+func (s *Server) buildJobsForOrder(
+	ctx context.Context, order gen.Order, items []production.LineItem,
+) ([]gen.InsertProductionJobParams, error) {
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
 	for _, li := range items {
@@ -281,6 +346,7 @@ func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.Inse
 			quantity = 1
 		}
 		status, confirms := production.AutoValidatePersonalisation(li)
+		match := s.matchDesignForSKU(ctx, li.SKU)
 
 		p := gen.InsertProductionJobParams{
 			ID: uuid.New(), JobNumber: jobNumber,
@@ -288,7 +354,7 @@ func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.Inse
 			Description: descriptionOf(li), Quantity: quantity,
 			Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 			QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-			Sku: nonEmptyPtr(li.ProductID), ProductName: nonEmptyPtr(li.ProductName),
+			Sku: li.SKU, ProductName: nonEmptyPtr(li.ProductName),
 			Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
 			FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
 			EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
@@ -300,10 +366,45 @@ func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.Inse
 			NameConfirmed:         confirms.Name, PhotoConfirmed: confirms.Photo, FontConfirmed: confirms.Font,
 			ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
 			CustomerApprovalReceived: confirms.Approval,
+			Colours:                  []byte("[]"),
 		}
+		applyMatch(&p, match, quantity)
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// applyMatch overlays a matched design's print facts onto a job's insert
+// params, or records why nothing was matched.
+func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, quantity int32) {
+	if !match.Matched() {
+		p.IssueReason = &match.Reason
+		return
+	}
+	d := match.Design
+	p.Material = nonEmptyPtr(d.Material)
+	if len(d.Colours) > 0 {
+		if raw, err := json.Marshal(d.Colours); err == nil {
+			p.Colours = raw
+		}
+	}
+	p.PrintFileID = d.PrintFileID
+	p.LeftNozzleMm, p.RightNozzleMm, p.FlowPct, p.QualityMm = d.LeftNozzleMM, d.RightNozzleMM, d.FlowPct, d.QualityMM
+	if d.MachineFamily != "" {
+		p.MachineFamily = &d.MachineFamily
+	}
+	if d.PrintTimeMin != nil {
+		v := int32(*d.PrintTimeMin)
+		p.EstimatedPrintTimeMinutes = &v
+	}
+	if d.FilamentGrams != nil {
+		v := *d.FilamentGrams * float64(quantity)
+		p.FilamentGramsRequired = &v
+	}
+	if p.PrintFileID == nil {
+		reason := production.IssueSTLMissing
+		p.IssueReason = &reason
+	}
 }
 
 // --- PATCH --------------------------------------------------------------------
@@ -503,6 +604,9 @@ func (s *Server) validatePersonalisation(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not record the personalisation.")
 		return
 	}
+	if status == production.PersonalisationValidated {
+		s.triggerBatchPlan(ctx)
+	}
 	c.JSON(http.StatusOK, productionJobDTO(job))
 }
 
@@ -610,9 +714,13 @@ func (s *Server) failProductionJob(c *gin.Context) {
 		}); err != nil {
 			return err
 		}
-		// Decrement the wasted filament from stock (best-effort, no-op if untracked).
+		// Decrement the wasted filament from stock, split across the job's
+		// colours (best-effort per bucket, no-op if untracked) - the same fix
+		// as the colour-blind shortage check this batch approval used to have.
 		if req.FilamentWastedGrams != nil {
-			if err := s.decrementFilament(ctx, q, job.Material, *req.FilamentWastedGrams); err != nil {
+			waste := make(map[filamentKey]float64)
+			filamentSplit(waste, job.Material, decodeColours(job.Colours), *req.FilamentWastedGrams)
+			if err := s.adjustFilamentByColour(ctx, q, waste, -1); err != nil {
 				return err
 			}
 		}

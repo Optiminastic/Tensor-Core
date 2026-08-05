@@ -26,10 +26,21 @@ type Placed struct {
 	Rotated   bool
 }
 
+// Bbox is a merged plate's axis-aligned combined size, in millimetres - how
+// much of the bed the whole plate (every part, as actually placed) occupies.
+type Bbox struct {
+	XMM float64
+	YMM float64
+	ZMM float64
+}
+
 // MergeBinarySTL lays every placed part onto the plate and encodes the union as a
 // binary STL. Each part is normalised to the origin, optionally rotated (and
 // re-normalised), then translated to its bed offset - matching the source merge.
-func MergeBinarySTL(header string, parts []Placed) []byte {
+// Also returns the merged plate's overall bounding box, measured off the same
+// assembled triangles that get written out (so it's exact, not re-derived from
+// the individual parts' own footprints).
+func MergeBinarySTL(header string, parts []Placed) ([]byte, Bbox) {
 	var all [][3]vec
 	for _, p := range parts {
 		tris := toTriples(p.Triangles)
@@ -41,7 +52,9 @@ func MergeBinarySTL(header string, parts []Placed) []byte {
 		translate(tris, p.XOffsetMM, p.YOffsetMM, 0)
 		all = append(all, tris...)
 	}
-	return writeBinary(header, all)
+	mn, mx := bounds(all)
+	bbox := Bbox{XMM: mx.X - mn.X, YMM: mx.Y - mn.Y, ZMM: mx.Z - mn.Z}
+	return writeBinary(header, all), bbox
 }
 
 // toTriples copies a triangle slice into mutable vertex triples.

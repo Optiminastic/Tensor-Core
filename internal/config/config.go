@@ -54,12 +54,17 @@ type Settings struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 
-	// Design pipeline: object storage for STL/G-code.
-	MinIOEndpoint  string
-	MinIOAccessKey string
-	MinIOSecretKey string
-	MinIOBucket    string
-	MinIOSecure    bool
+	// Design pipeline: object storage for STL/G-code. MinIOKeyPrefix namespaces
+	// every object key - required when MinIOBucket is shared with other apps.
+	// MinIOAssumeBucketExists skips the bucket-existence/creation check, for
+	// when the credentials are scoped to the prefix and can't HeadBucket.
+	MinIOEndpoint           string
+	MinIOAccessKey          string
+	MinIOSecretKey          string
+	MinIOBucket             string
+	MinIOKeyPrefix          string
+	MinIOSecure             bool
+	MinIOAssumeBucketExists bool
 
 	// Slice worker (cmd/sliceworker): the Bambu Studio install, per-slice timeout,
 	// the calibratable average printer draw used to estimate energy, and how many
@@ -68,6 +73,16 @@ type Settings struct {
 	SliceTimeoutSeconds int
 	PrinterAvgPowerKW   float64
 	SliceConcurrency    int
+
+	// FakeSlice fabricates plausible slice metrics instead of running Bambu
+	// Studio (internal/slicing/fake.go) - dev-only, for testing the downstream
+	// pipeline (pricing, batching, scheduling) on a machine that can't run the
+	// real slicer. Never set true against a production deployment.
+	FakeSlice bool
+
+	// Production worker (cmd/productionworker): how many order's-worth of jobs
+	// the Job Creation Worker builds at once.
+	ProductionConcurrency int
 
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
@@ -128,16 +143,21 @@ func Load() Settings {
 		DBConnectTimeout:   secondsEnvOr("DB_CONNECT_TIMEOUT_SECONDS", 10),
 		DBStatementTimeout: secondsEnvOr("DB_STATEMENT_TIMEOUT_SECONDS", 15),
 
-		MinIOEndpoint:  envOr("MINIO_ENDPOINT", "localhost:9100"),
-		MinIOAccessKey: envOr("MINIO_ACCESS_KEY", "tensor"),
-		MinIOSecretKey: envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
-		MinIOBucket:    envOr("MINIO_BUCKET", "designs"),
-		MinIOSecure:    boolEnvOr("MINIO_SECURE", false),
+		MinIOEndpoint:           envOr("MINIO_ENDPOINT", "localhost:9100"),
+		MinIOAccessKey:          envOr("MINIO_ACCESS_KEY", "tensor"),
+		MinIOSecretKey:          envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
+		MinIOBucket:             envOr("MINIO_BUCKET", "designs"),
+		MinIOKeyPrefix:          os.Getenv("MINIO_KEY_PREFIX"),
+		MinIOSecure:             boolEnvOr("MINIO_SECURE", false),
+		MinIOAssumeBucketExists: boolEnvOr("MINIO_ASSUME_BUCKET_EXISTS", false),
 
 		BambuRoot:           envOr("BAMBU_ROOT", "/opt/bambu/squashfs-root"),
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),
 		PrinterAvgPowerKW:   floatEnvOr("PRINTER_AVG_POWER_KW", 0.11),
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
+		FakeSlice:           boolEnvOr("FAKE_SLICE", false),
+
+		ProductionConcurrency: intEnvOr("PRODUCTION_CONCURRENCY", 5),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),

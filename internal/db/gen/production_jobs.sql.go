@@ -57,7 +57,9 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
        photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-       personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+       personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs WHERE id = $1
 `
 
@@ -103,6 +105,15 @@ func (q *Queries) GetProductionJobByID(ctx context.Context, id uuid.UUID) (Produ
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -118,7 +129,9 @@ INSERT INTO production_jobs (
     due_date, priority, personalisation_name, personalisation_font, personalisation_colour,
     personalisation_variant, personalisation_status, name_confirmed, photo_confirmed,
     font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
-    personalisation_notes, personalisation_photo_file_id, reprint_of_job_id, held
+    personalisation_notes, personalisation_photo_file_id, reprint_of_job_id, held,
+    colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+    quality_mm, machine_family, issue_reason
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
@@ -130,7 +143,11 @@ INSERT INTO production_jobs (
     $25, $26, $27,
     $28, $29, $30,
     $31, $32, $33,
-    $34, $35, $36
+    $34, $35, $36,
+    $37, $38, $39::float8,
+    $40::float8, $41::float8,
+    $42::float8, $43::float8, $44,
+    $45
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
           qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
@@ -139,7 +156,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
           photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-          personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+          personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 `
 
 type InsertProductionJobParams struct {
@@ -179,6 +198,15 @@ type InsertProductionJobParams struct {
 	PersonalisationPhotoFileID *uuid.UUID
 	ReprintOfJobID             *uuid.UUID
 	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  *float64
+	LeftNozzleMm               *float64
+	RightNozzleMm              *float64
+	FlowPct                    *float64
+	QualityMm                  *float64
+	MachineFamily              *string
+	IssueReason                *string
 }
 
 // Production jobs: the print-queue core. filament_grams_required cast to float8;
@@ -222,6 +250,15 @@ func (q *Queries) InsertProductionJob(ctx context.Context, arg InsertProductionJ
 		arg.PersonalisationPhotoFileID,
 		arg.ReprintOfJobID,
 		arg.Held,
+		arg.Colours,
+		arg.SupportUsed,
+		arg.InfillPct,
+		arg.LeftNozzleMm,
+		arg.RightNozzleMm,
+		arg.FlowPct,
+		arg.QualityMm,
+		arg.MachineFamily,
+		arg.IssueReason,
 	)
 	var i ProductionJob
 	err := row.Scan(
@@ -263,6 +300,15 @@ func (q *Queries) InsertProductionJob(ctx context.Context, arg InsertProductionJ
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -319,14 +365,17 @@ func (q *Queries) InsertProductionJobFailure(ctx context.Context, arg InsertProd
 }
 
 const listBatchableJobs = `-- name: ListBatchableJobs :many
-SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at FROM production_jobs
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, issue_reason, created_at, updated_at FROM production_jobs
 WHERE batch_id IS NULL
   AND status = 'queued'
   AND personalisation_status IN ('validated', 'not_required')
+  AND issue_reason IS NULL
 ORDER BY created_at ASC, id ASC
 `
 
-// Unbatched, queued jobs whose personalisation is resolved, oldest first (FCFS).
+// Unbatched, queued jobs whose personalisation is resolved and which cleared
+// Stage 3 validation (no issue_reason), oldest first (FCFS). A flagged job is
+// never batched until whatever is wrong (missing SKU, STL, colour, ...) is fixed.
 func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listBatchableJobs)
 	if err != nil {
@@ -375,6 +424,15 @@ func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error
 			&i.PersonalisationValidatedAt,
 			&i.ReprintOfJobID,
 			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -389,7 +447,7 @@ func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error
 }
 
 const listJobsForBatch = `-- name: ListJobsForBatch :many
-SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, issue_reason, created_at, updated_at FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC
 `
 
 func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]ProductionJob, error) {
@@ -440,6 +498,15 @@ func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]P
 			&i.PersonalisationValidatedAt,
 			&i.ReprintOfJobID,
 			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -461,21 +528,32 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
        photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-       personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+       personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
   AND ($2::text IS NULL OR qc_status = $2::text)
+  AND ($3::uuid IS NULL OR order_id = $3::uuid)
+  AND ($4::uuid IS NULL OR batch_id = $4::uuid)
 ORDER BY created_at DESC, id DESC
 `
 
 type ListProductionJobsParams struct {
 	Status   *string
 	QcStatus *string
+	OrderID  *uuid.UUID
+	BatchID  *uuid.UUID
 }
 
 // Full list, newest first, with optional status / qc_status filters (null = any).
 func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobsParams) ([]ProductionJob, error) {
-	rows, err := q.db.Query(ctx, listProductionJobs, arg.Status, arg.QcStatus)
+	rows, err := q.db.Query(ctx, listProductionJobs,
+		arg.Status,
+		arg.QcStatus,
+		arg.OrderID,
+		arg.BatchID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -522,6 +600,15 @@ func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobs
 			&i.PersonalisationValidatedAt,
 			&i.ReprintOfJobID,
 			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -543,21 +630,27 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
        photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-       personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+       personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
   AND ($2::text IS NULL OR qc_status = $2::text)
+  AND ($3::uuid IS NULL OR order_id = $3::uuid)
+  AND ($4::uuid IS NULL OR batch_id = $4::uuid)
   AND (
-    $3::timestamptz IS NULL
-    OR (created_at, id) < ($3::timestamptz, $4::uuid)
+    $5::timestamptz IS NULL
+    OR (created_at, id) < ($5::timestamptz, $6::uuid)
   )
 ORDER BY created_at DESC, id DESC
-LIMIT $5
+LIMIT $7
 `
 
 type ListProductionJobsPageParams struct {
 	Status          *string
 	QcStatus        *string
+	OrderID         *uuid.UUID
+	BatchID         *uuid.UUID
 	CursorCreatedAt pgtype.Timestamptz
 	CursorID        *uuid.UUID
 	PageLimit       int32
@@ -568,6 +661,8 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 	rows, err := q.db.Query(ctx, listProductionJobsPage,
 		arg.Status,
 		arg.QcStatus,
+		arg.OrderID,
+		arg.BatchID,
 		arg.CursorCreatedAt,
 		arg.CursorID,
 		arg.PageLimit,
@@ -618,6 +713,15 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 			&i.PersonalisationValidatedAt,
 			&i.ReprintOfJobID,
 			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -641,7 +745,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
           photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-          personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+          personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 `
 
 type SetProductionJobPrintFileParams struct {
@@ -691,6 +797,15 @@ func (q *Queries) SetProductionJobPrintFile(ctx context.Context, arg SetProducti
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -707,7 +822,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
           photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-          personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+          personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 `
 
 type SetProductionJobStatusParams struct {
@@ -757,6 +874,15 @@ func (q *Queries) SetProductionJobStatus(ctx context.Context, arg SetProductionJ
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -781,7 +907,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
           photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-          personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+          personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 `
 
 type UpdateProductionJobFieldsParams struct {
@@ -850,6 +978,15 @@ func (q *Queries) UpdateProductionJobFields(ctx context.Context, arg UpdateProdu
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -878,7 +1015,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
           photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
-          personalisation_validated_at, reprint_of_job_id, held, created_at, updated_at
+          personalisation_validated_at, reprint_of_job_id, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, created_at, updated_at
 `
 
 type ValidateProductionJobPersonalisationParams struct {
@@ -951,6 +1090,15 @@ func (q *Queries) ValidateProductionJobPersonalisation(ctx context.Context, arg 
 		&i.PersonalisationValidatedAt,
 		&i.ReprintOfJobID,
 		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

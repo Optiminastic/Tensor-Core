@@ -17,3 +17,12 @@ RETURNING id, filename, content_type, size_bytes, storage_key, is_template, uplo
 SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
        bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
 FROM file_assets WHERE id = $1;
+
+-- name: GetFileAssetByStorageKey :one
+-- Used by the job-creation worker to check whether a design's STL already has
+-- a file_assets row (with its bbox already computed) before downloading and
+-- computing one - storage_key has no unique constraint, so this takes the
+-- most recently created match.
+SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
+       bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
+FROM file_assets WHERE storage_key = $1 ORDER BY created_at DESC LIMIT 1;

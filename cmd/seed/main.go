@@ -1,6 +1,7 @@
-// Command seed applies the migrations and seeds the RBAC catalog and the
-// default cost assumptions. Brands are user-created, so none are seeded. It is
-// idempotent -- safe to run repeatedly.
+// Command seed applies the migrations and seeds the RBAC catalog, the default
+// cost assumptions, 20 dummy orders (for the frontend's live/dummy orders
+// toggle), and a default 3-machine fleet (for the batch scheduler). Brands are
+// user-created, so none are seeded. It is idempotent -- safe to run repeatedly.
 package main
 
 import (
@@ -44,7 +45,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("seed cost assumptions: %v", err)
 	}
+	dummyOrders, err := seedDummyOrders(ctx, store)
+	if err != nil {
+		log.Fatalf("seed dummy orders: %v", err)
+	}
+	fleetMachines, err := seedFleetMachines(ctx, store)
+	if err != nil {
+		log.Fatalf("seed fleet machines: %v", err)
+	}
 
-	log.Printf("seeded: %d permissions, %d roles, %d grants, %d cost sets",
-		authRes.Permissions, authRes.Roles, authRes.Grants, costSets)
+	log.Printf("seeded: %d permissions, %d roles, %d grants, %d cost sets, %d dummy orders, %d fleet machines",
+		authRes.Permissions, authRes.Roles, authRes.Grants, costSets, dummyOrders, fleetMachines)
 }
