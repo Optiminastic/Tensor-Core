@@ -84,6 +84,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerBatches(r)
 	s.registerFilament(r)
 	s.registerMachineOps(r)
+	s.registerFleetMachines(r)
 	s.registerDispatch(r)
 	s.registerShopify(r)
 	s.registerWebhooks(r)

@@ -68,3 +68,44 @@ func TestMergeCombinesParts(t *testing.T) {
 		t.Errorf("x-span = [%v,%v], want [0,60]", mesh.Min.X, mesh.Max.X)
 	}
 }
+
+func TestTranslateTrianglesShiftsBoundsAndKeepsOriginal(t *testing.T) {
+	base := rect(10, 10)
+	moved := TranslateTriangles(base, 5, 5, 5)
+
+	m, err := orientation.LoadSTL(ConcatBinarySTL("t", moved))
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if !approx(m.Min.X, 5) || !approx(m.Min.Y, 5) || !approx(m.Min.Z, 5) {
+		t.Errorf("min = %+v, want (5,5,5)", m.Min)
+	}
+	if !approx(m.Max.X, 15) || !approx(m.Max.Z, 5) {
+		t.Errorf("max = %+v, want (15,15,5)", m.Max)
+	}
+	// The source slice must be untouched (still at the origin).
+	if base[0].V0.X != 0 || base[0].V0.Z != 0 {
+		t.Errorf("TranslateTriangles mutated its input: %+v", base[0].V0)
+	}
+}
+
+func TestConcatKeepsPartsAligned(t *testing.T) {
+	// A base rect at the origin and a "label" lifted to z=5 and offset in XY:
+	// Concat must NOT normalise, so the union keeps both in place.
+	base := rect(10, 10)
+	label := TranslateTriangles(rect(4, 2), 3, 4, 5)
+
+	mesh, err := orientation.LoadSTL(ConcatBinarySTL("concat", base, label))
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	if len(mesh.Triangles) != 4 {
+		t.Errorf("triangles = %d, want 4 (2 base + 2 label)", len(mesh.Triangles))
+	}
+	if !approx(mesh.Min.X, 0) || !approx(mesh.Min.Z, 0) {
+		t.Errorf("min = %+v, want origin (base stays put)", mesh.Min)
+	}
+	if !approx(mesh.Max.Z, 5) {
+		t.Errorf("max.Z = %v, want 5 (label lifted, not normalised)", mesh.Max.Z)
+	}
+}

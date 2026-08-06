@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 
@@ -53,8 +54,48 @@ func (s *Server) enrichJobsFromCatalog(
 		if design.Colour != nil {
 			params[i].Colour = design.Colour
 		}
+
+		// Validate the order's personalisation against the product's rules (allowed
+		// fonts/colours/variants, name length, required fields), overriding the
+		// generic non-empty check. No rules -> the generic result stands.
+		if len(design.PersonalisationRules) > 0 {
+			applyPersonalisationRules(&params[i], design.PersonalisationRules, items[i])
+		}
 	}
 	return nil
+}
+
+// applyPersonalisationRules re-validates a job's personalisation against its
+// product's rules and overrides the status, per-field confirmations, and notes.
+// Malformed rules are ignored (the generic result stays), so a bad rule blob can
+// never block order fulfilment.
+func applyPersonalisationRules(
+	p *gen.InsertProductionJobParams, rulesJSON []byte, li production.LineItem,
+) {
+	var rules production.PersonalisationRules
+	if err := json.Unmarshal(rulesJSON, &rules); err != nil {
+		return
+	}
+	status, confirms, issues := production.ValidateAgainstRules(rules, li)
+	p.PersonalisationStatus = status
+	p.NameConfirmed = confirms.Name
+	p.PhotoConfirmed = confirms.Photo
+	p.FontConfirmed = confirms.Font
+	p.ColourConfirmed = confirms.Colour
+	p.VariantConfirmed = confirms.Variant
+	p.CustomerApprovalReceived = confirms.Approval
+	if len(issues) > 0 {
+		p.PersonalisationNotes = mergeNote(p.PersonalisationNotes, strings.Join(issues, "; "))
+	}
+}
+
+// mergeNote appends an issue string to any existing personalisation note.
+func mergeNote(existing *string, add string) *string {
+	if existing != nil && strings.TrimSpace(*existing) != "" {
+		merged := strings.TrimSpace(*existing) + " | " + add
+		return &merged
+	}
+	return &add
 }
 
 // ensureTemplateFile returns the file_asset that stands in for the design's model

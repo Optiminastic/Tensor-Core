@@ -78,6 +78,11 @@ type Settings struct {
 	PrinterAvgPowerKW   float64
 	SliceConcurrency    int
 
+	// OpenSCADBin is the OpenSCAD executable used to render personalised text into
+	// printable geometry (the API's personalise-preview route). Absent/failed
+	// OpenSCAD just falls back to the plain model, so this is best-effort.
+	OpenSCADBin string
+
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
 	// so very large models stay fast.
@@ -150,6 +155,7 @@ func Load() Settings {
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),
 		PrinterAvgPowerKW:   floatEnvOr("PRINTER_AVG_POWER_KW", 0.11),
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
+		OpenSCADBin:         envOr("OPENSCAD_BIN", "openscad"),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),

@@ -189,6 +189,10 @@ CREATE TABLE designs (
     -- The design's stand-in file_asset for the production queue (migration 0017);
     -- created lazily from stl_key, reused for every reprint.
     template_file_id uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    -- What personalization this product offers (migration 0020); NULL = none.
+    -- {enabled, name{required,min,max}, font/colour/variant{required,allowed[]},
+    --  photo{required}, approval{required}, zone{width_mm,height_mm}}.
+    personalisation_rules jsonb,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -411,6 +415,28 @@ CREATE TABLE filament_inventory (
 );
 CREATE UNIQUE INDEX uq_filament_material_colour
     ON filament_inventory (material, COALESCE(colour, ''));
+
+-- The physical printer fleet (migration 0019) - one row per physical unit, live
+-- print-state. Distinct from machine_profiles (the printer model/slicing profile).
+CREATE TABLE machines (
+    id                        uuid PRIMARY KEY,
+    machine_id                varchar(64) NOT NULL UNIQUE,
+    name                      varchar(120) NOT NULL DEFAULT 'Bambu H2C',
+    image_url                 text,
+    status                    varchar(16) NOT NULL DEFAULT 'idle'
+                              CHECK (status IN ('idle', 'running', 'off')),
+    filaments                 jsonb NOT NULL DEFAULT '[]',
+    current_batch_id          uuid REFERENCES batches (id) ON DELETE SET NULL,
+    current_layer             integer,
+    total_layers              integer,
+    batch_total_time_minutes  integer,
+    print_started_at          timestamptz,
+    total_waste_grams         numeric(10, 2) NOT NULL DEFAULT 0,
+    created_at                timestamptz NOT NULL DEFAULT now(),
+    updated_at                timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_machines_status ON machines (status);
+CREATE INDEX ix_machines_current_batch ON machines (current_batch_id);
 
 CREATE TABLE production_job_assembly_checks (
     id                uuid PRIMARY KEY,

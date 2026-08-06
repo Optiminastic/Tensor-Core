@@ -277,7 +277,7 @@ func (s *Server) insertDesignAndJob(
 		d, err := q.InsertDesign(ctx, gen.InsertDesignParams{
 			ID: designID, BrandSlug: form.Brand, Name: form.Name, CreatedBy: createdBy,
 			Status: designQueued, StlKey: stlKey, Material: form.Material, Colour: form.Colour,
-			Sku:    &sku,
+			Sku: &sku, MachineID: form.MachineID,
 			Finish: form.Finish, UnitsPerBed: form.UnitsPerBed, Quality: form.Quality,
 			InfillPct: form.InfillPct, Notes: form.Notes, PreviewKey: previewKey,
 		})
@@ -423,7 +423,7 @@ func (s *Server) applyResubmit(c *gin.Context, id uuid.UUID, stlKey string, form
 		if err := q.UpdateDesignSpecs(ctx, gen.UpdateDesignSpecsParams{
 			Material: form.Material, Colour: form.Colour, Finish: form.Finish,
 			UnitsPerBed: form.UnitsPerBed, Quality: form.Quality, InfillPct: form.InfillPct,
-			Status: designQueued, ID: id,
+			MachineID: form.MachineID, Status: designQueued, ID: id,
 		}); err != nil {
 			return err
 		}

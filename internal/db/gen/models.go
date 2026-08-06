@@ -79,25 +79,26 @@ type CostAssumptionSet struct {
 }
 
 type Design struct {
-	ID             uuid.UUID
-	BrandSlug      string
-	Name           string
-	CreatedBy      string
-	Status         string
-	StlKey         string
-	Material       string
-	Colour         *string
-	Finish         string
-	UnitsPerBed    int32
-	Quality        string
-	InfillPct      pgtype.Numeric
-	Notes          *string
-	PreviewKey     string
-	MachineID      *uuid.UUID
-	Sku            *string
-	TemplateFileID *uuid.UUID
-	CreatedAt      pgtype.Timestamptz
-	UpdatedAt      pgtype.Timestamptz
+	ID                   uuid.UUID
+	BrandSlug            string
+	Name                 string
+	CreatedBy            string
+	Status               string
+	StlKey               string
+	Material             string
+	Colour               *string
+	Finish               string
+	UnitsPerBed          int32
+	Quality              string
+	InfillPct            pgtype.Numeric
+	Notes                *string
+	PreviewKey           string
+	MachineID            *uuid.UUID
+	Sku                  *string
+	TemplateFileID       *uuid.UUID
+	PersonalisationRules []byte
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
 }
 
 type DesignPricing struct {
@@ -163,6 +164,23 @@ type FileAsset struct {
 	BboxYMm     pgtype.Numeric
 	BboxZMm     pgtype.Numeric
 	CreatedAt   pgtype.Timestamptz
+}
+
+type Machine struct {
+	ID                    uuid.UUID
+	MachineID             string
+	Name                  string
+	ImageUrl              *string
+	Status                string
+	Filaments             []byte
+	CurrentBatchID        *uuid.UUID
+	CurrentLayer          *int32
+	TotalLayers           *int32
+	BatchTotalTimeMinutes *int32
+	PrintStartedAt        pgtype.Timestamptz
+	TotalWasteGrams       pgtype.Numeric
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
 }
 
 type MachineProfile struct {

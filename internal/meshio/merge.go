@@ -44,6 +44,33 @@ func MergeBinarySTL(header string, parts []Placed) []byte {
 	return writeBinary(header, all)
 }
 
+// ConcatBinarySTL encodes several already-positioned meshes as one binary STL
+// WITHOUT any normalisation - every part keeps its own coordinates, so the parts
+// stay aligned as given (unlike MergeBinarySTL, which snaps each part to the
+// origin). This is how a base model and a positioned text mesh are combined into
+// one STL: the slicer fuses the overlapping bodies at slice time.
+func ConcatBinarySTL(header string, meshes ...[]orientation.Triangle) []byte {
+	var all [][3]vec
+	for _, m := range meshes {
+		all = append(all, toTriples(m)...)
+	}
+	return writeBinary(header, all)
+}
+
+// TranslateTriangles returns a copy of the triangles shifted by (dx, dy, dz). The
+// input is not mutated; face normals are unaffected by a pure translation.
+func TranslateTriangles(tris []orientation.Triangle, dx, dy, dz float64) []orientation.Triangle {
+	out := make([]orientation.Triangle, len(tris))
+	shift := func(v vec) vec { return vec{X: v.X + dx, Y: v.Y + dy, Z: v.Z + dz} }
+	for i, t := range tris {
+		out[i] = t
+		out[i].V0 = shift(t.V0)
+		out[i].V1 = shift(t.V1)
+		out[i].V2 = shift(t.V2)
+	}
+	return out
+}
+
 // toTriples copies a triangle slice into mutable vertex triples.
 func toTriples(tris []orientation.Triangle) [][3]vec {
 	out := make([][3]vec, len(tris))

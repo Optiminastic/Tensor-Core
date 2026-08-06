@@ -35,28 +35,30 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
 type GetDesignByIDRow struct {
-	ID          uuid.UUID
-	BrandSlug   string
-	Name        string
-	CreatedBy   string
-	Status      string
-	StlKey      string
-	Material    string
-	Colour      *string
-	Finish      string
-	UnitsPerBed int32
-	Quality     string
-	InfillPct   float64
-	Notes       *string
-	PreviewKey  string
-	Sku         *string
-	CreatedAt   pgtype.Timestamptz
-	UpdatedAt   pgtype.Timestamptz
+	ID                   uuid.UUID
+	BrandSlug            string
+	Name                 string
+	CreatedBy            string
+	Status               string
+	StlKey               string
+	Material             string
+	Colour               *string
+	Finish               string
+	UnitsPerBed          int32
+	Quality              string
+	InfillPct            float64
+	Notes                *string
+	PreviewKey           string
+	Sku                  *string
+	MachineID            *uuid.UUID
+	PersonalisationRules []byte
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
 }
 
 func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByIDRow, error) {
@@ -78,6 +80,8 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.Notes,
 		&i.PreviewKey,
 		&i.Sku,
+		&i.MachineID,
+		&i.PersonalisationRules,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -87,28 +91,29 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 const getDesignBySku = `-- name: GetDesignBySku :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, sku, template_file_id, created_at, updated_at
+       preview_key, sku, template_file_id, personalisation_rules, created_at, updated_at
 FROM designs WHERE sku = $1
 `
 
 type GetDesignBySkuRow struct {
-	ID             uuid.UUID
-	BrandSlug      string
-	Name           string
-	CreatedBy      string
-	Status         string
-	StlKey         string
-	Material       string
-	Colour         *string
-	Finish         string
-	UnitsPerBed    int32
-	Quality        string
-	InfillPct      float64
-	PreviewKey     string
-	Sku            *string
-	TemplateFileID *uuid.UUID
-	CreatedAt      pgtype.Timestamptz
-	UpdatedAt      pgtype.Timestamptz
+	ID                   uuid.UUID
+	BrandSlug            string
+	Name                 string
+	CreatedBy            string
+	Status               string
+	StlKey               string
+	Material             string
+	Colour               *string
+	Finish               string
+	UnitsPerBed          int32
+	Quality              string
+	InfillPct            float64
+	PreviewKey           string
+	Sku                  *string
+	TemplateFileID       *uuid.UUID
+	PersonalisationRules []byte
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
 }
 
 // GetDesignBySku resolves an order line's SKU to its design so a production job
@@ -132,6 +137,7 @@ func (q *Queries) GetDesignBySku(ctx context.Context, sku *string) (GetDesignByS
 		&i.PreviewKey,
 		&i.Sku,
 		&i.TemplateFileID,
+		&i.PersonalisationRules,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -325,12 +331,13 @@ const insertDesign = `-- name: InsertDesign :one
 
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
     $9, $10, $11,
-    $12::float8, $13, $14, $15
+    $12::float8, $13, $14, $15,
+    $16
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
@@ -353,6 +360,7 @@ type InsertDesignParams struct {
 	Notes       *string
 	PreviewKey  string
 	Sku         *string
+	MachineID   *uuid.UUID
 }
 
 type InsertDesignRow struct {
@@ -394,6 +402,7 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		arg.Notes,
 		arg.PreviewKey,
 		arg.Sku,
+		arg.MachineID,
 	)
 	var i InsertDesignRow
 	err := row.Scan(
@@ -745,6 +754,70 @@ func (q *Queries) NextDesignSkuSeq(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
+const setDesignPersonalisationRules = `-- name: SetDesignPersonalisationRules :one
+UPDATE designs SET personalisation_rules = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, machine_id, personalisation_rules, created_at, updated_at
+`
+
+type SetDesignPersonalisationRulesParams struct {
+	PersonalisationRules []byte
+	ID                   uuid.UUID
+}
+
+type SetDesignPersonalisationRulesRow struct {
+	ID                   uuid.UUID
+	BrandSlug            string
+	Name                 string
+	CreatedBy            string
+	Status               string
+	StlKey               string
+	Material             string
+	Colour               *string
+	Finish               string
+	UnitsPerBed          int32
+	Quality              string
+	InfillPct            float64
+	Notes                *string
+	PreviewKey           string
+	Sku                  *string
+	MachineID            *uuid.UUID
+	PersonalisationRules []byte
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+}
+
+// SetDesignPersonalisationRules stores (or clears, with NULL) the product's
+// personalization rule set. The jsonb shape is validated in Go before it is set.
+func (q *Queries) SetDesignPersonalisationRules(ctx context.Context, arg SetDesignPersonalisationRulesParams) (SetDesignPersonalisationRulesRow, error) {
+	row := q.db.QueryRow(ctx, setDesignPersonalisationRules, arg.PersonalisationRules, arg.ID)
+	var i SetDesignPersonalisationRulesRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Notes,
+		&i.PreviewKey,
+		&i.Sku,
+		&i.MachineID,
+		&i.PersonalisationRules,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const setDesignSku = `-- name: SetDesignSku :one
 UPDATE designs SET sku = $1, updated_at = now()
 WHERE id = $2
@@ -828,8 +901,9 @@ UPDATE designs SET
     material = $1, colour = $2,
     finish = $3, units_per_bed = $4,
     quality = $5, infill_pct = $6::float8,
-    status = $7, updated_at = now()
-WHERE id = $8
+    machine_id = $7,
+    status = $8, updated_at = now()
+WHERE id = $9
 `
 
 type UpdateDesignSpecsParams struct {
@@ -839,6 +913,7 @@ type UpdateDesignSpecsParams struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   float64
+	MachineID   *uuid.UUID
 	Status      string
 	ID          uuid.UUID
 }
@@ -851,6 +926,7 @@ func (q *Queries) UpdateDesignSpecs(ctx context.Context, arg UpdateDesignSpecsPa
 		arg.UnitsPerBed,
 		arg.Quality,
 		arg.InfillPct,
+		arg.MachineID,
 		arg.Status,
 		arg.ID,
 	)

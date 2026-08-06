@@ -4,12 +4,13 @@
 -- name: InsertDesign :one
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('name'), sqlc.arg('created_by'),
     sqlc.arg('status'), sqlc.arg('stl_key'), sqlc.arg('material'), sqlc.narg('colour'),
     sqlc.arg('finish'), sqlc.arg('units_per_bed'), sqlc.arg('quality'),
-    sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key'), sqlc.narg('sku')
+    sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key'), sqlc.narg('sku'),
+    sqlc.narg('machine_id')
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
@@ -22,8 +23,17 @@ SELECT nextval('designs_sku_seq')::bigint AS seq;
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, created_at, updated_at
 FROM designs WHERE id = $1;
+
+-- SetDesignPersonalisationRules stores (or clears, with NULL) the product's
+-- personalization rule set. The jsonb shape is validated in Go before it is set.
+-- name: SetDesignPersonalisationRules :one
+UPDATE designs SET personalisation_rules = sqlc.narg('personalisation_rules'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, machine_id, personalisation_rules, created_at, updated_at;
 
 -- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
@@ -64,6 +74,7 @@ UPDATE designs SET
     material = sqlc.arg('material'), colour = sqlc.narg('colour'),
     finish = sqlc.arg('finish'), units_per_bed = sqlc.arg('units_per_bed'),
     quality = sqlc.arg('quality'), infill_pct = sqlc.arg('infill_pct')::float8,
+    machine_id = sqlc.narg('machine_id'),
     status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');
 
@@ -82,7 +93,7 @@ RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
 -- name: GetDesignBySku :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       preview_key, sku, template_file_id, created_at, updated_at
+       preview_key, sku, template_file_id, personalisation_rules, created_at, updated_at
 FROM designs WHERE sku = $1;
 
 -- SetDesignTemplateFile records the file_asset that stands in for the design's

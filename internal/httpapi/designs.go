@@ -134,11 +134,13 @@ type jobResponse struct {
 
 type designDetailResponse struct {
 	designResponse
-	Notes   *string          `json:"notes"`
-	Job     *jobResponse     `json:"job"`
-	Metrics *metricsResponse `json:"metrics"`
-	Pricing *pricingResponse `json:"pricing"`
-	Shopify *shopifyBlock    `json:"shopify"`
+	Notes                *string                `json:"notes"`
+	Job                  *jobResponse           `json:"job"`
+	Metrics              *metricsResponse       `json:"metrics"`
+	Pricing              *pricingResponse       `json:"pricing"`
+	Shopify              *shopifyBlock          `json:"shopify"`
+	Machine              *machineConfigResponse `json:"machine"`
+	PersonalisationRules json.RawMessage        `json:"personalisation_rules"`
 }
 
 // designDTO maps the shared design columns (identical across the insert/get/list
@@ -163,6 +165,8 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.POST("", s.guards.RequirePermission(auth.DesignCreate.Key()), s.createDesign)
 	g.GET("/:id", s.guards.RequirePermission(auth.DesignRead.Key()), s.getDesign)
 	g.GET("/:id/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
+	g.GET("/:id/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
+	g.GET("/:id/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
 	g.GET("/:id/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
 	g.GET("/:id/gcode/plate", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcodePlate)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPreview)
@@ -174,6 +178,10 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.GET("/:id/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
 	g.POST("/:id/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
 	g.PATCH("/:id/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
+	g.PATCH("/:id/personalisation-rules",
+		s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignPersonalisationRules)
+	g.POST("/:id/personalisation-estimate",
+		s.guards.RequirePermission(auth.DesignRead.Key()), s.estimatePersonalisation)
 }
 
 // listDesigns returns a brand's designs, newest first. The brand is a required
@@ -264,17 +272,43 @@ func (s *Server) getDesign(c *gin.Context) {
 		dbError(c, err, "That design does not exist.", "Could not load the design.")
 		return
 	}
+	machine, err := s.designMachine(ctx, d.MachineID)
+	if err != nil {
+		dbError(c, err, "That design does not exist.", "Could not load the design.")
+		return
+	}
 
 	resp := designDetailResponse{
 		designResponse: designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
 			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.PreviewKey, d.Sku, d.CreatedAt, d.UpdatedAt),
-		Notes:   d.Notes,
-		Job:     job,
-		Metrics: metrics,
-		Pricing: pricing,
-		Shopify: shopifyBlk,
+		Notes:                d.Notes,
+		Job:                  job,
+		Metrics:              metrics,
+		Pricing:              pricing,
+		Shopify:              shopifyBlk,
+		Machine:              machine,
+		PersonalisationRules: json.RawMessage(d.PersonalisationRules),
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// designMachine resolves the machine profile a design slices on, or nil when the
+// design has no machine set (it uses the built-in default) or the chosen machine
+// has since been deleted.
+func (s *Server) designMachine(ctx context.Context, machineID *uuid.UUID) (*machineConfigResponse, error) {
+	if machineID == nil {
+		return nil, nil
+	}
+	m, err := s.store.Q.GetMachineConfig(ctx, *machineID)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	dto := machineConfigDTO(m.ID, m.Name, m.Family, m.NozzleMm, m.Flow, m.DefaultColour,
+		m.LayerHeightMinMm, m.LayerHeightMaxMm, m.SupportedFilaments, m.Status, m.IsActive, m.IsDefault)
+	return &dto, nil
 }
 
 // downloadModel streams the original model a designer uploaded (STL/3MF/STEP).
