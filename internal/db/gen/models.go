@@ -282,6 +282,9 @@ type ProductionJob struct {
 	PersonalisationValidatedBy *string
 	PersonalisationValidatedAt pgtype.Timestamptz
 	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
 	Held                       bool
 	Colours                    []byte
 	SupportUsed                *bool

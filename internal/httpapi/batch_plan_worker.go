@@ -41,12 +41,13 @@ func NewBatchPlanWorker(server *Server, logger *slog.Logger) *BatchPlanWorker {
 func (w *BatchPlanWorker) Work(ctx context.Context, job *river.Job[production.PlanBatchesArgs]) error {
 	w.logger.Info("batch plan start", "attempt", job.Attempt)
 
-	created, unbatchable, err := w.server.AutoCreateBatches(ctx)
+	created, unbatchable, held, err := w.server.AutoCreateBatches(ctx)
 	if err != nil {
 		w.logger.Error("batch plan failed", "attempt", job.Attempt, "error", err)
 		return fmt.Errorf("auto create batches: %w", err)
 	}
 
-	w.logger.Info("batch plan done", "batches", len(created), "unbatchable", len(unbatchable))
+	w.logger.Info("batch plan done",
+		"batches", len(created), "unbatchable", len(unbatchable), "held", len(held))
 	return nil
 }

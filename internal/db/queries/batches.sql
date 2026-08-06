@@ -69,3 +69,10 @@ RETURNING *;
 UPDATE batches SET preview_file_id = sqlc.arg('preview_file_id'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: ListPendingApprovalBatchesForMachine :many
+-- Draft batches still parked on a machine profile that's about to go
+-- offline/maintenance - reassignBatchesForOfflineMachine's candidates (see
+-- machine_scheduler.go). Only pending_approval: an approved batch is a human
+-- commitment and is left alone for a human to move manually.
+SELECT * FROM batches WHERE machine_id = sqlc.arg('machine_id') AND status = 'pending_approval';

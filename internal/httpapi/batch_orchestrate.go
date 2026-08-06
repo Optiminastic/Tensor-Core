@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -35,17 +36,51 @@ var (
 	errPlanBatchableJobs = errors.New("resolve batchable jobs' print files")
 )
 
-func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []production.Unbatchable, error) {
+// AutoCreateBatches returns the newly-created batches, jobs that could never
+// be placed, held partitions (compatible + packed, but under the utilisation
+// target with no override yet - their jobs stay queued, not assigned to any
+// batch, for the next run to reconsider), and an error.
+func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []production.Unbatchable, []production.PlannedBatch, error) {
 	jobs, err := s.store.Q.ListBatchableJobs(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", errListBatchableJobs, err)
+		return nil, nil, nil, fmt.Errorf("%w: %v", errListBatchableJobs, err)
 	}
 
 	planJobs, err := s.planJobsFor(ctx, jobs)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", errPlanBatchableJobs, err)
+		return nil, nil, nil, fmt.Errorf("%w: %v", errPlanBatchableJobs, err)
 	}
-	planned, unbatchable := production.Plan(planJobs)
+	gate := production.BatchGate{
+		MaxWait:           time.Duration(s.cfg.BatchMaxWaitHours * float64(time.Hour)),
+		DueSoonWindow:     time.Duration(s.cfg.BatchDueSoonHours * float64(time.Hour)),
+		AgingWindow:       time.Duration(s.cfg.BatchAgingWindowMinutes * float64(time.Minute)),
+		AgingFloorPercent: s.cfg.BatchAgingFloorPercent,
+	}
+	planned, unbatchable, held := production.Plan(planJobs, time.Now(), gate)
+
+	log := obs.FromContext(ctx)
+	for _, h := range held {
+		// Not silent: these jobs are genuinely not being batched this run -
+		// fillBed already exhausted every compatible job in the cluster, the
+		// result landed under the 80% target, and no override (urgent
+		// priority, due soon, max wait) applied. They stay in the queue;
+		// ListBatchableJobs picks them up again next run.
+		log.Info("batch held below target, waiting for more compatible volume",
+			"jobs", len(h.Jobs), "utilisation_percent", h.BedUtilisationPercent,
+			"target_percent", production.TargetBedUtilisationPercent)
+	}
+
+	// originalQty is each job's quantity as loaded before Plan ran - the
+	// yardstick splitJobIDsFor uses to tell an unsplit job (quantity
+	// unchanged, commit it as-is, the overwhelmingly common case) from a
+	// split fragment (quantity reduced, needs a new row - see
+	// splitJobIDsFor's doc comment for why every committed fragment mints a
+	// new row rather than only the second-and-later ones).
+	originalQty := make(map[string]int32, len(planJobs))
+	for _, pj := range planJobs {
+		originalQty[pj.ID] = int32(pj.Quantity)
+	}
+	committed := make(map[string]bool, len(planJobs))
 
 	created := make([]gen.Batch, 0, len(planned))
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
@@ -54,16 +89,21 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 			if err != nil {
 				return err
 			}
-			shortage := !s.filamentAvailable(ctx, q, batchMaterial(p.Jobs), p.TotalFilamentGrams)
-			// Stage 9: auto-assign the earliest-free machine for this batch's
-			// required family; a human can still override at approval.
-			var family string
+			material := batchMaterial(p.Jobs)
+			shortage := !s.filamentAvailable(ctx, q, material, p.TotalFilamentGrams)
+			// Stage 9: auto-assign the best-scoring machine for this batch's
+			// required family/material/colours; a human can still override
+			// at approval.
+			var family, materialStr string
 			if len(p.Jobs) > 0 {
 				family = p.Jobs[0].MachineFamily
 			}
+			if material != nil {
+				materialStr = *material
+			}
 			b, err := q.InsertBatch(ctx, gen.InsertBatchParams{
 				ID: uuid.New(), BatchNumber: number, Status: production.BatchPendingApproval,
-				MachineID:        s.assignMachineForBatch(ctx, family),
+				MachineID:        s.assignMachineForBatch(ctx, family, materialStr, planColours(p.Jobs)),
 				MaterialShortage: shortage, UnitsPerBed: int32ptr(p.UnitsPerBed),
 				TotalPrintTimeMinutes:       int32PtrFromInt(p.TotalPrintTimeMinutes),
 				EffectiveTimePerUnitMinutes: p.EffectiveTimePerUnitMinutes,
@@ -74,17 +114,20 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 			if err != nil {
 				return err
 			}
+			jobIDs, err := s.splitJobIDsFor(ctx, q, p.Jobs, originalQty, committed)
+			if err != nil {
+				return err
+			}
 			if err := q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{
-				BatchID: ptr(b.ID), JobIds: jobIDsOf(p.Jobs),
+				BatchID: ptr(b.ID), JobIds: jobIDs,
 			}); err != nil {
 				return err
 			}
 			if p.BedUtilisationPercent < production.TargetBedUtilisationPercent {
-				// Not silently accepted: fillBed already exhausted every
-				// compatible job left in this cluster before closing the
-				// bed, so this is a genuine exception (too few/large
-				// leftover jobs to reach the target), not a packing miss.
-				obs.FromContext(ctx).Warn("batch created under the bed-utilisation target",
+				// Created despite being under target: an override fired
+				// (urgent priority, due soon, or max wait) - worth flagging
+				// distinctly from a normal >=80% batch.
+				log.Warn("batch created under the bed-utilisation target via override",
 					"batch", b.ID, "utilisation_percent", p.BedUtilisationPercent,
 					"target_percent", production.TargetBedUtilisationPercent, "jobs", len(p.Jobs))
 			}
@@ -93,7 +136,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		return nil
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("insert batches: %w", err)
+		return nil, nil, nil, fmt.Errorf("insert batches: %w", err)
 	}
 
 	// Cache each Draft's merged plate now, off the tx and best-effort, so
@@ -106,7 +149,52 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 			s.cachePreview(ctx, b)
 		}
 	}
-	return created, unbatchable, nil
+	return created, unbatchable, held, nil
+}
+
+// splitJobIDsFor resolves one PlannedBatch's jobs to the production_jobs row
+// ids AssignJobsToBatch should link, handling production.packJobs's
+// quantity-split fragments (see splitJobToFit): a job whose PlanJob.Quantity
+// still matches its original, not-yet-committed quantity is linked directly,
+// unchanged - the common case, zero extra queries. Any other occurrence
+// (quantity reduced by a split, or a second/later fragment of the same job
+// id within this run) always gets a brand-new row via splitProductionJob,
+// linked via split_of_job_id, with the original's own quantity decremented
+// by the same amount - so the original row keeps representing exactly
+// what's left un-split, still fully accounted for whether that remainder
+// ends up in another batch this run or stays queued for a later one.
+func (s *Server) splitJobIDsFor(
+	ctx context.Context, q *gen.Queries, jobs []production.PlanJob,
+	originalQty map[string]int32, committed map[string]bool,
+) ([]uuid.UUID, error) {
+	ids := make([]uuid.UUID, 0, len(jobs))
+	for _, j := range jobs {
+		id, err := uuid.Parse(j.ID)
+		if err != nil {
+			continue
+		}
+		full := !committed[j.ID] && int32(j.Quantity) == originalQty[j.ID]
+		committed[j.ID] = true
+		if full {
+			ids = append(ids, id)
+			continue
+		}
+		orig, err := q.GetProductionJobByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		frag, err := q.InsertProductionJob(ctx, splitProductionJob(orig, int32(j.Quantity)))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := q.DecrementProductionJobQuantity(ctx, gen.DecrementProductionJobQuantityParams{
+			ID: id, Delta: int32(j.Quantity),
+		}); err != nil {
+			return nil, err
+		}
+		ids = append(ids, frag.ID)
+	}
+	return ids, nil
 }
 
 // cachePreview builds and stores one Draft batch's merged plate, recording it
@@ -153,13 +241,17 @@ func (s *Server) storePlateSystem(ctx context.Context, batchID uuid.UUID, kind, 
 	return fileID, nil
 }
 
-// triggerBatchPlan schedules a debounced replan (see BatchPlanEnqueuer) after
-// something may have made new jobs batchable - a job creation run, or a
-// personalisation check that resolved to validated. Best-effort: a batch is
-// not created transactionally with anything else (unlike CreateJobsForOrder's
-// job-creation enqueue), so a failure here is logged, not propagated - the
-// caller's own work (the jobs, the validated personalisation) still succeeded,
-// and the next natural trigger picks up the same batchable jobs regardless.
+// triggerBatchPlan schedules a debounced replan (see BatchPlanEnqueuer)
+// unconditionally - for the low-frequency, high-signal events (a batch
+// completing, freeing up a machine; a reprint being created) where it's
+// always worth a look regardless of how much else is queued. High-frequency
+// per-job events (job creation, personalisation validation) go through
+// triggerBatchPlanIfThresholdMet instead, so a burst of individual orders
+// doesn't force a replan per order - see its own doc comment. Best-effort: a
+// batch is not created transactionally with anything else, so a failure here
+// is logged, not propagated - the caller's own work still succeeded, and the
+// next natural trigger (including the periodic tick, see
+// cmd/productionworker/main.go) picks up the same batchable jobs regardless.
 func (s *Server) triggerBatchPlan(ctx context.Context) {
 	if s.batchEnqueuer == nil {
 		return
@@ -167,4 +259,28 @@ func (s *Server) triggerBatchPlan(ctx context.Context) {
 	if err := s.batchEnqueuer.Enqueue(ctx); err != nil {
 		obs.FromContext(ctx).Error("could not schedule batch replan", "error", err)
 	}
+}
+
+// triggerBatchPlanIfThresholdMet is triggerBatchPlan gated on a cheap
+// backlog count, for the two high-frequency per-job trigger sites (job
+// creation, personalisation validation) - stopping "replan after every
+// single order" per the user's explicit direction, while a periodic tick
+// (cmd/productionworker/main.go) and the two unconditional low-frequency
+// triggers (triggerBatchPlan) still guarantee batchable jobs are eventually
+// reconsidered even below the threshold. A count-query failure fails OPEN
+// (triggers anyway): a broken count check must never permanently starve the
+// planner, and the periodic tick alone could otherwise be minutes away.
+func (s *Server) triggerBatchPlanIfThresholdMet(ctx context.Context) {
+	log := obs.FromContext(ctx)
+	count, err := s.store.Q.CountBatchableJobs(ctx)
+	if err != nil {
+		log.Warn("could not count batchable jobs, triggering replan anyway", "error", err)
+		s.triggerBatchPlan(ctx)
+		return
+	}
+	if int(count) < s.cfg.BatchPlanJobThreshold {
+		log.Info("batch replan skipped, below threshold", "batchable_jobs", count, "threshold", s.cfg.BatchPlanJobThreshold)
+		return
+	}
+	s.triggerBatchPlan(ctx)
 }

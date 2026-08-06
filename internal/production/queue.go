@@ -21,10 +21,6 @@ import (
 	"github.com/riverqueue/river"
 )
 
-// batchPlanDebounce is the window a burst of replan triggers collapses into
-// one run over, via UniqueOpts.ByPeriod below.
-const batchPlanDebounce = 5 * time.Second
-
 // JobCreationQueueName is the River queue order-arrived jobs are routed to.
 const JobCreationQueueName = "production_jobs"
 
@@ -77,11 +73,17 @@ func (e *JobCreationEnqueuer) EnqueueTx(ctx context.Context, tx pgx.Tx, args Cre
 
 // BatchPlanEnqueuer inserts debounced PlanBatchesArgs triggers into River.
 type BatchPlanEnqueuer struct {
-	client *river.Client[pgx.Tx]
+	client   *river.Client[pgx.Tx]
+	debounce time.Duration
 }
 
-func NewBatchPlanEnqueuer(client *river.Client[pgx.Tx]) *BatchPlanEnqueuer {
-	return &BatchPlanEnqueuer{client: client}
+// NewBatchPlanEnqueuer builds an enqueuer that collapses triggers landing
+// within debounce of each other into a single run - shared with the periodic
+// tick registered in cmd/productionworker/main.go so a scheduled tick and an
+// event trigger arriving close together never double-fire (see
+// PeriodicBatchPlanConstructor).
+func NewBatchPlanEnqueuer(client *river.Client[pgx.Tx], debounce time.Duration) *BatchPlanEnqueuer {
+	return &BatchPlanEnqueuer{client: client, debounce: debounce}
 }
 
 // Enqueue schedules a replan, deduplicated against any run already pending
@@ -93,7 +95,21 @@ func NewBatchPlanEnqueuer(client *river.Client[pgx.Tx]) *BatchPlanEnqueuer {
 func (e *BatchPlanEnqueuer) Enqueue(ctx context.Context) error {
 	_, err := e.client.Insert(ctx, PlanBatchesArgs{}, &river.InsertOpts{
 		Queue:      BatchPlanQueueName,
-		UniqueOpts: river.UniqueOpts{ByPeriod: batchPlanDebounce},
+		UniqueOpts: river.UniqueOpts{ByPeriod: e.debounce},
 	})
 	return err
+}
+
+// PeriodicBatchPlanConstructor is the river.PeriodicJobConstructor for the
+// periodic replan tick (see cmd/productionworker/main.go) - uses the same
+// debounce as Enqueue so the periodic tick and an event trigger landing
+// close together collapse into one run via River's own ByPeriod uniqueness,
+// rather than each inserting a separate job.
+func PeriodicBatchPlanConstructor(debounce time.Duration) func() (river.JobArgs, *river.InsertOpts) {
+	return func() (river.JobArgs, *river.InsertOpts) {
+		return PlanBatchesArgs{}, &river.InsertOpts{
+			Queue:      BatchPlanQueueName,
+			UniqueOpts: river.UniqueOpts{ByPeriod: debounce},
+		}
+	}
 }

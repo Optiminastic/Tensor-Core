@@ -355,6 +355,15 @@ CREATE TABLE production_jobs (
     personalisation_validated_by  varchar(64),
     personalisation_validated_at  timestamptz,
     reprint_of_job_id             uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
+    -- Set when this row is a fragment peeled off another job's quantity
+    -- because the whole amount didn't fit on one bed (see 0028_job_split.sql).
+    split_of_job_id               uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
+    -- Denormalised from orders.shopify_customer_id / customer_name at job
+    -- creation time (see buildJobsForOrder) - avoids a join for the planner
+    -- and batch listings; both null when the order has no customer object
+    -- (guest checkout) or the job has no linked order (see 0029).
+    shopify_customer_id           bigint,
+    customer_name                 varchar(255),
     held                          boolean NOT NULL DEFAULT false,
     -- Multi-colour set (e.g. ["Red","Yellow","Black"]) and the grouping/
     -- validation-stage snapshots: support usage and infill from the matched
@@ -377,6 +386,8 @@ CREATE INDEX ix_production_jobs_batch_id ON production_jobs (batch_id);
 CREATE INDEX ix_production_jobs_created ON production_jobs (created_at DESC, id DESC);
 CREATE INDEX ix_production_jobs_personalisation ON production_jobs (personalisation_status);
 CREATE INDEX ix_production_jobs_reprint_of ON production_jobs (reprint_of_job_id);
+CREATE INDEX ix_production_jobs_split_of ON production_jobs (split_of_job_id);
+CREATE INDEX ix_production_jobs_shopify_customer_id ON production_jobs (shopify_customer_id);
 CREATE INDEX ix_production_jobs_shopify_order_id ON production_jobs (shopify_order_id);
 CREATE INDEX ix_production_jobs_colours ON production_jobs USING gin (colours);
 CREATE INDEX ix_production_jobs_issue ON production_jobs (issue_reason) WHERE issue_reason IS NOT NULL;

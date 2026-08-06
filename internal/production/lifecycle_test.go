@@ -1,8 +1,38 @@
 package production
 
-import "testing"
+import (
+	"regexp"
+	"testing"
+)
 
 func strptr(s string) *string { return &s }
+
+var jobNumberPattern = regexp.MustCompile(`^JOB-\d{5}$`)
+var batchNumberPattern = regexp.MustCompile(`^BATCH-\d{5}$`)
+
+func TestNewJobNumberFormat(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		n, err := NewJobNumber()
+		if err != nil {
+			t.Fatalf("NewJobNumber: %v", err)
+		}
+		if !jobNumberPattern.MatchString(n) {
+			t.Fatalf("job number %q does not match JOB-##### (5 digits)", n)
+		}
+	}
+}
+
+func TestNewBatchNumberFormat(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		n, err := NewBatchNumber()
+		if err != nil {
+			t.Fatalf("NewBatchNumber: %v", err)
+		}
+		if !batchNumberPattern.MatchString(n) {
+			t.Fatalf("batch number %q does not match BATCH-##### (5 digits)", n)
+		}
+	}
+}
 
 func TestAutoValidateNotRequired(t *testing.T) {
 	status, c := AutoValidatePersonalisation(LineItem{PersonalisationRequired: false})

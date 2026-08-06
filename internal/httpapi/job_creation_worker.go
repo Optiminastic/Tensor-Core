@@ -55,6 +55,6 @@ func (w *JobCreationWorker) Work(ctx context.Context, job *river.Job[production.
 	}
 
 	w.logger.Info("job creation done", "order", orderID, "jobs", len(jobs))
-	w.server.triggerBatchPlan(ctx)
+	w.server.triggerBatchPlanIfThresholdMet(ctx)
 	return nil
 }

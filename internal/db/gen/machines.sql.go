@@ -152,7 +152,7 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 }
 
 const listFleetMachinesWithFamily = `-- name: ListFleetMachinesWithFamily :many
-SELECT m.id, m.machine_id, m.name, m.image_url, m.status, m.filaments, m.current_batch_id, m.current_layer, m.total_layers, m.batch_total_time_minutes, m.print_started_at, m.total_waste_grams, m.machine_profile_id, m.created_at, m.updated_at, mp.family AS profile_family
+SELECT m.id, m.machine_id, m.name, m.image_url, m.status, m.filaments, m.current_batch_id, m.current_layer, m.total_layers, m.batch_total_time_minutes, m.print_started_at, m.total_waste_grams, m.machine_profile_id, m.created_at, m.updated_at, mp.family AS profile_family, mp.status AS profile_status
 FROM machines m
 LEFT JOIN machine_profiles mp ON mp.id = m.machine_profile_id
 ORDER BY m.machine_id
@@ -175,11 +175,13 @@ type ListFleetMachinesWithFamilyRow struct {
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 	ProfileFamily         *string
+	ProfileStatus         *string
 }
 
-// Every fleet machine with its linked profile's family (null if unlinked or
-// off, both of which the scheduler skips) - what the earliest-free-machine
-// scheduler ranks over for a given batch's required machine family.
+// Every fleet machine with its linked profile's family and operational status
+// (both null if unlinked) - what the earliest-free-machine scheduler ranks
+// over for a given batch's required machine family, skipping any fleet unit
+// that's off or whose linked profile is offline/maintenance.
 func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetMachinesWithFamilyRow, error) {
 	rows, err := q.db.Query(ctx, listFleetMachinesWithFamily)
 	if err != nil {
@@ -206,6 +208,7 @@ func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetM
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.ProfileFamily,
+			&i.ProfileStatus,
 		); err != nil {
 			return nil, err
 		}

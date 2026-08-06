@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -89,9 +90,10 @@ func seedRealOrders(ctx context.Context, store *db.Store, designs []seededDesign
 		for _, d := range picks {
 			qty := 1 + rng.Intn(3)
 			sku := d.SKU
+			priority, due := realisticPriorityAndDueDate(rng)
 			lineItems = append(lineItems, production.LineItem{
 				ProductID: d.ID.String(), SKU: &sku, ProductName: d.Name,
-				Quantity: qty, Unit: "pcs",
+				Quantity: qty, Unit: "pcs", Priority: priority, DueDate: due,
 			})
 			total += float64(qty) * realUnitPrice
 		}
@@ -131,6 +133,25 @@ func seedRealOrders(ctx context.Context, store *db.Store, designs []seededDesign
 		ids = append(ids, order.ID)
 	}
 	return ids, nil
+}
+
+// realisticPriorityAndDueDate gives most line items a routine priority and a
+// due date well outside the "due soon" override window, with a modest
+// fraction genuinely urgent or due imminently - so the seeded data actually
+// exercises production.Plan's hold-below-target gate and its overrides
+// (internal/production/planner.go's BatchGate) instead of every job
+// trivially qualifying as urgent by leaving Priority at its zero value
+// (which is <= production's urgentPriority=1).
+func realisticPriorityAndDueDate(rng *rand.Rand) (priority int, due *time.Time) {
+	priority = 5 // routine
+	if rng.Intn(6) == 0 {
+		priority = 1 // same-day/urgent
+	}
+	when := time.Now().Add(time.Duration(3+rng.Intn(5)) * 24 * time.Hour) // 3-7 days out
+	if rng.Intn(8) == 0 {
+		when = time.Now().Add(time.Duration(rng.Intn(20)) * time.Hour) // due imminently
+	}
+	return priority, &when
 }
 
 func pickDesigns(rng *rand.Rand, designs []seededDesign, n int) []seededDesign {

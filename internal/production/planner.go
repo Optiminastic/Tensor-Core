@@ -26,21 +26,27 @@ const similarDueDateWindow = 3 * 24 * time.Hour
 // the "1" the user specified: FCFS by default, "1" for same-day).
 const urgentPriority = 1
 
+// UrgentPriority is urgentPriority, exported for callers outside this
+// package that need to force a job to the top of the queue - e.g. a reprint,
+// which should always jump ahead regardless of its source job's priority.
+const UrgentPriority = urgentPriority
+
 // maxGroupColours caps how many distinct filament colours a single bed may
 // use combined, checked live while packing (see withinColourCap) - not a
 // pre-grouping equality bucket, so jobs of genuinely different colours can
 // still share a bed as long as the running total stays at or under this.
-const maxGroupColours = 3
+const maxGroupColours = 2
 
 // TargetBedUtilisationPercent is the floor bed-footprint fill (X*Y area of
 // placed parts / bed area) a batch should clear before it's accepted as
 // final - the top-priority packing goal, per the user's explicit "more than
-// 80% in X/Y" instruction. It is enforced by packJobs's lookahead fill (see
-// fillBed) rather than by ever discarding a partition outright: a batch that
-// still lands under this after exhausting every compatible job left in its
-// cluster is accepted anyway (there is nothing left to add it with) but
-// surfaced as an explicit, non-silent exception by the caller (see
-// httpapi.AutoCreateBatches).
+// 80% in X/Y" instruction. It is chased two ways: packJobs's lookahead fill
+// (see fillBed) tries to reach it by pulling in whatever compatible jobs
+// still fit; and a partition that still lands under it after exhausting
+// every compatible job in its cluster is not created at all - see
+// shouldCreateBatch/BatchGate - unless an override condition (urgent
+// priority, due soon, or max queue wait) applies, so genuinely low-volume
+// periods still ship instead of waiting forever.
 const TargetBedUtilisationPercent = 80.0
 
 // packingStrategies are the job orderings tried per cluster; the best-scoring one
@@ -59,22 +65,28 @@ var packingStrategies = []string{strategyFCFS, strategyArea, strategyTime, strat
 // filament need, and per-unit footprint. String fields are already normalised
 // to "" when absent. Colours is a set (order doesn't matter for grouping).
 type PlanJob struct {
-	ID               string
-	JobNumber        string
-	Material         string
-	Colours          []string
-	NozzleLeft       string
-	NozzleRight      string
-	QualityMM        string
-	MachineFamily    string
-	SupportUsed      bool
-	InfillPct        float64
-	Priority         int
-	Quantity         int
-	EstimatedMinutes *int
-	DueDate          *time.Time
-	FilamentGrams    float64
-	Footprint        bedpack.UnitFootprint
+	ID        string
+	JobNumber string
+	// ShopifyCustomerID is nil when the job has no linked order or the
+	// order had no customer object (guest checkout) - never treated as
+	// matching another nil, so unset-customer jobs never spuriously
+	// cluster together (see sameCustomerOnBed/customerCohesionCount).
+	ShopifyCustomerID *int64
+	Material          string
+	Colours           []string
+	NozzleLeft        string
+	NozzleRight       string
+	QualityMM         string
+	MachineFamily     string
+	SupportUsed       bool
+	InfillPct         float64
+	Priority          int
+	Quantity          int
+	EstimatedMinutes  *int
+	DueDate           *time.Time
+	CreatedAt         time.Time
+	FilamentGrams     float64
+	Footprint         bedpack.UnitFootprint
 }
 
 // PlannedBatch is a proposed batch: its jobs, the placement result, and the
@@ -97,12 +109,67 @@ type Unbatchable struct {
 	Reason    string
 }
 
-// Plan groups and packs jobs into batches. Jobs without a measurable footprint,
-// or too large for the bed even alone, come back as Unbatchable.
-func Plan(jobs []PlanJob) ([]PlannedBatch, []Unbatchable) {
-	var batches []PlannedBatch
-	var unbatchable []Unbatchable
+// BatchGate configures the override conditions that let a partition become a
+// real batch even when it hasn't cleared TargetBedUtilisationPercent -
+// otherwise it's held (Plan's third return value) so its jobs stay queued,
+// waiting for more compatible volume to arrive rather than printing an
+// under-filled bed.
+type BatchGate struct {
+	// MaxWait forces a batch once any of its jobs has been queued this long,
+	// however low the utilisation - a low-volume period must not leave
+	// customers waiting forever for more orders to arrive. Stays in force
+	// even with aging configured below: a gradually-relaxing floor alone
+	// can't guarantee a genuinely isolated, incompatible-with-everything job
+	// ever ships, so this remains the final unconditional backstop.
+	MaxWait time.Duration
+	// DueSoonWindow forces a batch if any of its jobs is due within this
+	// window of now (including already overdue).
+	DueSoonWindow time.Duration
 
+	// AgingWindow is how long a partition ages before its effective
+	// acceptance bar bottoms out at AgingFloorPercent, relaxing linearly
+	// from TargetBedUtilisationPercent in between. AgingWindow<=0 disables
+	// aging entirely (the zero-value BatchGate{} used by existing callers
+	// and tests is unaffected).
+	AgingWindow time.Duration
+	// AgingFloorPercent is the lowest the effective bar relaxes to before
+	// MaxWait's unconditional override takes over. Should be less than
+	// TargetBedUtilisationPercent for aging to have any effect.
+	AgingFloorPercent float64
+}
+
+// Nester places print units onto a bed and reports what fit vs what didn't -
+// the seam between Stage 2 (Candidate Batch Builder: which jobs go on this
+// bed) and Stage 3 (2D Nesting/Bed Layout: where they physically sit).
+// bedpack.Pack (guillotine Best-Area-Fit) is today's only implementation and
+// exactly matches this signature; a future no-fit-polygon nester could
+// satisfy the same signature without any other function in this file
+// changing (see PlanWithNester).
+type Nester func(units []bedpack.UnitFootprint) (placements []bedpack.Placement, rejected []bedpack.UnitFootprint)
+
+// DefaultNester is bedpack's guillotine Best-Area-Fit packer - today's only
+// Nester, and what Plan uses.
+var DefaultNester Nester = bedpack.Pack
+
+// Plan groups and packs jobs into batches using DefaultNester. See
+// PlanWithNester for the nesting-algorithm-injectable version and the full
+// behaviour description.
+func Plan(jobs []PlanJob, now time.Time, gate BatchGate) (batches []PlannedBatch, unbatchable []Unbatchable, held []PlannedBatch) {
+	return PlanWithNester(jobs, now, gate, DefaultNester)
+}
+
+// PlanWithNester groups and packs jobs into batches. Jobs without a
+// measurable footprint, or too large for the bed even alone, come back as
+// Unbatchable. A partition that doesn't clear TargetBedUtilisationPercent is
+// only accepted as a real batch if it qualifies for an override under gate
+// (an urgent-priority job, a job due soon, or a job that's been queued past
+// the max wait) - otherwise it's returned as held, not created, so the next
+// run reconsiders its jobs alongside whatever newer orders have arrived by
+// then. Grouping (Stage 1: Compatibility Filter), scoring (Stage 4: Batch
+// Scoring), and this gate (Stage 5: Batch Approval) are all nesting-
+// algorithm-agnostic and unaffected by which Nester is passed - only Stage
+// 2/3 (candidate building + nesting, both inside bestPartition) consult it.
+func PlanWithNester(jobs []PlanJob, now time.Time, gate BatchGate, nest Nester) (batches []PlannedBatch, unbatchable []Unbatchable, held []PlannedBatch) {
 	measurable := make([]PlanJob, 0, len(jobs))
 	for _, j := range jobs {
 		if j.Footprint.XMM <= 0 || j.Footprint.YMM <= 0 {
@@ -117,12 +184,80 @@ func Plan(jobs []PlanJob) ([]PlannedBatch, []Unbatchable) {
 
 	for _, group := range groupByKey(measurable) {
 		for _, cluster := range dueDateClusters(group) {
-			planned, unb := bestPartition(cluster)
-			batches = append(batches, planned...)
+			planned, unb := bestPartition(cluster, nest)
 			unbatchable = append(unbatchable, unb...)
+			for _, p := range planned {
+				if shouldCreateBatch(p, now, gate) {
+					batches = append(batches, p)
+				} else {
+					held = append(held, p)
+				}
+			}
 		}
 	}
-	return batches, unbatchable
+	return batches, unbatchable, held
+}
+
+// shouldCreateBatch reports whether a partition should become a real batch
+// now rather than stay held waiting for more compatible volume.
+func shouldCreateBatch(b PlannedBatch, now time.Time, gate BatchGate) bool {
+	if b.BedUtilisationPercent >= TargetBedUtilisationPercent {
+		return true
+	}
+	for _, j := range b.Jobs {
+		if j.Priority <= urgentPriority {
+			return true
+		}
+		if j.DueDate != nil && !j.DueDate.After(now.Add(gate.DueSoonWindow)) {
+			return true
+		}
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) >= gate.MaxWait {
+			return true
+		}
+	}
+	if wait := longestJobWait(b.Jobs, now); wait > 0 {
+		if b.BedUtilisationPercent >= effectiveUtilisationThreshold(wait, gate) {
+			return true
+		}
+	}
+	return false
+}
+
+// longestJobWait is how long the longest-queued job in the batch has been
+// waiting, the single scalar effectiveUtilisationThreshold needs - the same
+// "how long has this batch been sitting" subject as the MaxWait loop above,
+// reduced to one value instead of a per-job early-exit.
+func longestJobWait(jobs []PlanJob, now time.Time) time.Duration {
+	var longest time.Duration
+	for _, j := range jobs {
+		if j.CreatedAt.IsZero() {
+			continue
+		}
+		if w := now.Sub(j.CreatedAt); w > longest {
+			longest = w
+		}
+	}
+	return longest
+}
+
+// effectiveUtilisationThreshold linearly relaxes the acceptance bar from
+// TargetBedUtilisationPercent at wait=0 down to gate.AgingFloorPercent at
+// wait>=gate.AgingWindow, then holds flat at the floor - MaxWait's separate,
+// unconditional override is what eventually ships a batch that never clears
+// even the floor. AgingWindow<=0 disables aging, returning the unchanged
+// target (today's behaviour).
+func effectiveUtilisationThreshold(wait time.Duration, gate BatchGate) float64 {
+	if gate.AgingWindow <= 0 {
+		return TargetBedUtilisationPercent
+	}
+	t := float64(wait) / float64(gate.AgingWindow)
+	if t >= 1 {
+		return gate.AgingFloorPercent
+	}
+	if t <= 0 {
+		return TargetBedUtilisationPercent
+	}
+	return TargetBedUtilisationPercent - (TargetBedUtilisationPercent-gate.AgingFloorPercent)*t
 }
 
 // groupKey is the compatibility bucket a job falls into: everything here must
@@ -257,18 +392,18 @@ func sameCluster(anchor, due *time.Time) bool {
 // runs a bounded local search over it to find combinations a single greedy
 // pass would miss. Jobs too big for the bed on their own are the same under
 // every strategy, so they are reported once.
-func bestPartition(cluster []PlanJob) ([]PlannedBatch, []Unbatchable) {
+func bestPartition(cluster []PlanJob, nest Nester) ([]PlannedBatch, []Unbatchable) {
 	var best []PlannedBatch
 	var bestUnb []Unbatchable
 	bestScore := math.Inf(-1)
 
 	for _, strategy := range packingStrategies {
-		batches, unb := packJobs(orderJobs(cluster, strategy), strategy)
+		batches, unb := packJobs(orderJobs(cluster, strategy), strategy, nest)
 		if score := partitionScore(batches); score > bestScore {
 			best, bestUnb, bestScore = batches, unb, score
 		}
 	}
-	return localSearch(best), bestUnb
+	return localSearch(best, nest), bestUnb
 }
 
 // orderJobs returns the cluster in the given strategy's order (a copy).
@@ -311,61 +446,134 @@ func quantityOf(j PlanJob) int {
 // compatible jobs still fit - not just the next one in strategy order - so
 // each bed is packed toward TargetBedUtilisationPercent before it's closed
 // out. A job that cannot fit even alone (the only jobs left when fillBed
-// places nothing) is unbatchable.
-func packJobs(jobs []PlanJob, strategy string) ([]PlannedBatch, []Unbatchable) {
+// places nothing) is unbatchable - unless splitJobToFit finds that a smaller
+// quantity of it does fit alone, in which case that quantity is retried
+// through the normal fillBed path (so it can still combine with other
+// compatible jobs, same as anything else) and the rest is carried forward to
+// split further on a later bed, until either the whole original quantity is
+// placed across however many beds it took, or a single unit genuinely
+// doesn't fit at all.
+func packJobs(jobs []PlanJob, strategy string, nest Nester) ([]PlannedBatch, []Unbatchable) {
 	var batches []PlannedBatch
 	var unb []Unbatchable
 	remaining := append([]PlanJob{}, jobs...)
 
 	for len(remaining) > 0 {
-		bedJobs, bedUnits, rest := fillBed(remaining)
+		bedJobs, bedUnits, rest := fillBed(remaining, nest)
 		if len(bedJobs) == 0 {
 			head := remaining[0]
-			unb = append(unb, Unbatchable{
-				JobID: head.ID, JobNumber: head.JobNumber,
-				Reason: "Exceeds the print bed's capacity even on its own.",
-			})
-			remaining = remaining[1:]
+			fragment, leftover, ok := splitJobToFit(head, nest)
+			if !ok {
+				unb = append(unb, Unbatchable{
+					JobID: head.ID, JobNumber: head.JobNumber,
+					Reason: "Exceeds the print bed's capacity even on its own.",
+				})
+				remaining = remaining[1:]
+				continue
+			}
+			remaining = append(append([]PlanJob{fragment}, remaining[1:]...), leftover)
 			continue
 		}
-		batches = append(batches, finalise(bedJobs, bedUnits, strategy))
+		batches = append(batches, finalise(bedJobs, bedUnits, strategy, nest))
 		remaining = rest
 	}
 	return batches, unb
 }
 
+// splitJobToFit reports the largest quantity of j (starting from 1) that
+// nest fits alone on an empty bed, as (fragment, leftover, ok=true) -
+// fragment carries that quantity, leftover carries whatever's left over,
+// both otherwise identical copies of j. ok is false only when not even a
+// single unit fits alone (genuinely oversized geometry, unrelated to
+// quantity), or j's quantity is already 1 (nothing left to split) - the
+// caller's existing unbatchable path handles both.
+func splitJobToFit(j PlanJob, nest Nester) (fragment, leftover PlanJob, ok bool) {
+	qty := quantityOf(j)
+	if qty <= 1 {
+		return PlanJob{}, PlanJob{}, false
+	}
+	placements, _ := nest(unitsFor(j))
+	fits := len(placements)
+	if fits <= 0 || fits >= qty {
+		return PlanJob{}, PlanJob{}, false
+	}
+	fragment, leftover = j, j
+	fragment.Quantity = fits
+	leftover.Quantity = qty - fits
+	return fragment, leftover, true
+}
+
 // fillBed greedily fills one bed to its maximum: it repeatedly scans the
-// still-unplaced jobs (in strategy order) for the first one that both stays
-// within the bed's colour cap (withinColourCap) and still packs alongside
-// everything already placed, adds it, and rescans from the front - so a job
-// that doesn't fit (or doesn't colour-fit) next in line no longer stops the
-// bed short; a later, smaller or same-colour-family job gets pulled in ahead
-// of it instead. This keeps going until a full scan places nothing more, i.e.
-// the bed is genuinely as full as this job set (and its colour budget)
-// allows - never capped at the 80% target itself, more fill is always
-// better, 80% is only the floor checked by the caller.
-func fillBed(jobs []PlanJob) (bedJobs []PlanJob, bedUnits []bedpack.UnitFootprint, remaining []PlanJob) {
+// still-unplaced jobs for one that both stays within the bed's colour cap
+// (withinColourCap) and still packs alongside everything already placed,
+// adds it, and rescans from the front - so a job that doesn't fit (or
+// doesn't colour-fit) next in line no longer stops the bed short; a later,
+// smaller or same-colour-family job gets pulled in ahead of it instead.
+// Within that, each round prefers (soft, never overriding fit or the colour
+// cap) a candidate sharing a known customer with something already on this
+// bed - see selectNext/sameCustomerOnBed - falling back to strategy order
+// when no such candidate is eligible. This keeps going until a full scan
+// places nothing more, i.e. the bed is genuinely as full as this job set
+// (and its colour budget) allows - never capped at the 80% target itself,
+// more fill is always better, 80% is only the floor checked by the caller.
+func fillBed(jobs []PlanJob, nest Nester) (bedJobs []PlanJob, bedUnits []bedpack.UnitFootprint, remaining []PlanJob) {
 	remaining = append([]PlanJob{}, jobs...)
 	for {
-		placedIdx := -1
-		for i, j := range remaining {
-			if !withinColourCap(append(append([]PlanJob{}, bedJobs...), j)) {
-				continue
-			}
-			trial := append(append([]bedpack.UnitFootprint{}, bedUnits...), unitsFor(j)...)
-			if _, rejected := bedpack.Pack(trial); len(rejected) == 0 {
-				bedJobs = append(bedJobs, j)
-				bedUnits = trial
-				placedIdx = i
-				break
-			}
+		idx, trial, ok := selectNext(remaining, bedJobs, bedUnits, sameCustomerOnBed, nest)
+		if !ok {
+			idx, trial, ok = selectNext(remaining, bedJobs, bedUnits, anyJob, nest)
 		}
-		if placedIdx == -1 {
+		if !ok {
 			return bedJobs, bedUnits, remaining
 		}
-		remaining = append(remaining[:placedIdx:placedIdx], remaining[placedIdx+1:]...)
+		bedJobs = append(bedJobs, remaining[idx])
+		bedUnits = trial
+		remaining = append(remaining[:idx:idx], remaining[idx+1:]...)
 	}
 }
+
+// selectNext scans remaining for the first job that passes match, stays
+// within the colour cap, and still packs (per nest) alongside everything
+// already on the bed - the single eligibility check fillBed always used, now
+// reused across two candidate-ordering passes (see fillBed) so a preference
+// can only ever change which eligible job is tried first, never which jobs
+// are eligible at all.
+func selectNext(remaining, bedJobs []PlanJob, bedUnits []bedpack.UnitFootprint, match func([]PlanJob, PlanJob) bool, nest Nester) (int, []bedpack.UnitFootprint, bool) {
+	for i, j := range remaining {
+		if !match(bedJobs, j) {
+			continue
+		}
+		if !withinColourCap(append(append([]PlanJob{}, bedJobs...), j)) {
+			continue
+		}
+		trial := append(append([]bedpack.UnitFootprint{}, bedUnits...), unitsFor(j)...)
+		if _, rejected := nest(trial); len(rejected) == 0 {
+			return i, trial, true
+		}
+	}
+	return -1, nil, false
+}
+
+// sameCustomerOnBed reports whether cand shares a known Shopify customer
+// with something already placed on this bed. A nil ShopifyCustomerID never
+// matches anything, including another nil - two jobs with no known customer
+// are not "the same customer." Also false while the bed is still empty,
+// since anyJob picks the first job on any bed regardless of customer.
+func sameCustomerOnBed(bedJobs []PlanJob, cand PlanJob) bool {
+	if cand.ShopifyCustomerID == nil {
+		return false
+	}
+	for _, bj := range bedJobs {
+		if bj.ShopifyCustomerID != nil && *bj.ShopifyCustomerID == *cand.ShopifyCustomerID {
+			return true
+		}
+	}
+	return false
+}
+
+// anyJob is fillBed's fallback match: every candidate is eligible, same as
+// its behaviour before the same-customer preference existed.
+func anyJob([]PlanJob, PlanJob) bool { return true }
 
 // colourUnionSize is how many distinct filament colours a set of jobs uses
 // combined.
@@ -399,8 +607,8 @@ func unitsFor(j PlanJob) []bedpack.UnitFootprint {
 }
 
 // finalise computes a batch's placements and snapshot metrics.
-func finalise(jobs []PlanJob, units []bedpack.UnitFootprint, strategy string) PlannedBatch {
-	placements, _ := bedpack.Pack(units)
+func finalise(jobs []PlanJob, units []bedpack.UnitFootprint, strategy string, nest Nester) PlannedBatch {
+	placements, _ := nest(units)
 	totalTime, effective := batchTimeFields(jobs)
 	var filament float64
 	for _, j := range jobs {
@@ -438,10 +646,14 @@ func batchTimeFields(jobs []PlanJob) (*int, *float64) {
 	return &total, eff
 }
 
-// scoreBatch weights bed utilisation, urgency, print time, and colour-change
-// cost into the single number the optimizer maximises. Utilisation and
-// priority are both 0-100 scales so the weights below are directly
-// comparable; print time and colour count are penalties.
+// scoreBatch weights bed utilisation, urgency, print time, colour-change
+// cost, and same-customer cohesion into the single number the optimizer
+// maximises. Utilisation and priority are both 0-100 scales so their weights
+// are directly comparable; print time, colour count, and cohesion are all
+// small raw-count adjustments on the same 0.05 scale as each other - bounded
+// by how many jobs actually fit on one bed, so cohesion can only ever act as
+// a tie-breaker between similarly-utilised partitions, never outweigh a
+// meaningful utilisation difference.
 func scoreBatch(b PlannedBatch) float64 {
 	minutes := 0.0
 	if b.TotalPrintTimeMinutes != nil {
@@ -450,7 +662,32 @@ func scoreBatch(b PlannedBatch) float64 {
 	return b.BedUtilisationPercent*0.5 +
 		priorityScore(b.Jobs)*0.3 -
 		minutes*0.10 -
-		float64(colourChangeCount(b))*0.05
+		float64(colourChangeCount(b))*0.05 +
+		float64(customerCohesionCount(b))*0.05
+}
+
+// customerCohesionCount is how many jobs in the batch are "redundant" with
+// an already-represented customer: total jobs minus distinct identity
+// buckets, where every known ShopifyCustomerID is its own bucket and every
+// job with no known customer gets its own unique bucket - so unset-customer
+// jobs never cluster with each other or inflate this count. A cohesive
+// same-customer batch scores higher than an otherwise-identical scattered
+// one, without ever letting cohesion alone beat a meaningfully better-
+// utilised partition (see scoreBatch's doc comment).
+func customerCohesionCount(b PlannedBatch) int {
+	seen := map[int64]bool{}
+	buckets := 0
+	for _, j := range b.Jobs {
+		if j.ShopifyCustomerID == nil {
+			buckets++
+			continue
+		}
+		if !seen[*j.ShopifyCustomerID] {
+			seen[*j.ShopifyCustomerID] = true
+			buckets++
+		}
+	}
+	return len(b.Jobs) - buckets
 }
 
 func partitionScore(batches []PlannedBatch) float64 {
@@ -497,7 +734,7 @@ const maxLocalSearchIterations = 50
 // A+B+D=90% instead of settling for whichever greedy strategy found A+B=60%
 // first - bestPartition's strategy loop alone cannot discover it, since no
 // single fixed ordering produces that grouping.
-func localSearch(batches []PlannedBatch) []PlannedBatch {
+func localSearch(batches []PlannedBatch, nest Nester) []PlannedBatch {
 	if len(batches) < 2 {
 		return batches
 	}
@@ -506,7 +743,7 @@ func localSearch(batches []PlannedBatch) []PlannedBatch {
 		improved := false
 		for i := 0; i < len(out); i++ {
 			for j := i + 1; j < len(out); j++ {
-				if swapBest(out, i, j) {
+				if swapBest(out, i, j, nest) {
 					improved = true
 				}
 			}
@@ -521,7 +758,7 @@ func localSearch(batches []PlannedBatch) []PlannedBatch {
 // swapBest tries every single-job exchange between out[i] and out[j], applying
 // the first one that improves their combined score while both batches still
 // pack onto a bed. Reports whether it made a swap.
-func swapBest(out []PlannedBatch, i, j int) bool {
+func swapBest(out []PlannedBatch, i, j int, nest Nester) bool {
 	baseScore := scoreBatch(out[i]) + scoreBatch(out[j])
 	for a := range out[i].Jobs {
 		for b := range out[j].Jobs {
@@ -531,14 +768,14 @@ func swapBest(out []PlannedBatch, i, j int) bool {
 				continue
 			}
 			unitsA, unitsB := unitsForAll(candA), unitsForAll(candB)
-			if _, rejected := bedpack.Pack(unitsA); len(rejected) > 0 {
+			if _, rejected := nest(unitsA); len(rejected) > 0 {
 				continue
 			}
-			if _, rejected := bedpack.Pack(unitsB); len(rejected) > 0 {
+			if _, rejected := nest(unitsB); len(rejected) > 0 {
 				continue
 			}
-			newA := finalise(candA, unitsA, out[i].PackingStrategy)
-			newB := finalise(candB, unitsB, out[j].PackingStrategy)
+			newA := finalise(candA, unitsA, out[i].PackingStrategy, nest)
+			newB := finalise(candB, unitsB, out[j].PackingStrategy, nest)
 			if scoreBatch(newA)+scoreBatch(newB) > baseScore {
 				out[i], out[j] = newA, newB
 				return true

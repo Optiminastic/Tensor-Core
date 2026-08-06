@@ -252,6 +252,14 @@ func (s *Server) updateMachine(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not update the machine.")
 		return
 	}
+	if req.Status == production.MachineOffline || req.Status == production.MachineMaintenance {
+		// Synchronous, not queued: this is a small, single-machine-scoped fix
+		// (a handful of Draft batches at most), and a delayed reassignment
+		// would leave those batches pointed at a dead machine for however long
+		// a debounced replan takes to notice - unlike full batch planning,
+		// there's no benefit to deferring it.
+		s.reassignBatchesForOfflineMachine(c.Request.Context(), m.ID)
+	}
 	c.JSON(http.StatusOK, machineFullResponse{
 		ID: m.ID.String(), Name: m.Name, Family: m.Family, NozzleMm: m.NozzleMm,
 		RightNozzleMm: db.NumFloatPtr(m.RightNozzleMm), Flow: m.Flow, RightFlow: m.RightFlow, DefaultColour: m.DefaultColour,

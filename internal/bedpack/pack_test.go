@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-func TestPackSingleUnitAtOrigin(t *testing.T) {
+func TestPackSingleUnitAtMarginInset(t *testing.T) {
 	placements, rejected := Pack([]UnitFootprint{{RefID: "a", XMM: 100, YMM: 100, ZMM: 50}})
 	if len(rejected) != 0 || len(placements) != 1 {
 		t.Fatalf("placed=%d rejected=%d, want 1/0", len(placements), len(rejected))
 	}
 	p := placements[0]
-	if p.XOffsetMM != 0 || p.YOffsetMM != 0 || p.Rotated {
-		t.Errorf("placement = %+v, want origin, not rotated", p)
+	if p.XOffsetMM != EdgeMarginMM || p.YOffsetMM != EdgeMarginMM || p.Rotated {
+		t.Errorf("placement = %+v, want (%v,%v), not rotated", p, EdgeMarginMM, EdgeMarginMM)
 	}
 }
 
@@ -24,7 +24,8 @@ func TestPackRejectsTooTall(t *testing.T) {
 }
 
 func TestPackRejectsTooWide(t *testing.T) {
-	// 350 mm wide cannot fit even alone (needs 360 with the gap, bed is 330).
+	// 350 mm wide cannot fit even alone (needs 360 with the gap, and the
+	// margin-inset usable width is only 310).
 	_, rejected := Pack([]UnitFootprint{{RefID: "w", XMM: 350, YMM: 50, ZMM: 10}})
 	if len(rejected) != 1 {
 		t.Errorf("an over-wide unit should be rejected, got %d rejected", len(rejected))
@@ -32,10 +33,11 @@ func TestPackRejectsTooWide(t *testing.T) {
 }
 
 func TestPackRotatesToFit(t *testing.T) {
-	// "a" (100x290) claims a strip, leaving a 120x320 leftover to one side and
-	// a 210x30 leftover below it. "b" (250x100) does not fit either leftover
-	// at 0 deg (needs 260 wide) but does turned 90 degrees (needs 110x260,
-	// which the 120x320 leftover has room for).
+	// Usable placement envelope (after the edge margin) is 310x300. "a"
+	// (100x290) claims a strip, leaving a 200x300 leftover to one side. "b"
+	// (250x100) does not fit that leftover at 0 deg (needs 260 wide) but
+	// does turned 90 degrees (needs 110x260, which the 200x300 leftover has
+	// room for).
 	placements, rejected := Pack([]UnitFootprint{
 		{RefID: "a", XMM: 100, YMM: 290, ZMM: 20},
 		{RefID: "b", XMM: 250, YMM: 100, ZMM: 20},
@@ -86,5 +88,23 @@ func TestUtilisationPercent(t *testing.T) {
 	}
 	if UtilisationPercent(nil) != 0 {
 		t.Error("empty utilisation should be 0")
+	}
+}
+
+func TestUtilisationAreaStats(t *testing.T) {
+	stats := Utilisation([]UnitFootprint{{XMM: 100, YMM: 100}})
+	if stats.OccupiedMM2 != 10000 {
+		t.Errorf("occupied = %v, want 10000", stats.OccupiedMM2)
+	}
+	if stats.FreeMM2 != bedAreaMM2-10000 {
+		t.Errorf("free = %v, want %v", stats.FreeMM2, bedAreaMM2-10000)
+	}
+	if stats.Percent != UtilisationPercent([]UnitFootprint{{XMM: 100, YMM: 100}}) {
+		t.Errorf("percent = %v, want it to match UtilisationPercent", stats.Percent)
+	}
+
+	empty := Utilisation(nil)
+	if empty.OccupiedMM2 != 0 || empty.FreeMM2 != bedAreaMM2 || empty.Percent != 0 {
+		t.Errorf("empty stats = %+v, want occupied=0 free=%v percent=0", empty, bedAreaMM2)
 	}
 }

@@ -57,6 +57,9 @@ type jobView struct {
 	QcStatus              string  `json:"qc_status"`
 	PersonalisationStatus string  `json:"personalisation_status"`
 	ReprintOfJobID        *string `json:"reprint_of_job_id"`
+	Priority              int     `json:"priority"`
+	ShopifyCustomerID     *int64  `json:"shopify_customer_id"`
+	CustomerName          *string `json:"customer_name"`
 }
 
 func TestIntegrationProductionAuth(t *testing.T) {
@@ -167,6 +170,104 @@ func TestIntegrationFromOrderAndLifecycle(t *testing.T) {
 	// Failing a job that is not in production is a conflict.
 	if rr := doJSON(router, http.MethodPost, "/production-jobs/"+failResp.ReprintJob.ID+"/fail", failTok, map[string]any{"reason": "other"}); rr.Code != http.StatusConflict {
 		t.Errorf("fail queued job = %d, want 409", rr.Code)
+	}
+}
+
+// TestIntegrationReprintForcesUrgentPriority confirms a reprint always jumps
+// the queue regardless of its source job's own priority - the original job
+// here is explicitly routine (5), so a reprint that merely copied it would
+// still read routine; the fix forces it to urgent (1) instead.
+func TestIntegrationReprintForcesUrgentPriority(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+
+	orderID := seedOrder(t, store, 5002, []map[string]any{
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA", "priority": 5},
+	})
+	create := minter.mint(t, []string{"production:create", "production:read"})
+	rr := doJSON(router, http.MethodPost, "/production-jobs/from-order/"+orderID.String(), create, nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("from-order = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var jobs []jobView
+	_ = json.Unmarshal(rr.Body.Bytes(), &jobs)
+	if len(jobs) != 1 || jobs[0].Priority != 5 {
+		t.Fatalf("seeded job priority = %+v, want one job at priority 5", jobs)
+	}
+	jobID := jobs[0].ID
+
+	admin := minter.mint(t, []string{"production:update"})
+	if rr := doJSON(router, http.MethodPatch, "/production-jobs/"+jobID, admin, map[string]any{"status": "in_production"}); rr.Code != http.StatusOK {
+		t.Fatalf("PATCH status=in_production = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	failTok := minter.mint(t, []string{"production:fail"})
+	rr = doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/fail", failTok, map[string]any{"reason": "warping"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fail = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var failResp struct {
+		ReprintJob jobView `json:"reprint_job"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &failResp)
+	if failResp.ReprintJob.Priority != 1 {
+		t.Errorf("reprint priority = %d, want 1 (urgent), even though the source job was priority 5", failResp.ReprintJob.Priority)
+	}
+}
+
+// TestIntegrationJobCarriesOrderAndCustomerTraceability confirms every job
+// created from an order shows both its Shopify order and customer once
+// listed - the traceability half of the colour-cap/customer-affinity work
+// (GET /production-jobs?batch_id= reuses this same DTO, so this covers the
+// batch-jobs view too).
+func TestIntegrationJobCarriesOrderAndCustomerTraceability(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+
+	custID := int64(555000111)
+	custName := "Ada Lovelace"
+	items, _ := json.Marshal([]map[string]any{
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
+	})
+	orderID := uuid.New()
+	if _, err := store.Q.InsertOrder(context.Background(), gen.InsertOrderParams{
+		ID: orderID, ShopifyOrderID: 5003, OrderNumber: "1003", FinancialStatus: "paid",
+		TotalPrice: 499, Currency: "INR", LineItems: items, Status: "queued",
+		ShopifyCustomerID: &custID, CustomerName: &custName,
+	}); err != nil {
+		t.Fatalf("insert order: %v", err)
+	}
+
+	create := minter.mint(t, []string{"production:create", "production:read"})
+	rr := doJSON(router, http.MethodPost, "/production-jobs/from-order/"+orderID.String(), create, nil)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("from-order = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var jobs []jobView
+	_ = json.Unmarshal(rr.Body.Bytes(), &jobs)
+	if len(jobs) != 1 {
+		t.Fatalf("from-order jobs = %d, want 1", len(jobs))
+	}
+	if jobs[0].ShopifyCustomerID == nil || *jobs[0].ShopifyCustomerID != custID {
+		t.Errorf("job shopify_customer_id = %v, want %d", jobs[0].ShopifyCustomerID, custID)
+	}
+	if jobs[0].CustomerName == nil || *jobs[0].CustomerName != custName {
+		t.Errorf("job customer_name = %v, want %q", jobs[0].CustomerName, custName)
+	}
+
+	// Listing by batch_id reuses the same DTO - confirm it's present there
+	// too via the plain GET (no batch yet, but the same handler/DTO path).
+	rr = doJSON(router, http.MethodGet, "/production-jobs/"+jobs[0].ID, create, nil)
+	var got jobView
+	_ = json.Unmarshal(rr.Body.Bytes(), &got)
+	if got.ShopifyCustomerID == nil || *got.ShopifyCustomerID != custID {
+		t.Errorf("GET job shopify_customer_id = %v, want %d", got.ShopifyCustomerID, custID)
 	}
 }
 

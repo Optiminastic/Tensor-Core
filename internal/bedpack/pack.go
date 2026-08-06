@@ -7,15 +7,21 @@ package bedpack
 import "math"
 
 // Bed dimensions and the gap kept between parts, in millimetres. A part must fit
-// within (bed - its footprint - gap) to be placed.
+// within (bed - its footprint - gap) to be placed. EdgeMarginMM is kept clear
+// on all four sides of the bed too - a part's footprint never touches the
+// physical bed edge, only the margin-inset placement envelope.
 const (
-	BedXMM = 330.0
-	BedYMM = 320.0
-	BedZMM = 300.0
-	GapMM  = 10.0
+	BedXMM       = 330.0
+	BedYMM       = 320.0
+	BedZMM       = 300.0
+	GapMM        = 10.0
+	EdgeMarginMM = 10.0
 )
 
-// bedAreaMM2 is the raw bed area used for the utilisation percentage.
+// bedAreaMM2 is the raw bed area used for the utilisation percentage - the
+// full nominal bed, not the smaller margin-inset placement envelope, so
+// "utilisation" reads as "share of the advertised bed," matching what a
+// user sees printed on the machine's spec sheet.
 const bedAreaMM2 = BedXMM * BedYMM
 
 // UnitFootprint is one printable unit's bounding footprint. RefID links a
@@ -45,9 +51,14 @@ type freeRect struct {
 // leftover side), splitting each used rectangle guillotine-style. It returns the
 // placements for the units that fit and the footprints of those that did not. A
 // unit taller than the bed, or with no free rectangle large enough, is rejected;
-// packing continues so later (smaller) units still get a chance.
+// packing continues so later (smaller) units still get a chance. Every
+// placement stays within the EdgeMarginMM-inset envelope, never the bed's
+// physical edge.
 func Pack(units []UnitFootprint) (placements []Placement, rejected []UnitFootprint) {
-	free := []freeRect{{0, 0, BedXMM, BedYMM}}
+	free := []freeRect{{
+		EdgeMarginMM, EdgeMarginMM,
+		BedXMM - 2*EdgeMarginMM, BedYMM - 2*EdgeMarginMM,
+	}}
 
 	for _, u := range units {
 		if u.ZMM > BedZMM {
@@ -139,9 +150,33 @@ func splitFreeRect(fr freeRect, usedW, usedH float64) []freeRect {
 // UtilisationPercent is the share of the bed covered by the units' footprints
 // (gaps and free space excluded), rounded to two decimals.
 func UtilisationPercent(units []UnitFootprint) float64 {
-	var area float64
+	return Utilisation(units).Percent
+}
+
+// AreaStats is the raw occupied/free area in mm^2 behind UtilisationPercent,
+// for callers (the batch API response) that want absolute figures alongside
+// the percentage - derived on read, not stored, so no schema change was
+// needed to add it.
+type AreaStats struct {
+	OccupiedMM2 float64
+	FreeMM2     float64
+	Percent     float64
+}
+
+// Utilisation computes occupied area, free area, and the percentage together
+// from the same footprint sum, so the three numbers can never drift apart.
+func Utilisation(units []UnitFootprint) AreaStats {
+	var occupied float64
 	for _, u := range units {
-		area += u.XMM * u.YMM
+		occupied += u.XMM * u.YMM
 	}
-	return math.Round(area/bedAreaMM2*100*100) / 100
+	free := bedAreaMM2 - occupied
+	if free < 0 {
+		free = 0
+	}
+	return AreaStats{
+		OccupiedMM2: occupied,
+		FreeMM2:     free,
+		Percent:     math.Round(occupied/bedAreaMM2*100*100) / 100,
+	}
 }

@@ -56,10 +56,11 @@ WHERE id = sqlc.arg('id')
 RETURNING *;
 
 -- name: ListFleetMachinesWithFamily :many
--- Every fleet machine with its linked profile's family (null if unlinked or
--- off, both of which the scheduler skips) - what the earliest-free-machine
--- scheduler ranks over for a given batch's required machine family.
-SELECT m.*, mp.family AS profile_family
+-- Every fleet machine with its linked profile's family and operational status
+-- (both null if unlinked) - what the earliest-free-machine scheduler ranks
+-- over for a given batch's required machine family, skipping any fleet unit
+-- that's off or whose linked profile is offline/maintenance.
+SELECT m.*, mp.family AS profile_family, mp.status AS profile_status
 FROM machines m
 LEFT JOIN machine_profiles mp ON mp.id = m.machine_profile_id
 ORDER BY m.machine_id;

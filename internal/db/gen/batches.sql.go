@@ -287,6 +287,53 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 	return items, nil
 }
 
+const listPendingApprovalBatchesForMachine = `-- name: ListPendingApprovalBatchesForMachine :many
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at FROM batches WHERE machine_id = $1 AND status = 'pending_approval'
+`
+
+// Draft batches still parked on a machine profile that's about to go
+// offline/maintenance - reassignBatchesForOfflineMachine's candidates (see
+// machine_scheduler.go). Only pending_approval: an approved batch is a human
+// commitment and is left alone for a human to move manually.
+func (q *Queries) ListPendingApprovalBatchesForMachine(ctx context.Context, machineID *uuid.UUID) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listPendingApprovalBatchesForMachine, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Batch{}
+	for rows.Next() {
+		var i Batch
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setBatchPreviewFile = `-- name: SetBatchPreviewFile :one
 UPDATE batches SET preview_file_id = $1, updated_at = now()
 WHERE id = $2

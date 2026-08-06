@@ -7,8 +7,8 @@ package production
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 )
@@ -266,18 +266,28 @@ func PersonalisationLog(c Confirms, required bool) []string {
 	return out
 }
 
-// NewJobNumber returns a job identifier of the form JOB-XXXXXX (6 uppercase hex).
+// numberDigits is how many random digits follow a generated identifier's
+// prefix (5, e.g. JOB-12345 / BATCH-12345).
+const numberDigits = 5
+
+// numberBound is the exclusive upper bound for a numberDigits-digit number
+// (10^numberDigits) - rand.Int draws from [0, numberBound).
+var numberBound = new(big.Int).Exp(big.NewInt(10), big.NewInt(numberDigits), nil)
+
+// NewJobNumber returns a job identifier of the form JOB-12345 (a random
+// 5-digit number, zero-padded).
 func NewJobNumber() (string, error) { return newNumber("JOB-") }
 
-// NewBatchNumber returns a batch identifier of the form BATCH-XXXXXX.
+// NewBatchNumber returns a batch identifier of the form BATCH-12345 (a
+// random 5-digit number, zero-padded) - same shape as NewJobNumber.
 func NewBatchNumber() (string, error) { return newNumber("BATCH-") }
 
 func newNumber(prefix string) (string, error) {
-	b := make([]byte, 3)
-	if _, err := rand.Read(b); err != nil {
+	n, err := rand.Int(rand.Reader, numberBound)
+	if err != nil {
 		return "", err
 	}
-	return prefix + strings.ToUpper(hex.EncodeToString(b)), nil
+	return fmt.Sprintf("%s%0*d", prefix, numberDigits, n.Int64()), nil
 }
 
 func nonEmpty(s *string) bool { return s != nil && strings.TrimSpace(*s) != "" }

@@ -84,6 +84,48 @@ type Settings struct {
 	// the Job Creation Worker builds at once.
 	ProductionConcurrency int
 
+	// Batch gate overrides (production.BatchGate, see planner.go): a batch
+	// under the utilisation target is still created once any of its jobs has
+	// been queued this long, or is due within this window of now - otherwise
+	// it's held for more compatible volume to arrive. See also the
+	// hard-coded urgent-priority override, which needs no config.
+	BatchMaxWaitHours float64
+	BatchDueSoonHours float64
+
+	// Batch aging (production.BatchGate, see planner.go): rather than a hard
+	// binary switch at BatchMaxWaitHours, the acceptable utilisation bar
+	// relaxes linearly from the 80% target down to BatchAgingFloorPercent as
+	// a partition's oldest job approaches BatchAgingWindowMinutes of age,
+	// then holds flat at the floor until BatchMaxWaitHours' unconditional
+	// override eventually fires regardless of utilisation.
+	BatchAgingWindowMinutes float64
+	BatchAgingFloorPercent  float64
+
+	// Batch replan cadence (see batch_orchestrate.go/cmd/productionworker):
+	// a replan runs periodically every BatchPlanIntervalMinutes regardless of
+	// activity, on the two high-frequency per-job trigger sites only once at
+	// least BatchPlanJobThreshold jobs have actually accumulated (instead of
+	// once per single order/personalisation event), and unconditionally on
+	// the two low-frequency, high-signal events (a batch completing, a
+	// reprint being created) - all still collapsed within
+	// BatchPlanDebounceSeconds of each other into one run.
+	BatchPlanIntervalMinutes int
+	BatchPlanJobThreshold    int
+	BatchPlanDebounceSeconds int
+
+	// Machine selection weighted scoring (production.MachineScoreWeights, see
+	// machine_scheduler.go/scheduler.go): minutes-equivalent adjustments to a
+	// candidate machine's raw free time - already-loaded material/colour
+	// match make it look more free, a material change (different, KNOWN
+	// material loaded) makes it look less free, likewise queue depth and
+	// health. The change penalty deliberately exceeds the match bonus: an
+	// actual changeover costs more operator time than a match saves.
+	MachineMaterialMatchBonusMinutes    float64
+	MachineColourMatchBonusMinutes      float64
+	MachineMaterialChangePenaltyMinutes float64
+	MachineQueueLengthPenaltyMinutes    float64
+	MachineHealthBonusMinutes           float64
+
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
 	// so very large models stay fast.
@@ -157,7 +199,21 @@ func Load() Settings {
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
 		FakeSlice:           boolEnvOr("FAKE_SLICE", false),
 
-		ProductionConcurrency: intEnvOr("PRODUCTION_CONCURRENCY", 5),
+		ProductionConcurrency:   intEnvOr("PRODUCTION_CONCURRENCY", 5),
+		BatchMaxWaitHours:       floatEnvOr("BATCH_MAX_WAIT_HOURS", 4),
+		BatchDueSoonHours:       floatEnvOr("BATCH_DUE_SOON_HOURS", 24),
+		BatchAgingWindowMinutes: floatEnvOr("BATCH_AGING_WINDOW_MINUTES", 60),
+		BatchAgingFloorPercent:  floatEnvOr("BATCH_AGING_FLOOR_PERCENT", 73),
+
+		BatchPlanIntervalMinutes: intEnvOr("BATCH_PLAN_INTERVAL_MINUTES", 7),
+		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
+		BatchPlanDebounceSeconds: intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+
+		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
+		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
+		MachineMaterialChangePenaltyMinutes: floatEnvOr("MACHINE_MATERIAL_CHANGE_PENALTY_MINUTES", 45),
+		MachineQueueLengthPenaltyMinutes:    floatEnvOr("MACHINE_QUEUE_LENGTH_PENALTY_MINUTES", 10),
+		MachineHealthBonusMinutes:           floatEnvOr("MACHINE_HEALTH_BONUS_MINUTES", 10),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),

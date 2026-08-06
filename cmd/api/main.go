@@ -91,7 +91,7 @@ func main() {
 	// pipeline's enqueuers wrap the same client as the slice enqueuer above.
 	server.EnableProductionQueue(
 		production.NewJobCreationEnqueuer(riverClient),
-		production.NewBatchPlanEnqueuer(riverClient),
+		production.NewBatchPlanEnqueuer(riverClient, time.Duration(cfg.BatchPlanDebounceSeconds)*time.Second),
 	)
 
 	if objects, err := storage.New(ctx, storage.Options{

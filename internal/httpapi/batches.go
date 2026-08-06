@@ -44,6 +44,12 @@ type batchResponse struct {
 	CreatedAt                   time.Time  `json:"created_at"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 	JobsCount                   *int64     `json:"jobs_count,omitempty"`
+	// OccupiedAreaMm2/FreeAreaMm2 are derived from BedUtilizationPercent at
+	// response time (bedpack.BedXMM*BedYMM is the same denominator the
+	// percentage was computed against) - no new column, cheap on every
+	// response including list views.
+	OccupiedAreaMm2 *float64 `json:"occupied_area_mm2"`
+	FreeAreaMm2     *float64 `json:"free_area_mm2"`
 	// PlateBbox* is the merged plate's overall combined size, in mm - only
 	// attached on the single-batch GET (see attachPlateBbox), never on list
 	// responses, so listing batches never pays for a per-row file lookup.
@@ -53,15 +59,35 @@ type batchResponse struct {
 }
 
 func batchDTO(b gen.Batch) batchResponse {
+	utilisation := db.NumFloatPtr(b.BedUtilizationPercent)
+	occupied, free := occupiedFreeArea(utilisation)
 	return batchResponse{
 		ID: b.ID.String(), BatchNumber: b.BatchNumber, MachineID: uuidPtrStr(b.MachineID),
 		Status: b.Status, ApprovedBy: b.ApprovedBy, ApprovedAt: db.TimePtr(b.ApprovedAt),
 		MaterialShortage: b.MaterialShortage, MergedFileID: uuidPtrStr(b.MergedFileID),
 		PreviewFileID: uuidPtrStr(b.PreviewFileID), UnitsPerBed: b.UnitsPerBed,
 		TotalPrintTimeMinutes: b.TotalPrintTimeMinutes, EffectiveTimePerUnitMinutes: db.NumFloatPtr(b.EffectiveTimePerUnitMinutes),
-		TotalFilamentGrams: db.NumFloatPtr(b.TotalFilamentGrams), BedUtilizationPercent: db.NumFloatPtr(b.BedUtilizationPercent),
+		TotalFilamentGrams: db.NumFloatPtr(b.TotalFilamentGrams), BedUtilizationPercent: utilisation,
+		OccupiedAreaMm2: occupied, FreeAreaMm2: free,
 		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
 	}
+}
+
+// occupiedFreeArea derives absolute occupied/free mm^2 from a utilisation
+// percentage, against the same full-nominal-bed denominator
+// bedpack.UtilisationPercent used to compute that percentage in the first
+// place - so the three numbers can never disagree with each other.
+func occupiedFreeArea(percent *float64) (occupied, free *float64) {
+	if percent == nil {
+		return nil, nil
+	}
+	const bedAreaMM2 = bedpack.BedXMM * bedpack.BedYMM
+	o := *percent / 100 * bedAreaMM2
+	f := bedAreaMM2 - o
+	if f < 0 {
+		f = 0
+	}
+	return &o, &f
 }
 
 func (s *Server) registerBatches(r *gin.Engine) {
@@ -187,6 +213,12 @@ func (s *Server) patchBatch(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not update the batch.")
 		return
 	}
+	if req.Status != nil && *req.Status == production.BatchCompleted {
+		// A machine just freed up - worth a replan regardless of how much
+		// else is currently queued, unlike the threshold-gated per-job
+		// triggers (see triggerBatchPlan's doc comment).
+		s.triggerBatchPlan(ctx)
+	}
 	c.JSON(http.StatusOK, batchDTO(b))
 }
 
@@ -234,12 +266,33 @@ func (s *Server) attachPlateBbox(ctx context.Context, dto *batchResponse, merged
 type autoCreateResponse struct {
 	Created     []batchResponse          `json:"created"`
 	Unbatchable []production.Unbatchable `json:"unbatchable"`
+	// Held is every compatible, packed partition that landed under the
+	// utilisation target with no override yet - not created, jobs stay
+	// queued for the next run (see AutoCreateBatches/shouldCreateBatch).
+	Held []heldPartitionResponse `json:"held"`
+}
+
+// heldPartitionResponse is production.PlannedBatch reduced to what a caller
+// needs to know about a held (not yet created) partition.
+type heldPartitionResponse struct {
+	JobsCount             int     `json:"jobs_count"`
+	BedUtilizationPercent float64 `json:"bed_utilization_percent"`
+}
+
+func heldDTO(held []production.PlannedBatch) []heldPartitionResponse {
+	out := make([]heldPartitionResponse, 0, len(held))
+	for _, h := range held {
+		out = append(out, heldPartitionResponse{
+			JobsCount: len(h.Jobs), BedUtilizationPercent: h.BedUtilisationPercent,
+		})
+	}
+	return out
 }
 
 func (s *Server) autoCreateBatches(c *gin.Context) {
 	// No storage needed here: footprints come from the file_assets bbox in the DB.
 	// Merging the plate STL (which needs storage) happens at preview/approve.
-	created, unbatchable, err := s.AutoCreateBatches(c.Request.Context())
+	created, unbatchable, held, err := s.AutoCreateBatches(c.Request.Context())
 	switch {
 	case errors.Is(err, errListBatchableJobs):
 		detail(c, http.StatusInternalServerError, "Could not read batchable jobs.")
@@ -256,7 +309,7 @@ func (s *Server) autoCreateBatches(c *gin.Context) {
 	for _, b := range created {
 		out = append(out, batchDTO(b))
 	}
-	c.JSON(http.StatusOK, autoCreateResponse{Created: out, Unbatchable: unbatchable})
+	c.JSON(http.StatusOK, autoCreateResponse{Created: out, Unbatchable: unbatchable, Held: heldDTO(held)})
 }
 
 func (s *Server) previewBatch(c *gin.Context) {
@@ -612,14 +665,15 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 			}
 		}
 		out = append(out, production.PlanJob{
-			ID: j.ID.String(), JobNumber: j.JobNumber,
+			ID: j.ID.String(), JobNumber: j.JobNumber, ShopifyCustomerID: j.ShopifyCustomerID,
 			Material: deref(j.Material), Colours: decodeColours(j.Colours),
 			NozzleLeft: numAsString(j.LeftNozzleMm), NozzleRight: numAsString(j.RightNozzleMm),
 			QualityMM: numAsString(j.QualityMm), MachineFamily: deref(j.MachineFamily),
 			SupportUsed: j.SupportUsed != nil && *j.SupportUsed,
 			InfillPct:   db.NumFloat(j.InfillPct), Priority: int(j.Priority),
 			Quantity: int(j.Quantity), EstimatedMinutes: int32PtrToIntPtr(j.EstimatedPrintTimeMinutes),
-			DueDate: db.TimePtr(j.DueDate), FilamentGrams: db.NumFloat(j.FilamentGramsRequired), Footprint: box,
+			DueDate: db.TimePtr(j.DueDate), CreatedAt: db.Time(j.CreatedAt),
+			FilamentGrams: db.NumFloat(j.FilamentGramsRequired), Footprint: box,
 		})
 	}
 	return out, nil
@@ -652,6 +706,22 @@ func batchMaterial(jobs []production.PlanJob) *string {
 	return nil
 }
 
+// planColours unions every job's colours - what assignMachineForBatch's
+// weighted scoring needs to judge a candidate machine's colour match.
+func planColours(jobs []production.PlanJob) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, j := range jobs {
+		for _, c := range j.Colours {
+			if !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
 func batchTimeFromJobs(jobs []gen.ProductionJob) (*int32, *float64) {
 	units := 0
 	var maxTime int32
@@ -678,14 +748,4 @@ func sumFilament(jobs []gen.ProductionJob) float64 {
 		sum += db.NumFloat(j.FilamentGramsRequired)
 	}
 	return sum
-}
-
-func jobIDsOf(jobs []production.PlanJob) []uuid.UUID {
-	ids := make([]uuid.UUID, 0, len(jobs))
-	for _, j := range jobs {
-		if id, err := uuid.Parse(j.ID); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }

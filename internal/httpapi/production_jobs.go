@@ -32,6 +32,8 @@ type productionJobResponse struct {
 	QcStatus                   string     `json:"qc_status"`
 	PackagingStatus            string     `json:"packaging_status"`
 	ShopifyOrderID             *int64     `json:"shopify_order_id"`
+	ShopifyCustomerID          *int64     `json:"shopify_customer_id"`
+	CustomerName               *string    `json:"customer_name"`
 	Sku                        *string    `json:"sku"`
 	ProductName                *string    `json:"product_name"`
 	Material                   *string    `json:"material"`
@@ -58,6 +60,7 @@ type productionJobResponse struct {
 	PersonalisationValidatedBy *string    `json:"personalisation_validated_by"`
 	PersonalisationValidatedAt *time.Time `json:"personalisation_validated_at"`
 	ReprintOfJobID             *string    `json:"reprint_of_job_id"`
+	SplitOfJobID               *string    `json:"split_of_job_id"`
 	Held                       bool       `json:"held"`
 	Colours                    []string   `json:"colours"`
 	SupportUsed                *bool      `json:"support_used"`
@@ -74,6 +77,20 @@ type productionJobResponse struct {
 	PersonalisationLog []string  `json:"personalisation_log"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	// SplitProgress is "150 total / 72 printed / 78 remaining" for a job
+	// whose quantity was split across multiple batches (see
+	// AutoCreateBatches/splitJobIDsFor) - only populated by the single-job
+	// GET, and only when this job is actually part of a split group larger
+	// than itself, to keep list endpoints free of the extra lookup.
+	SplitProgress *splitProgressResponse `json:"split_progress,omitempty"`
+}
+
+// splitProgressResponse is production.GetSplitJobProgressRow's totals in
+// API terms.
+type splitProgressResponse struct {
+	TotalQuantity     int64 `json:"total_quantity"`
+	CompletedQuantity int64 `json:"completed_quantity"`
+	RemainingQuantity int64 `json:"remaining_quantity"`
 }
 
 func productionJobDTO(j gen.ProductionJob) productionJobResponse {
@@ -86,7 +103,8 @@ func productionJobDTO(j gen.ProductionJob) productionJobResponse {
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
 		Status: j.Status, AssemblyStatus: j.AssemblyStatus, QcStatus: j.QcStatus,
-		PackagingStatus: j.PackagingStatus, ShopifyOrderID: j.ShopifyOrderID, Sku: j.Sku,
+		PackagingStatus: j.PackagingStatus, ShopifyOrderID: j.ShopifyOrderID,
+		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
 		FilamentGramsRequired: db.NumFloatPtr(j.FilamentGramsRequired), PrintFileID: uuidPtrStr(j.PrintFileID),
 		EstimatedPrintTimeMinutes: j.EstimatedPrintTimeMinutes, DueDate: db.TimePtr(j.DueDate),
@@ -97,7 +115,7 @@ func productionJobDTO(j gen.ProductionJob) productionJobResponse {
 		VariantConfirmed: j.VariantConfirmed, CustomerApprovalReceived: j.CustomerApprovalReceived,
 		PersonalisationNotes: j.PersonalisationNotes, PersonalisationPhotoFileID: uuidPtrStr(j.PersonalisationPhotoFileID),
 		PersonalisationValidatedBy: j.PersonalisationValidatedBy, PersonalisationValidatedAt: db.TimePtr(j.PersonalisationValidatedAt),
-		ReprintOfJobID: uuidPtrStr(j.ReprintOfJobID), Held: j.Held,
+		ReprintOfJobID: uuidPtrStr(j.ReprintOfJobID), SplitOfJobID: uuidPtrStr(j.SplitOfJobID), Held: j.Held,
 		Colours: decodeColours(j.Colours), SupportUsed: j.SupportUsed, InfillPct: db.NumFloatPtr(j.InfillPct),
 		LeftNozzleMm: db.NumFloatPtr(j.LeftNozzleMm), RightNozzleMm: db.NumFloatPtr(j.RightNozzleMm),
 		FlowPct: db.NumFloatPtr(j.FlowPct), QualityMm: db.NumFloatPtr(j.QualityMm),
@@ -183,12 +201,24 @@ func (s *Server) getProductionJob(c *gin.Context) {
 	if !ok {
 		return
 	}
-	j, err := s.store.Q.GetProductionJobByID(c.Request.Context(), id)
+	ctx := c.Request.Context()
+	j, err := s.store.Q.GetProductionJobByID(ctx, id)
 	if err != nil {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(j))
+	dto := productionJobDTO(j)
+	// One cheap indexed lookup on a single-resource detail page (not a list
+	// endpoint, so no N+1 risk) - only surfaced when the group is actually
+	// bigger than this job alone, which is a no-op for the overwhelming
+	// majority of jobs that were never split.
+	if progress, err := s.store.Q.GetSplitJobProgress(ctx, id); err == nil && progress.TotalQuantity > int64(j.Quantity) {
+		dto.SplitProgress = &splitProgressResponse{
+			TotalQuantity: progress.TotalQuantity, CompletedQuantity: progress.CompletedQuantity,
+			RemainingQuantity: progress.TotalQuantity - progress.CompletedQuantity,
+		}
+	}
+	c.JSON(http.StatusOK, dto)
 }
 
 // --- create -------------------------------------------------------------------
@@ -211,7 +241,8 @@ func (s *Server) createProductionJob(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var orderID *uuid.UUID
-	var shopifyOrderID *int64
+	var shopifyOrderID, shopifyCustomerID *int64
+	var customerName *string
 	if req.OrderID != nil && *req.OrderID != "" {
 		oid, err := uuid.Parse(*req.OrderID)
 		if err != nil {
@@ -226,6 +257,8 @@ func (s *Server) createProductionJob(c *gin.Context) {
 		orderID = &oid
 		v := order.ShopifyOrderID
 		shopifyOrderID = &v
+		shopifyCustomerID = order.ShopifyCustomerID
+		customerName = order.CustomerName
 	}
 
 	jobNumber, err := production.NewJobNumber()
@@ -235,6 +268,7 @@ func (s *Server) createProductionJob(c *gin.Context) {
 	}
 	job, err := s.store.Q.InsertProductionJob(ctx, gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber, OrderID: orderID, ShopifyOrderID: shopifyOrderID,
+		ShopifyCustomerID: shopifyCustomerID, CustomerName: customerName,
 		Description: req.Description, Quantity: quantity,
 		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
@@ -351,6 +385,7 @@ func (s *Server) buildJobsForOrder(
 		p := gen.InsertProductionJobParams{
 			ID: uuid.New(), JobNumber: jobNumber,
 			OrderID: ptr(order.ID), ShopifyOrderID: &shopifyID,
+			ShopifyCustomerID: order.ShopifyCustomerID, CustomerName: order.CustomerName,
 			Description: descriptionOf(li), Quantity: quantity,
 			Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 			QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
@@ -605,7 +640,7 @@ func (s *Server) validatePersonalisation(c *gin.Context) {
 		return
 	}
 	if status == production.PersonalisationValidated {
-		s.triggerBatchPlan(ctx)
+		s.triggerBatchPlanIfThresholdMet(ctx)
 	}
 	c.JSON(http.StatusOK, productionJobDTO(job))
 }
@@ -731,19 +766,61 @@ func (s *Server) failProductionJob(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not fail the production job.")
 		return
 	}
+	// A fresh urgent reprint just entered the queue - worth a replan
+	// regardless of how much else is currently queued, unlike the
+	// threshold-gated per-job triggers (see triggerBatchPlan's doc comment).
+	s.triggerBatchPlan(ctx)
 	c.JSON(http.StatusOK, failJobResponse{FailedJob: productionJobDTO(failed), ReprintJob: productionJobDTO(reprint)})
 }
 
 // cloneForReprint builds the insert params for a fresh queued reprint of a failed
 // job. It carries the print facts and personalisation, resets the lifecycle
 // sub-states to their defaults, leaves the job unbatched, and links back to the
-// source via reprint_of_job_id.
+// source via reprint_of_job_id. Priority is always forced to urgent - a
+// reprint represents an already-late order and must jump the queue ahead of
+// routine jobs regardless of what priority the original job had.
 func cloneForReprint(src gen.ProductionJob) gen.InsertProductionJobParams {
+	jobNumber, _ := production.NewJobNumber()
+	priority := src.Priority
+	if priority > production.UrgentPriority {
+		priority = production.UrgentPriority
+	}
+	return gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: jobNumber,
+		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,
+		ShopifyCustomerID: src.ShopifyCustomerID, CustomerName: src.CustomerName,
+		Description: src.Description, Quantity: src.Quantity,
+		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		Sku: src.Sku, ProductName: src.ProductName, Material: src.Material, Colour: src.Colour,
+		NozzleProfile: src.NozzleProfile, FilamentGramsRequired: db.NumFloatPtr(src.FilamentGramsRequired),
+		PrintFileID: src.PrintFileID, EstimatedPrintTimeMinutes: src.EstimatedPrintTimeMinutes,
+		DueDate: src.DueDate, Priority: priority,
+		PersonalisationName: src.PersonalisationName, PersonalisationFont: src.PersonalisationFont,
+		PersonalisationColour: src.PersonalisationColour, PersonalisationVariant: src.PersonalisationVariant,
+		PersonalisationStatus: src.PersonalisationStatus,
+		NameConfirmed:         src.NameConfirmed, PhotoConfirmed: src.PhotoConfirmed, FontConfirmed: src.FontConfirmed,
+		ColourConfirmed: src.ColourConfirmed, VariantConfirmed: src.VariantConfirmed,
+		CustomerApprovalReceived:   src.CustomerApprovalReceived,
+		PersonalisationPhotoFileID: src.PersonalisationPhotoFileID,
+		ReprintOfJobID:             ptr(src.ID),
+	}
+}
+
+// splitProductionJob builds the insert params for a fragment peeled off src's
+// quantity because the whole amount didn't fit on one bed (see
+// AutoCreateBatches/production.packJobs's splitJobToFit). Unlike
+// cloneForReprint this carries every grouping/compatibility fact and the
+// original priority/due date unchanged - it's the same physical product,
+// just fewer units, not a failure - and links back via split_of_job_id
+// instead of reprint_of_job_id.
+func splitProductionJob(src gen.ProductionJob, quantity int32) gen.InsertProductionJobParams {
 	jobNumber, _ := production.NewJobNumber()
 	return gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber,
 		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,
-		Description: src.Description, Quantity: src.Quantity,
+		ShopifyCustomerID: src.ShopifyCustomerID, CustomerName: src.CustomerName,
+		Description: src.Description, Quantity: quantity,
 		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
 		Sku: src.Sku, ProductName: src.ProductName, Material: src.Material, Colour: src.Colour,
@@ -757,7 +834,15 @@ func cloneForReprint(src gen.ProductionJob) gen.InsertProductionJobParams {
 		ColourConfirmed: src.ColourConfirmed, VariantConfirmed: src.VariantConfirmed,
 		CustomerApprovalReceived:   src.CustomerApprovalReceived,
 		PersonalisationPhotoFileID: src.PersonalisationPhotoFileID,
-		ReprintOfJobID:             ptr(src.ID),
+		SplitOfJobID:               ptr(src.ID),
+		Colours:                    src.Colours,
+		SupportUsed:                src.SupportUsed,
+		InfillPct:                  db.NumFloatPtr(src.InfillPct),
+		LeftNozzleMm:               db.NumFloatPtr(src.LeftNozzleMm),
+		RightNozzleMm:              db.NumFloatPtr(src.RightNozzleMm),
+		FlowPct:                    db.NumFloatPtr(src.FlowPct),
+		QualityMm:                  db.NumFloatPtr(src.QualityMm),
+		MachineFamily:              src.MachineFamily,
 	}
 }
 

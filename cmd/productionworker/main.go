@@ -75,6 +75,7 @@ func main() {
 	river.AddWorker(workers, httpapi.NewJobCreationWorker(server, logger))
 	river.AddWorker(workers, httpapi.NewBatchPlanWorker(server, logger))
 
+	debounce := time.Duration(cfg.BatchPlanDebounceSeconds) * time.Second
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
 			production.JobCreationQueueName: {MaxWorkers: concurrency},
@@ -82,6 +83,20 @@ func main() {
 		},
 		Workers: workers,
 		Logger:  logger,
+		// Replans periodically regardless of activity - the backstop that
+		// makes the threshold-gated per-job triggers (see
+		// triggerBatchPlanIfThresholdMet) safe to skip below the threshold.
+		// RunOnStart is deliberately false: a worker restart/redeploy
+		// shouldn't itself force an immediate replan. Shares Enqueue's
+		// debounce so a tick landing close to an event trigger collapses
+		// into one run instead of firing twice.
+		PeriodicJobs: []*river.PeriodicJob{
+			river.NewPeriodicJob(
+				river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
+				production.PeriodicBatchPlanConstructor(debounce),
+				&river.PeriodicJobOpts{RunOnStart: false},
+			),
+		},
 	})
 	if err != nil {
 		log.Fatalf("build river client: %v", err)

@@ -113,12 +113,16 @@ func main() {
 	}
 	log.Printf("created %d production jobs", totalJobs)
 
-	created, unbatchable, err := server.AutoCreateBatches(ctx)
+	created, unbatchable, held, err := server.AutoCreateBatches(ctx)
 	if err != nil {
 		log.Fatalf("auto create batches: %v", err)
 	}
-	log.Printf("created %d batches, %d jobs unbatchable", len(created), len(unbatchable))
+	log.Printf("created %d batches, %d jobs unbatchable, %d partitions held below target",
+		len(created), len(unbatchable), len(held))
 	for _, u := range unbatchable {
 		log.Printf("  unbatchable: job %s (%s): %s", u.JobID, u.JobNumber, u.Reason)
+	}
+	for _, h := range held {
+		log.Printf("  held: %d jobs at %.2f%% utilisation", len(h.Jobs), h.BedUtilisationPercent)
 	}
 }

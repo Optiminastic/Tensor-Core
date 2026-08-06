@@ -11,6 +11,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // seedFileAsset inserts a file_assets row with the given bounding box and returns
@@ -25,6 +26,60 @@ func seedFileAsset(t *testing.T, store *db.Store, x, y, z float64) uuid.UUID {
 		t.Fatalf("insert file asset: %v", err)
 	}
 	return f.ID
+}
+
+// seedFleetMachineWithProfile inserts a physical fleet machine linked to a
+// new machine_profiles row of the given family/status - the pair
+// assignMachineForBatch actually schedules over (unlike seedMachine, which
+// only seeds the profile half). Returns the profile id, since that's what
+// batches.machine_id and PATCH /machines/:id both address.
+func seedFleetMachineWithProfile(t *testing.T, store *db.Store, code, family, status string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	p, err := store.Q.InsertMachineProfileFull(ctx, gen.InsertMachineProfileFullParams{
+		ID: uuid.New(), Name: "Bambu " + code, IsActive: true, Family: family,
+		NozzleMm: 0.4, Flow: "standard", LayerHeightMinMm: 0.08, LayerHeightMaxMm: 0.28,
+		SupportedFilaments: []byte("[]"), Status: status, IsDefault: false,
+	})
+	if err != nil {
+		t.Fatalf("insert machine profile: %v", err)
+	}
+	m, err := store.Q.InsertFleetMachine(ctx, gen.InsertFleetMachineParams{
+		ID: uuid.New(), MachineID: code, Name: "Bambu " + code + " unit", Status: "idle", Filaments: []byte("[]"),
+	})
+	if err != nil {
+		t.Fatalf("insert fleet machine: %v", err)
+	}
+	if _, err := store.Q.SetFleetMachineProfile(ctx, gen.SetFleetMachineProfileParams{ID: m.ID, MachineProfileID: &p.ID}); err != nil {
+		t.Fatalf("link fleet machine to profile: %v", err)
+	}
+	return p.ID
+}
+
+// seedDraftBatch inserts a batch with one job on it (batch status and the
+// job's machine_family are the only fields reassignBatchesForOfflineMachine
+// reads) - a minimal fixture, bypassing the order/design pipeline entirely
+// since this is only exercising the scheduler, not job creation.
+func seedDraftBatch(t *testing.T, store *db.Store, batchNumber, status string, machineID *uuid.UUID, jobFamily string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	b, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: batchNumber, MachineID: machineID,
+		Status: status, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+	if _, err := store.Q.InsertProductionJob(ctx, gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: batchNumber + "-J1", BatchID: &b.ID, Description: "Test job",
+		Quantity: 1, Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
+		MachineFamily: &jobFamily,
+	}); err != nil {
+		t.Fatalf("insert production job: %v", err)
+	}
+	return b.ID
 }
 
 func seedMachine(t *testing.T, store *db.Store, name string) uuid.UUID {
@@ -130,6 +185,83 @@ func TestIntegrationMachineOps(t *testing.T) {
 	}
 }
 
+// TestIntegrationBatchAutoCreateSplitsLargeQuantityOrder confirms the fix for
+// the confirmed bug where a job's full quantity not fitting on one bed
+// wrongly reported it unbatchable instead of splitting it across batches.
+// Priority 1 (urgent) forces every fragment's batch to be created regardless
+// of its individual bed utilisation, so the DB-commit split path (not just
+// the pure planner logic already covered in internal/production) is
+// actually exercised end to end.
+func TestIntegrationBatchAutoCreateSplitsLargeQuantityOrder(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+
+	orderID := seedOrder(t, store, 8101, []map[string]any{
+		{"product_id": "SKU1", "product_name": "Keychain", "quantity": 20, "material": "PLA", "priority": 1},
+	})
+	jobs := fromOrderJobs(t, router, minter, orderID)
+	if len(jobs) != 1 {
+		t.Fatalf("from-order jobs = %d, want 1", len(jobs))
+	}
+	originalID := uuid.MustParse(jobs[0].ID)
+
+	// 100x100mm on the 330x320 bed only fits a handful per bed, so quantity
+	// 20 must split across multiple batches instead of being unbatchable.
+	fileID := seedFileAsset(t, store, 100, 100, 20)
+	if _, err := store.Q.SetProductionJobPrintFile(context.Background(), gen.SetProductionJobPrintFileParams{
+		ID: originalID, PrintFileID: &fileID,
+	}); err != nil {
+		t.Fatalf("set print file: %v", err)
+	}
+
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+	rr := doJSON(router, http.MethodPost, "/batches/auto-create", manage, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("auto-create = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var resp autoCreateResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	if len(resp.Unbatchable) != 0 {
+		t.Fatalf("unbatchable = %+v, want none (should split instead)", resp.Unbatchable)
+	}
+	if len(resp.Created) < 2 {
+		t.Fatalf("created batches = %d, want >1 (quantity 20 shouldn't fit on one bed)", len(resp.Created))
+	}
+
+	// The split group (the original row plus every split_of_job_id
+	// fragment) must sum back to the original 20 units, and every row with
+	// quantity left must be linked to a batch - nothing lost or orphaned.
+	rows, err := store.Pool.Query(context.Background(),
+		`SELECT quantity, batch_id FROM production_jobs WHERE id = $1 OR split_of_job_id = $1`, originalID)
+	if err != nil {
+		t.Fatalf("query split group: %v", err)
+	}
+	defer rows.Close()
+	var total int32
+	rowCount := 0
+	for rows.Next() {
+		var qty int32
+		var batchID *uuid.UUID
+		if err := rows.Scan(&qty, &batchID); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		rowCount++
+		if qty > 0 && batchID == nil {
+			t.Errorf("row with quantity %d has no batch_id (lost/orphaned)", qty)
+		}
+		total += qty
+	}
+	if total != 20 {
+		t.Errorf("total quantity across the split group = %d, want 20", total)
+	}
+	if rowCount < 2 {
+		t.Errorf("split group has %d row(s), want >1 (root + at least one split fragment)", rowCount)
+	}
+}
+
 func TestIntegrationBatchAutoCreate(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
@@ -174,6 +306,54 @@ func TestIntegrationBatchAutoCreate(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &detail)
 	if detail.JobsCount == nil || *detail.JobsCount != 2 {
 		t.Errorf("jobs_count = %v, want 2", detail.JobsCount)
+	}
+}
+
+func TestIntegrationBatchReassignedWhenMachineGoesOffline(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+
+	profileA := seedFleetMachineWithProfile(t, store, "H2C-A", "H2C", "online")
+	profileB := seedFleetMachineWithProfile(t, store, "H2C-B", "H2C", "online")
+
+	// Draft, family H2C: an alternative (profileB) exists -> reassigned to it.
+	withAlternative := seedDraftBatch(t, store, "BATCH-REASSIGN-1", production.BatchPendingApproval, &profileA, "H2C")
+	// Draft, an unrelated family with no eligible machine at all -> cleared to unassigned.
+	noAlternative := seedDraftBatch(t, store, "BATCH-REASSIGN-2", production.BatchPendingApproval, &profileA, "H2S")
+	// Already approved (open): a human commitment, left alone even though its machine goes offline.
+	approved := seedDraftBatch(t, store, "BATCH-REASSIGN-3", production.BatchOpen, &profileA, "H2C")
+
+	manage := minter.mint(t, []string{"machine:manage", "machine:read"})
+	if rr := doJSON(router, http.MethodPatch, "/machines/"+profileA.String(), manage, map[string]any{"status": "offline"}); rr.Code != http.StatusOK {
+		t.Fatalf("patch machine offline = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	got, err := store.Q.GetBatchByID(ctx, withAlternative)
+	if err != nil {
+		t.Fatalf("get withAlternative: %v", err)
+	}
+	if got.MachineID == nil || *got.MachineID != profileB {
+		t.Errorf("withAlternative machine_id = %v, want %s", got.MachineID, profileB)
+	}
+
+	got, err = store.Q.GetBatchByID(ctx, noAlternative)
+	if err != nil {
+		t.Fatalf("get noAlternative: %v", err)
+	}
+	if got.MachineID != nil {
+		t.Errorf("noAlternative machine_id = %v, want nil (no eligible machine)", *got.MachineID)
+	}
+
+	got, err = store.Q.GetBatchByID(ctx, approved)
+	if err != nil {
+		t.Fatalf("get approved: %v", err)
+	}
+	if got.MachineID == nil || *got.MachineID != profileA {
+		t.Errorf("approved (open) batch machine_id = %v, want unchanged %s", got.MachineID, profileA)
 	}
 }
 
