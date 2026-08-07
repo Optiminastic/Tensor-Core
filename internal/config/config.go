@@ -103,6 +103,22 @@ type Settings struct {
 	PublicBaseURL       string
 	FrontendURL         string
 	TokenEncryptionKey  string
+
+	// AI optimization advisor via OpenRouter (an OpenAI-compatible LLM gateway).
+	// The key is required to run the advisor; absent, the endpoint fails closed
+	// (503). The model slug is configurable so the shop can pick any OpenRouter
+	// model (default a capable Claude).
+	OpenRouterAPIKey  string
+	OpenRouterModel   string
+	OpenRouterTimeout time.Duration
+
+	// SMTP for the email-report feature (net/smtp, STARTTLS on 587). Absent
+	// host/from means the email endpoint fails closed (503).
+	SMTPHost string
+	SMTPPort int
+	SMTPUser string
+	SMTPPass string
+	SMTPFrom string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -168,7 +184,29 @@ func Load() Settings {
 		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
 		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
+
+		OpenRouterAPIKey:  os.Getenv("OPENROUTER_API_KEY"),
+		OpenRouterModel:   envOr("OPENROUTER_MODEL", "anthropic/claude-sonnet-4.5"),
+		OpenRouterTimeout: secondsEnvOr("OPENROUTER_TIMEOUT_SECONDS", 60),
+
+		SMTPHost: os.Getenv("SMTP_HOST"),
+		SMTPPort: intEnvOr("SMTP_PORT", 587),
+		SMTPUser: os.Getenv("SMTP_USER"),
+		SMTPPass: os.Getenv("SMTP_PASS"),
+		SMTPFrom: os.Getenv("SMTP_FROM"),
 	}
+}
+
+// EmailConfigured reports whether the email-report feature can send. When false,
+// the email endpoint fails closed with a 503.
+func (s Settings) EmailConfigured() bool {
+	return strings.TrimSpace(s.SMTPHost) != "" && strings.TrimSpace(s.SMTPFrom) != ""
+}
+
+// AdvisorConfigured reports whether the AI optimization advisor has an API key.
+// When false, the optimize endpoint fails closed with a 503.
+func (s Settings) AdvisorConfigured() bool {
+	return strings.TrimSpace(s.OpenRouterAPIKey) != ""
 }
 
 // ShopifyImportConfigured reports whether the inbound Shopify order-import flow

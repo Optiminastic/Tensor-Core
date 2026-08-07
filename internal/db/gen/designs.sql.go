@@ -35,7 +35,7 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, machine_id, personalisation_rules, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, attributes, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
@@ -57,6 +57,7 @@ type GetDesignByIDRow struct {
 	Sku                  *string
 	MachineID            *uuid.UUID
 	PersonalisationRules []byte
+	Attributes           []byte
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 }
@@ -82,6 +83,7 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.Sku,
 		&i.MachineID,
 		&i.PersonalisationRules,
+		&i.Attributes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -331,13 +333,13 @@ const insertDesign = `-- name: InsertDesign :one
 
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id, attributes
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
     $9, $10, $11,
     $12::float8, $13, $14, $15,
-    $16
+    $16, $17
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
@@ -361,6 +363,7 @@ type InsertDesignParams struct {
 	PreviewKey  string
 	Sku         *string
 	MachineID   *uuid.UUID
+	Attributes  []byte
 }
 
 type InsertDesignRow struct {
@@ -403,6 +406,7 @@ func (q *Queries) InsertDesign(ctx context.Context, arg InsertDesignParams) (Ins
 		arg.PreviewKey,
 		arg.Sku,
 		arg.MachineID,
+		arg.Attributes,
 	)
 	var i InsertDesignRow
 	err := row.Scan(

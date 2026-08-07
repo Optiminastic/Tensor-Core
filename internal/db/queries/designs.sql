@@ -4,13 +4,13 @@
 -- name: InsertDesign :one
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id
+    material, colour, finish, units_per_bed, quality, infill_pct, notes, preview_key, sku, machine_id, attributes
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('name'), sqlc.arg('created_by'),
     sqlc.arg('status'), sqlc.arg('stl_key'), sqlc.arg('material'), sqlc.narg('colour'),
     sqlc.arg('finish'), sqlc.arg('units_per_bed'), sqlc.arg('quality'),
     sqlc.arg('infill_pct')::float8, sqlc.narg('notes'), sqlc.arg('preview_key'), sqlc.narg('sku'),
-    sqlc.narg('machine_id')
+    sqlc.narg('machine_id'), sqlc.narg('attributes')
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
@@ -23,7 +23,7 @@ SELECT nextval('designs_sku_seq')::bigint AS seq;
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, machine_id, personalisation_rules, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, attributes, created_at, updated_at
 FROM designs WHERE id = $1;
 
 -- SetDesignPersonalisationRules stores (or clears, with NULL) the product's

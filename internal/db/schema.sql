@@ -193,6 +193,9 @@ CREATE TABLE designs (
     -- {enabled, name{required,min,max}, font/colour/variant{required,allowed[]},
     --  photo{required}, approval{required}, zone{width_mm,height_mm}}.
     personalisation_rules jsonb,
+    -- Upload metadata: {product_type, personalisation_type, colour_count,
+    --  add_ons[], packaging_type}. Validated in Go.
+    attributes    jsonb,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -519,3 +522,13 @@ ALTER TABLE orders
     FOREIGN KEY (shop_connection_id) REFERENCES shopify_connections (id) ON DELETE SET NULL;
 CREATE UNIQUE INDEX uq_orders_shop_order_number
     ON orders (shop_connection_id, order_number);
+
+CREATE TABLE design_optimizations (
+    id         uuid PRIMARY KEY,
+    design_id  uuid NOT NULL REFERENCES designs (id) ON DELETE CASCADE,
+    input_hash text NOT NULL,
+    result     jsonb NOT NULL,
+    model      text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (design_id, input_hash)
+);

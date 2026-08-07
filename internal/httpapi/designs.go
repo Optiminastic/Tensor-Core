@@ -18,6 +18,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/failurerisk"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -141,6 +142,11 @@ type designDetailResponse struct {
 	Shopify              *shopifyBlock          `json:"shopify"`
 	Machine              *machineConfigResponse `json:"machine"`
 	PersonalisationRules json.RawMessage        `json:"personalisation_rules"`
+	// Upload metadata (product type, personalisation type, colour count, add-ons,
+	// packaging type); null when none was supplied.
+	Attributes json.RawMessage `json:"attributes"`
+	// Advisory print-reliability score derived from the metrics; nil until sliced.
+	FailureRisk *failurerisk.Assessment `json:"failure_risk"`
 }
 
 // designDTO maps the shared design columns (identical across the insert/get/list
@@ -167,6 +173,9 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.GET("/:id/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
 	g.GET("/:id/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
 	g.GET("/:id/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
+	g.POST("/:id/optimize", s.guards.RequirePermission(auth.DesignRead.Key()), s.optimizeDesign)
+	g.GET("/:id/report.pdf", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadDesignReport)
+	g.POST("/:id/email-report", s.guards.RequirePermission(auth.DesignRead.Key()), s.emailDesignReport)
 	g.GET("/:id/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
 	g.GET("/:id/gcode/plate", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcodePlate)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPreview)
@@ -288,8 +297,42 @@ func (s *Server) getDesign(c *gin.Context) {
 		Shopify:              shopifyBlk,
 		Machine:              machine,
 		PersonalisationRules: json.RawMessage(d.PersonalisationRules),
+		Attributes:           json.RawMessage(d.Attributes),
+		FailureRisk:          failureRiskFor(metrics),
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// failureRiskFor scores print reliability from the latest metrics (nil when the
+// design has not been sliced). The overhang signal comes from the stored
+// orientation recommendation.
+func failureRiskFor(m *metricsResponse) *failurerisk.Assessment {
+	if m == nil {
+		return nil
+	}
+	a := failurerisk.Assess(failurerisk.Inputs{
+		FilamentG:           m.FilamentG,
+		SupportG:            m.SupportG,
+		SupportUsed:         m.SupportUsed,
+		WallLoops:           m.WallLoops,
+		PurgeG:              m.PurgeG,
+		ColourChanges:       m.ColourChanges,
+		OverhangBaselineMM2: overhangBaseline(m.Orientation),
+	})
+	return &a
+}
+
+// overhangBaseline pulls the baseline overhang area from the orientation
+// recommendation JSON, or 0 when absent.
+func overhangBaseline(raw json.RawMessage) float64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0
+	}
+	var o struct {
+		OverhangBaseline float64 `json:"overhang_area_baseline"`
+	}
+	_ = json.Unmarshal(raw, &o)
+	return o.OverhangBaseline
 }
 
 // designMachine resolves the machine profile a design slices on, or nil when the

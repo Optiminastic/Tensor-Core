@@ -97,8 +97,18 @@ type Design struct {
 	Sku                  *string
 	TemplateFileID       *uuid.UUID
 	PersonalisationRules []byte
+	Attributes           []byte
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
+}
+
+type DesignOptimization struct {
+	ID        uuid.UUID
+	DesignID  uuid.UUID
+	InputHash string
+	Result    []byte
+	Model     string
+	CreatedAt pgtype.Timestamptz
 }
 
 type DesignPricing struct {

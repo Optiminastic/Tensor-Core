@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -47,6 +48,8 @@ type designForm struct {
 	// machine filament to use.
 	MachineID      *uuid.UUID
 	FilamentPreset string
+	// Upload metadata (spec Step 1), stored as jsonb; nil when none supplied.
+	Attributes []byte
 }
 
 // pipelineReady fails closed with 503 when object storage or the slice enqueuer
@@ -155,6 +158,7 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 		f.MachineID = &id
 	}
 	f.FilamentPreset = strings.TrimSpace(c.PostForm("filament_preset"))
+	f.Attributes = parseAttributes(c)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -162,6 +166,47 @@ func (s *Server) parseDesignForm(c *gin.Context) (designForm, *multipart.FileHea
 		return f, nil, false
 	}
 	return f, fileHeader, true
+}
+
+// parseAttributes reads the optional upload-metadata fields (spec Step 1) into a
+// jsonb blob, or nil when none were supplied. Free-form: the backend stores what
+// the designer entered; costing can read it later.
+func parseAttributes(c *gin.Context) []byte {
+	productType := strings.TrimSpace(c.PostForm("product_type"))
+	personalisationType := strings.TrimSpace(c.PostForm("personalisation_type"))
+	packagingType := strings.TrimSpace(c.PostForm("packaging_type"))
+	colourCount := 0
+	if v := strings.TrimSpace(c.PostForm("colour_count")); v != "" {
+		colourCount, _ = strconv.Atoi(v)
+	}
+	var addOns []string
+	for _, a := range strings.Split(c.PostForm("add_ons"), ",") {
+		if t := strings.TrimSpace(a); t != "" {
+			addOns = append(addOns, t)
+		}
+	}
+
+	attrs := map[string]any{}
+	if productType != "" {
+		attrs["product_type"] = productType
+	}
+	if personalisationType != "" {
+		attrs["personalisation_type"] = personalisationType
+	}
+	if packagingType != "" {
+		attrs["packaging_type"] = packagingType
+	}
+	if colourCount > 0 {
+		attrs["colour_count"] = colourCount
+	}
+	if len(addOns) > 0 {
+		attrs["add_ons"] = addOns
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(attrs)
+	return b
 }
 
 // validateSpecValues checks the enum-like answers against the accepted sets.
@@ -280,6 +325,7 @@ func (s *Server) insertDesignAndJob(
 			Sku: &sku, MachineID: form.MachineID,
 			Finish: form.Finish, UnitsPerBed: form.UnitsPerBed, Quality: form.Quality,
 			InfillPct: form.InfillPct, Notes: form.Notes, PreviewKey: previewKey,
+			Attributes: form.Attributes,
 		})
 		if err != nil {
 			return err

@@ -11,6 +11,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/integrations/openrouter"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/secretbox"
@@ -28,6 +29,9 @@ type Server struct {
 	// secrets seals Shopify access tokens at rest. Nil when TOKEN_ENCRYPTION_KEY is
 	// unset; the Shopify integration routes then fail closed (503).
 	secrets *secretbox.Box
+	// openrouter powers the AI optimization advisor. Always built; the optimize
+	// route fails closed (503) when no OPENROUTER_API_KEY is configured.
+	openrouter *openrouter.Client
 
 	// Design pipeline dependencies. Nil until EnablePipeline is called; the
 	// design routes fail closed (503) when they are absent.
@@ -42,12 +46,13 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 	// A nil box is fine: the Shopify routes check shopifyReady and 503 without it.
 	box, _ := secretbox.New(cfg.TokenEncryptionKey)
 	return &Server{
-		cfg:     cfg,
-		store:   store,
-		guards:  guards,
-		logger:  logger,
-		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
-		secrets: box,
+		cfg:        cfg,
+		store:      store,
+		guards:     guards,
+		logger:     logger,
+		shopify:    shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
+		secrets:    box,
+		openrouter: openrouter.New(cfg.OpenRouterTimeout),
 	}
 }
 
