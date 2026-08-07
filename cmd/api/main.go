@@ -95,18 +95,18 @@ func main() {
 	)
 
 	if objects, err := storage.New(ctx, storage.Options{
-		Endpoint:           cfg.MinIOEndpoint,
-		AccessKey:          cfg.MinIOAccessKey,
-		SecretKey:          cfg.MinIOSecretKey,
-		Bucket:             cfg.MinIOBucket,
-		KeyPrefix:          cfg.MinIOKeyPrefix,
-		Secure:             cfg.MinIOSecure,
-		AssumeBucketExists: cfg.MinIOAssumeBucketExists,
+		Endpoint:           cfg.S3Endpoint,
+		AccessKey:          cfg.S3AccessKey,
+		SecretKey:          cfg.S3SecretKey,
+		Bucket:             cfg.S3Bucket,
+		KeyPrefix:          cfg.S3KeyPrefix,
+		Secure:             cfg.S3Secure,
+		AssumeBucketExists: cfg.S3AssumeBucketExists,
 	}); err != nil {
 		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
 	} else {
 		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient))
-		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.MinIOEndpoint)
+		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.S3Endpoint)
 	}
 
 	addr := ":" + cfg.Port

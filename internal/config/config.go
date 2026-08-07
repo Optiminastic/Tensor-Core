@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// minIODevSecret is the built-in development MinIO secret. Running with it in
-// production is a misconfiguration, so Validate rejects it there.
-const minIODevSecret = "tensor_local_dev"
+// s3DevSecret is the built-in development object-storage secret. Running with
+// it in production is a misconfiguration, so Validate rejects it there.
+const s3DevSecret = "tensor_local_dev"
 
 // Settings holds every environment-driven value the backend needs.
 type Settings struct {
@@ -54,17 +54,19 @@ type Settings struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 
-	// Design pipeline: object storage for STL/G-code. MinIOKeyPrefix namespaces
-	// every object key - required when MinIOBucket is shared with other apps.
-	// MinIOAssumeBucketExists skips the bucket-existence/creation check, for
+	// Design pipeline: object storage for STL/G-code, any S3-compatible store
+	// (real AWS S3 in production, MinIO in dev - internal/storage talks the S3
+	// API via minio-go, which works against both identically). S3KeyPrefix
+	// namespaces every object key - required when S3Bucket is shared with other
+	// apps. S3AssumeBucketExists skips the bucket-existence/creation check, for
 	// when the credentials are scoped to the prefix and can't HeadBucket.
-	MinIOEndpoint           string
-	MinIOAccessKey          string
-	MinIOSecretKey          string
-	MinIOBucket             string
-	MinIOKeyPrefix          string
-	MinIOSecure             bool
-	MinIOAssumeBucketExists bool
+	S3Endpoint           string
+	S3AccessKey          string
+	S3SecretKey          string
+	S3Bucket             string
+	S3KeyPrefix          string
+	S3Secure             bool
+	S3AssumeBucketExists bool
 
 	// Slice worker (cmd/sliceworker): the Bambu Studio install, per-slice timeout,
 	// the calibratable average printer draw used to estimate energy, and how many
@@ -185,13 +187,13 @@ func Load() Settings {
 		DBConnectTimeout:   secondsEnvOr("DB_CONNECT_TIMEOUT_SECONDS", 10),
 		DBStatementTimeout: secondsEnvOr("DB_STATEMENT_TIMEOUT_SECONDS", 15),
 
-		MinIOEndpoint:           envOr("MINIO_ENDPOINT", "localhost:9100"),
-		MinIOAccessKey:          envOr("MINIO_ACCESS_KEY", "tensor"),
-		MinIOSecretKey:          envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
-		MinIOBucket:             envOr("MINIO_BUCKET", "designs"),
-		MinIOKeyPrefix:          os.Getenv("MINIO_KEY_PREFIX"),
-		MinIOSecure:             boolEnvOr("MINIO_SECURE", false),
-		MinIOAssumeBucketExists: boolEnvOr("MINIO_ASSUME_BUCKET_EXISTS", false),
+		S3Endpoint:           envOr("S3_ENDPOINT", "localhost:9100"),
+		S3AccessKey:          envOr("S3_ACCESS_KEY", "tensor"),
+		S3SecretKey:          envOr("S3_SECRET_KEY", "tensor_local_dev"),
+		S3Bucket:             envOr("S3_BUCKET", "designs"),
+		S3KeyPrefix:          os.Getenv("S3_KEY_PREFIX"),
+		S3Secure:             boolEnvOr("S3_SECURE", false),
+		S3AssumeBucketExists: boolEnvOr("S3_ASSUME_BUCKET_EXISTS", false),
 
 		BambuRoot:           envOr("BAMBU_ROOT", "/opt/bambu/squashfs-root"),
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),
@@ -263,8 +265,8 @@ func (s Settings) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("config: required in production but unset: %s", strings.Join(missing, ", "))
 	}
-	if s.MinIOSecretKey == minIODevSecret {
-		return errors.New("config: MINIO_SECRET_KEY is the development default in production; set a real secret")
+	if s.S3SecretKey == s3DevSecret {
+		return errors.New("config: S3_SECRET_KEY is the development default in production; set a real secret")
 	}
 	return nil
 }

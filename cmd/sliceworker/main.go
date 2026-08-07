@@ -45,13 +45,13 @@ func main() {
 	defer store.Close()
 
 	objects, err := storage.New(ctx, storage.Options{
-		Endpoint:           cfg.MinIOEndpoint,
-		AccessKey:          cfg.MinIOAccessKey,
-		SecretKey:          cfg.MinIOSecretKey,
-		Bucket:             cfg.MinIOBucket,
-		KeyPrefix:          cfg.MinIOKeyPrefix,
-		Secure:             cfg.MinIOSecure,
-		AssumeBucketExists: cfg.MinIOAssumeBucketExists,
+		Endpoint:           cfg.S3Endpoint,
+		AccessKey:          cfg.S3AccessKey,
+		SecretKey:          cfg.S3SecretKey,
+		Bucket:             cfg.S3Bucket,
+		KeyPrefix:          cfg.S3KeyPrefix,
+		Secure:             cfg.S3Secure,
+		AssumeBucketExists: cfg.S3AssumeBucketExists,
 	})
 	if err != nil {
 		log.Fatalf("object storage unavailable: %v", err)
