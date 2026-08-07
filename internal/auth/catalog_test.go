@@ -9,8 +9,8 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 21 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 21 each", len(admin), len(AllPermissions))
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 37 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 37 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -26,8 +26,26 @@ func TestOperatorNeverSeesCosts(t *testing.T) {
 			t.Errorf("operator must not have %s", forbidden)
 		}
 	}
-	if !has(op, "design:read") || !has(op, "production:read") {
-		t.Error("operator should have design:read and production:read")
+	for _, expected := range []string{"design:read", "production:read", "production:update", "production:fail", "machine:manage"} {
+		if !has(op, expected) {
+			t.Errorf("operator should have %s", expected)
+		}
+	}
+}
+
+func TestPackagingQcScope(t *testing.T) {
+	qc := PermissionsFor(RolePackagingQc)
+	// Records QC, assembly and packaging; reads the queue.
+	for _, expected := range []string{"production:read", "qc:submit", "assembly:submit", "packaging:submit"} {
+		if !has(qc, expected) {
+			t.Errorf("packaging_qc should have %s", expected)
+		}
+	}
+	// Cannot advance a job directly, cannot see costs, cannot manage machines.
+	for _, forbidden := range []string{"production:update", "production:fail", "config:read", "pricing:read", "order:read", "machine:manage"} {
+		if has(qc, forbidden) {
+			t.Errorf("packaging_qc must not have %s", forbidden)
+		}
 	}
 }
 
@@ -73,12 +91,13 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 21 (admin) + 4 (designer) + 9 (project lead) + 2 (marketer) + 2 (operator) = 38.
+	// 37 (admin) + 4 (designer) + 25 (project lead) + 2 (marketer) + 8 (operator)
+	// + 4 (packaging_qc) = 80.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 38 {
-		t.Fatalf("total grants = %d, want 38", total)
+	if total != 80 {
+		t.Fatalf("total grants = %d, want 80", total)
 	}
 }

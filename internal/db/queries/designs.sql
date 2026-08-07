@@ -4,27 +4,27 @@
 -- name: InsertDesign :one
 INSERT INTO designs (
     id, brand_slug, name, created_by, status, stl_key,
-    material, colour, finish, units_per_bed, quality, infill_pct
+    material, colour, finish, units_per_bed, quality, infill_pct, machine_id
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('name'), sqlc.arg('created_by'),
     sqlc.arg('status'), sqlc.arg('stl_key'), sqlc.arg('material'), sqlc.narg('colour'),
     sqlc.arg('finish'), sqlc.arg('units_per_bed'), sqlc.arg('quality'),
-    sqlc.arg('infill_pct')::float8
+    sqlc.arg('infill_pct')::float8, sqlc.narg('machine_id')
 )
 RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
           finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-          created_at, updated_at;
+          sku, machine_id, created_at, updated_at;
 
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs WHERE id = $1;
 
 -- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 
 -- name: ListDesignsByBrandPage :many
@@ -33,7 +33,7 @@ FROM designs WHERE brand_slug = $1 ORDER BY created_at DESC;
 -- as a stable tiebreaker.
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
-       created_at, updated_at
+       sku, machine_id, created_at, updated_at
 FROM designs
 WHERE brand_slug = sqlc.arg('brand_slug')
   AND (
@@ -46,6 +46,33 @@ LIMIT sqlc.arg('page_limit');
 -- name: UpdateDesignStatus :exec
 UPDATE designs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');
+
+-- name: UpdateDesignSku :one
+-- A nil sku clears it (frontend contract: empty string -> clear). The caller
+-- maps a unique_violation on this to a 409 - see designs.go#setDesignSku.
+UPDATE designs SET sku = sqlc.narg('sku'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+          sku, machine_id, created_at, updated_at;
+
+-- name: UpdateDesignMachine :one
+-- Relinks a design to a different machine_profiles row (see
+-- internal/httpapi/design_machine_link.go#findOrCreateMachineProfile) - the
+-- "Machine" tab's edit form.
+UPDATE designs SET machine_id = sqlc.arg('machine_id'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+          sku, machine_id, created_at, updated_at;
+
+-- name: GetDesignBySKU :one
+-- Used by the job-creation worker to match an order line item's SKU to its
+-- approved design. Only approved/published designs are sellable/printable.
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       sku, machine_id, created_at, updated_at
+FROM designs WHERE sku = $1 AND status IN ('approved', 'published');
 
 -- name: UpdateDesignSpecs :exec
 UPDATE designs SET

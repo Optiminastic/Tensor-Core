@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,12 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
+
+// skuPattern mirrors the frontend's DesignSkuInputSchema exactly: letters/digits
+// first, then letters, digits, and - . _ /, up to 64 characters.
+var skuPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+
+const maxSKULength = 64
 
 // Design lifecycle statuses (the `designs.status` column).
 const (
@@ -37,13 +44,21 @@ const (
 	jobFailed  = "failed"
 )
 
-// Accepted answers. Materials/qualities must map to an H2S profile in the worker
-// (internal/../profiles.py); finishes are cosmetic and advisory only.
+// Accepted answers. Materials/qualities must map to a BBL H2C profile in
+// internal/slicing/profiles.go; finishes are cosmetic and advisory only.
 var (
-	validMaterials  = map[string]bool{"PLA": true, "PETG": true, "ABS": true}
-	validQualities  = map[string]bool{"draft": true, "standard": true, "fine": true}
+	validMaterials = map[string]bool{"PLA Basics": true, "PA-CF": true}
+	validQualities = map[string]bool{
+		"0.08-high": true, "0.12-high": true, "0.16-high": true, "0.16-standard": true,
+		"0.20-high": true, "0.20-standard": true, "0.24-standard": true,
+	}
 	validFinishes   = map[string]bool{"none": true, "sanded": true, "painted": true}
 	allowedModelExt = map[string]bool{".stl": true, ".3mf": true, ".step": true, ".stp": true}
+
+	// Dual-nozzle slicing config, captured on the design form and resolved to a
+	// machine_profiles row - see design_machine_link.go.
+	validNozzleMM = map[float64]bool{0.2: true, 0.4: true, 0.6: true, 0.8: true}
+	validFlow     = map[string]bool{"standard": true, "high_flow": true}
 )
 
 type designResponse struct {
@@ -58,6 +73,7 @@ type designResponse struct {
 	UnitsPerBed int       `json:"units_per_bed"`
 	Quality     string    `json:"quality"`
 	InfillPct   float64   `json:"infill_pct"`
+	SKU         *string   `json:"sku"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -110,25 +126,46 @@ type jobResponse struct {
 	Error   *string `json:"error"`
 }
 
+// designMachineResponse is the design's linked slicing config (which
+// machine_profiles row designs.machine_id points at) - the "Machine" tab.
+// machine_hour_cost is deliberately absent, same as machineFullResponse.
+type designMachineResponse struct {
+	ID            string   `json:"id"`
+	Family        string   `json:"family"`
+	NozzleMm      float64  `json:"nozzle_mm"`
+	RightNozzleMm *float64 `json:"right_nozzle_mm"`
+	Flow          string   `json:"flow"`
+	RightFlow     *string  `json:"right_flow"`
+}
+
+func designMachineDTO(m gen.GetMachineProfileFullRow) designMachineResponse {
+	return designMachineResponse{
+		ID: m.ID.String(), Family: m.Family, NozzleMm: m.NozzleMm,
+		RightNozzleMm: db.NumFloatPtr(m.RightNozzleMm), Flow: m.Flow, RightFlow: m.RightFlow,
+	}
+}
+
 type designDetailResponse struct {
 	designResponse
-	Job     *jobResponse     `json:"job"`
-	Metrics *metricsResponse `json:"metrics"`
-	Pricing *pricingResponse `json:"pricing"`
-	Shopify *shopifyBlock    `json:"shopify"`
+	Job     *jobResponse           `json:"job"`
+	Metrics *metricsResponse       `json:"metrics"`
+	Pricing *pricingResponse       `json:"pricing"`
+	Shopify *shopifyBlock          `json:"shopify"`
+	Machine *designMachineResponse `json:"machine"`
 }
 
 // designDTO maps the shared design columns (identical across the insert/get/list
 // rows) to the wire shape. Wide-param like brandDTO, and for the same reason.
 func designDTO(
 	id uuid.UUID, brandSlug, name, createdBy, status, material string, colour *string,
-	finish string, unitsPerBed int32, quality string, infillPct float64,
+	finish string, unitsPerBed int32, quality string, infillPct float64, sku *string,
 	created, updated pgtype.Timestamptz,
 ) designResponse {
 	return designResponse{
 		ID: id.String(), BrandSlug: brandSlug, Name: name, CreatedBy: createdBy, Status: status,
 		Material: material, Colour: colour, Finish: finish, UnitsPerBed: int(unitsPerBed),
-		Quality: quality, InfillPct: infillPct, CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
+		Quality: quality, InfillPct: infillPct, SKU: sku,
+		CreatedAt: db.Time(created), UpdatedAt: db.Time(updated),
 	}
 }
 
@@ -141,6 +178,8 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.GET("/:id/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
 	g.GET("/:id/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
 	g.POST("/:id/resubmit", s.guards.RequirePermission(auth.DesignCreate.Key()), s.resubmitDesign)
+	g.PATCH("/:id/sku", s.guards.RequirePermission(auth.DesignCreate.Key()), s.setDesignSku)
+	g.PATCH("/:id/machine", s.guards.RequirePermission(auth.DesignCreate.Key()), s.updateDesignMachine)
 	g.POST("/:id/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
 }
 
@@ -168,7 +207,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 		out := make([]designResponse, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.CreatedAt, r.UpdatedAt))
+				r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.Sku, r.CreatedAt, r.UpdatedAt))
 		}
 		c.JSON(http.StatusOK, out)
 		return
@@ -185,7 +224,7 @@ func (s *Server) listDesigns(c *gin.Context) {
 	out := make([]designResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
-			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.CreatedAt, r.UpdatedAt))
+			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.Sku, r.CreatedAt, r.UpdatedAt))
 	}
 	if n := len(rows); n > 0 {
 		last := rows[n-1]
@@ -232,14 +271,16 @@ func (s *Server) getDesign(c *gin.Context) {
 		dbError(c, err, "That design does not exist.", "Could not load the design.")
 		return
 	}
+	machine := s.designMachine(ctx, d.MachineID)
 
 	resp := designDetailResponse{
 		designResponse: designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
-			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.CreatedAt, d.UpdatedAt),
+			d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.Sku, d.CreatedAt, d.UpdatedAt),
 		Job:     job,
 		Metrics: metrics,
 		Pricing: pricing,
 		Shopify: shopifyBlk,
+		Machine: machine,
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -410,6 +451,115 @@ func (s *Server) designPricing(ctx context.Context, id uuid.UUID) (*pricingRespo
 	}, nil
 }
 
+type setDesignSkuRequest struct {
+	SKU string `json:"sku"`
+}
+
+// setDesignSku assigns (or, with an empty string, clears) a design's catalog
+// SKU. The backend owns uniqueness across every design - a duplicate answers
+// 409, matching the frontend's design-sku-dialog contract.
+func (s *Server) setDesignSku(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req setDesignSkuRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	sku := strings.TrimSpace(req.SKU)
+	if sku != "" {
+		if len(sku) > maxSKULength || !skuPattern.MatchString(sku) {
+			detail(c, http.StatusUnprocessableEntity,
+				"A SKU must be at most 64 characters, starting with a letter or digit, "+
+					"using only letters, digits, and - . _ /.")
+			return
+		}
+	}
+
+	var skuArg *string
+	if sku != "" {
+		skuArg = &sku
+	}
+	d, err := s.store.Q.UpdateDesignSku(c.Request.Context(), gen.UpdateDesignSkuParams{ID: id, Sku: skuArg})
+	if err != nil {
+		if isUniqueViolation(err) {
+			detail(c, http.StatusConflict, "That SKU is already assigned to another design.")
+			return
+		}
+		dbError(c, err, "That design does not exist.", "Could not update the design's SKU.")
+		return
+	}
+	c.JSON(http.StatusOK, designDTO(d.ID, d.BrandSlug, d.Name, d.CreatedBy, d.Status, d.Material,
+		d.Colour, d.Finish, d.UnitsPerBed, d.Quality, d.InfillPct, d.Sku, d.CreatedAt, d.UpdatedAt))
+}
+
+type updateDesignMachineRequest struct {
+	LeftNozzleMM  float64 `json:"left_nozzle_mm"`
+	RightNozzleMM float64 `json:"right_nozzle_mm"`
+	LeftFlow      string  `json:"left_flow"`
+	RightFlow     string  `json:"right_flow"`
+}
+
+// updateDesignMachine relinks a design to whichever machine_profiles row
+// matches the given dual-nozzle config, finding or creating one exactly like
+// design creation does (see design_machine_link.go) - the "Machine" tab's
+// edit form.
+func (s *Server) updateDesignMachine(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req updateDesignMachineRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if !validNozzleMM[req.LeftNozzleMM] {
+		detail(c, http.StatusUnprocessableEntity, "left_nozzle_mm must be one of 0.2, 0.4, 0.6, 0.8.")
+		return
+	}
+	if !validNozzleMM[req.RightNozzleMM] {
+		detail(c, http.StatusUnprocessableEntity, "right_nozzle_mm must be one of 0.2, 0.4, 0.6, 0.8.")
+		return
+	}
+	leftFlow := strings.ToLower(strings.TrimSpace(req.LeftFlow))
+	if !validFlow[leftFlow] {
+		detail(c, http.StatusUnprocessableEntity, "left_flow must be one of standard, high_flow.")
+		return
+	}
+	rightFlow := strings.ToLower(strings.TrimSpace(req.RightFlow))
+	if !validFlow[rightFlow] {
+		detail(c, http.StatusUnprocessableEntity, "right_flow must be one of standard, high_flow.")
+		return
+	}
+
+	ctx := c.Request.Context()
+	if _, err := s.store.Q.GetDesignByID(ctx, id); err != nil {
+		dbError(c, err, "That design does not exist.", "Could not load the design.")
+		return
+	}
+	machineID, err := s.findOrCreateMachineProfile(ctx, s.store.Q, nozzleSpec{
+		LeftNozzleMM: req.LeftNozzleMM, RightNozzleMM: req.RightNozzleMM,
+		LeftFlow: leftFlow, RightFlow: rightFlow,
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not resolve a machine profile.")
+		return
+	}
+	if _, err := s.store.Q.UpdateDesignMachine(ctx, gen.UpdateDesignMachineParams{
+		ID: id, MachineID: &machineID,
+	}); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not update the design's machine.")
+		return
+	}
+	m, err := s.store.Q.GetMachineProfileFull(ctx, machineID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the updated machine.")
+		return
+	}
+	c.JSON(http.StatusOK, designMachineDTO(m))
+}
+
 func (s *Server) designShopify(ctx context.Context, id uuid.UUID) (*shopifyBlock, error) {
 	p, err := s.store.Q.GetShopifyProduct(ctx, id)
 	if err != nil {
@@ -419,4 +569,20 @@ func (s *Server) designShopify(ctx context.Context, id uuid.UUID) (*shopifyBlock
 		return nil, err
 	}
 	return &shopifyBlock{Status: p.Status, Handle: p.Handle, AdminURL: p.AdminUrl}, nil
+}
+
+// designMachine loads the design's linked slicing config, if any. Unlike
+// latestJob/latestMetrics/designPricing/designShopify this is best-effort, not
+// error-propagating: a nil machineID (not linked yet) or a stale/missing link
+// both just render the "Machine" tab with nothing set, never a 5xx.
+func (s *Server) designMachine(ctx context.Context, machineID *uuid.UUID) *designMachineResponse {
+	if machineID == nil {
+		return nil
+	}
+	m, err := s.store.Q.GetMachineProfileFull(ctx, *machineID)
+	if err != nil {
+		return nil
+	}
+	dto := designMachineDTO(m)
+	return &dto
 }

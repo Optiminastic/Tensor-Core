@@ -9,6 +9,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Batch struct {
+	ID                          uuid.UUID
+	BatchNumber                 string
+	MachineID                   *uuid.UUID
+	Status                      string
+	ApprovedBy                  *string
+	ApprovedAt                  pgtype.Timestamptz
+	MaterialShortage            bool
+	MergedFileID                *uuid.UUID
+	PreviewFileID               *uuid.UUID
+	UnitsPerBed                 *int32
+	TotalPrintTimeMinutes       *int32
+	EffectiveTimePerUnitMinutes pgtype.Numeric
+	TotalFilamentGrams          pgtype.Numeric
+	BedUtilizationPercent       pgtype.Numeric
+	PackingStrategy             *string
+	FilamentReserved            bool
+	CreatedAt                   pgtype.Timestamptz
+	UpdatedAt                   pgtype.Timestamptz
+}
+
 type Brand struct {
 	ID                uuid.UUID
 	Slug              string
@@ -71,6 +92,8 @@ type Design struct {
 	UnitsPerBed int32
 	Quality     string
 	InfillPct   pgtype.Numeric
+	Sku         *string
+	MachineID   *uuid.UUID
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
 }
@@ -96,13 +119,77 @@ type DesignPricing struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+type DispatchOrder struct {
+	ID             uuid.UUID
+	OrderID        uuid.UUID
+	Carrier        *string
+	TrackingNumber *string
+	Status         string
+	DispatchedAt   pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
+}
+
+type FilamentInventory struct {
+	ID                uuid.UUID
+	Material          string
+	Colour            *string
+	GramsAvailable    pgtype.Numeric
+	ReorderLevelGrams pgtype.Numeric
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type FileAsset struct {
+	ID          uuid.UUID
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+	StorageKey  string
+	IsTemplate  bool
+	UploadedBy  string
+	BboxXMm     pgtype.Numeric
+	BboxYMm     pgtype.Numeric
+	BboxZMm     pgtype.Numeric
+	CreatedAt   pgtype.Timestamptz
+}
+
+type Machine struct {
+	ID                    uuid.UUID
+	MachineID             string
+	Name                  string
+	ImageUrl              *string
+	Status                string
+	Filaments             []byte
+	CurrentBatchID        *uuid.UUID
+	CurrentLayer          *int32
+	TotalLayers           *int32
+	BatchTotalTimeMinutes *int32
+	PrintStartedAt        pgtype.Timestamptz
+	TotalWasteGrams       pgtype.Numeric
+	MachineProfileID      *uuid.UUID
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+}
+
 type MachineProfile struct {
-	ID              uuid.UUID
-	Name            string
-	MachineHourCost pgtype.Numeric
-	IsActive        bool
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                 uuid.UUID
+	Name               string
+	MachineHourCost    pgtype.Numeric
+	IsActive           bool
+	Status             string
+	Family             string
+	NozzleMm           pgtype.Numeric
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   pgtype.Numeric
+	LayerHeightMaxMm   pgtype.Numeric
+	SupportedFilaments []byte
+	IsDefault          bool
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 type MaterialProfile struct {
@@ -116,6 +203,38 @@ type MaterialProfile struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type Order struct {
+	ID                uuid.UUID
+	ShopConnectionID  *uuid.UUID
+	ShopifyOrderID    int64
+	OrderNumber       string
+	CustomerName      *string
+	ShopifyCustomerID *int64
+	CustomerEmail     *string
+	CustomerPhone     *string
+	FinancialStatus   string
+	TotalPrice        pgtype.Numeric
+	Currency          string
+	LineItems         []byte
+	Status            string
+	Source            string
+	ImportedAt        pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+}
+
+type OrderLineItem struct {
+	ID                uuid.UUID
+	OrderID           uuid.UUID
+	ShopifyOrderID    int64
+	ShopifyCustomerID *int64
+	Sku               *string
+	ProductName       string
+	ProductImageUrl   *string
+	Quantity          int32
+	CreatedAt         pgtype.Timestamptz
+}
+
 type Permission struct {
 	ID          uuid.UUID
 	Resource    string
@@ -123,6 +242,119 @@ type Permission struct {
 	Description string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+}
+
+type ProductionJob struct {
+	ID                         uuid.UUID
+	JobNumber                  string
+	OrderID                    *uuid.UUID
+	BatchID                    *uuid.UUID
+	Description                string
+	Quantity                   int32
+	Status                     string
+	AssemblyStatus             string
+	QcStatus                   string
+	PackagingStatus            string
+	ShopifyOrderID             *int64
+	Sku                        *string
+	ProductName                *string
+	Material                   *string
+	Colour                     *string
+	NozzleProfile              *string
+	FilamentGramsRequired      pgtype.Numeric
+	PrintFileID                *uuid.UUID
+	EstimatedPrintTimeMinutes  *int32
+	DueDate                    pgtype.Timestamptz
+	Priority                   int32
+	PersonalisationName        *string
+	PersonalisationFont        *string
+	PersonalisationColour      *string
+	PersonalisationVariant     *string
+	PersonalisationStatus      string
+	NameConfirmed              bool
+	PhotoConfirmed             bool
+	FontConfirmed              bool
+	ColourConfirmed            bool
+	VariantConfirmed           bool
+	CustomerApprovalReceived   bool
+	PersonalisationNotes       *string
+	PersonalisationPhotoFileID *uuid.UUID
+	PersonalisationValidatedBy *string
+	PersonalisationValidatedAt pgtype.Timestamptz
+	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
+	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	IssueReason                *string
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+}
+
+type ProductionJobAssemblyCheck struct {
+	ID               uuid.UUID
+	JobID            uuid.UUID
+	PartsCombined    bool
+	HardwareAttached bool
+	AddonsAttached   bool
+	FitCheckOk       bool
+	PhotoFileID      *uuid.UUID
+	Notes            *string
+	AssembledBy      string
+	AssembledAt      pgtype.Timestamptz
+}
+
+type ProductionJobFailure struct {
+	ID                  uuid.UUID
+	JobID               uuid.UUID
+	Stage               string
+	Reason              string
+	Notes               *string
+	FilamentWastedGrams pgtype.Numeric
+	TimeWastedMinutes   *int32
+	CreatedBy           string
+	CreatedAt           pgtype.Timestamptz
+}
+
+type ProductionJobPackagingDetail struct {
+	ID               uuid.UUID
+	JobID            uuid.UUID
+	PackagingType    string
+	Addons           *string
+	GiftMessage      *string
+	Fragile          bool
+	CourierPartner   *string
+	InvoiceReference *string
+	PhotoFileID      *uuid.UUID
+	PackedBy         string
+	PackedAt         pgtype.Timestamptz
+}
+
+type ProductionJobQcCheck struct {
+	ID                     uuid.UUID
+	JobID                  uuid.UUID
+	CorrectPersonalisation bool
+	CorrectColour          bool
+	SurfaceFinishOk        bool
+	NoCracks               bool
+	NoLayerDefects         bool
+	DimensionsOk           bool
+	AssemblyFitOk          bool
+	AddonsWorking          bool
+	PackagingSafe          bool
+	PhotoFileID            *uuid.UUID
+	Decision               string
+	Notes                  *string
+	InspectedBy            string
+	InspectedAt            pgtype.Timestamptz
 }
 
 type Project struct {
@@ -149,6 +381,19 @@ type RolePermission struct {
 	PermissionID uuid.UUID
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+}
+
+type ShopifyConnection struct {
+	ID                    uuid.UUID
+	ShopDomain            string
+	EncryptedAccessToken  string
+	Scopes                *string
+	WebhookSubscriptionID *string
+	IsActive              bool
+	ConnectedAt           pgtype.Timestamptz
+	DisconnectedAt        pgtype.Timestamptz
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
 }
 
 type ShopifyProduct struct {

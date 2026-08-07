@@ -19,8 +19,8 @@ type SeedResult struct {
 // SyncAll projects the permission catalog into the database, idempotently. It
 // upserts every permission and role, then reconciles each role's grants:
 // inserting the ones the catalog says it should have and DELETING any stale ones
-// (revocation matters). Grants is the count of wanted grants (38 for the current
-// catalog: 21 admin + 4 + 9 + 2 + 2).
+// (revocation matters). Grants is the count of wanted grants (80 for the current
+// catalog: 37 admin + 4 + 25 + 2 + 8 + 4).
 func SyncAll(ctx context.Context, store *db.Store) (SeedResult, error) {
 	var result SeedResult
 	err := store.InTx(ctx, func(q *gen.Queries) error {

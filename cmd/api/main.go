@@ -19,6 +19,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -85,13 +86,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("build river client: %v", err)
 	}
-	if objects, err := storage.New(
-		ctx, cfg.MinIOEndpoint, cfg.MinIOAccessKey, cfg.MinIOSecretKey, cfg.MinIOBucket, cfg.MinIOSecure,
-	); err != nil {
+
+	// One insert-only client enqueues any registered Kind, so the production
+	// pipeline's enqueuers wrap the same client as the slice enqueuer above.
+	server.EnableProductionQueue(
+		production.NewJobCreationEnqueuer(riverClient),
+		production.NewBatchPlanEnqueuer(riverClient, time.Duration(cfg.BatchPlanDebounceSeconds)*time.Second),
+	)
+
+	if objects, err := storage.New(ctx, storage.Options{
+		Endpoint:           cfg.S3Endpoint,
+		AccessKey:          cfg.S3AccessKey,
+		SecretKey:          cfg.S3SecretKey,
+		Bucket:             cfg.S3Bucket,
+		KeyPrefix:          cfg.S3KeyPrefix,
+		Secure:             cfg.S3Secure,
+		AssumeBucketExists: cfg.S3AssumeBucketExists,
+	}); err != nil {
 		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
 	} else {
 		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient))
-		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.MinIOEndpoint)
+		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.S3Endpoint)
 	}
 
 	addr := ":" + cfg.Port

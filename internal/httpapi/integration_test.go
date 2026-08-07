@@ -13,15 +13,16 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
-	"github.com/Optiminastic/tensor-core/internal/brandpolicy"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/pricing"
 )
 
 // setupStore migrates and truncates a throwaway database. It skips when
@@ -47,7 +48,9 @@ func setupStore(t *testing.T) *db.Store {
 	t.Cleanup(store.Close)
 	_, err = store.Pool.Exec(ctx, `TRUNCATE brands, projects, user_invites, user_authz_state,
 		user_roles, role_permissions, permissions, roles, cost_assumption_sets,
-		material_profiles, machine_profiles RESTART IDENTITY CASCADE`)
+		material_profiles, machine_profiles,
+		orders, production_jobs, batches, filament_inventory, dispatch_orders,
+		file_assets, shopify_connections RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -61,11 +64,39 @@ func seedAll(t *testing.T, store *db.Store) {
 	if err != nil {
 		t.Fatalf("seed auth: %v", err)
 	}
-	if res.Permissions != 21 || res.Roles != 5 || res.Grants != 38 {
-		t.Fatalf("seed counts = %+v, want 21/5/38", res)
+	if res.Permissions != 37 || res.Roles != 6 || res.Grants != 80 {
+		t.Fatalf("seed counts = %+v, want 37/6/80", res)
 	}
-	if _, err := brandpolicy.SyncBrands(ctx, store); err != nil {
-		t.Fatalf("seed brands: %v", err)
+	seedGiftingBrand(t, store)
+}
+
+// seedGiftingBrand inserts the one brand the integration tests price against.
+// Brands are user-created in production (no built-in seed), so the fixture lives
+// with the tests. Its ladder and thresholds come from the engine constants that
+// also back the pure-engine fallback, keeping the priced numbers stable.
+func seedGiftingBrand(t *testing.T, store *db.Store) {
+	t.Helper()
+	ctx := context.Background()
+	ladderJSON, err := json.Marshal(pricing.GiftingLadder)
+	if err != nil {
+		t.Fatalf("marshal ladder: %v", err)
+	}
+	green, yellow := pricing.CPThresholds(pricing.BrandGifting)
+	entryHours := pricing.GiftingEntryMachineHours
+	entryRung := int32(pricing.GiftingEntryRung)
+	if _, err := store.Q.InsertBrand(ctx, gen.InsertBrandParams{
+		ID:                uuid.New(),
+		Slug:              string(pricing.BrandGifting),
+		Name:              "Test Gifting",
+		StartingPrice:     999,
+		IsActive:          true,
+		Ladder:            ladderJSON,
+		CpGreenMax:        green,
+		CpYellowMax:       yellow,
+		EntryMachineHours: &entryHours,
+		EntryRung:         &entryRung,
+	}); err != nil {
+		t.Fatalf("seed gifting brand: %v", err)
 	}
 }
 
@@ -76,7 +107,7 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 
 	// Re-seeding is idempotent.
 	res, err := auth.SyncAll(ctx, store)
-	if err != nil || res.Grants != 38 {
+	if err != nil || res.Grants != 80 {
 		t.Fatalf("re-seed: %+v err=%v", res, err)
 	}
 
@@ -95,8 +126,8 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 	if len(authz.Roles) != 1 || authz.Roles[0] != auth.RoleAdmin {
 		t.Errorf("roles = %v, want [ADMIN]", authz.Roles)
 	}
-	if len(authz.Permissions) != 21 {
-		t.Errorf("permissions = %d, want 21", len(authz.Permissions))
+	if len(authz.Permissions) != 37 {
+		t.Errorf("permissions = %d, want 37", len(authz.Permissions))
 	}
 
 	// Unknown user resolves to empty, version 0.
@@ -310,7 +341,7 @@ func TestIntegrationBrandGuard(t *testing.T) {
 		t.Errorf("no-perm GET /brands = %d, want 403", rr.Code)
 	}
 
-	// Token with brand:read -> 200 and both brands.
+	// Token with brand:read -> 200 and the one seeded fixture brand.
 	withPerm := minter.mint(t, []string{"brand:read"})
 	rr := doJSON(router, http.MethodGet, "/brands", withPerm, nil)
 	if rr.Code != http.StatusOK {
@@ -318,8 +349,8 @@ func TestIntegrationBrandGuard(t *testing.T) {
 	}
 	var brands []map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &brands)
-	if len(brands) != 2 {
-		t.Errorf("brands = %d, want 2", len(brands))
+	if len(brands) != 1 {
+		t.Errorf("brands = %d, want 1", len(brands))
 	}
 }
 

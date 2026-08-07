@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// minIODevSecret is the built-in development MinIO secret. Running with it in
-// production is a misconfiguration, so Validate rejects it there.
-const minIODevSecret = "tensor_local_dev"
+// s3DevSecret is the built-in development object-storage secret. Running with
+// it in production is a misconfiguration, so Validate rejects it there.
+const s3DevSecret = "tensor_local_dev"
 
 // Settings holds every environment-driven value the backend needs.
 type Settings struct {
@@ -54,12 +54,19 @@ type Settings struct {
 	DBConnectTimeout   time.Duration
 	DBStatementTimeout time.Duration
 
-	// Design pipeline: object storage for STL/G-code.
-	MinIOEndpoint  string
-	MinIOAccessKey string
-	MinIOSecretKey string
-	MinIOBucket    string
-	MinIOSecure    bool
+	// Design pipeline: object storage for STL/G-code, any S3-compatible store
+	// (real AWS S3 in production, MinIO in dev - internal/storage talks the S3
+	// API via minio-go, which works against both identically). S3KeyPrefix
+	// namespaces every object key - required when S3Bucket is shared with other
+	// apps. S3AssumeBucketExists skips the bucket-existence/creation check, for
+	// when the credentials are scoped to the prefix and can't HeadBucket.
+	S3Endpoint           string
+	S3AccessKey          string
+	S3SecretKey          string
+	S3Bucket             string
+	S3KeyPrefix          string
+	S3Secure             bool
+	S3AssumeBucketExists bool
 
 	// Slice worker (cmd/sliceworker): the Bambu Studio install, per-slice timeout,
 	// the calibratable average printer draw used to estimate energy, and how many
@@ -68,6 +75,58 @@ type Settings struct {
 	SliceTimeoutSeconds int
 	PrinterAvgPowerKW   float64
 	SliceConcurrency    int
+
+	// FakeSlice fabricates plausible slice metrics instead of running Bambu
+	// Studio (internal/slicing/fake.go) - dev-only, for testing the downstream
+	// pipeline (pricing, batching, scheduling) on a machine that can't run the
+	// real slicer. Never set true against a production deployment.
+	FakeSlice bool
+
+	// Production worker (cmd/productionworker): how many order's-worth of jobs
+	// the Job Creation Worker builds at once.
+	ProductionConcurrency int
+
+	// Batch gate overrides (production.BatchGate, see planner.go): a batch
+	// under the utilisation target is still created once any of its jobs has
+	// been queued this long, or is due within this window of now - otherwise
+	// it's held for more compatible volume to arrive. See also the
+	// hard-coded urgent-priority override, which needs no config.
+	BatchMaxWaitHours float64
+	BatchDueSoonHours float64
+
+	// Batch aging (production.BatchGate, see planner.go): rather than a hard
+	// binary switch at BatchMaxWaitHours, the acceptable utilisation bar
+	// relaxes linearly from the 80% target down to BatchAgingFloorPercent as
+	// a partition's oldest job approaches BatchAgingWindowMinutes of age,
+	// then holds flat at the floor until BatchMaxWaitHours' unconditional
+	// override eventually fires regardless of utilisation.
+	BatchAgingWindowMinutes float64
+	BatchAgingFloorPercent  float64
+
+	// Batch replan cadence (see batch_orchestrate.go/cmd/productionworker):
+	// a replan runs periodically every BatchPlanIntervalMinutes regardless of
+	// activity, on the two high-frequency per-job trigger sites only once at
+	// least BatchPlanJobThreshold jobs have actually accumulated (instead of
+	// once per single order/personalisation event), and unconditionally on
+	// the two low-frequency, high-signal events (a batch completing, a
+	// reprint being created) - all still collapsed within
+	// BatchPlanDebounceSeconds of each other into one run.
+	BatchPlanIntervalMinutes int
+	BatchPlanJobThreshold    int
+	BatchPlanDebounceSeconds int
+
+	// Machine selection weighted scoring (production.MachineScoreWeights, see
+	// machine_scheduler.go/scheduler.go): minutes-equivalent adjustments to a
+	// candidate machine's raw free time - already-loaded material/colour
+	// match make it look more free, a material change (different, KNOWN
+	// material loaded) makes it look less free, likewise queue depth and
+	// health. The change penalty deliberately exceeds the match bonus: an
+	// actual changeover costs more operator time than a match saves.
+	MachineMaterialMatchBonusMinutes    float64
+	MachineColourMatchBonusMinutes      float64
+	MachineMaterialChangePenaltyMinutes float64
+	MachineQueueLengthPenaltyMinutes    float64
+	MachineHealthBonusMinutes           float64
 
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
@@ -79,6 +138,16 @@ type Settings struct {
 	// per-request timeout for the outbound Admin API calls.
 	ShopifyAPIVersion string
 	ShopifyTimeout    time.Duration
+
+	// Shopify order import (inbound): the single app's OAuth credentials, this
+	// backend's own reachable URL (for the OAuth redirect + webhook callback), the
+	// frontend URL to bounce back to after connecting, and the key used to encrypt
+	// each store's access token at rest.
+	ShopifyClientID     string
+	ShopifyClientSecret string
+	PublicBaseURL       string
+	FrontendURL         string
+	TokenEncryptionKey  string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -118,23 +187,56 @@ func Load() Settings {
 		DBConnectTimeout:   secondsEnvOr("DB_CONNECT_TIMEOUT_SECONDS", 10),
 		DBStatementTimeout: secondsEnvOr("DB_STATEMENT_TIMEOUT_SECONDS", 15),
 
-		MinIOEndpoint:  envOr("MINIO_ENDPOINT", "localhost:9100"),
-		MinIOAccessKey: envOr("MINIO_ACCESS_KEY", "tensor"),
-		MinIOSecretKey: envOr("MINIO_SECRET_KEY", "tensor_local_dev"),
-		MinIOBucket:    envOr("MINIO_BUCKET", "designs"),
-		MinIOSecure:    boolEnvOr("MINIO_SECURE", false),
+		S3Endpoint:           envOr("S3_ENDPOINT", "localhost:9100"),
+		S3AccessKey:          envOr("S3_ACCESS_KEY", "tensor"),
+		S3SecretKey:          envOr("S3_SECRET_KEY", "tensor_local_dev"),
+		S3Bucket:             envOr("S3_BUCKET", "designs"),
+		S3KeyPrefix:          os.Getenv("S3_KEY_PREFIX"),
+		S3Secure:             boolEnvOr("S3_SECURE", false),
+		S3AssumeBucketExists: boolEnvOr("S3_ASSUME_BUCKET_EXISTS", false),
 
 		BambuRoot:           envOr("BAMBU_ROOT", "/opt/bambu/squashfs-root"),
 		SliceTimeoutSeconds: intEnvOr("SLICE_TIMEOUT_SECONDS", 300),
 		PrinterAvgPowerKW:   floatEnvOr("PRINTER_AVG_POWER_KW", 0.11),
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
+		FakeSlice:           boolEnvOr("FAKE_SLICE", false),
+
+		ProductionConcurrency:   intEnvOr("PRODUCTION_CONCURRENCY", 5),
+		BatchMaxWaitHours:       floatEnvOr("BATCH_MAX_WAIT_HOURS", 4),
+		BatchDueSoonHours:       floatEnvOr("BATCH_DUE_SOON_HOURS", 24),
+		BatchAgingWindowMinutes: floatEnvOr("BATCH_AGING_WINDOW_MINUTES", 60),
+		BatchAgingFloorPercent:  floatEnvOr("BATCH_AGING_FLOOR_PERCENT", 73),
+
+		BatchPlanIntervalMinutes: intEnvOr("BATCH_PLAN_INTERVAL_MINUTES", 7),
+		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
+		BatchPlanDebounceSeconds: intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+
+		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
+		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
+		MachineMaterialChangePenaltyMinutes: floatEnvOr("MACHINE_MATERIAL_CHANGE_PENALTY_MINUTES", 45),
+		MachineQueueLengthPenaltyMinutes:    floatEnvOr("MACHINE_QUEUE_LENGTH_PENALTY_MINUTES", 10),
+		MachineHealthBonusMinutes:           floatEnvOr("MACHINE_HEALTH_BONUS_MINUTES", 10),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
 		ShopifyTimeout:    secondsEnvOr("SHOPIFY_TIMEOUT_SECONDS", 15),
+
+		ShopifyClientID:     os.Getenv("SHOPIFY_CLIENT_ID"),
+		ShopifyClientSecret: os.Getenv("SHOPIFY_CLIENT_SECRET"),
+		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
+		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
 	}
+}
+
+// ShopifyImportConfigured reports whether the inbound Shopify order-import flow
+// has everything it needs. When false, the integration endpoints fail closed with
+// a 503 rather than half-working.
+func (s Settings) ShopifyImportConfigured() bool {
+	return s.ShopifyClientID != "" && s.ShopifyClientSecret != "" &&
+		s.PublicBaseURL != "" && s.TokenEncryptionKey != ""
 }
 
 // IsProduction reports whether the service is running outside development, where
@@ -163,8 +265,8 @@ func (s Settings) Validate() error {
 	if len(missing) > 0 {
 		return fmt.Errorf("config: required in production but unset: %s", strings.Join(missing, ", "))
 	}
-	if s.MinIOSecretKey == minIODevSecret {
-		return errors.New("config: MINIO_SECRET_KEY is the development default in production; set a real secret")
+	if s.S3SecretKey == s3DevSecret {
+		return errors.New("config: S3_SECRET_KEY is the development default in production; set a real secret")
 	}
 	return nil
 }

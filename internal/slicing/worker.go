@@ -38,13 +38,16 @@ type SliceWorker struct {
 	printerAvgPowerKW float64
 	orientOpts        orientation.Options
 	logger            *slog.Logger
+	// fakeSlice fabricates metrics instead of running Bambu Studio - see
+	// fake.go and config.Settings.FakeSlice. Dev-only.
+	fakeSlice bool
 }
 
 // NewSliceWorker builds the worker. logger may be nil (falls back to slog default).
 func NewSliceWorker(
 	store *db.Store, objects *storage.Client, bambuRoot string,
 	sliceTimeout time.Duration, printerAvgPowerKW float64,
-	orientOpts orientation.Options, logger *slog.Logger,
+	orientOpts orientation.Options, logger *slog.Logger, fakeSlice bool,
 ) *SliceWorker {
 	if logger == nil {
 		logger = slog.Default()
@@ -52,7 +55,7 @@ func NewSliceWorker(
 	return &SliceWorker{
 		store: store, objects: objects, bambuRoot: bambuRoot,
 		sliceTimeout: sliceTimeout, printerAvgPowerKW: printerAvgPowerKW,
-		orientOpts: orientOpts, logger: logger,
+		orientOpts: orientOpts, logger: logger, fakeSlice: fakeSlice,
 	}
 }
 
@@ -67,7 +70,15 @@ func (w *SliceWorker) Work(ctx context.Context, job *river.Job[SliceArgs]) error
 		return fmt.Errorf("mark slicing: %w", err)
 	}
 
-	metrics, err := w.slice(ctx, args)
+	var metrics PerUnitMetrics
+	var err error
+	if w.fakeSlice {
+		w.logger.Warn("FAKE_SLICE enabled: fabricating metrics instead of running Bambu Studio",
+			"job", args.JobID, "design", args.DesignID)
+		metrics = FakeSlice(args, w.printerAvgPowerKW)
+	} else {
+		metrics, err = w.slice(ctx, args)
+	}
 	if err != nil {
 		w.logger.Error("slice failed", "job", args.JobID, "attempt", job.Attempt, "error", err)
 		// River discards the job after the final attempt; mirror that in our own

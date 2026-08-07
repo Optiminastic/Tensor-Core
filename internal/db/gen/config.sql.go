@@ -12,6 +12,89 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteMachineProfile = `-- name: DeleteMachineProfile :execrows
+DELETE FROM machine_profiles WHERE id = $1
+`
+
+func (q *Queries) DeleteMachineProfile(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteMachineProfile, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const findMachineProfileByNozzleFlow = `-- name: FindMachineProfileByNozzleFlow :one
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles
+WHERE family = $1
+  AND nozzle_mm = $2::float8
+  AND COALESCE(right_nozzle_mm::float8, -1) = COALESCE($3::float8, -1)
+  AND flow = $4
+  AND COALESCE(right_flow, '') = COALESCE($5, '')
+LIMIT 1
+`
+
+type FindMachineProfileByNozzleFlowParams struct {
+	Family        string
+	NozzleMm      float64
+	RightNozzleMm *float64
+	Flow          string
+	RightFlow     *string
+}
+
+type FindMachineProfileByNozzleFlowRow struct {
+	ID                 uuid.UUID
+	Name               string
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsActive           bool
+	IsDefault          bool
+}
+
+// Exact-match lookup for the design-upload auto-link: a profile already
+// configured with this family + nozzle + flow combination. Nozzle values are
+// compared as text so a null right_nozzle_mm/right_flow matches a null
+// argument (COALESCE to a sentinel avoids NULL <> NULL never matching).
+func (q *Queries) FindMachineProfileByNozzleFlow(ctx context.Context, arg FindMachineProfileByNozzleFlowParams) (FindMachineProfileByNozzleFlowRow, error) {
+	row := q.db.QueryRow(ctx, findMachineProfileByNozzleFlow,
+		arg.Family,
+		arg.NozzleMm,
+		arg.RightNozzleMm,
+		arg.Flow,
+		arg.RightFlow,
+	)
+	var i FindMachineProfileByNozzleFlowRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Family,
+		&i.NozzleMm,
+		&i.RightNozzleMm,
+		&i.Flow,
+		&i.RightFlow,
+		&i.DefaultColour,
+		&i.LayerHeightMinMm,
+		&i.LayerHeightMaxMm,
+		&i.SupportedFilaments,
+		&i.Status,
+		&i.IsActive,
+		&i.IsDefault,
+	)
+	return i, err
+}
+
 const getCostAssumption = `-- name: GetCostAssumption :one
 SELECT id, name, brand,
        filament_cost_per_kg::float8 AS filament_cost_per_kg,
@@ -118,6 +201,76 @@ func (q *Queries) GetDefaultCostAssumptionForBrand(ctx context.Context, brand *s
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getMachineOps = `-- name: GetMachineOps :one
+SELECT id, name, status, is_active FROM machine_profiles WHERE id = $1
+`
+
+type GetMachineOpsRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+func (q *Queries) GetMachineOps(ctx context.Context, id uuid.UUID) (GetMachineOpsRow, error) {
+	row := q.db.QueryRow(ctx, getMachineOps, id)
+	var i GetMachineOpsRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Status,
+		&i.IsActive,
+	)
+	return i, err
+}
+
+const getMachineProfileFull = `-- name: GetMachineProfileFull :one
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles WHERE id = $1
+`
+
+type GetMachineProfileFullRow struct {
+	ID                 uuid.UUID
+	Name               string
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsActive           bool
+	IsDefault          bool
+}
+
+func (q *Queries) GetMachineProfileFull(ctx context.Context, id uuid.UUID) (GetMachineProfileFullRow, error) {
+	row := q.db.QueryRow(ctx, getMachineProfileFull, id)
+	var i GetMachineProfileFullRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Family,
+		&i.NozzleMm,
+		&i.RightNozzleMm,
+		&i.Flow,
+		&i.RightFlow,
+		&i.DefaultColour,
+		&i.LayerHeightMinMm,
+		&i.LayerHeightMaxMm,
+		&i.SupportedFilaments,
+		&i.Status,
+		&i.IsActive,
+		&i.IsDefault,
 	)
 	return i, err
 }
@@ -287,6 +440,97 @@ func (q *Queries) InsertMachine(ctx context.Context, arg InsertMachineParams) (I
 	return i, err
 }
 
+const insertMachineProfileFull = `-- name: InsertMachineProfileFull :one
+INSERT INTO machine_profiles (
+    id, name, machine_hour_cost, is_active, family, nozzle_mm, right_nozzle_mm,
+    flow, right_flow, default_colour, layer_height_min_mm, layer_height_max_mm,
+    supported_filaments, status, is_default
+) VALUES (
+    $1, $2, 0, $3, $4,
+    $5::float8, $6::float8, $7,
+    $8, $9, $10::float8,
+    $11::float8, $12,
+    $13, $14
+)
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+          flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+          status, is_active, is_default
+`
+
+type InsertMachineProfileFullParams struct {
+	ID                 uuid.UUID
+	Name               string
+	IsActive           bool
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      *float64
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsDefault          bool
+}
+
+type InsertMachineProfileFullRow struct {
+	ID                 uuid.UUID
+	Name               string
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsActive           bool
+	IsDefault          bool
+}
+
+// machine_hour_cost defaults to 0 - it is set separately via /config/machines,
+// never through this slicing-config surface.
+func (q *Queries) InsertMachineProfileFull(ctx context.Context, arg InsertMachineProfileFullParams) (InsertMachineProfileFullRow, error) {
+	row := q.db.QueryRow(ctx, insertMachineProfileFull,
+		arg.ID,
+		arg.Name,
+		arg.IsActive,
+		arg.Family,
+		arg.NozzleMm,
+		arg.RightNozzleMm,
+		arg.Flow,
+		arg.RightFlow,
+		arg.DefaultColour,
+		arg.LayerHeightMinMm,
+		arg.LayerHeightMaxMm,
+		arg.SupportedFilaments,
+		arg.Status,
+		arg.IsDefault,
+	)
+	var i InsertMachineProfileFullRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Family,
+		&i.NozzleMm,
+		&i.RightNozzleMm,
+		&i.Flow,
+		&i.RightFlow,
+		&i.DefaultColour,
+		&i.LayerHeightMinMm,
+		&i.LayerHeightMaxMm,
+		&i.SupportedFilaments,
+		&i.Status,
+		&i.IsActive,
+		&i.IsDefault,
+	)
+	return i, err
+}
+
 const insertMaterial = `-- name: InsertMaterial :one
 INSERT INTO material_profiles (id, name, material_type, cost_per_kg, colour, is_active)
 VALUES ($1, $2, $3,
@@ -403,6 +647,109 @@ func (q *Queries) ListCostAssumptions(ctx context.Context) ([]ListCostAssumption
 	return items, nil
 }
 
+const listMachineOps = `-- name: ListMachineOps :many
+
+SELECT id, name, status, is_active FROM machine_profiles ORDER BY name
+`
+
+type ListMachineOpsRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+// Operational machine views for the print queue (machine_profiles.status). The
+// cost fields are omitted here; the config endpoints above own those.
+func (q *Queries) ListMachineOps(ctx context.Context) ([]ListMachineOpsRow, error) {
+	rows, err := q.db.Query(ctx, listMachineOps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMachineOpsRow{}
+	for rows.Next() {
+		var i ListMachineOpsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Status,
+			&i.IsActive,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMachineProfilesFull = `-- name: ListMachineProfilesFull :many
+
+SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+       flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+       layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+       status, is_active, is_default
+FROM machine_profiles ORDER BY name
+`
+
+type ListMachineProfilesFullRow struct {
+	ID                 uuid.UUID
+	Name               string
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsActive           bool
+	IsDefault          bool
+}
+
+// Slicing-config machine profiles, exposed via /machines (internal/httpapi/
+// machines_ops.go). Cost (machine_hour_cost) is never read/written here - it
+// stays owned by the /config/machines queries above.
+func (q *Queries) ListMachineProfilesFull(ctx context.Context) ([]ListMachineProfilesFullRow, error) {
+	rows, err := q.db.Query(ctx, listMachineProfilesFull)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMachineProfilesFullRow{}
+	for rows.Next() {
+		var i ListMachineProfilesFullRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Family,
+			&i.NozzleMm,
+			&i.RightNozzleMm,
+			&i.Flow,
+			&i.RightFlow,
+			&i.DefaultColour,
+			&i.LayerHeightMinMm,
+			&i.LayerHeightMaxMm,
+			&i.SupportedFilaments,
+			&i.Status,
+			&i.IsActive,
+			&i.IsDefault,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMachines = `-- name: ListMachines :many
 SELECT id, name, machine_hour_cost::float8 AS machine_hour_cost,
        is_active, created_at, updated_at
@@ -493,6 +840,30 @@ func (q *Queries) ListMaterials(ctx context.Context) ([]ListMaterialsRow, error)
 		return nil, err
 	}
 	return items, nil
+}
+
+const suggestMachine = `-- name: SuggestMachine :one
+SELECT m.id, m.name, m.status
+FROM machine_profiles m
+LEFT JOIN batches b ON b.machine_id = m.id AND b.status IN ('open', 'in_progress')
+WHERE m.status = 'online'
+GROUP BY m.id, m.name, m.status
+ORDER BY count(b.id) ASC, m.name ASC
+LIMIT 1
+`
+
+type SuggestMachineRow struct {
+	ID     uuid.UUID
+	Name   string
+	Status string
+}
+
+// The least-loaded online machine: fewest active (open/in_progress) batches.
+func (q *Queries) SuggestMachine(ctx context.Context) (SuggestMachineRow, error) {
+	row := q.db.QueryRow(ctx, suggestMachine)
+	var i SuggestMachineRow
+	err := row.Scan(&i.ID, &i.Name, &i.Status)
+	return i, err
 }
 
 const updateCostAssumption = `-- name: UpdateCostAssumption :one
@@ -586,6 +957,139 @@ func (q *Queries) UpdateCostAssumption(ctx context.Context, arg UpdateCostAssump
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateMachineProfileFull = `-- name: UpdateMachineProfileFull :one
+UPDATE machine_profiles SET
+    name                 = COALESCE($1, name),
+    family               = COALESCE($2, family),
+    nozzle_mm            = COALESCE($3::float8, nozzle_mm),
+    right_nozzle_mm      = CASE WHEN $4::bool
+                                THEN $5::float8 ELSE right_nozzle_mm END,
+    flow                 = COALESCE($6, flow),
+    right_flow           = CASE WHEN $7::bool
+                                THEN $8 ELSE right_flow END,
+    default_colour       = CASE WHEN $9::bool
+                                THEN $10 ELSE default_colour END,
+    layer_height_min_mm  = COALESCE($11::float8, layer_height_min_mm),
+    layer_height_max_mm  = COALESCE($12::float8, layer_height_max_mm),
+    supported_filaments  = COALESCE($13, supported_filaments),
+    status               = COALESCE($14, status),
+    is_active            = COALESCE($15, is_active),
+    is_default           = COALESCE($16, is_default),
+    updated_at           = now()
+WHERE id = $17
+RETURNING id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
+          flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
+          layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
+          status, is_active, is_default
+`
+
+type UpdateMachineProfileFullParams struct {
+	Name               *string
+	Family             *string
+	NozzleMm           *float64
+	SetRightNozzleMm   bool
+	RightNozzleMm      *float64
+	Flow               *string
+	SetRightFlow       bool
+	RightFlow          *string
+	SetDefaultColour   bool
+	DefaultColour      *string
+	LayerHeightMinMm   *float64
+	LayerHeightMaxMm   *float64
+	SupportedFilaments []byte
+	Status             *string
+	IsActive           *bool
+	IsDefault          *bool
+	ID                 uuid.UUID
+}
+
+type UpdateMachineProfileFullRow struct {
+	ID                 uuid.UUID
+	Name               string
+	Family             string
+	NozzleMm           float64
+	RightNozzleMm      pgtype.Numeric
+	Flow               string
+	RightFlow          *string
+	DefaultColour      *string
+	LayerHeightMinMm   float64
+	LayerHeightMaxMm   float64
+	SupportedFilaments []byte
+	Status             string
+	IsActive           bool
+	IsDefault          bool
+}
+
+func (q *Queries) UpdateMachineProfileFull(ctx context.Context, arg UpdateMachineProfileFullParams) (UpdateMachineProfileFullRow, error) {
+	row := q.db.QueryRow(ctx, updateMachineProfileFull,
+		arg.Name,
+		arg.Family,
+		arg.NozzleMm,
+		arg.SetRightNozzleMm,
+		arg.RightNozzleMm,
+		arg.Flow,
+		arg.SetRightFlow,
+		arg.RightFlow,
+		arg.SetDefaultColour,
+		arg.DefaultColour,
+		arg.LayerHeightMinMm,
+		arg.LayerHeightMaxMm,
+		arg.SupportedFilaments,
+		arg.Status,
+		arg.IsActive,
+		arg.IsDefault,
+		arg.ID,
+	)
+	var i UpdateMachineProfileFullRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Family,
+		&i.NozzleMm,
+		&i.RightNozzleMm,
+		&i.Flow,
+		&i.RightFlow,
+		&i.DefaultColour,
+		&i.LayerHeightMinMm,
+		&i.LayerHeightMaxMm,
+		&i.SupportedFilaments,
+		&i.Status,
+		&i.IsActive,
+		&i.IsDefault,
+	)
+	return i, err
+}
+
+const updateMachineStatus = `-- name: UpdateMachineStatus :one
+UPDATE machine_profiles SET status = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, name, status, is_active
+`
+
+type UpdateMachineStatusParams struct {
+	Status string
+	ID     uuid.UUID
+}
+
+type UpdateMachineStatusRow struct {
+	ID       uuid.UUID
+	Name     string
+	Status   string
+	IsActive bool
+}
+
+func (q *Queries) UpdateMachineStatus(ctx context.Context, arg UpdateMachineStatusParams) (UpdateMachineStatusRow, error) {
+	row := q.db.QueryRow(ctx, updateMachineStatus, arg.Status, arg.ID)
+	var i UpdateMachineStatusRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Status,
+		&i.IsActive,
 	)
 	return i, err
 }
