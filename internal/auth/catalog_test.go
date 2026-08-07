@@ -64,8 +64,10 @@ func TestProjectLeadCannotManageUsers(t *testing.T) {
 	}
 }
 
-func TestProjectAndBrandAreAdminOnly(t *testing.T) {
-	adminOnly := []string{"project:read", "project:manage", "brand:read", "brand:manage"}
+func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
+	// brand:read is granted to the working roles (scoped per user via user_brands);
+	// only project:* and brand:manage stay admin-only.
+	adminOnly := []string{"project:read", "project:manage", "brand:manage"}
 	for _, role := range AllRoles {
 		if role == RoleAdmin {
 			continue
@@ -75,6 +77,12 @@ func TestProjectAndBrandAreAdminOnly(t *testing.T) {
 			if has(set, key) {
 				t.Errorf("%s must not have %s (admin-only)", role, key)
 			}
+		}
+	}
+	// The working roles can read brands (to see their assigned ones).
+	for _, role := range []RoleName{RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator} {
+		if !has(PermissionsFor(role), "brand:read") {
+			t.Errorf("%s should have brand:read", role)
 		}
 	}
 }
@@ -91,13 +99,14 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 37 (admin) + 5 (designer, +machine:read for the machine picker) + 25 (project
-	// lead) + 2 (marketer) + 8 (operator) + 4 (packaging_qc) = 81.
+	// 37 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 13 (operator)
+	// + 4 (packaging_qc) = 91. Operator runs the whole Production tab; project lead
+	// holds user:read (roster + remove juniors) and design:delete.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 81 {
-		t.Fatalf("total grants = %d, want 81", total)
+	if total != 91 {
+		t.Fatalf("total grants = %d, want 91", total)
 	}
 }

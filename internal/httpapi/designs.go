@@ -145,6 +145,9 @@ type designDetailResponse struct {
 	// Upload metadata (product type, personalisation type, colour count, add-ons,
 	// packaging type); null when none was supplied.
 	Attributes json.RawMessage `json:"attributes"`
+	// The applied personalisation spec (name + placement + colour); null when the
+	// design has none, so the editor can rehydrate the saved state.
+	Personalisation json.RawMessage `json:"personalisation"`
 	// Advisory print-reliability score derived from the metrics; nil until sliced.
 	FailureRisk *failurerisk.Assessment `json:"failure_risk"`
 }
@@ -169,28 +172,61 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesigns)
 	g.POST("", s.guards.RequirePermission(auth.DesignCreate.Key()), s.createDesign)
-	g.GET("/:id", s.guards.RequirePermission(auth.DesignRead.Key()), s.getDesign)
-	g.GET("/:id/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
-	g.GET("/:id/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
-	g.GET("/:id/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
-	g.POST("/:id/optimize", s.guards.RequirePermission(auth.DesignRead.Key()), s.optimizeDesign)
-	g.GET("/:id/report.pdf", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadDesignReport)
-	g.POST("/:id/email-report", s.guards.RequirePermission(auth.DesignRead.Key()), s.emailDesignReport)
-	g.GET("/:id/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
-	g.GET("/:id/gcode/plate", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcodePlate)
-	g.GET("/:id/preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPreview)
-	g.POST("/:id/resubmit", s.guards.RequirePermission(auth.DesignCreate.Key()), s.resubmitDesign)
-	g.POST("/:id/submit", s.guards.RequirePermission(auth.DesignSubmit.Key()), s.submitDesign)
-	g.POST("/:id/approve", s.guards.RequirePermission(auth.DesignApprove.Key()), s.approveDesign)
-	g.POST("/:id/reject", s.guards.RequirePermission(auth.DesignReject.Key()), s.rejectDesign)
-	g.POST("/:id/comments", s.guards.RequirePermission(auth.DesignRead.Key()), s.commentOnDesign)
-	g.GET("/:id/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
-	g.POST("/:id/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
-	g.PATCH("/:id/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
-	g.PATCH("/:id/personalisation-rules",
+
+	// Every /:id route also passes the brand-access gate, so a member can only
+	// reach designs in a brand an admin assigned them (a 404 otherwise). Admins
+	// (brand:manage) pass through. The gate runs after RequireUser (inherited).
+	id := g.Group("/:id")
+	id.Use(s.requireDesignBrandAccess)
+	id.GET("", s.guards.RequirePermission(auth.DesignRead.Key()), s.getDesign)
+	id.DELETE("", s.guards.RequirePermission(auth.DesignDelete.Key()), s.deleteDesign)
+	id.GET("/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
+	id.GET("/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
+	id.GET("/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
+	id.GET("/personalise-text", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonaliseText)
+	id.PATCH("/personalisation", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignPersonalisation)
+	id.POST("/optimize", s.guards.RequirePermission(auth.DesignRead.Key()), s.optimizeDesign)
+	id.GET("/report.pdf", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadDesignReport)
+	id.POST("/email-report", s.guards.RequirePermission(auth.DesignRead.Key()), s.emailDesignReport)
+	id.GET("/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)
+	id.GET("/gcode/plate", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcodePlate)
+	id.GET("/preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPreview)
+	id.POST("/resubmit", s.guards.RequirePermission(auth.DesignCreate.Key()), s.resubmitDesign)
+	id.POST("/submit", s.guards.RequirePermission(auth.DesignSubmit.Key()), s.submitDesign)
+	id.POST("/approve", s.guards.RequirePermission(auth.DesignApprove.Key()), s.approveDesign)
+	id.POST("/reject", s.guards.RequirePermission(auth.DesignReject.Key()), s.rejectDesign)
+	id.POST("/comments", s.guards.RequirePermission(auth.DesignRead.Key()), s.commentOnDesign)
+	id.GET("/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
+	id.POST("/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
+	id.PATCH("/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
+	id.PATCH("/personalisation-rules",
 		s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignPersonalisationRules)
-	g.POST("/:id/personalisation-estimate",
+	id.POST("/personalisation-estimate",
 		s.guards.RequirePermission(auth.DesignRead.Key()), s.estimatePersonalisation)
+}
+
+// requireDesignBrandAccess is the /:id gate: it resolves the design's brand and
+// denies (404, matching a missing design) when the caller may not access it. A
+// missing/invalid id or unknown design is left to the handler's own load, which
+// produces the same 404, so the gate only blocks the cross-brand case.
+func (s *Server) requireDesignBrandAccess(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.Next()
+		return
+	}
+	slug, err := s.store.Q.GetDesignBrandSlug(c.Request.Context(), id)
+	if err != nil {
+		c.Next()
+		return
+	}
+	user, ok := auth.UserFrom(c)
+	if !ok || !s.canAccessBrand(c.Request.Context(), user, slug) {
+		detail(c, http.StatusNotFound, "That design does not exist.")
+		c.Abort()
+		return
+	}
+	c.Next()
 }
 
 // listDesigns returns a brand's designs, newest first. The brand is a required
@@ -199,6 +235,9 @@ func (s *Server) listDesigns(c *gin.Context) {
 	slug := c.Query("brand")
 	if !slugPattern.MatchString(slug) {
 		detail(c, http.StatusUnprocessableEntity, "A valid 'brand' query parameter is required.")
+		return
+	}
+	if !s.requireBrandAccess(c, slug) {
 		return
 	}
 	ctx := c.Request.Context()
@@ -298,9 +337,31 @@ func (s *Server) getDesign(c *gin.Context) {
 		Machine:              machine,
 		PersonalisationRules: json.RawMessage(d.PersonalisationRules),
 		Attributes:           json.RawMessage(d.Attributes),
+		Personalisation:      json.RawMessage(d.Personalisation),
 		FailureRisk:          failureRiskFor(metrics),
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// deleteDesign permanently removes a design and all its child rows (the FKs
+// cascade). Guarded by design:delete and the /:id brand-access gate. Stored model
+// / preview / g-code objects are left in object storage (harmless orphans); the
+// catalog record is what the UI and pipeline key off. Does not touch Shopify.
+func (s *Server) deleteDesign(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := s.store.Q.DeleteDesign(c.Request.Context(), id)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not delete the design.")
+		return
+	}
+	if rows == 0 {
+		detail(c, http.StatusNotFound, "That design does not exist.")
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // failureRiskFor scores print reliability from the latest metrics (nil when the

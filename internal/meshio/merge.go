@@ -71,6 +71,32 @@ func TranslateTriangles(tris []orientation.Triangle, dx, dy, dz float64) []orien
 	return out
 }
 
+// RotateZTriangles returns a copy of the triangles rotated by deg degrees CCW
+// about the Z axis through the origin (x, y) -> (x*cos - y*sin, x*sin + y*cos, z).
+// The input is not mutated. Winding is preserved (a proper rotation), so face
+// normals stay outward. The extruded text mesh is centred on the origin, so this
+// spins it in place before it is translated to its spot on the model.
+func RotateZTriangles(tris []orientation.Triangle, deg float64) []orientation.Triangle {
+	if deg == 0 {
+		out := make([]orientation.Triangle, len(tris))
+		copy(out, tris)
+		return out
+	}
+	rad := deg * math.Pi / 180
+	cos, sin := math.Cos(rad), math.Sin(rad)
+	spin := func(v vec) vec {
+		return vec{X: v.X*cos - v.Y*sin, Y: v.X*sin + v.Y*cos, Z: v.Z}
+	}
+	out := make([]orientation.Triangle, len(tris))
+	for i, t := range tris {
+		out[i] = t
+		out[i].V0 = spin(t.V0)
+		out[i].V1 = spin(t.V1)
+		out[i].V2 = spin(t.V2)
+	}
+	return out
+}
+
 // toTriples copies a triangle slice into mutable vertex triples.
 func toTriples(tris []orientation.Triangle) [][3]vec {
 	out := make([][3]vec, len(tris))

@@ -108,7 +108,7 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (36 permissions).
+// AllPermissions is the full catalog in seed order (37 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
 	PricingRead, PricingGenerate, PricingOverride,
@@ -130,15 +130,20 @@ var AllPermissions = []PermissionSpec{
 
 // roleGrants is the exact role -> permissions matrix. ADMIN is every permission
 // by construction. The operational roles are deliberately narrow: OPERATOR never
-// sees costs (no config:read / pricing:read); project:* and brand:* are
-// ADMIN-only.
+// sees costs (no config:read / pricing:read); project:* and brand:manage are
+// ADMIN-only. brand:read is granted to the working roles so they can see the
+// brands an admin assigned them (scoped per user via user_brands at the handler).
 var roleGrants = map[RoleName][]PermissionSpec{
 	RoleAdmin:    AllPermissions,
-	RoleDesigner: {DesignCreate, DesignRead, DesignUpdate, DesignSubmit, MachineRead},
+	RoleDesigner: {BrandRead, DesignCreate, DesignRead, DesignUpdate, DesignSubmit, MachineRead},
 	RoleProjectLead: {
-		DesignRead, DesignApprove, DesignReject,
+		BrandRead,
+		DesignRead, DesignApprove, DesignReject, DesignDelete,
 		PricingRead, PricingGenerate, PricingOverride,
 		ShopifyPublish, ConfigRead, AuditRead,
+		// Can view the team roster and remove junior members (not admins or other
+		// leads); user:manage (invite / assign brands) stays ADMIN-only.
+		UserRead,
 		// Runs the whole production pipeline.
 		OrderRead,
 		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
@@ -148,13 +153,19 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		MachineRead, MachineManage,
 		FilamentRead, FilamentManage,
 	},
-	RolePerformanceMarketer: {DesignRead, PricingRead},
-	// Machine operator: runs prints, records assembly, fails a job, manages
-	// machine status and reads filament. Never sees costs; never does QC/packaging.
+	RolePerformanceMarketer: {BrandRead, DesignRead, PricingRead},
+	// Machine operator: runs the whole Production tab - jobs, orders, batches,
+	// machines and filament inventory. Records assembly, fails/advances a job,
+	// manages machine status, and reads orders + manages batches/inventory. Still
+	// never sees costs or pricing, and never does QC/packaging.
 	RoleOperator: {
+		BrandRead,
 		DesignRead,
+		OrderRead,
 		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit,
-		MachineRead, MachineManage, FilamentRead,
+		BatchRead, BatchManage,
+		MachineRead, MachineManage,
+		FilamentRead, FilamentManage,
 	},
 	// QC/packaging station: records QC, assembly and packaging through their
 	// dedicated endpoints. No production:update (cannot advance a job directly),

@@ -120,9 +120,12 @@ func (s *Server) downloadPersonalisePreview(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), personaliseTimeout)
 	defer cancel()
 
-	offX := queryFloat(c, "offset_x_mm", 0)
-	offY := queryFloat(c, "offset_y_mm", 0)
-	pKey, err := s.ensurePersonalisedModel(ctx, d.StlKey, spec, offX, offY)
+	place := textPlacement{
+		OffsetXMM:   queryFloat(c, "offset_x_mm", 0),
+		OffsetYMM:   queryFloat(c, "offset_y_mm", 0),
+		RotationDeg: queryFloat(c, "rotation_deg", 0),
+	}
+	pKey, err := s.ensurePersonalisedModel(ctx, d.StlKey, spec, place)
 	if err != nil {
 		// OpenSCAD missing or the merge failed: show the plain model, not an error.
 		s.logger.Info("personalise fallback", "design", d.ID, "reason", err)
@@ -139,13 +142,22 @@ func (s *Server) downloadPersonalisePreview(c *gin.Context) {
 	s.streamObject(c, liteKey, name+"-personalised.stl")
 }
 
+// textPlacement is where the extruded name sits on the model: an in-plane XY nudge
+// from the model's centre and an in-plane rotation. The name is always raised onto
+// the model's top face in Z.
+type textPlacement struct {
+	OffsetXMM   float64
+	OffsetYMM   float64
+	RotationDeg float64
+}
+
 // ensurePersonalisedModel builds the merged (base + extruded name) STL once and
-// caches it under a key derived from the source model and the exact spec, so the
+// caches it under a key derived from the source model, spec and placement, so the
 // same name/placement is never regenerated. Returns the cached object key.
 func (s *Server) ensurePersonalisedModel(
-	ctx context.Context, srcKey string, spec personalise.Spec, offX, offY float64,
+	ctx context.Context, srcKey string, spec personalise.Spec, place textPlacement,
 ) (string, error) {
-	pKey := personalisedKey(srcKey, spec, offX, offY)
+	pKey := personalisedKey(srcKey, spec, place)
 	if obj, err := s.storage.Get(ctx, pKey); err == nil {
 		_ = obj.Body.Close()
 		return pKey, nil
@@ -176,20 +188,24 @@ func (s *Server) ensurePersonalisedModel(
 		return "", err
 	}
 
-	// Sit the name centred on the model's top face, plus the user's XY nudge. The
-	// extruded text rises from z=0, so lifting it to the top makes it raised.
-	cx := (base.Min.X+base.Max.X)/2 + offX
-	cy := (base.Min.Y+base.Max.Y)/2 + offY
-	placed := meshio.TranslateTriangles(textMesh.Triangles, cx, cy, base.Max.Z)
+	// Spin the (origin-centred) text in place, then sit it centred on the model's
+	// top face plus the user's XY nudge. The extruded text rises from z=0, so
+	// lifting it to the top makes it raised.
+	spun := meshio.RotateZTriangles(textMesh.Triangles, place.RotationDeg)
+	cx := (base.Min.X+base.Max.X)/2 + place.OffsetXMM
+	cy := (base.Min.Y+base.Max.Y)/2 + place.OffsetYMM
+	placed := meshio.TranslateTriangles(spun, cx, cy, base.Max.Z)
 	merged := meshio.ConcatBinarySTL("tensor-personalised", base.Triangles, placed)
 	return pKey, s.storage.Put(ctx, pKey, bytes.NewReader(merged), int64(len(merged)), "model/stl")
 }
 
 // personalisedKey is the deterministic cache key for one merged model: the source
-// key plus a short hash of the exact spec, so identical requests hit the cache and
-// different names/placements never collide.
-func personalisedKey(srcKey string, spec personalise.Spec, offX, offY float64) string {
-	sig := fmt.Sprintf("%s|%s|%.3f|%.3f|%.3f|%.3f", spec.Text, spec.Font, spec.SizeMM, spec.DepthMM, offX, offY)
+// key plus a short hash of the exact spec and placement, so identical requests hit
+// the cache and different names/placements never collide.
+func personalisedKey(srcKey string, spec personalise.Spec, place textPlacement) string {
+	sig := fmt.Sprintf("%s|%s|%.3f|%.3f|%.3f|%.3f|%.3f",
+		spec.Text, spec.Font, spec.SizeMM, spec.DepthMM,
+		place.OffsetXMM, place.OffsetYMM, place.RotationDeg)
 	sum := sha256.Sum256([]byte(sig))
 	return srcKey + ".p-" + hex.EncodeToString(sum[:8]) + ".stl"
 }

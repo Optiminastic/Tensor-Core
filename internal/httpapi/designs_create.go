@@ -80,6 +80,9 @@ func (s *Server) createDesign(c *gin.Context) {
 		detail(c, http.StatusNotFound, fmt.Sprintf("Brand '%s' is not configured yet.", form.Brand))
 		return
 	}
+	if !s.requireBrandAccess(c, form.Brand) {
+		return
+	}
 	ext, ok := validateModelFile(c, fileHeader)
 	if !ok {
 		return

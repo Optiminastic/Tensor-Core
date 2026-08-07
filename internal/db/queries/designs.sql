@@ -23,8 +23,32 @@ SELECT nextval('designs_sku_seq')::bigint AS seq;
 -- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, machine_id, personalisation_rules, attributes, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, attributes,
+       personalisation, personalised_stl_key, created_at, updated_at
 FROM designs WHERE id = $1;
+
+-- SetDesignPersonalisation stores the applied personalisation spec and the baked
+-- STL key for a design (or clears both with NULLs). Returns the updated row.
+-- name: SetDesignPersonalisation :one
+UPDATE designs
+SET personalisation = sqlc.narg('personalisation'),
+    personalised_stl_key = sqlc.narg('personalised_stl_key'),
+    updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, machine_id, personalisation_rules, attributes,
+          personalisation, personalised_stl_key, created_at, updated_at;
+
+-- GetDesignBrandSlug returns only a design's brand, for the cheap per-request
+-- brand-access gate on the /:id sub-routes (no need to load the whole row).
+-- name: GetDesignBrandSlug :one
+SELECT brand_slug FROM designs WHERE id = $1;
+
+-- DeleteDesign removes a design; every child row (jobs, metrics, pricing, reviews,
+-- optimisations, attributes) is ON DELETE CASCADE, so this one statement is enough.
+-- name: DeleteDesign :execrows
+DELETE FROM designs WHERE id = $1;
 
 -- SetDesignPersonalisationRules stores (or clears, with NULL) the product's
 -- personalization rule set. The jsonb shape is validated in Go before it is set.

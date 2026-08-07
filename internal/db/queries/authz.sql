@@ -68,3 +68,25 @@ SELECT EXISTS (
 INSERT INTO user_roles (user_id, role_id, assigned_by)
 VALUES ($1, $2, $3)
 ON CONFLICT (user_id, role_id) DO NOTHING;
+
+-- name: ListMembers :many
+-- One row per user that has at least one role, with their role names aggregated.
+-- Emails are resolved on the frontend (Better Auth owns the user table).
+SELECT ur.user_id,
+       array_agg(r.name::text ORDER BY r.name)::text[] AS roles
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+GROUP BY ur.user_id
+ORDER BY ur.user_id;
+
+-- name: DeleteUserRoles :exec
+-- Remove every role from a user (de-provision them). Their Better Auth account
+-- stays; with no roles they fail closed and can do nothing.
+DELETE FROM user_roles WHERE user_id = $1;
+
+-- name: CountAdminsExcluding :one
+-- How many OTHER users hold the ADMIN role, so the last admin cannot be removed.
+SELECT count(DISTINCT ur.user_id)::int AS other_admins
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+WHERE r.name = 'ADMIN' AND ur.user_id <> $1;

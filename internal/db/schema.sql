@@ -110,6 +110,7 @@ CREATE TABLE user_invites (
     accepted_user_id varchar(64),
     revoked_at       timestamptz,
     created_by       varchar(64),
+    brand_slugs      jsonb NOT NULL DEFAULT '[]',
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now()
 );
@@ -196,6 +197,13 @@ CREATE TABLE designs (
     -- Upload metadata: {product_type, personalisation_type, colour_count,
     --  add_ons[], packaging_type}. Validated in Go.
     attributes    jsonb,
+    -- The applied personalisation on this design (migration 0025): the customer's
+    -- name plus its placement {text, font, size_mm, depth_mm, offset_x_mm,
+    --  offset_y_mm, rotation_deg, colour}. NULL = plain design.
+    personalisation jsonb,
+    -- The baked (base + embossed text) STL the slicer uses when a personalisation
+    -- is applied, so cost and G-code include the text. NULL until first saved.
+    personalised_stl_key text,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
@@ -532,3 +540,12 @@ CREATE TABLE design_optimizations (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (design_id, input_hash)
 );
+
+CREATE TABLE user_brands (
+    user_id     varchar(64) NOT NULL,
+    brand_slug  text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,
+    assigned_by varchar(64) NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, brand_slug)
+);
+CREATE INDEX ix_user_brands_brand ON user_brands (brand_slug);

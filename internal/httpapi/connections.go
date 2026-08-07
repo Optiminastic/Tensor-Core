@@ -77,6 +77,11 @@ func (s *Server) listConnections(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// A member may only read connections for a brand an admin assigned them, the
+	// same scoping as /brands/:slug and the designs routes (not just brand:read).
+	if !s.requireBrandAccess(c, slug) {
+		return
+	}
 	if !s.brandMustExist(c, slug) {
 		return
 	}

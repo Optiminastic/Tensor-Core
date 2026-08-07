@@ -32,10 +32,38 @@ func (q *Queries) ApproveDesignPricing(ctx context.Context, arg ApproveDesignPri
 	return err
 }
 
+const deleteDesign = `-- name: DeleteDesign :execrows
+DELETE FROM designs WHERE id = $1
+`
+
+// DeleteDesign removes a design; every child row (jobs, metrics, pricing, reviews,
+// optimisations, attributes) is ON DELETE CASCADE, so this one statement is enough.
+func (q *Queries) DeleteDesign(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDesign, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getDesignBrandSlug = `-- name: GetDesignBrandSlug :one
+SELECT brand_slug FROM designs WHERE id = $1
+`
+
+// GetDesignBrandSlug returns only a design's brand, for the cheap per-request
+// brand-access gate on the /:id sub-routes (no need to load the whole row).
+func (q *Queries) GetDesignBrandSlug(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getDesignBrandSlug, id)
+	var brand_slug string
+	err := row.Scan(&brand_slug)
+	return brand_slug, err
+}
+
 const getDesignByID = `-- name: GetDesignByID :one
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
-       preview_key, sku, machine_id, personalisation_rules, attributes, created_at, updated_at
+       preview_key, sku, machine_id, personalisation_rules, attributes,
+       personalisation, personalised_stl_key, created_at, updated_at
 FROM designs WHERE id = $1
 `
 
@@ -58,6 +86,8 @@ type GetDesignByIDRow struct {
 	MachineID            *uuid.UUID
 	PersonalisationRules []byte
 	Attributes           []byte
+	Personalisation      []byte
+	PersonalisedStlKey   *string
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 }
@@ -84,6 +114,8 @@ func (q *Queries) GetDesignByID(ctx context.Context, id uuid.UUID) (GetDesignByI
 		&i.MachineID,
 		&i.PersonalisationRules,
 		&i.Attributes,
+		&i.Personalisation,
+		&i.PersonalisedStlKey,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -756,6 +788,81 @@ func (q *Queries) NextDesignSkuSeq(ctx context.Context) (int64, error) {
 	var seq int64
 	err := row.Scan(&seq)
 	return seq, err
+}
+
+const setDesignPersonalisation = `-- name: SetDesignPersonalisation :one
+UPDATE designs
+SET personalisation = $1,
+    personalised_stl_key = $2,
+    updated_at = now()
+WHERE id = $3
+RETURNING id, brand_slug, name, created_by, status, stl_key, material, colour,
+          finish, units_per_bed, quality, infill_pct::float8 AS infill_pct, notes,
+          preview_key, sku, machine_id, personalisation_rules, attributes,
+          personalisation, personalised_stl_key, created_at, updated_at
+`
+
+type SetDesignPersonalisationParams struct {
+	Personalisation    []byte
+	PersonalisedStlKey *string
+	ID                 uuid.UUID
+}
+
+type SetDesignPersonalisationRow struct {
+	ID                   uuid.UUID
+	BrandSlug            string
+	Name                 string
+	CreatedBy            string
+	Status               string
+	StlKey               string
+	Material             string
+	Colour               *string
+	Finish               string
+	UnitsPerBed          int32
+	Quality              string
+	InfillPct            float64
+	Notes                *string
+	PreviewKey           string
+	Sku                  *string
+	MachineID            *uuid.UUID
+	PersonalisationRules []byte
+	Attributes           []byte
+	Personalisation      []byte
+	PersonalisedStlKey   *string
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+}
+
+// SetDesignPersonalisation stores the applied personalisation spec and the baked
+// STL key for a design (or clears both with NULLs). Returns the updated row.
+func (q *Queries) SetDesignPersonalisation(ctx context.Context, arg SetDesignPersonalisationParams) (SetDesignPersonalisationRow, error) {
+	row := q.db.QueryRow(ctx, setDesignPersonalisation, arg.Personalisation, arg.PersonalisedStlKey, arg.ID)
+	var i SetDesignPersonalisationRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Name,
+		&i.CreatedBy,
+		&i.Status,
+		&i.StlKey,
+		&i.Material,
+		&i.Colour,
+		&i.Finish,
+		&i.UnitsPerBed,
+		&i.Quality,
+		&i.InfillPct,
+		&i.Notes,
+		&i.PreviewKey,
+		&i.Sku,
+		&i.MachineID,
+		&i.PersonalisationRules,
+		&i.Attributes,
+		&i.Personalisation,
+		&i.PersonalisedStlKey,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const setDesignPersonalisationRules = `-- name: SetDesignPersonalisationRules :one

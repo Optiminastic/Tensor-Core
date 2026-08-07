@@ -98,6 +98,8 @@ type Design struct {
 	TemplateFileID       *uuid.UUID
 	PersonalisationRules []byte
 	Attributes           []byte
+	Personalisation      []byte
+	PersonalisedStlKey   *string
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 }
@@ -437,6 +439,13 @@ type UserAuthzState struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+type UserBrand struct {
+	UserID     string
+	BrandSlug  string
+	AssignedBy string
+	CreatedAt  pgtype.Timestamptz
+}
+
 type UserInvite struct {
 	ID             uuid.UUID
 	Email          string
@@ -447,6 +456,7 @@ type UserInvite struct {
 	AcceptedUserID *string
 	RevokedAt      pgtype.Timestamptz
 	CreatedBy      *string
+	BrandSlugs     []byte
 	CreatedAt      pgtype.Timestamptz
 	UpdatedAt      pgtype.Timestamptz
 }

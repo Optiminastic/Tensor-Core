@@ -42,6 +42,21 @@ func (q *Queries) BumpPermissionsVersion(ctx context.Context, userID string) (in
 	return permissions_version, err
 }
 
+const countAdminsExcluding = `-- name: CountAdminsExcluding :one
+SELECT count(DISTINCT ur.user_id)::int AS other_admins
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+WHERE r.name = 'ADMIN' AND ur.user_id <> $1
+`
+
+// How many OTHER users hold the ADMIN role, so the last admin cannot be removed.
+func (q *Queries) CountAdminsExcluding(ctx context.Context, userID string) (int32, error) {
+	row := q.db.QueryRow(ctx, countAdminsExcluding, userID)
+	var other_admins int32
+	err := row.Scan(&other_admins)
+	return other_admins, err
+}
+
 const deleteRolePermission = `-- name: DeleteRolePermission :exec
 DELETE FROM role_permissions WHERE role_id = $1 AND permission_id = $2
 `
@@ -53,6 +68,17 @@ type DeleteRolePermissionParams struct {
 
 func (q *Queries) DeleteRolePermission(ctx context.Context, arg DeleteRolePermissionParams) error {
 	_, err := q.db.Exec(ctx, deleteRolePermission, arg.RoleID, arg.PermissionID)
+	return err
+}
+
+const deleteUserRoles = `-- name: DeleteUserRoles :exec
+DELETE FROM user_roles WHERE user_id = $1
+`
+
+// Remove every role from a user (de-provision them). Their Better Auth account
+// stays; with no roles they fail closed and can do nothing.
+func (q *Queries) DeleteUserRoles(ctx context.Context, userID string) error {
+	_, err := q.db.Exec(ctx, deleteUserRoles, userID)
 	return err
 }
 
@@ -177,6 +203,42 @@ type InsertUserRoleParams struct {
 func (q *Queries) InsertUserRole(ctx context.Context, arg InsertUserRoleParams) error {
 	_, err := q.db.Exec(ctx, insertUserRole, arg.UserID, arg.RoleID, arg.AssignedBy)
 	return err
+}
+
+const listMembers = `-- name: ListMembers :many
+SELECT ur.user_id,
+       array_agg(r.name::text ORDER BY r.name)::text[] AS roles
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+GROUP BY ur.user_id
+ORDER BY ur.user_id
+`
+
+type ListMembersRow struct {
+	UserID string
+	Roles  []string
+}
+
+// One row per user that has at least one role, with their role names aggregated.
+// Emails are resolved on the frontend (Better Auth owns the user table).
+func (q *Queries) ListMembers(ctx context.Context) ([]ListMembersRow, error) {
+	rows, err := q.db.Query(ctx, listMembers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMembersRow{}
+	for rows.Next() {
+		var i ListMembersRow
+		if err := rows.Scan(&i.UserID, &i.Roles); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRolePermissionIDs = `-- name: ListRolePermissionIDs :many

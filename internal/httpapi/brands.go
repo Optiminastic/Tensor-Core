@@ -118,12 +118,33 @@ func slugify(name string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// listBrands returns the brands the caller may access: every brand for an admin
+// (brand:manage), otherwise only the ones an admin assigned via user_brands. The
+// two queries return the same row shape, so both feed the same DTO mapping.
 func (s *Server) listBrands(c *gin.Context) {
-	rows, err := s.store.Q.ListBrands(c.Request.Context())
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not list brands.")
-		return
+	ctx := c.Request.Context()
+	user, _ := auth.UserFrom(c)
+
+	var rows []gen.ListBrandsRow
+	if user.Has(auth.BrandManage.Key()) {
+		all, err := s.store.Q.ListBrands(ctx)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list brands.")
+			return
+		}
+		rows = all
+	} else {
+		scoped, err := s.store.Q.ListBrandsForUser(ctx, user.ID)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list brands.")
+			return
+		}
+		rows = make([]gen.ListBrandsRow, len(scoped))
+		for i, r := range scoped {
+			rows[i] = gen.ListBrandsRow(r)
+		}
 	}
+
 	out := make([]brandResponse, 0, len(rows))
 	for _, r := range rows {
 		dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
@@ -141,6 +162,12 @@ func (s *Server) listBrands(c *gin.Context) {
 func (s *Server) getBrand(c *gin.Context) {
 	slug, ok := brandSlugParam(c)
 	if !ok {
+		return
+	}
+	// A member may only load a brand an admin assigned them. Answer 404 (not 403)
+	// so an unassigned brand is indistinguishable from a non-existent one.
+	if user, ok := auth.UserFrom(c); !ok || !s.canAccessBrand(c.Request.Context(), user, slug) {
+		detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
 		return
 	}
 	r, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
