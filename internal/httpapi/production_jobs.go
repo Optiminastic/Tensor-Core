@@ -150,7 +150,9 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 		return
 	}
 	statusFilter := nilIfEmpty(c.Query("status"))
+	assemblyFilter := nilIfEmpty(c.Query("assembly_status"))
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
+	packagingFilter := nilIfEmpty(c.Query("packaging_status"))
 	ctx := c.Request.Context()
 
 	orderFilter, ok := queryUUID(c, "order_id")
@@ -164,7 +166,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 
 	if !page.paginate {
 		rows, err := s.store.Q.ListProductionJobs(ctx, gen.ListProductionJobsParams{
-			Status: statusFilter, QcStatus: qcFilter, OrderID: orderFilter, BatchID: batchFilter,
+			Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+			PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
@@ -175,7 +178,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 
 	rows, err := s.store.Q.ListProductionJobsPage(ctx, gen.ListProductionJobsPageParams{
-		Status: statusFilter, QcStatus: qcFilter, OrderID: orderFilter, BatchID: batchFilter,
+		Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+		PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
 	})
 	if err != nil {

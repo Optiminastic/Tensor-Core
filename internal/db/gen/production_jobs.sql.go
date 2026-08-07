@@ -695,24 +695,31 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::text IS NULL OR qc_status = $2::text)
-  AND ($3::uuid IS NULL OR order_id = $3::uuid)
-  AND ($4::uuid IS NULL OR batch_id = $4::uuid)
+  AND ($2::text IS NULL OR assembly_status = $2::text)
+  AND ($3::text IS NULL OR qc_status = $3::text)
+  AND ($4::text IS NULL OR packaging_status = $4::text)
+  AND ($5::uuid IS NULL OR order_id = $5::uuid)
+  AND ($6::uuid IS NULL OR batch_id = $6::uuid)
 ORDER BY created_at DESC, id DESC
 `
 
 type ListProductionJobsParams struct {
-	Status   *string
-	QcStatus *string
-	OrderID  *uuid.UUID
-	BatchID  *uuid.UUID
+	Status          *string
+	AssemblyStatus  *string
+	QcStatus        *string
+	PackagingStatus *string
+	OrderID         *uuid.UUID
+	BatchID         *uuid.UUID
 }
 
-// Full list, newest first, with optional status / qc_status filters (null = any).
+// Full list, newest first, with optional status / assembly_status / qc_status /
+// packaging_status filters (null = any).
 func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobsParams) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listProductionJobs,
 		arg.Status,
+		arg.AssemblyStatus,
 		arg.QcStatus,
+		arg.PackagingStatus,
 		arg.OrderID,
 		arg.BatchID,
 	)
@@ -800,20 +807,24 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
-  AND ($2::text IS NULL OR qc_status = $2::text)
-  AND ($3::uuid IS NULL OR order_id = $3::uuid)
-  AND ($4::uuid IS NULL OR batch_id = $4::uuid)
+  AND ($2::text IS NULL OR assembly_status = $2::text)
+  AND ($3::text IS NULL OR qc_status = $3::text)
+  AND ($4::text IS NULL OR packaging_status = $4::text)
+  AND ($5::uuid IS NULL OR order_id = $5::uuid)
+  AND ($6::uuid IS NULL OR batch_id = $6::uuid)
   AND (
-    $5::timestamptz IS NULL
-    OR (created_at, id) < ($5::timestamptz, $6::uuid)
+    $7::timestamptz IS NULL
+    OR (created_at, id) < ($7::timestamptz, $8::uuid)
   )
 ORDER BY created_at DESC, id DESC
-LIMIT $7
+LIMIT $9
 `
 
 type ListProductionJobsPageParams struct {
 	Status          *string
+	AssemblyStatus  *string
 	QcStatus        *string
+	PackagingStatus *string
 	OrderID         *uuid.UUID
 	BatchID         *uuid.UUID
 	CursorCreatedAt pgtype.Timestamptz
@@ -825,7 +836,9 @@ type ListProductionJobsPageParams struct {
 func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProductionJobsPageParams) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listProductionJobsPage,
 		arg.Status,
+		arg.AssemblyStatus,
 		arg.QcStatus,
+		arg.PackagingStatus,
 		arg.OrderID,
 		arg.BatchID,
 		arg.CursorCreatedAt,

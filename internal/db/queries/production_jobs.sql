@@ -56,7 +56,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs WHERE id = $1;
 
 -- name: ListProductionJobs :many
--- Full list, newest first, with optional status / qc_status filters (null = any).
+-- Full list, newest first, with optional status / assembly_status / qc_status /
+-- packaging_status filters (null = any).
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
@@ -69,7 +70,9 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
+  AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
+  AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
   AND (sqlc.narg('batch_id')::uuid IS NULL OR batch_id = sqlc.narg('batch_id')::uuid)
 ORDER BY created_at DESC, id DESC;
@@ -88,7 +91,9 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, issue_reason, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
+  AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
+  AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
   AND (sqlc.narg('batch_id')::uuid IS NULL OR batch_id = sqlc.narg('batch_id')::uuid)
   AND (
