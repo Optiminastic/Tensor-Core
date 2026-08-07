@@ -67,7 +67,7 @@ func (s *Server) submitAssembly(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not record the assembly.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(updated))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
 }
 
 func (s *Server) skipAssembly(c *gin.Context) {
@@ -92,7 +92,7 @@ func (s *Server) skipAssembly(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not skip assembly.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(updated))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
 }
 
 type qcRequest struct {
@@ -186,9 +186,9 @@ func (s *Server) submitQc(c *gin.Context) {
 		return
 	}
 
-	resp := qcResponse{Job: productionJobDTO(updated)}
+	resp := qcResponse{Job: s.singleJobDTO(ctx, updated)}
 	if reprint != nil {
-		dto := productionJobDTO(*reprint)
+		dto := s.singleJobDTO(ctx, *reprint)
 		resp.ReprintJob = &dto
 	}
 	c.JSON(http.StatusOK, resp)
@@ -247,5 +247,5 @@ func (s *Server) submitPackaging(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not record the packaging.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(updated))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
 }

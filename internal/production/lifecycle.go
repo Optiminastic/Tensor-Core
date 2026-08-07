@@ -266,6 +266,103 @@ func PersonalisationLog(c Confirms, required bool) []string {
 	return out
 }
 
+// Pipeline stage: a coarse, computed-on-read display/filter label derived
+// from the 5 stored status columns plus held/issue_reason/batch state -
+// never stored (see PipelineStage). Ten values, not the "NEW..COMPLETED"
+// eleven originally proposed: COMPLETED is dropped since dispatch_orders
+// only tracks pending->dispatched with nothing further, so it and DISPATCHED
+// would be the same condition. FAILED is added - a job whose print or QC
+// failed needs a real bucket rather than silently misrepresenting it.
+const (
+	StageNew          = "NEW"
+	StageValidating   = "VALIDATING"
+	StageReady        = "READY"
+	StageWaitingBatch = "WAITING_BATCH"
+	StageReserved     = "RESERVED"
+	StageBatched      = "BATCHED"
+	StagePrinting     = "PRINTING"
+	StageQC           = "QC"
+	StagePacked       = "PACKED"
+	StageDispatched   = "DISPATCHED"
+	StageFailed       = "FAILED"
+)
+
+// PipelineStageInput is everything PipelineStage needs about one job and
+// (when batched) its batch - resolved by the caller (httpapi), since this
+// package stays DB-free by design.
+type PipelineStageInput struct {
+	Status, AssemblyStatus, QcStatus, PackagingStatus, PersonalisationStatus string
+	Held                                                                     bool
+	IssueReason                                                              *string
+	// BatchStatus is nil when the job is unbatched, else one of
+	// BatchPendingApproval/BatchOpen/BatchInProgress/BatchCompleted.
+	BatchStatus *string
+	// Dispatched is true when the job's order has a dispatched (not merely
+	// created) dispatch_orders row - best-effort, resolved by the caller.
+	Dispatched bool
+}
+
+// PipelineStage derives a single display/filter label for a job's position
+// in the pipeline, first-match-wins:
+//
+//  1. Failed: status == failed (the print itself failed - a separate
+//     reprint job, not this row, continues the pipeline) or
+//     qc_status == failed (same: a reprint was already queued).
+//  2. Batched (BatchStatus != nil and not yet completed): pending_approval
+//     -> RESERVED (a bed slot is tentatively held, not yet approved),
+//     open -> BATCHED (approved, filament reserved, queued),
+//     in_progress -> PRINTING. A completed batch falls through to the
+//     post-print rules below, as if unbatched - by the time a batch reaches
+//     'completed', Phase A guarantees every one of its jobs' own status is
+//     already 'completed' too.
+//  3. status == completed - NOTE this means the print finished, not that
+//     the whole job is done; assembly/QC/packaging/dispatch all happen
+//     after this value, gated on the sub-status fields below:
+//     qc_status != passed, or packaging_status != packaged -> QC
+//     (packaging isn't a distinct bucket in this 10-value list - a job
+//     that passed QC but isn't packaged yet still reads as QC);
+//     packaging_status == packaged -> PACKED, or DISPATCHED if the order
+//     has actually shipped.
+//  4. Unbatched, not yet printed: issue_reason set -> VALIDATING (blocked
+//     on a design/SKU/file problem), personalisation_status == pending ->
+//     NEW (blocked on a human), held -> READY (cleared, but paused),
+//     otherwise -> WAITING_BATCH (eligible, just hasn't been picked up
+//     yet).
+func PipelineStage(in PipelineStageInput) string {
+	if in.Status == StatusFailed || in.QcStatus == QcFailed {
+		return StageFailed
+	}
+	if in.BatchStatus != nil && *in.BatchStatus != BatchCompleted {
+		switch *in.BatchStatus {
+		case BatchPendingApproval:
+			return StageReserved
+		case BatchOpen:
+			return StageBatched
+		case BatchInProgress:
+			return StagePrinting
+		}
+	}
+	if in.Status == StatusCompleted {
+		if in.QcStatus != QcPassed || in.PackagingStatus != PackagingPackaged {
+			return StageQC
+		}
+		if in.Dispatched {
+			return StageDispatched
+		}
+		return StagePacked
+	}
+	if in.IssueReason != nil {
+		return StageValidating
+	}
+	if in.PersonalisationStatus == PersonalisationPending {
+		return StageNew
+	}
+	if in.Held {
+		return StageReady
+	}
+	return StageWaitingBatch
+}
+
 // numberDigits is how many random digits follow a generated identifier's
 // prefix (5, e.g. JOB-12345 / BATCH-12345).
 const numberDigits = 5

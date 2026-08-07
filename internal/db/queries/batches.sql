@@ -18,6 +18,12 @@ RETURNING *;
 -- name: GetBatchByID :one
 SELECT * FROM batches WHERE id = $1;
 
+-- name: ListBatchStatusesForIDs :many
+-- Cheap status-only companion to a batched list-of-jobs response - the
+-- pipeline_stage RESERVED/BATCHED/PRINTING signal, without a per-row
+-- GetBatchByID call for every job on a list endpoint.
+SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
+
 -- name: ListBatches :many
 SELECT * FROM batches ORDER BY created_at DESC, id DESC;
 

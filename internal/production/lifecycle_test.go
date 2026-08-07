@@ -144,3 +144,94 @@ func TestFailureReasonValidation(t *testing.T) {
 		t.Error("failure stage validation is wrong")
 	}
 }
+
+func TestPipelineStage(t *testing.T) {
+	pendingApproval, open, inProgress, completed := BatchPendingApproval, BatchOpen, BatchInProgress, BatchCompleted
+
+	tests := []struct {
+		name string
+		in   PipelineStageInput
+		want string
+	}{
+		{
+			"unbatched, personalisation pending -> NEW",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationPending},
+			StageNew,
+		},
+		{
+			"unbatched, issue reason set -> VALIDATING",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, IssueReason: strptr(IssueSTLMissing)},
+			StageValidating,
+		},
+		{
+			"unbatched, held -> READY",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, Held: true},
+			StageReady,
+		},
+		{
+			"unbatched, clean and unheld -> WAITING_BATCH",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired},
+			StageWaitingBatch,
+		},
+		{
+			"batch pending_approval -> RESERVED",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &pendingApproval},
+			StageReserved,
+		},
+		{
+			"batch open -> BATCHED",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &open},
+			StageBatched,
+		},
+		{
+			"batch in_progress -> PRINTING",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &inProgress},
+			StagePrinting,
+		},
+		{
+			"batch completed, job still qc pending -> falls through to QC, not RESERVED/BATCHED",
+			PipelineStageInput{
+				Status: StatusCompleted, QcStatus: QcPending, PackagingStatus: PackagingPending,
+				PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &completed,
+			},
+			StageQC,
+		},
+		{
+			"printed, qc pending -> QC",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPending, PackagingStatus: PackagingPending},
+			StageQC,
+		},
+		{
+			"printed, qc passed but not yet packaged -> still QC (no distinct awaiting-packaging bucket)",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPending},
+			StageQC,
+		},
+		{
+			"printed, qc passed, packaged, not dispatched -> PACKED",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPackaged},
+			StagePacked,
+		},
+		{
+			"printed, qc passed, packaged, dispatched -> DISPATCHED",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPackaged, Dispatched: true},
+			StageDispatched,
+		},
+		{
+			"print failed -> FAILED, regardless of batch state",
+			PipelineStageInput{Status: StatusFailed, BatchStatus: &open},
+			StageFailed,
+		},
+		{
+			"qc failed -> FAILED, even though status is completed",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcFailed, PackagingStatus: PackagingPending},
+			StageFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PipelineStage(tc.in); got != tc.want {
+				t.Errorf("PipelineStage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

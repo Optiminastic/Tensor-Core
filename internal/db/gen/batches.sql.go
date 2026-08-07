@@ -189,6 +189,38 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 	return i, err
 }
 
+const listBatchStatusesForIDs = `-- name: ListBatchStatusesForIDs :many
+SELECT id, status FROM batches WHERE id = ANY($1::uuid[])
+`
+
+type ListBatchStatusesForIDsRow struct {
+	ID     uuid.UUID
+	Status string
+}
+
+// Cheap status-only companion to a batched list-of-jobs response - the
+// pipeline_stage RESERVED/BATCHED/PRINTING signal, without a per-row
+// GetBatchByID call for every job on a list endpoint.
+func (q *Queries) ListBatchStatusesForIDs(ctx context.Context, ids []uuid.UUID) ([]ListBatchStatusesForIDsRow, error) {
+	rows, err := q.db.Query(ctx, listBatchStatusesForIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBatchStatusesForIDsRow{}
+	for rows.Next() {
+		var i ListBatchStatusesForIDsRow
+		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBatches = `-- name: ListBatches :many
 SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
 `

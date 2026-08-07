@@ -26,6 +26,39 @@ func smallJob(id, material string) PlanJob {
 	}
 }
 
+// TestKeyForDiscriminatesOnSupportAndInfill is the bug-fix half of Phase C:
+// before applyMatch snapshotted support_used/infill_pct onto production_jobs,
+// every job had the same false/0 value on both axes, so keyFor's supportUsed
+// and infillBucket fields never actually varied - a support-required job and
+// a plain one always shared a compatibility bucket. With real values flowing
+// in now, they must not.
+func TestKeyForDiscriminatesOnSupportAndInfill(t *testing.T) {
+	base := smallJob("a", "PLA")
+	base.SupportUsed = false
+	base.InfillPct = 15
+
+	withSupport := base
+	withSupport.SupportUsed = true
+
+	if keyFor(base) == keyFor(withSupport) {
+		t.Error("a support-required job must not share a groupKey with an otherwise-identical non-support job")
+	}
+
+	differentInfill := base
+	differentInfill.InfillPct = 40
+
+	if keyFor(base) == keyFor(differentInfill) {
+		t.Error("jobs with meaningfully different infill% must not share a groupKey")
+	}
+
+	sameBucket := base
+	sameBucket.InfillPct = 16 // rounds to the same 5%-bucket as 15
+
+	if keyFor(base) != keyFor(sameBucket) {
+		t.Error("infill within the same rounded bucket should still share a groupKey")
+	}
+}
+
 func TestPlanNoFootprintIsUnbatchable(t *testing.T) {
 	j := smallJob("a", "PLA")
 	j.Footprint = bedpack.UnitFootprint{}

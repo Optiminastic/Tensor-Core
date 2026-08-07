@@ -24,3 +24,9 @@ LIMIT sqlc.arg('page_limit');
 UPDATE dispatch_orders SET status = 'dispatched', dispatched_at = now(), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: ListDispatchedOrderIDs :many
+-- Which of the given orders have actually shipped (not merely have a
+-- dispatch_orders row created) - the pipeline_stage DISPATCHED signal.
+SELECT DISTINCT order_id FROM dispatch_orders
+WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[]) AND status = 'dispatched';

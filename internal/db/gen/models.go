@@ -295,6 +295,12 @@ type ProductionJob struct {
 	QualityMm                  pgtype.Numeric
 	MachineFamily              *string
 	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
 	CreatedAt                  pgtype.Timestamptz
 	UpdatedAt                  pgtype.Timestamptz
 }

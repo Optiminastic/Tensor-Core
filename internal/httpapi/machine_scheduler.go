@@ -190,4 +190,11 @@ func (s *Server) reassignBatchesForOfflineMachine(ctx context.Context, machinePr
 			log.Info("batch reassigned after its machine went offline", "batch", b.ID, "from_machine", machineProfileID, "to_machine", *next)
 		}
 	}
+	if len(batches) > 0 {
+		// A machine just went offline - low-frequency, high-signal, same
+		// category as batch-completed/reprint-created (see triggerBatchPlan's
+		// doc comment): worth an immediate look regardless of backlog size,
+		// since a batch above may have just been cleared to fully unassigned.
+		s.triggerBatchPlan(ctx)
+	}
 }

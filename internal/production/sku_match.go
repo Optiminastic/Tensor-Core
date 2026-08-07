@@ -18,6 +18,20 @@ type DesignFacts struct {
 	FlowPct       *float64
 	QualityMM     *float64
 	MachineFamily string
+	// Geometry/slice snapshot (see 0030_job_geometry_snapshot.sql).
+	// BboxXMM/YMM/ZMM and ColourCount are per-unit facts, never scaled by
+	// quantity. SupportWeightG/PurgeWeightG are per-unit grams as measured -
+	// applyMatch scales them by quantity, matching FilamentGrams' convention.
+	BboxXMM, BboxYMM, BboxZMM    *float64
+	SupportWeightG, PurgeWeightG *float64
+	ColourCount                  *int
+	// SupportUsed/InfillPct already exist as production_jobs columns and are
+	// already read by the planner's compatibility grouping (groupKey), but
+	// were never actually populated here - every job in the system had the
+	// same false/0 value on both axes. Fixed alongside the rest of this
+	// snapshot since it's the same source data (GetLatestMetricsForDesign).
+	SupportUsed *bool
+	InfillPct   *float64
 }
 
 // MatchResult is what SKU-matching a line item against the design catalog

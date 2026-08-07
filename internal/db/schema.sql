@@ -378,6 +378,17 @@ CREATE TABLE production_jobs (
     quality_mm                    numeric(4, 3),
     machine_family                varchar(16),
     issue_reason                  varchar(32),
+    -- Geometry/slice snapshot from the matched design at creation time (see
+    -- 0030_job_geometry_snapshot.sql): bounding box from file_assets, and
+    -- support/purge weight (already scaled to this job's quantity, same
+    -- convention as filament_grams_required) plus colour count (per-unit,
+    -- not scaled) from the design's latest slice metrics.
+    bbox_x_mm                     numeric(10, 2),
+    bbox_y_mm                     numeric(10, 2),
+    bbox_z_mm                     numeric(10, 2),
+    support_weight_g              numeric(10, 3),
+    purge_weight_g                numeric(10, 3),
+    colour_count                  integer,
     created_at                    timestamptz NOT NULL DEFAULT now(),
     updated_at                    timestamptz NOT NULL DEFAULT now()
 );

@@ -71,6 +71,20 @@ type productionJobResponse struct {
 	QualityMm                  *float64   `json:"quality_mm"`
 	MachineFamily              *string    `json:"machine_family"`
 	IssueReason                *string    `json:"issue_reason"`
+	// Geometry/slice snapshot taken from the matched design at creation time
+	// (see 0030_job_geometry_snapshot.sql). BboxXMm/YMm/ZMm and ColourCount
+	// are per-unit facts; SupportWeightG/PurgeWeightG are already scaled to
+	// this job's quantity, matching FilamentGramsRequired's convention.
+	BboxXMm        *float64 `json:"bbox_x_mm"`
+	BboxYMm        *float64 `json:"bbox_y_mm"`
+	BboxZMm        *float64 `json:"bbox_z_mm"`
+	SupportWeightG *float64 `json:"support_weight_g"`
+	PurgeWeightG   *float64 `json:"purge_weight_g"`
+	ColourCount    *int32   `json:"colour_count"`
+	// PipelineStage is a coarse, computed (never stored) label for where this
+	// job sits end to end - see production.PipelineStage's doc comment for
+	// exactly how it's derived and its two documented simplifications.
+	PipelineStage string `json:"pipeline_stage"`
 	// PersonalisationLog explains what's ready/still pending and why - a
 	// checklist derived from the six confirm booleans above, nil when
 	// personalisation isn't required for this job at all.
@@ -93,12 +107,21 @@ type splitProgressResponse struct {
 	RemainingQuantity int64 `json:"remaining_quantity"`
 }
 
-func productionJobDTO(j gen.ProductionJob) productionJobResponse {
+// productionJobDTO builds the API shape for one job. batchStatus/dispatched
+// are the two bits of cross-table state PipelineStage needs beyond the job
+// row itself - resolved by the caller (singleJobDTO for one job,
+// productionJobsDTO's bulk lookups for a list), never re-queried here.
+func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool) productionJobResponse {
 	confirms := production.Confirms{
 		Name: j.NameConfirmed, Photo: j.PhotoConfirmed, Font: j.FontConfirmed,
 		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
 	}
 	required := j.PersonalisationStatus != production.PersonalisationNotRequired
+	stage := production.PipelineStage(production.PipelineStageInput{
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, QcStatus: j.QcStatus,
+		PackagingStatus: j.PackagingStatus, PersonalisationStatus: j.PersonalisationStatus,
+		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
+	})
 	return productionJobResponse{
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
@@ -120,9 +143,90 @@ func productionJobDTO(j gen.ProductionJob) productionJobResponse {
 		LeftNozzleMm: db.NumFloatPtr(j.LeftNozzleMm), RightNozzleMm: db.NumFloatPtr(j.RightNozzleMm),
 		FlowPct: db.NumFloatPtr(j.FlowPct), QualityMm: db.NumFloatPtr(j.QualityMm),
 		MachineFamily: j.MachineFamily, IssueReason: j.IssueReason,
+		BboxXMm: db.NumFloatPtr(j.BboxXMm), BboxYMm: db.NumFloatPtr(j.BboxYMm), BboxZMm: db.NumFloatPtr(j.BboxZMm),
+		SupportWeightG: db.NumFloatPtr(j.SupportWeightG), PurgeWeightG: db.NumFloatPtr(j.PurgeWeightG),
+		ColourCount:        j.ColourCount,
+		PipelineStage:      stage,
 		PersonalisationLog: production.PersonalisationLog(confirms, required),
 		CreatedAt:          db.Time(j.CreatedAt), UpdatedAt: db.Time(j.UpdatedAt),
 	}
+}
+
+// singleJobDTO is productionJobDTO for the single-job endpoints: it resolves
+// the job's batch status and order dispatch state itself, best-effort - a
+// lookup failure degrades to the unbatched/not-dispatched branch rather than
+// failing the response, matching attachPlateBbox's convention elsewhere in
+// this package.
+func (s *Server) singleJobDTO(ctx context.Context, j gen.ProductionJob) productionJobResponse {
+	var batchStatus *string
+	if j.BatchID != nil {
+		if b, err := s.store.Q.GetBatchByID(ctx, *j.BatchID); err == nil {
+			batchStatus = &b.Status
+		}
+	}
+	var dispatched bool
+	if j.OrderID != nil {
+		if ids, err := s.store.Q.ListDispatchedOrderIDs(ctx, []uuid.UUID{*j.OrderID}); err == nil && len(ids) > 0 {
+			dispatched = true
+		}
+	}
+	return productionJobDTO(j, batchStatus, dispatched)
+}
+
+// productionJobsDTO is productionJobDTO for a list of jobs: two bulk lookups
+// (not one per row) resolve every job's batch status and order dispatch
+// state at once, keyed by the distinct batch/order ids actually present in
+// rows - a lookup failure degrades the same way as singleJobDTO, per job.
+func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob) []productionJobResponse {
+	batchIDs := dedupeIDs(rows, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+	orderIDs := dedupeIDs(rows, func(j gen.ProductionJob) *uuid.UUID { return j.OrderID })
+
+	batchStatusByID := map[uuid.UUID]string{}
+	if len(batchIDs) > 0 {
+		if statuses, err := s.store.Q.ListBatchStatusesForIDs(ctx, batchIDs); err == nil {
+			for _, b := range statuses {
+				batchStatusByID[b.ID] = b.Status
+			}
+		}
+	}
+	dispatchedOrderIDs := map[uuid.UUID]bool{}
+	if len(orderIDs) > 0 {
+		if ids, err := s.store.Q.ListDispatchedOrderIDs(ctx, orderIDs); err == nil {
+			for _, id := range ids {
+				dispatchedOrderIDs[id] = true
+			}
+		}
+	}
+
+	out := make([]productionJobResponse, 0, len(rows))
+	for _, j := range rows {
+		var batchStatus *string
+		if j.BatchID != nil {
+			if status, ok := batchStatusByID[*j.BatchID]; ok {
+				batchStatus = &status
+			}
+		}
+		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
+		out = append(out, productionJobDTO(j, batchStatus, dispatched))
+	}
+	return out
+}
+
+// dedupeIDs collects the distinct non-nil ids get extracts from rows - turns
+// a job list's scattered batch_id/order_id pointers into the small
+// deduplicated slices ListBatchStatusesForIDs/ListDispatchedOrderIDs need.
+func dedupeIDs(rows []gen.ProductionJob, get func(gen.ProductionJob) *uuid.UUID) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	var out []uuid.UUID
+	for _, j := range rows {
+		id := get(j)
+		if id == nil || seen[*id] {
+			continue
+		}
+		seen[*id] = true
+		out = append(out, *id)
+	}
+	return out
 }
 
 func (s *Server) registerProductionJobs(r *gin.Engine) {
@@ -144,6 +248,26 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 
 // --- list / get ---------------------------------------------------------------
 
+// filterByPipelineStage keeps only the responses matching stage, in place -
+// a Go-side filter (not a SQL WHERE) since pipeline_stage is computed, not a
+// column: a SQL CASE would have to duplicate PipelineStage's branching logic
+// across two languages, which drifts. On the paginated endpoint this means a
+// page can come back short (even empty) with more matching rows past the
+// cursor, since the DB's LIMIT is applied before this filter runs - callers
+// polling this filter must keep following next_cursor, not stop on a short page.
+func filterByPipelineStage(jobs []productionJobResponse, stage string) []productionJobResponse {
+	if stage == "" {
+		return jobs
+	}
+	out := make([]productionJobResponse, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PipelineStage == stage {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 func (s *Server) listProductionJobs(c *gin.Context) {
 	page, ok := parsePageParams(c)
 	if !ok {
@@ -153,6 +277,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	assemblyFilter := nilIfEmpty(c.Query("assembly_status"))
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
 	packagingFilter := nilIfEmpty(c.Query("packaging_status"))
+	stageFilter := c.Query("pipeline_stage")
 	ctx := c.Request.Context()
 
 	orderFilter, ok := queryUUID(c, "order_id")
@@ -173,7 +298,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
 			return
 		}
-		c.JSON(http.StatusOK, productionJobsDTO(rows))
+		c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
 		return
 	}
 
@@ -189,15 +314,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	if n := len(rows); n > 0 {
 		setNextCursor(c, n, page.limit, db.Time(rows[n-1].CreatedAt), rows[n-1].ID)
 	}
-	c.JSON(http.StatusOK, productionJobsDTO(rows))
-}
-
-func productionJobsDTO(rows []gen.ProductionJob) []productionJobResponse {
-	out := make([]productionJobResponse, 0, len(rows))
-	for _, j := range rows {
-		out = append(out, productionJobDTO(j))
-	}
-	return out
+	c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
 }
 
 func (s *Server) getProductionJob(c *gin.Context) {
@@ -211,7 +328,7 @@ func (s *Server) getProductionJob(c *gin.Context) {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
 	}
-	dto := productionJobDTO(j)
+	dto := s.singleJobDTO(ctx, j)
 	// One cheap indexed lookup on a single-resource detail page (not a list
 	// endpoint, so no N+1 risk) - only surfaced when the group is actually
 	// bigger than this job alone, which is a no-op for the overwhelming
@@ -282,7 +399,7 @@ func (s *Server) createProductionJob(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not create the production job.")
 		return
 	}
-	c.JSON(http.StatusCreated, productionJobDTO(job))
+	c.JSON(http.StatusCreated, s.singleJobDTO(ctx, job))
 }
 
 // --- from-order ---------------------------------------------------------------
@@ -297,7 +414,8 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	jobs, err := s.CreateJobsForOrder(c.Request.Context(), orderID)
+	ctx := c.Request.Context()
+	jobs, err := s.CreateJobsForOrder(ctx, orderID)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobsAlreadyCreated):
@@ -309,11 +427,7 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		}
 		return
 	}
-	out := make([]productionJobResponse, 0, len(jobs))
-	for _, j := range jobs {
-		out = append(out, productionJobDTO(j))
-	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(http.StatusCreated, s.productionJobsDTO(ctx, jobs))
 }
 
 // CreateJobsForOrder is the Job Creation Worker's core (Stage 2 + Stage 3
@@ -440,6 +554,24 @@ func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, 
 		v := *d.FilamentGrams * float64(quantity)
 		p.FilamentGramsRequired = &v
 	}
+	// Geometry/slice snapshot (see 0030_job_geometry_snapshot.sql). Bbox and
+	// colour count are per-unit facts, not scaled. Support/purge weight scale
+	// by quantity, matching FilamentGramsRequired's whole-job-total
+	// convention above - same source metric, same reasoning.
+	p.BboxXMm, p.BboxYMm, p.BboxZMm = d.BboxXMM, d.BboxYMM, d.BboxZMM
+	p.ColourCount = intPtrToInt32(d.ColourCount)
+	if d.SupportWeightG != nil {
+		v := *d.SupportWeightG * float64(quantity)
+		p.SupportWeightG = &v
+	}
+	if d.PurgeWeightG != nil {
+		v := *d.PurgeWeightG * float64(quantity)
+		p.PurgeWeightG = &v
+	}
+	// Fix: these two columns already existed and are already read by the
+	// planner's compatibility grouping (groupKey), but were never populated
+	// here - every job had the same false/0 value on both axes.
+	p.SupportUsed, p.InfillPct = d.SupportUsed, d.InfillPct
 	if p.PrintFileID == nil {
 		reason := production.IssueSTLMissing
 		p.IssueReason = &reason
@@ -490,7 +622,7 @@ func (s *Server) patchProductionJob(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not update the production job.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	c.JSON(http.StatusOK, s.singleJobDTO(c.Request.Context(), job))
 }
 
 // applyJobPatch validates and copies the provided PATCH fields into params.
@@ -646,7 +778,7 @@ func (s *Server) validatePersonalisation(c *gin.Context) {
 	if status == production.PersonalisationValidated {
 		s.triggerBatchPlanIfThresholdMet(ctx)
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, job))
 }
 
 // --- print file ---------------------------------------------------------------
@@ -686,7 +818,7 @@ func (s *Server) setPrintFile(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not set the print file.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, job))
 }
 
 // --- fail ---------------------------------------------------------------------
@@ -774,7 +906,9 @@ func (s *Server) failProductionJob(c *gin.Context) {
 	// regardless of how much else is currently queued, unlike the
 	// threshold-gated per-job triggers (see triggerBatchPlan's doc comment).
 	s.triggerBatchPlan(ctx)
-	c.JSON(http.StatusOK, failJobResponse{FailedJob: productionJobDTO(failed), ReprintJob: productionJobDTO(reprint)})
+	c.JSON(http.StatusOK, failJobResponse{
+		FailedJob: s.singleJobDTO(ctx, failed), ReprintJob: s.singleJobDTO(ctx, reprint),
+	})
 }
 
 // cloneForReprint builds the insert params for a fresh queued reprint of a failed
@@ -847,6 +981,15 @@ func splitProductionJob(src gen.ProductionJob, quantity int32) gen.InsertProduct
 		FlowPct:                    db.NumFloatPtr(src.FlowPct),
 		QualityMm:                  db.NumFloatPtr(src.QualityMm),
 		MachineFamily:              src.MachineFamily,
+		// A fragment is the same physical product, just fewer units - copied
+		// as-is, same convention as FilamentGramsRequired above (not
+		// re-scaled to the fragment's smaller quantity).
+		BboxXMm:        db.NumFloatPtr(src.BboxXMm),
+		BboxYMm:        db.NumFloatPtr(src.BboxYMm),
+		BboxZMm:        db.NumFloatPtr(src.BboxZMm),
+		SupportWeightG: db.NumFloatPtr(src.SupportWeightG),
+		PurgeWeightG:   db.NumFloatPtr(src.PurgeWeightG),
+		ColourCount:    src.ColourCount,
 	}
 }
 

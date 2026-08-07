@@ -208,12 +208,34 @@ func (s *Server) patchBatch(c *gin.Context) {
 		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
 		return
 	}
-	b, err := s.store.Q.UpdateBatch(ctx, params)
+	completing := req.Status != nil && *req.Status == production.BatchCompleted
+
+	var b gen.Batch
+	err := s.store.InTx(ctx, func(q *gen.Queries) error {
+		var err error
+		b, err = q.UpdateBatch(ctx, params)
+		if err != nil {
+			return err
+		}
+		if completing {
+			// The bed finished printing: every job on it is done unless it
+			// individually failed (that job's reprint was already queued via
+			// /fail, and force-completing it here would erase the failure
+			// and let a bad print slip into assembly/QC as if it passed).
+			// This is what actually makes a job reachable from the
+			// Assembly/QC/Packaging queues without an operator manually
+			// completing every job by hand.
+			if _, err := q.CompleteProductionJobsForBatch(ctx, &id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not update the batch.")
 		return
 	}
-	if req.Status != nil && *req.Status == production.BatchCompleted {
+	if completing {
 		// A machine just freed up - worth a replan regardless of how much
 		// else is currently queued, unlike the threshold-gated per-job
 		// triggers (see triggerBatchPlan's doc comment).

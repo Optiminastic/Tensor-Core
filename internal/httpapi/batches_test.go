@@ -314,8 +314,14 @@ func TestIntegrationBatchReassignedWhenMachineGoesOffline(t *testing.T) {
 	seedAll(t, store)
 	minter := newTokenMinter(t)
 	guards := auth.NewGuards(minter.verifier, "")
-	router := testServer(t, store, guards)
+	// threshold=1000: isolates the offline-triggers-a-replan assertion below
+	// from the threshold-gated per-job triggers, same reasoning as the
+	// batch-completed/reprint-created trigger tests.
+	s := testServerWithBatchQueue(t, store, guards, 1000)
+	router := s.Router()
 	ctx := context.Background()
+
+	beforePlanBatches := countPlanBatchesJobs(t, store)
 
 	profileA := seedFleetMachineWithProfile(t, store, "H2C-A", "H2C", "online")
 	profileB := seedFleetMachineWithProfile(t, store, "H2C-B", "H2C", "online")
@@ -355,6 +361,31 @@ func TestIntegrationBatchReassignedWhenMachineGoesOffline(t *testing.T) {
 	if got.MachineID == nil || *got.MachineID != profileA {
 		t.Errorf("approved (open) batch machine_id = %v, want unchanged %s", got.MachineID, profileA)
 	}
+
+	if got := countPlanBatchesJobs(t, store) - beforePlanBatches; got != 1 {
+		t.Errorf("new plan_batches jobs after a machine with draft batches went offline = %d, want 1", got)
+	}
+}
+
+func TestIntegrationNoReplanWhenOfflineMachineHasNoDraftBatches(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	s := testServerWithBatchQueue(t, store, guards, 1000)
+	router := s.Router()
+	beforePlanBatches := countPlanBatchesJobs(t, store)
+
+	profileA := seedFleetMachineWithProfile(t, store, "H2C-C", "H2C", "online")
+
+	manage := minter.mint(t, []string{"machine:manage", "machine:read"})
+	if rr := doJSON(router, http.MethodPatch, "/machines/"+profileA.String(), manage, map[string]any{"status": "offline"}); rr.Code != http.StatusOK {
+		t.Fatalf("patch machine offline = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	if got := countPlanBatchesJobs(t, store) - beforePlanBatches; got != 0 {
+		t.Errorf("new plan_batches jobs after a machine with zero draft batches went offline = %d, want 0", got)
+	}
 }
 
 func TestIntegrationBatchIdPatchAndGuard(t *testing.T) {
@@ -390,5 +421,63 @@ func TestIntegrationBatchIdPatchAndGuard(t *testing.T) {
 	// Assigning to a non-existent batch is rejected.
 	if rr := doJSON(router, http.MethodPatch, "/production-jobs/"+jobID, admin, map[string]any{"batch_id": uuid.New().String()}); rr.Code != http.StatusNotFound {
 		t.Errorf("assign missing batch = %d, want 404", rr.Code)
+	}
+}
+
+// seedJobOnBatch inserts a production job on the given batch with the given
+// status - the minimal shape CompleteProductionJobsForBatch cares about.
+func seedJobOnBatch(t *testing.T, store *db.Store, batchID uuid.UUID, jobNumber, status string) uuid.UUID {
+	t.Helper()
+	j, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: jobNumber, BatchID: &batchID, Description: "Test job",
+		Quantity: 1, Status: status, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
+	})
+	if err != nil {
+		t.Fatalf("insert production job: %v", err)
+	}
+	return j.ID
+}
+
+func TestIntegrationBatchCompletedAutoCompletesItsJobs(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+
+	b, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-COMPLETE-1", Status: production.BatchOpen, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+	queuedID := seedJobOnBatch(t, store, b.ID, "BATCH-COMPLETE-1-J1", production.StatusQueued)
+	inProductionID := seedJobOnBatch(t, store, b.ID, "BATCH-COMPLETE-1-J2", production.StatusInProduction)
+	failedID := seedJobOnBatch(t, store, b.ID, "BATCH-COMPLETE-1-J3", production.StatusFailed)
+
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+	if rr := doJSON(router, http.MethodPatch, "/batches/"+b.ID.String(), manage, map[string]any{"status": "completed"}); rr.Code != http.StatusOK {
+		t.Fatalf("patch batch completed = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	for _, tc := range []struct {
+		name string
+		id   uuid.UUID
+		want string
+	}{
+		{"queued -> completed", queuedID, production.StatusCompleted},
+		{"in_production -> completed", inProductionID, production.StatusCompleted},
+		{"failed stays failed", failedID, production.StatusFailed},
+	} {
+		job, err := store.Q.GetProductionJobByID(ctx, tc.id)
+		if err != nil {
+			t.Fatalf("%s: get job: %v", tc.name, err)
+		}
+		if job.Status != tc.want {
+			t.Errorf("%s: status = %q, want %q", tc.name, job.Status, tc.want)
+		}
 	}
 }

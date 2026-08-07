@@ -148,6 +148,33 @@ func (q *Queries) ListDispatchPage(ctx context.Context, arg ListDispatchPagePara
 	return items, nil
 }
 
+const listDispatchedOrderIDs = `-- name: ListDispatchedOrderIDs :many
+SELECT DISTINCT order_id FROM dispatch_orders
+WHERE order_id = ANY($1::uuid[]) AND status = 'dispatched'
+`
+
+// Which of the given orders have actually shipped (not merely have a
+// dispatch_orders row created) - the pipeline_stage DISPATCHED signal.
+func (q *Queries) ListDispatchedOrderIDs(ctx context.Context, orderIds []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listDispatchedOrderIDs, orderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var order_id uuid.UUID
+		if err := rows.Scan(&order_id); err != nil {
+			return nil, err
+		}
+		items = append(items, order_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markDispatched = `-- name: MarkDispatched :one
 UPDATE dispatch_orders SET status = 'dispatched', dispatched_at = now(), updated_at = now()
 WHERE id = $1

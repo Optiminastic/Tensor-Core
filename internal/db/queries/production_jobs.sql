@@ -12,7 +12,8 @@ INSERT INTO production_jobs (
     font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
     personalisation_notes, personalisation_photo_file_id, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
     colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-    quality_mm, machine_family, issue_reason
+    quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+    support_weight_g, purge_weight_g, colour_count
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('job_number'), sqlc.narg('order_id'), sqlc.narg('batch_id'),
     sqlc.arg('description'), sqlc.arg('quantity'), sqlc.arg('status'), sqlc.arg('assembly_status'),
@@ -29,7 +30,9 @@ INSERT INTO production_jobs (
     sqlc.arg('colours'), sqlc.narg('support_used'), sqlc.narg('infill_pct')::float8,
     sqlc.narg('left_nozzle_mm')::float8, sqlc.narg('right_nozzle_mm')::float8,
     sqlc.narg('flow_pct')::float8, sqlc.narg('quality_mm')::float8, sqlc.narg('machine_family'),
-    sqlc.narg('issue_reason')
+    sqlc.narg('issue_reason'), sqlc.narg('bbox_x_mm')::float8, sqlc.narg('bbox_y_mm')::float8,
+    sqlc.narg('bbox_z_mm')::float8, sqlc.narg('support_weight_g')::float8,
+    sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
           qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
@@ -40,7 +43,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
@@ -52,7 +56,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs WHERE id = $1;
 
 -- name: ListProductionJobs :many
@@ -67,7 +72,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
@@ -88,7 +94,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
@@ -128,7 +135,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ValidateProductionJobPersonalisation :one
 UPDATE production_jobs SET
@@ -154,7 +162,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobPrintFile :one
 UPDATE production_jobs SET print_file_id = sqlc.arg('print_file_id'), updated_at = now()
@@ -168,7 +177,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobStatus :one
 UPDATE production_jobs SET status = sqlc.arg('status'), updated_at = now()
@@ -182,7 +192,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ListBatchableJobs :many
 -- Unbatched, queued jobs whose personalisation is resolved and which cleared
@@ -222,6 +233,16 @@ SELECT count(*) FROM production_jobs WHERE batch_id = $1;
 UPDATE production_jobs SET batch_id = sqlc.arg('batch_id'), updated_at = now()
 WHERE id = ANY(sqlc.arg('job_ids')::uuid[]);
 
+-- name: CompleteProductionJobsForBatch :execrows
+-- Auto-completes every non-terminal job on a batch that just finished
+-- printing. A job already 'failed' is excluded on purpose: the bed as a
+-- whole finished, but this job's own print did not succeed (its reprint
+-- was already queued via /fail) - force-completing it would erase that
+-- failure and let a bad print slip into assembly/QC as if it passed.
+UPDATE production_jobs
+SET status = 'completed', updated_at = now()
+WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
+
 -- name: DecrementProductionJobQuantity :one
 -- Shrinks a job's remaining quantity by delta after some of it was peeled
 -- off into a new split_of_job_id row for a batch that's actually being
@@ -239,7 +260,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetSplitJobProgress :one
 -- Total ordered vs completed quantity across a split job's whole group (the
