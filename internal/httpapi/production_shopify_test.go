@@ -141,11 +141,21 @@ func TestIntegrationShopifyConnectGuards(t *testing.T) {
 	}
 
 	// Authorize builds a redirect to Shopify.
-	rr := doJSON(router, http.MethodGet, "/integrations/shopify/authorize?shop_domain="+testShopDomain, manage, nil)
+	rr := doJSON(router, http.MethodGet, "/integrations/shopify/authorize?shop_domain="+testShopDomain+"&brand=gifting", manage, nil)
 	if rr.Code != http.StatusFound {
 		t.Fatalf("authorize = %d, want 302", rr.Code)
 	}
 	if loc := rr.Header().Get("Location"); loc == "" || loc[:8] != "https://" {
 		t.Errorf("authorize redirect = %q, want a Shopify URL", loc)
+	}
+
+	// A missing/unknown brand is rejected before any redirect is built.
+	rr = doJSON(router, http.MethodGet, "/integrations/shopify/authorize?shop_domain="+testShopDomain, manage, nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("authorize without brand = %d, want 422", rr.Code)
+	}
+	rr = doJSON(router, http.MethodGet, "/integrations/shopify/authorize?shop_domain="+testShopDomain+"&brand=no-such-brand", manage, nil)
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("authorize with unknown brand = %d, want 422", rr.Code)
 	}
 }

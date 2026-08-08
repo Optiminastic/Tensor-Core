@@ -62,16 +62,16 @@ func TestVerifyCallbackHMAC(t *testing.T) {
 
 func TestSignVerifyState(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	token := SignState("acme.myshopify.com", "nonce123", "secret", now.Add(10*time.Minute))
+	token := SignState("acme.myshopify.com", "my-store", "nonce123", "secret", now.Add(10*time.Minute))
 
-	shop, ok := VerifyState(token, "secret", now)
-	if !ok || shop != "acme.myshopify.com" {
-		t.Errorf("verify = (%q, %v), want acme.myshopify.com/true", shop, ok)
+	shop, brand, ok := VerifyState(token, "secret", now)
+	if !ok || shop != "acme.myshopify.com" || brand != "my-store" {
+		t.Errorf("verify = (%q, %q, %v), want acme.myshopify.com/my-store/true", shop, brand, ok)
 	}
-	if _, ok := VerifyState(token, "other-secret", now); ok {
+	if _, _, ok := VerifyState(token, "other-secret", now); ok {
 		t.Error("a wrong secret must not verify state")
 	}
-	if _, ok := VerifyState(token, "secret", now.Add(11*time.Minute)); ok {
+	if _, _, ok := VerifyState(token, "secret", now.Add(11*time.Minute)); ok {
 		t.Error("an expired state must not verify")
 	}
 }

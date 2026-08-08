@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -72,14 +73,33 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 		detail(c, http.StatusBadRequest, "The webhook payload is invalid.")
 		return
 	}
+
+	if _, err := s.importShopifyOrder(ctx, conn.ID, payload, fallbackStatus); err != nil {
+		obs.FromContext(ctx).Error("shopify order webhook import failed", "error", err)
+		detail(c, http.StatusInternalServerError, "Could not import the order.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// importShopifyOrder upserts one order and rebuilds its line items from
+// scratch (so a replay never accumulates duplicates - Shopify's payload
+// doesn't carry a product image, so product_image_url is left null for real
+// orders), then - if the production queue is wired up - schedules job
+// creation in the same transaction, so nothing commits while silently
+// failing to schedule it. Shared by the live orders-paid/orders-create
+// webhooks (upsertOrderFromWebhook) and the one-time historical backfill
+// that runs right after a store connects (backfillShopifyOrders), so both
+// paths produce identical rows.
+func (s *Server) importShopifyOrder(
+	ctx context.Context, connID uuid.UUID, payload shopifyOrderPayload, fallbackStatus string,
+) (gen.Order, error) {
 	items := mapShopifyLineItems(payload.LineItems)
 	lineItemsJSON, err := json.Marshal(items)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not encode the order's line items.")
-		return
+		return gen.Order{}, err
 	}
 
-	connID := conn.ID
 	var order gen.Order
 	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
 		var err error
@@ -96,9 +116,6 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 			return err
 		}
 
-		// Rebuild this order's product rows from scratch so a webhook replay never
-		// accumulates duplicates. Shopify's order webhook doesn't carry a product
-		// image, so product_image_url is left null for real orders.
 		if err := q.DeleteLineItemsForOrder(ctx, order.ID); err != nil {
 			return err
 		}
@@ -113,10 +130,6 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 			}
 		}
 
-		// Stage 2 handoff: schedule job creation in the same transaction as the
-		// order/line-items write, so sync never commits while silently failing to
-		// schedule it. Skipped (not failed) when the production queue isn't wired
-		// up - order sync still works standalone, same as EnablePipeline.
 		if s.jobEnqueuer != nil {
 			if err := s.jobEnqueuer.EnqueueTx(ctx, tx, production.CreateJobsArgs{OrderID: order.ID}); err != nil {
 				return err
@@ -124,12 +137,7 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 		}
 		return nil
 	})
-	if err != nil {
-		obs.FromContext(ctx).Error("shopify order webhook import failed", "error", err)
-		detail(c, http.StatusInternalServerError, "Could not import the order.")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return order, err
 }
 
 // --- Shopify order payload + line-item mapping --------------------------------
