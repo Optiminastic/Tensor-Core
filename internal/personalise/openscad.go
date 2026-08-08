@@ -12,29 +12,52 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
-// DefaultFont is a font guaranteed to exist in the runtime (fonts-dejavu-core in
-// the slice-worker image); the brand's Mona Sans can be installed server-side
-// later without touching this code.
-const DefaultFont = "DejaVu Sans"
+// DefaultFont / DefaultStyle are guaranteed to exist in the runtime. Liberation
+// ships with OpenSCAD on every platform and the API image also installs DejaVu and
+// FreeFont, so every family in AllowedFonts renders both in dev and in production.
+const (
+	DefaultFont  = "Liberation Sans"
+	DefaultStyle = "Regular"
+)
+
+// AllowedFonts is the font families the editor may pick. Kept to families that are
+// installed in the API image (fonts-liberation, fonts-dejavu, fonts-freefont-ttf)
+// AND bundled with OpenSCAD, so the choice is honoured everywhere. Membership is an
+// allowlist, so the family can be interpolated into the script safely.
+var AllowedFonts = []string{
+	"Liberation Sans",
+	"Liberation Serif",
+	"Liberation Mono",
+	"DejaVu Sans",
+	"DejaVu Serif",
+	"FreeSans",
+	"FreeSerif",
+}
+
+// AllowedStyles is the weight/slant options. Values are OpenSCAD ":style=" names.
+var AllowedStyles = []string{"Regular", "Bold", "Italic", "Bold Italic"}
 
 // Spec is one personalisation label to render. Text is the customer's free input;
 // it is passed to OpenSCAD via -D (never interpolated into the script) so it can
-// never break out into OpenSCAD code.
+// never break out into OpenSCAD code. Font and Style are allowlisted.
 type Spec struct {
 	Text    string
 	Font    string
+	Style   string
 	SizeMM  float64
 	DepthMM float64
 }
 
-// normalised returns the spec with sane, bounded values and a safe font family.
+// normalised returns the spec with sane, bounded values and an allowlisted font.
 func (s Spec) normalised() Spec {
 	out := s
 	out.Text = strings.TrimSpace(s.Text)
 	out.Font = safeFont(s.Font)
+	out.Style = safeStyle(s.Style)
 	if out.SizeMM <= 0 {
 		out.SizeMM = 10
 	}
@@ -44,33 +67,41 @@ func (s Spec) normalised() Spec {
 	return out
 }
 
-// safeFont keeps only characters valid in a font-family name so the value can be
-// interpolated into the script without escaping worries; falls back to the default.
+// safeFont returns the family only if it is in AllowedFonts, else the default.
 func safeFont(font string) string {
-	f := strings.TrimSpace(font)
-	if f == "" {
-		return DefaultFont
+	if f := strings.TrimSpace(font); slices.Contains(AllowedFonts, f) {
+		return f
 	}
-	for _, r := range f {
-		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == ' ' || r == '-' || r == '_'
-		if !ok {
-			return DefaultFont
-		}
-	}
-	return f
+	return DefaultFont
 }
 
-// buildScad returns the OpenSCAD program. Size/depth/font are baked in (they are
-// numbers and a validated font name); `name` is a placeholder overridden at run
-// time by -D, so the untrusted text never appears in the script source. Pure.
+// safeStyle returns the style only if it is in AllowedStyles, else the default.
+func safeStyle(style string) string {
+	if s := strings.TrimSpace(style); slices.Contains(AllowedStyles, s) {
+		return s
+	}
+	return DefaultStyle
+}
+
+// openscadFont builds the OpenSCAD font string from the allowlisted family and
+// style, e.g. "Liberation Sans:style=Bold". A Regular style needs no suffix.
+func (s Spec) openscadFont() string {
+	if s.Style == "" || s.Style == DefaultStyle {
+		return s.Font
+	}
+	return s.Font + ":style=" + s.Style
+}
+
+// buildScad returns the OpenSCAD program. Size/depth/font are baked in (numbers and
+// an allowlisted font); `name` is a placeholder overridden at run time by -D, so
+// the untrusted text never appears in the script source. Pure.
 func buildScad(s Spec) string {
 	s = s.normalised()
 	return fmt.Sprintf(
 		"name = \"PREVIEW\";\n"+
 			"linear_extrude(height = %.4f)\n"+
 			"  text(name, size = %.4f, font = \"%s\", halign = \"center\", valign = \"center\");\n",
-		s.DepthMM, s.SizeMM, s.Font,
+		s.DepthMM, s.SizeMM, s.openscadFont(),
 	)
 }
 

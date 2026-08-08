@@ -32,7 +32,7 @@ func TestBuildScadDefaultsAndSafeFont(t *testing.T) {
 	if !strings.Contains(got, "size = 10.0000") || !strings.Contains(got, "linear_extrude(height = 1.0000)") {
 		t.Errorf("defaults not applied:\n%s", got)
 	}
-	if !strings.Contains(got, `font = "DejaVu Sans"`) {
+	if !strings.Contains(got, `font = "Liberation Sans"`) {
 		t.Errorf("unsafe font not rejected:\n%s", got)
 	}
 	if strings.Contains(got, "cube(99)") {

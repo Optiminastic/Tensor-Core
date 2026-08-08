@@ -49,6 +49,31 @@ func (q *Queries) CountJobsInBatch(ctx context.Context, batchID *uuid.UUID) (int
 	return count, err
 }
 
+const getDesignSalesSummary = `-- name: GetDesignSalesSummary :one
+SELECT
+    count(*)::int AS units_ordered,
+    count(*) FILTER (WHERE status = 'completed')::int AS units_completed,
+    count(*) FILTER (WHERE status = 'failed')::int AS units_failed
+FROM production_jobs
+WHERE sku = $1
+`
+
+type GetDesignSalesSummaryRow struct {
+	UnitsOrdered   int32
+	UnitsCompleted int32
+	UnitsFailed    int32
+}
+
+// Units for a catalog SKU across the production pipeline: each production job is
+// one ordered unit, with a completed / failed breakdown. Empty (all zero) when the
+// SKU has no jobs yet.
+func (q *Queries) GetDesignSalesSummary(ctx context.Context, sku *string) (GetDesignSalesSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getDesignSalesSummary, sku)
+	var i GetDesignSalesSummaryRow
+	err := row.Scan(&i.UnitsOrdered, &i.UnitsCompleted, &i.UnitsFailed)
+	return i, err
+}
+
 const getProductionJobByID = `-- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,

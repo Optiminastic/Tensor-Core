@@ -27,6 +27,7 @@ import (
 type personalisationSpec struct {
 	Text        string  `json:"text"`
 	Font        string  `json:"font"`
+	Style       string  `json:"font_style"`
 	SizeMM      float64 `json:"size_mm"`
 	DepthMM     float64 `json:"depth_mm"`
 	OffsetXMM   float64 `json:"offset_x_mm"`
@@ -52,6 +53,7 @@ func (p personalisationSpec) normalise() personalisationSpec {
 	out := p
 	out.Text = strings.TrimSpace(p.Text)
 	out.Font = strings.TrimSpace(p.Font)
+	out.Style = strings.TrimSpace(p.Style)
 	out.SizeMM = clampFloat(p.SizeMM, minPersonaliseSizeMM, maxPersonaliseSizeMM)
 	if out.DepthMM == 0 {
 		out.DepthMM = 1
@@ -102,6 +104,7 @@ func (s *Server) downloadPersonaliseText(c *gin.Context) {
 	spec := personalise.Spec{
 		Text:    strings.TrimSpace(c.Query("text")),
 		Font:    c.Query("font"),
+		Style:   c.Query("font_style"),
 		SizeMM:  queryFloat(c, "size_mm", 10),
 		DepthMM: queryFloat(c, "depth_mm", 1),
 	}
@@ -140,7 +143,7 @@ func (s *Server) ensureTextModel(ctx context.Context, id uuid.UUID, spec persona
 // textModelKey is the deterministic cache key for one design's extruded text mesh,
 // derived from the exact text spec so a repeated request hits the cache.
 func textModelKey(id uuid.UUID, spec personalise.Spec) string {
-	sig := fmt.Sprintf("%s|%s|%.3f|%.3f", strings.TrimSpace(spec.Text), spec.Font, spec.SizeMM, spec.DepthMM)
+	sig := fmt.Sprintf("%s|%s|%s|%.3f|%.3f", strings.TrimSpace(spec.Text), spec.Font, spec.Style, spec.SizeMM, spec.DepthMM)
 	sum := sha256.Sum256([]byte(sig))
 	return fmt.Sprintf("designs/%s/text-%s.stl", id, hex.EncodeToString(sum[:8]))
 }
@@ -222,7 +225,7 @@ func (s *Server) bakePersonalisation(
 	defer cancel()
 
 	pKey, err := s.ensurePersonalisedModel(ctx, d.StlKey, personalise.Spec{
-		Text: spec.Text, Font: spec.Font, SizeMM: spec.SizeMM, DepthMM: spec.DepthMM,
+		Text: spec.Text, Font: spec.Font, Style: spec.Style, SizeMM: spec.SizeMM, DepthMM: spec.DepthMM,
 	}, textPlacement{OffsetXMM: spec.OffsetXMM, OffsetYMM: spec.OffsetYMM, RotationDeg: spec.RotationDeg})
 	if err != nil {
 		detail(c, http.StatusUnprocessableEntity, "Could not render the personalised model. Check the name and try again.")

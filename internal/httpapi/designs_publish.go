@@ -6,6 +6,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/orientation"
 )
 
 const (
@@ -41,7 +43,8 @@ type publishForm struct {
 	SEOTitle       string
 	SEODescription string
 	SKU            string
-	WeightGrams    float64
+	// Weight and dimensions are NOT here: they are physical facts Tensor derives
+	// from the slice (printed weight) and the model (bounding box), never typed.
 }
 
 type publishResponse struct {
@@ -145,6 +148,16 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 	}
 
 	metrics, metricsErr := s.store.Q.GetLatestMetricsForDesign(ctx, id)
+	// Weight and dimensions come from Tensor, never from a typed field: the printed
+	// weight is the slice's filament grams, and the dimensions are the model's
+	// bounding box. Both are best-effort - a missing slice or unreadable model just
+	// omits them rather than blocking the publish.
+	weightGrams := 0.0
+	if metricsErr == nil {
+		weightGrams = metrics.FilamentG
+	}
+	metafields := buildMetafields(design, pricing, metrics, metricsErr == nil)
+	metafields = append(metafields, s.dimensionMetafields(ctx, design.StlKey)...)
 	draft := shopify.ProductDraft{
 		Title:           form.Title,
 		Vendor:          s.vendorFor(ctx, form.Vendor, design.BrandSlug),
@@ -155,8 +168,8 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 		SEOTitle:        form.SEOTitle,
 		SEODescription:  form.SEODescription,
 		SKU:             skuToPublish,
-		WeightGrams:     form.WeightGrams,
-		Metafields:      buildMetafields(design, pricing, metrics, metricsErr == nil),
+		WeightGrams:     weightGrams,
+		Metafields:      metafields,
 		Images:          images,
 	}
 
@@ -169,9 +182,9 @@ func (s *Server) publishDesignToShopify(c *gin.Context) {
 
 	// Set the price, SKU and weight on the (new or reused) variant. Idempotent, so
 	// a retry is safe.
-	if ref.VariantGID != "" && (price > 0 || skuToPublish != "" || form.WeightGrams > 0) {
+	if ref.VariantGID != "" && (price > 0 || skuToPublish != "" || weightGrams > 0) {
 		if err := s.shopify.SetVariant(ctx, shop, token, ref.GID, ref.VariantGID, shopify.VariantDetails{
-			PriceINR: price, SKU: skuToPublish, WeightGrams: form.WeightGrams,
+			PriceINR: price, SKU: skuToPublish, WeightGrams: weightGrams,
 		}); err != nil {
 			// Product exists and is recorded; the design stays "approved" and a
 			// retry will reuse it. Shopify-side failure.
@@ -236,15 +249,6 @@ func parsePublishForm(c *gin.Context) (publishForm, []shopify.ProductImage, bool
 		}
 		form.Price = &n
 	}
-	if raw := strings.TrimSpace(c.PostForm("weight_grams")); raw != "" {
-		w, err := strconv.ParseFloat(raw, 64)
-		if err != nil || w < 0 {
-			detail(c, http.StatusUnprocessableEntity, "Weight must be zero or a positive number.")
-			return publishForm{}, nil, false
-		}
-		form.WeightGrams = w
-	}
-
 	images, ok := readPublishImages(c)
 	if !ok {
 		return publishForm{}, nil, false
@@ -420,6 +424,37 @@ func (s *Server) vendorFor(ctx context.Context, requested, brandSlug string) str
 		return brand.Name
 	}
 	return brandSlug
+}
+
+// dimensionMetafields loads the design's model and returns its bounding-box size
+// (mm) as "tensor" metafields, so the product's real dimensions come from Tensor
+// rather than being typed. Best-effort: no storage, a non-STL model, or any read
+// error returns nil so a publish never fails over dimensions.
+func (s *Server) dimensionMetafields(ctx context.Context, stlKey string) []shopify.Metafield {
+	if s.storage == nil || stlKey == "" || strings.ToLower(filepath.Ext(stlKey)) != ".stl" {
+		return nil
+	}
+	obj, err := s.storage.Get(ctx, stlKey)
+	if err != nil {
+		return nil
+	}
+	data, err := io.ReadAll(obj.Body)
+	_ = obj.Body.Close()
+	if err != nil {
+		return nil
+	}
+	mesh, err := orientation.LoadSTL(data)
+	if err != nil {
+		return nil
+	}
+	dim := func(key string, v float64) shopify.Metafield {
+		return shopify.Metafield{Namespace: "tensor", Key: key, Type: "number_decimal", Value: fmt.Sprintf("%.2f", v)}
+	}
+	return []shopify.Metafield{
+		dim("dim_x_mm", mesh.Max.X-mesh.Min.X),
+		dim("dim_y_mm", mesh.Max.Y-mesh.Min.Y),
+		dim("dim_z_mm", mesh.Max.Z-mesh.Min.Z),
+	}
 }
 
 // buildMetafields attaches the costing facts as "tensor" metafields so the

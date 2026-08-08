@@ -180,3 +180,14 @@ INSERT INTO production_job_failures (
 RETURNING id, job_id, stage, reason, notes,
           filament_wasted_grams, time_wasted_minutes,
           created_by, created_at;
+
+-- name: GetDesignSalesSummary :one
+-- Units for a catalog SKU across the production pipeline: each production job is
+-- one ordered unit, with a completed / failed breakdown. Empty (all zero) when the
+-- SKU has no jobs yet.
+SELECT
+    count(*)::int AS units_ordered,
+    count(*) FILTER (WHERE status = 'completed')::int AS units_completed,
+    count(*) FILTER (WHERE status = 'failed')::int AS units_failed
+FROM production_jobs
+WHERE sku = $1;

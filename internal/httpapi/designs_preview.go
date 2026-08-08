@@ -109,6 +109,7 @@ func (s *Server) downloadPersonalisePreview(c *gin.Context) {
 	spec := personalise.Spec{
 		Text:    strings.TrimSpace(c.Query("text")),
 		Font:    c.Query("font"),
+		Style:   c.Query("font_style"),
 		SizeMM:  queryFloat(c, "size_mm", 10),
 		DepthMM: queryFloat(c, "depth_mm", 1),
 	}
@@ -203,8 +204,8 @@ func (s *Server) ensurePersonalisedModel(
 // key plus a short hash of the exact spec and placement, so identical requests hit
 // the cache and different names/placements never collide.
 func personalisedKey(srcKey string, spec personalise.Spec, place textPlacement) string {
-	sig := fmt.Sprintf("%s|%s|%.3f|%.3f|%.3f|%.3f|%.3f",
-		spec.Text, spec.Font, spec.SizeMM, spec.DepthMM,
+	sig := fmt.Sprintf("%s|%s|%s|%.3f|%.3f|%.3f|%.3f|%.3f",
+		spec.Text, spec.Font, spec.Style, spec.SizeMM, spec.DepthMM,
 		place.OffsetXMM, place.OffsetYMM, place.RotationDeg)
 	sum := sha256.Sum256([]byte(sig))
 	return srcKey + ".p-" + hex.EncodeToString(sum[:8]) + ".stl"

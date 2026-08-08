@@ -186,6 +186,7 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.GET("/personalise-text", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonaliseText)
 	id.PATCH("/personalisation", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignPersonalisation)
 	id.POST("/optimize", s.guards.RequirePermission(auth.DesignRead.Key()), s.optimizeDesign)
+	id.GET("/performance", s.guards.RequirePermission(auth.DesignRead.Key()), s.designPerformance)
 	id.GET("/report.pdf", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadDesignReport)
 	id.POST("/email-report", s.guards.RequirePermission(auth.DesignRead.Key()), s.emailDesignReport)
 	id.GET("/gcode", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadGcode)

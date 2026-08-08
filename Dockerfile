@@ -16,7 +16,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migr
 # export STL without an X server.
 FROM debian:12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openscad ca-certificates fonts-dejavu-core \
+      openscad ca-certificates \
+      fonts-liberation fonts-dejavu fonts-freefont-ttf \
     && rm -rf /var/lib/apt/lists/*
 ENV QT_QPA_PLATFORM=offscreen OPENSCAD_BIN=openscad
 WORKDIR /app
