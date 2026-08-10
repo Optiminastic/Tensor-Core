@@ -790,6 +790,51 @@ func (q *Queries) NextDesignSkuSeq(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
+const setDesignAttributes = `-- name: SetDesignAttributes :exec
+UPDATE designs SET attributes = $1, updated_at = now()
+WHERE id = $2
+`
+
+type SetDesignAttributesParams struct {
+	Attributes []byte
+	ID         uuid.UUID
+}
+
+func (q *Queries) SetDesignAttributes(ctx context.Context, arg SetDesignAttributesParams) error {
+	_, err := q.db.Exec(ctx, setDesignAttributes, arg.Attributes, arg.ID)
+	return err
+}
+
+const setDesignName = `-- name: SetDesignName :exec
+UPDATE designs SET name = $1, updated_at = now()
+WHERE id = $2
+`
+
+type SetDesignNameParams struct {
+	Name string
+	ID   uuid.UUID
+}
+
+func (q *Queries) SetDesignName(ctx context.Context, arg SetDesignNameParams) error {
+	_, err := q.db.Exec(ctx, setDesignName, arg.Name, arg.ID)
+	return err
+}
+
+const setDesignNotes = `-- name: SetDesignNotes :exec
+UPDATE designs SET notes = $1, updated_at = now()
+WHERE id = $2
+`
+
+type SetDesignNotesParams struct {
+	Notes *string
+	ID    uuid.UUID
+}
+
+func (q *Queries) SetDesignNotes(ctx context.Context, arg SetDesignNotesParams) error {
+	_, err := q.db.Exec(ctx, setDesignNotes, arg.Notes, arg.ID)
+	return err
+}
+
 const setDesignPersonalisation = `-- name: SetDesignPersonalisation :one
 UPDATE designs
 SET personalisation = $1,
@@ -927,6 +972,21 @@ func (q *Queries) SetDesignPersonalisationRules(ctx context.Context, arg SetDesi
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const setDesignPreviewKey = `-- name: SetDesignPreviewKey :exec
+UPDATE designs SET preview_key = $1, updated_at = now()
+WHERE id = $2
+`
+
+type SetDesignPreviewKeyParams struct {
+	PreviewKey string
+	ID         uuid.UUID
+}
+
+func (q *Queries) SetDesignPreviewKey(ctx context.Context, arg SetDesignPreviewKeyParams) error {
+	_, err := q.db.Exec(ctx, setDesignPreviewKey, arg.PreviewKey, arg.ID)
+	return err
 }
 
 const setDesignSku = `-- name: SetDesignSku :one

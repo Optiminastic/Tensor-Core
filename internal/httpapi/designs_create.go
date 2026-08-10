@@ -1,14 +1,18 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -18,6 +22,14 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 )
+
+// shopifyAttrKeys are the optional Shopify link + price-snapshot fields the import
+// flow attaches to a design's attributes jsonb, so the design detail can show a
+// cost-vs-listing-price comparison. Free-form strings; the frontend re-validates.
+var shopifyAttrKeys = []string{
+	"shopify_product_gid", "shopify_handle", "shopify_admin_url",
+	"shopify_min_price", "shopify_max_price", "shopify_currency",
+}
 
 // maxUploadBytes caps an STL upload. Real parts slice well under this; the cap
 // keeps a runaway file from filling storage.
@@ -87,19 +99,15 @@ func (s *Server) createDesign(c *gin.Context) {
 	if !ok {
 		return
 	}
-	previewHeader, previewExt, ok := parsePreview(c)
-	if !ok {
-		return
-	}
 
 	user, _ := auth.UserFrom(c)
 	designID := uuid.New()
 	stlKey := fmt.Sprintf("designs/%s/model%s", designID, ext)
-	previewKey := fmt.Sprintf("designs/%s/preview%s", designID, previewExt)
 	if !s.uploadModel(c, stlKey, fileHeader) {
 		return
 	}
-	if !s.uploadModel(c, previewKey, previewHeader) {
+	previewKey, ok := s.resolveAndStorePreview(c, designID)
+	if !ok {
 		return
 	}
 
@@ -205,6 +213,13 @@ func parseAttributes(c *gin.Context) []byte {
 	if len(addOns) > 0 {
 		attrs["add_ons"] = addOns
 	}
+	// Shopify import snapshot: the source product id + a price snapshot, so the
+	// design detail can compare true cost against the live listing price.
+	for _, key := range shopifyAttrKeys {
+		if v := strings.TrimSpace(c.PostForm(key)); v != "" {
+			attrs[key] = v
+		}
+	}
 	if len(attrs) == 0 {
 		return nil
 	}
@@ -265,28 +280,122 @@ func validateModelFile(c *gin.Context, fh *multipart.FileHeader) (string, bool) 
 	return ext, true
 }
 
-// parsePreview reads and validates the required cover image, returning its header
-// and lower-cased extension.
-func parsePreview(c *gin.Context) (*multipart.FileHeader, string, bool) {
-	fh, err := c.FormFile("preview")
+// resolveAndStorePreview stores the design's cover image and returns its storage
+// key. An uploaded "preview" file wins; failing that, a "preview_url" (the Shopify
+// import flow, pointing at the product's own photo) is fetched server-side. A
+// request with neither still 422s - a preview is always required.
+func (s *Server) resolveAndStorePreview(c *gin.Context, designID uuid.UUID) (string, bool) {
+	if fh, err := c.FormFile("preview"); err == nil {
+		ext := strings.ToLower(filepath.Ext(fh.Filename))
+		if !allowedImageExt[ext] {
+			detail(c, http.StatusUnprocessableEntity, "The preview must be a PNG, JPG, WEBP or GIF image.")
+			return "", false
+		}
+		if fh.Size <= 0 {
+			detail(c, http.StatusUnprocessableEntity, "The preview image is empty.")
+			return "", false
+		}
+		if fh.Size > maxPreviewBytes {
+			detail(c, http.StatusRequestEntityTooLarge, "The preview image is larger than the 10 MB limit.")
+			return "", false
+		}
+		key := fmt.Sprintf("designs/%s/preview%s", designID, ext)
+		if !s.uploadModel(c, key, fh) {
+			return "", false
+		}
+		return key, true
+	}
+
+	if rawURL := strings.TrimSpace(c.PostForm("preview_url")); rawURL != "" {
+		data, ext, err := fetchPreviewFromURL(c.Request.Context(), rawURL)
+		if err != nil {
+			detail(c, http.StatusUnprocessableEntity, err.Error())
+			return "", false
+		}
+		key := fmt.Sprintf("designs/%s/preview%s", designID, ext)
+		if !s.putPreviewBytes(c, key, data) {
+			return "", false
+		}
+		return key, true
+	}
+
+	detail(c, http.StatusUnprocessableEntity, "A preview image is required.")
+	return "", false
+}
+
+// putPreviewBytes stores fetched preview bytes at key.
+func (s *Server) putPreviewBytes(c *gin.Context, key string, data []byte) bool {
+	if err := s.storage.Put(c.Request.Context(), key, bytes.NewReader(data),
+		int64(len(data)), "application/octet-stream"); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not store the preview image.")
+		return false
+	}
+	return true
+}
+
+// fetchPreviewFromURL downloads a Shopify product image to use as the design
+// cover. It is deliberately narrow to avoid SSRF: only https URLs on a Shopify
+// host (the URL only ever comes from our own catalog's image_url), an image
+// content-type, and a 10 MB cap.
+func fetchPreviewFromURL(ctx context.Context, rawURL string) ([]byte, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || !isShopifyImageHost(u.Hostname()) {
+		return nil, "", fmt.Errorf("the preview URL must be an https Shopify image URL")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		detail(c, http.StatusUnprocessableEntity, "A preview image is required.")
-		return nil, "", false
+		return nil, "", fmt.Errorf("could not fetch the preview image")
 	}
-	ext := strings.ToLower(filepath.Ext(fh.Filename))
-	if !allowedImageExt[ext] {
-		detail(c, http.StatusUnprocessableEntity, "The preview must be a PNG, JPG, WEBP or GIF image.")
-		return nil, "", false
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("could not fetch the preview image")
 	}
-	if fh.Size <= 0 {
-		detail(c, http.StatusUnprocessableEntity, "The preview image is empty.")
-		return nil, "", false
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("could not fetch the preview image (%d)", resp.StatusCode)
 	}
-	if fh.Size > maxPreviewBytes {
-		detail(c, http.StatusRequestEntityTooLarge, "The preview image is larger than the 10 MB limit.")
-		return nil, "", false
+	ext, ok := imageExtForContentType(resp.Header.Get("Content-Type"))
+	if !ok {
+		return nil, "", fmt.Errorf("the preview URL is not an image")
 	}
-	return fh, ext, true
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxPreviewBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("could not read the preview image")
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("the preview image is empty")
+	}
+	if int64(len(data)) > maxPreviewBytes {
+		return nil, "", fmt.Errorf("the preview image is larger than the 10 MB limit")
+	}
+	return data, ext, nil
+}
+
+// isShopifyImageHost allows only Shopify-owned image hosts.
+func isShopifyImageHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "cdn.shopify.com" ||
+		strings.HasSuffix(host, ".shopify.com") ||
+		strings.HasSuffix(host, ".shopifycdn.com")
+}
+
+// imageExtForContentType maps an image content-type to a stored file extension.
+func imageExtForContentType(ct string) (string, bool) {
+	base := strings.ToLower(strings.TrimSpace(strings.Split(ct, ";")[0]))
+	switch base {
+	case "image/png":
+		return ".png", true
+	case "image/jpeg", "image/jpg":
+		return ".jpg", true
+	case "image/webp":
+		return ".webp", true
+	case "image/gif":
+		return ".gif", true
+	default:
+		return "", false
+	}
 }
 
 // uploadModel streams the upload straight to object storage.

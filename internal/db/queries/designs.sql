@@ -85,6 +85,22 @@ LIMIT sqlc.arg('page_limit');
 UPDATE designs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');
 
+-- name: SetDesignName :exec
+UPDATE designs SET name = sqlc.arg('name'), updated_at = now()
+WHERE id = sqlc.arg('id');
+
+-- name: SetDesignNotes :exec
+UPDATE designs SET notes = sqlc.narg('notes'), updated_at = now()
+WHERE id = sqlc.arg('id');
+
+-- name: SetDesignAttributes :exec
+UPDATE designs SET attributes = sqlc.narg('attributes'), updated_at = now()
+WHERE id = sqlc.arg('id');
+
+-- name: SetDesignPreviewKey :exec
+UPDATE designs SET preview_key = sqlc.arg('preview_key'), updated_at = now()
+WHERE id = sqlc.arg('id');
+
 -- name: InsertDesignReview :one
 INSERT INTO design_reviews (id, design_id, author_id, kind, body)
 VALUES (sqlc.arg('id'), sqlc.arg('design_id'), sqlc.arg('author_id'), sqlc.arg('kind'), sqlc.narg('body'))

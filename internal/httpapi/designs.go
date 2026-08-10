@@ -204,6 +204,10 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.GET("/shopify-product", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.getShopifyProductState)
 	id.PATCH("/shopify-product", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.editShopifyProduct)
 	id.PATCH("/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
+	id.PATCH("/name", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.renameDesign)
+	id.PATCH("/notes", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignNotes)
+	id.PATCH("/attributes", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignAttributes)
+	id.PATCH("/preview", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.replaceDesignPreview)
 	id.PATCH("/personalisation-rules",
 		s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignPersonalisationRules)
 	id.POST("/personalisation-estimate",

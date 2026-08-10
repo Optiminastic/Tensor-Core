@@ -63,3 +63,32 @@ func (s *Server) setDesignSku(c *gin.Context) {
 		row.Material, row.Colour, row.Finish, row.UnitsPerBed, row.Quality, row.InfillPct,
 		row.PreviewKey, row.Sku, row.CreatedAt, row.UpdatedAt))
 }
+
+// renameRequest is the PATCH /designs/:id/name body.
+type renameRequest struct {
+	Name string `json:"name"`
+}
+
+// renameDesign changes a design's display name. Guarded by design:update; the
+// /:id brand-access gate already 404s a design the caller cannot reach.
+func (s *Server) renameDesign(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req renameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		detail(c, http.StatusUnprocessableEntity, "A JSON body with a 'name' field is required.")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len([]rune(name)) > 160 {
+		detail(c, http.StatusUnprocessableEntity, "Name must be 1 to 160 characters.")
+		return
+	}
+	if err := s.store.Q.SetDesignName(c.Request.Context(), gen.SetDesignNameParams{ID: id, Name: name}); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not rename the design.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id.String(), "name": name})
+}
