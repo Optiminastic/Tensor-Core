@@ -46,9 +46,12 @@ internal/
              orientation's loaders to merge placed jobs into one plate
   secretbox/ AES-256-GCM seal/open for Shopify access tokens at rest (pure)
   storage/   S3/MinIO client (STL in, G-code out) - Put/Get/Download/Upload
-  integrations/shopify/  Admin GraphQL client. client.go publishes an approved design;
-             oauth.go is the inbound order-import side: OAuth authorize/callback HMAC,
-             code exchange, orders/paid webhook register/delete
+  integrations/shopify/  Admin GraphQL client. client.go publishes an approved design
+             and reads/updates an existing one (GetProduct/UpdateProduct); media.go
+             stages image uploads + add/delete product media; inventory.go resolves the
+             primary location and sets stock quantities; oauth.go is the inbound
+             order-import side: OAuth authorize/callback HMAC, code exchange, orders/paid
+             webhook register/delete
   auth/      jwt.go (verify against JWKS, EdDSA), catalog.go (permissions + grants),
              service.go (ResolveUserAuthz, BumpPermissionsVersion), invites.go,
              seed.go (sync catalog into DB), middleware.go (Gin guards), models.go
@@ -57,6 +60,13 @@ internal/
              lifecycle queued->slicing->priced->submitted->approved->published, with
              changes_requested on send-back. Approve is decoupled from publish
              (publish requires an approved design), guarded by design:submit/approve/reject.
+             designs_publish.go creates the Shopify DRAFT product; designs_shopify_edit.go
+             edits an already-published listing in place (GET/PATCH
+             /designs/:id/shopify-product, multipart: reads the live product to prefill,
+             then pushes title/description/tags/type/vendor/SEO/status via productUpdate,
+             price via productVariantsBulkUpdate, images via productCreateMedia/
+             productDeleteMedia, and stock via inventorySetQuantities; the design's
+             lifecycle status is untouched), guarded by shopify:publish.
              production pipeline: orders.go, production_jobs.go, production_qc.go
              (assembly/qc/packaging), files.go, batches.go, filament.go,
              machines_ops.go, dispatch.go, shopify_oauth.go (store connect),

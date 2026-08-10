@@ -80,6 +80,71 @@ func (c *Client) uploadImages(ctx context.Context, shop, token string, images []
 	return resources, nil
 }
 
+const productCreateMediaMutation = `mutation AddProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+  productCreateMedia(productId: $productId, media: $media) {
+    media { id }
+    mediaUserErrors { field message }
+  }
+}`
+
+// AddProductMedia stages and attaches new images to an existing product. An empty
+// input is a no-op. Shopify processes images asynchronously, so the call returns
+// once they are accepted, not once they finish processing.
+func (c *Client) AddProductMedia(ctx context.Context, shop, token, productGID string, images []ProductImage) error {
+	if len(images) == 0 {
+		return nil
+	}
+	media, err := c.buildMedia(ctx, shop, token, images)
+	if err != nil {
+		return err
+	}
+	var out struct {
+		Data struct {
+			ProductCreateMedia struct {
+				MediaUserErrors []userError `json:"mediaUserErrors"`
+			} `json:"productCreateMedia"`
+		} `json:"data"`
+	}
+	variables := map[string]any{"productId": productGID, "media": media}
+	if err := c.do(ctx, shop, token, productCreateMediaMutation, variables, &out); err != nil {
+		return err
+	}
+	if msg := firstUserError(out.Data.ProductCreateMedia.MediaUserErrors); msg != "" {
+		return apiErr("Shopify rejected the new images: %s", msg)
+	}
+	return nil
+}
+
+const productDeleteMediaMutation = `mutation DeleteProductMedia($productId: ID!, $mediaIds: [ID!]!) {
+  productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
+    deletedMediaIds
+    mediaUserErrors { field message }
+  }
+}`
+
+// DeleteProductMedia removes images from a product by their media ids. An empty
+// input is a no-op.
+func (c *Client) DeleteProductMedia(ctx context.Context, shop, token, productGID string, mediaIDs []string) error {
+	if len(mediaIDs) == 0 {
+		return nil
+	}
+	var out struct {
+		Data struct {
+			ProductDeleteMedia struct {
+				MediaUserErrors []userError `json:"mediaUserErrors"`
+			} `json:"productDeleteMedia"`
+		} `json:"data"`
+	}
+	variables := map[string]any{"productId": productGID, "mediaIds": mediaIDs}
+	if err := c.do(ctx, shop, token, productDeleteMediaMutation, variables, &out); err != nil {
+		return err
+	}
+	if msg := firstUserError(out.Data.ProductDeleteMedia.MediaUserErrors); msg != "" {
+		return apiErr("Shopify could not remove an image: %s", msg)
+	}
+	return nil
+}
+
 // postToTarget uploads one image's bytes to its staged target. Shopify's target
 // is an object store that requires the returned parameters as form fields, in
 // order, with the file field last.

@@ -82,6 +82,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerProjects(r)
 	s.registerBrands(r)
 	s.registerConnections(r)
+	s.registerShopifyCatalog(r)
 	s.registerDesigns(r)
 	s.registerFiles(r)
 	s.registerOrders(r)

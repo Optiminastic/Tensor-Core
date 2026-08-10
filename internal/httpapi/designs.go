@@ -199,6 +199,10 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.POST("/comments", s.guards.RequirePermission(auth.DesignRead.Key()), s.commentOnDesign)
 	id.GET("/reviews", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignReviews)
 	id.POST("/publish-shopify", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.publishDesignToShopify)
+	// Edit an already-published Shopify listing: GET reads the live product to
+	// prefill the form, PATCH pushes the merchant-facing edits (and price/status).
+	id.GET("/shopify-product", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.getShopifyProductState)
+	id.PATCH("/shopify-product", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.editShopifyProduct)
 	id.PATCH("/sku", s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignSku)
 	id.PATCH("/personalisation-rules",
 		s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignPersonalisationRules)

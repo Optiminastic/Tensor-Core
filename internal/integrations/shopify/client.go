@@ -126,11 +126,14 @@ func (c *Client) CreateProduct(ctx context.Context, shop, token string, draft Pr
 }
 
 // VariantDetails are the default variant's editable fields. Zero values are
-// omitted, so setting only a price leaves SKU and weight untouched.
+// omitted, so setting only a price leaves SKU and weight untouched. Tracked is a
+// pointer so "leave tracking as-is" (nil) is distinct from "turn it off" (false);
+// it is set true before an inventory-quantity edit so the quantity can apply.
 type VariantDetails struct {
 	PriceINR    int
 	SKU         string
 	WeightGrams float64
+	Tracked     *bool
 }
 
 // SetPrice sets the default variant's price. It is idempotent: setting the same
@@ -294,6 +297,9 @@ func (c *Client) setVariant(
 			"weight": map[string]any{"value": d.WeightGrams, "unit": "GRAMS"},
 		}
 	}
+	if d.Tracked != nil {
+		inventoryItem["tracked"] = *d.Tracked
+	}
 	if len(inventoryItem) > 0 {
 		variant["inventoryItem"] = inventoryItem
 	}
@@ -316,6 +322,193 @@ func (c *Client) setVariant(
 		return apiErr("Shopify rejected the variant details: %s", msg)
 	}
 	return nil
+}
+
+// ProductState is an already-published product read back from Shopify, used to
+// prefill an edit form so the merchant edits from the current live values rather
+// than from blank. Price is the default variant's price in whole INR.
+type ProductState struct {
+	GID              string
+	Handle           string
+	AdminURL         string
+	Title            string
+	DescriptionHTML  string
+	ProductType      string
+	Vendor           string
+	Tags             []string
+	Status           string // ACTIVE / DRAFT / ARCHIVED (Shopify's ProductStatus)
+	SEOTitle         string
+	SEODescription   string
+	VariantGID       string
+	PriceINR         int
+	SKU              string
+	Images           []MediaImage
+	InventoryItemGID string
+	InventoryQty     int
+}
+
+// MediaImage is one image already on the product, read so the edit UI can show
+// the current gallery and let the merchant remove images by their media id.
+type MediaImage struct {
+	GID string
+	URL string
+}
+
+// ProductEdit is the set of merchant-facing fields pushed to an existing product
+// via productUpdate. It never touches the variant price (that is a separate,
+// idempotent SetVariant call) nor the system-derived "tensor" metafields.
+type ProductEdit struct {
+	GID             string
+	Title           string
+	DescriptionHTML string
+	ProductType     string
+	Vendor          string
+	Tags            []string
+	Status          string // ACTIVE / DRAFT / ARCHIVED, or "" to leave unchanged
+	SEOTitle        string
+	SEODescription  string
+}
+
+const getProductQuery = `query GetProduct($id: ID!) {
+  product(id: $id) {
+    id handle title descriptionHtml productType vendor tags status
+    seo { title description }
+    media(first: 20) {
+      nodes { id mediaContentType ... on MediaImage { image { url } } }
+    }
+    variants(first: 1) {
+      nodes { id price sku inventoryQuantity inventoryItem { id } }
+    }
+  }
+}`
+
+// GetProduct reads the current state of a published product so the caller can
+// prefill an edit. shop is "<handle>.myshopify.com".
+func (c *Client) GetProduct(ctx context.Context, shop, token, productGID string) (ProductState, error) {
+	variables := map[string]any{"id": productGID}
+	var out struct {
+		Data struct {
+			Product *struct {
+				ID              string   `json:"id"`
+				Handle          string   `json:"handle"`
+				Title           string   `json:"title"`
+				DescriptionHTML string   `json:"descriptionHtml"`
+				ProductType     string   `json:"productType"`
+				Vendor          string   `json:"vendor"`
+				Tags            []string `json:"tags"`
+				Status          string   `json:"status"`
+				SEO             struct {
+					Title       string `json:"title"`
+					Description string `json:"description"`
+				} `json:"seo"`
+				Media struct {
+					Nodes []struct {
+						ID    string `json:"id"`
+						Image struct {
+							URL string `json:"url"`
+						} `json:"image"`
+					} `json:"nodes"`
+				} `json:"media"`
+				Variants struct {
+					Nodes []struct {
+						ID                string `json:"id"`
+						Price             string `json:"price"`
+						SKU               string `json:"sku"`
+						InventoryQuantity int    `json:"inventoryQuantity"`
+						InventoryItem     struct {
+							ID string `json:"id"`
+						} `json:"inventoryItem"`
+					} `json:"nodes"`
+				} `json:"variants"`
+			} `json:"product"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, shop, token, getProductQuery, variables, &out); err != nil {
+		return ProductState{}, err
+	}
+	p := out.Data.Product
+	if p == nil || p.ID == "" {
+		return ProductState{}, apiErr("that product no longer exists in Shopify")
+	}
+	state := ProductState{
+		GID: p.ID, Handle: p.Handle, AdminURL: adminURL(shop, p.ID),
+		Title: p.Title, DescriptionHTML: p.DescriptionHTML, ProductType: p.ProductType,
+		Vendor: p.Vendor, Tags: p.Tags, Status: p.Status,
+		SEOTitle: p.SEO.Title, SEODescription: p.SEO.Description,
+	}
+	for _, m := range p.Media.Nodes {
+		if m.Image.URL != "" {
+			state.Images = append(state.Images, MediaImage{GID: m.ID, URL: m.Image.URL})
+		}
+	}
+	if len(p.Variants.Nodes) > 0 {
+		v := p.Variants.Nodes[0]
+		state.VariantGID = v.ID
+		state.SKU = v.SKU
+		state.PriceINR = parsePriceINR(v.Price)
+		state.InventoryItemGID = v.InventoryItem.ID
+		state.InventoryQty = v.InventoryQuantity
+	}
+	return state, nil
+}
+
+const productUpdateMutation = `mutation UpdateProduct($product: ProductUpdateInput!) {
+  productUpdate(product: $product) {
+    product { id handle }
+    userErrors { field message }
+  }
+}`
+
+// UpdateProduct pushes edited merchant-facing fields to an existing product and
+// returns its ref. Empty string fields are still sent (a merchant may clear a
+// description or vendor); Status "" is omitted so it is left unchanged.
+func (c *Client) UpdateProduct(ctx context.Context, shop, token string, edit ProductEdit) (ProductRef, error) {
+	product := map[string]any{
+		"id":              edit.GID,
+		"title":           edit.Title,
+		"vendor":          edit.Vendor,
+		"productType":     edit.ProductType,
+		"tags":            edit.Tags,
+		"descriptionHtml": edit.DescriptionHTML,
+		"seo":             map[string]any{"title": edit.SEOTitle, "description": edit.SEODescription},
+	}
+	if edit.Status != "" {
+		product["status"] = edit.Status
+	}
+	variables := map[string]any{"product": product}
+
+	var out struct {
+		Data struct {
+			ProductUpdate struct {
+				Product struct {
+					ID     string `json:"id"`
+					Handle string `json:"handle"`
+				} `json:"product"`
+				UserErrors []userError `json:"userErrors"`
+			} `json:"productUpdate"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, shop, token, productUpdateMutation, variables, &out); err != nil {
+		return ProductRef{}, err
+	}
+	if msg := firstUserError(out.Data.ProductUpdate.UserErrors); msg != "" {
+		return ProductRef{}, apiErr("Shopify rejected the product update: %s", msg)
+	}
+	p := out.Data.ProductUpdate.Product
+	if p.ID == "" {
+		return ProductRef{}, apiErr("Shopify did not return the updated product")
+	}
+	return ProductRef{GID: p.ID, Handle: p.Handle, AdminURL: adminURL(shop, p.ID)}, nil
+}
+
+// parsePriceINR converts Shopify's decimal price string ("1234.00") to whole INR.
+// An unparseable value yields 0, so a read never fails over a price.
+func parsePriceINR(v string) int {
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || f <= 0 {
+		return 0
+	}
+	return int(f + 0.5)
 }
 
 type userError struct {
