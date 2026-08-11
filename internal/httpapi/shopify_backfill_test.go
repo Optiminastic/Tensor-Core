@@ -21,7 +21,7 @@ func TestToWebhookPayload(t *testing.T) {
 		},
 	}
 
-	payload := toWebhookPayload(summary)
+	payload := toOrderPayload(summary)
 
 	if payload.ID != 5001 || payload.Name != "#1001" || payload.FinancialStatus != "paid" {
 		t.Errorf("unexpected payload: %+v", payload)
@@ -42,7 +42,7 @@ func TestToWebhookPayload(t *testing.T) {
 }
 
 func TestToWebhookPayloadNoCustomer(t *testing.T) {
-	payload := toWebhookPayload(shopify.OrderSummary{ID: 5002, Name: "#1002", FinancialStatus: "pending"})
+	payload := toOrderPayload(shopify.OrderSummary{ID: 5002, Name: "#1002", FinancialStatus: "pending"})
 	if payload.Customer != nil {
 		t.Errorf("expected nil customer, got %+v", payload.Customer)
 	}

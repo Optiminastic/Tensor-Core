@@ -104,7 +104,6 @@ func (s *Server) Router() *gin.Engine {
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)
 	s.registerShopify(r)
-	s.registerWebhooks(r)
 	s.registerInternal(r)
 
 	return r

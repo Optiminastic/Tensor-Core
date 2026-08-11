@@ -37,12 +37,6 @@ func (s *Server) shopifyReady(c *gin.Context) bool {
 	return true
 }
 
-func (s *Server) callbackURL() string { return s.cfg.PublicBaseURL + "/webhooks/shopify/orders-paid" }
-
-func (s *Server) createCallbackURL() string {
-	return s.cfg.PublicBaseURL + "/webhooks/shopify/orders-create"
-}
-
 // shopifyAuthorize starts the order-import OAuth flow for one brand's
 // Integrations page. brand is carried through the signed state purely so the
 // callback can send the browser back to where it started -
@@ -131,23 +125,11 @@ func (s *Server) shopifyCallback(c *gin.Context) {
 		fail()
 		return
 	}
-	subID, err := s.shopify.RegisterOrdersPaidWebhook(ctx, shop, token, s.callbackURL())
-	if err != nil {
-		obs.FromContext(ctx).Error("shopify webhook registration failed", "error", err)
-		fail()
-		return
-	}
-	// Also registered, but its subscription id isn't persisted (the schema has
-	// one webhook_subscription_id column, sized for the original orders/paid
-	// integration) - a store disconnect won't auto-unregister this one from
-	// Shopify. ORDERS_CREATE is what catches a COD order, which may sit at
-	// financial_status "pending" indefinitely and would otherwise never fire
-	// ORDERS_PAID.
-	if _, err := s.shopify.RegisterOrdersCreateWebhook(ctx, shop, token, s.createCallbackURL()); err != nil {
-		obs.FromContext(ctx).Error("shopify orders/create webhook registration failed", "error", err)
-		fail()
-		return
-	}
+	// No webhook subscription is registered: orders are pulled from Shopify's
+	// API on demand ("Sync from Shopify") rather than pushed by Shopify, so
+	// webhook_subscription_id stays null on new connections. The disconnect
+	// path still deletes a subscription when one is present, which cleans up
+	// stores connected before the pull-only switch.
 	sealed, err := s.secrets.Seal(token)
 	if err != nil {
 		fail()
@@ -155,16 +137,16 @@ func (s *Server) shopifyCallback(c *gin.Context) {
 	}
 	conn, err := s.store.Q.InsertShopifyConnection(ctx, gen.InsertShopifyConnectionParams{
 		ID: uuid.New(), ShopDomain: shop, EncryptedAccessToken: sealed,
-		Scopes: nonEmptyPtr(scopes), WebhookSubscriptionID: nonEmptyPtr(subID),
+		Scopes: nonEmptyPtr(scopes), WebhookSubscriptionID: nil,
 	})
 	if err != nil {
 		obs.FromContext(ctx).Error("shopify connection insert failed", "error", err)
 		fail()
 		return
 	}
-	// Best-effort catch-up on orders placed before this connection existed -
-	// the webhooks just registered above only fire for events from now on.
-	s.backfillShopifyOrders(ctx, conn.ID, shop, token)
+	// Best-effort first pull so the store isn't empty on arrival. Every later
+	// import is an explicit "Sync from Shopify".
+	s.backfillShopifyOrders(ctx, &conn.ID, shop, token)
 	c.Redirect(http.StatusFound, s.shopifyIntegrationsURL(brand, "connected"))
 }
 

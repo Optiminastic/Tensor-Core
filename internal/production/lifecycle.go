@@ -92,6 +92,27 @@ const (
 var batchStatusTargets = set(BatchOpen, BatchInProgress, BatchCompleted)
 var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMaintenance)
 
+// TargetBedUtilisationPercent (planner.go) is the same "batch is full" cutoff
+// reused here for manually adding a job to an existing Draft batch - see
+// CompatibilityKey's doc comment for the narrower compatibility definition
+// this pairs with.
+
+// CompatibilityKey is a job's physical/slicing-profile signature - the "same
+// machine configuration" check used when manually adding a job to an
+// existing batch. Deliberately a narrower subset of planner.go's groupKey
+// (which also folds in supportUsed/infillBucket/priorityTier for batching
+// efficiency): those three are packing/scheduling heuristics, not machine
+// configuration, so a job is offered as compatible here even if it differs
+// on them. A plain comparable struct - build one from a job's already-loaded
+// fields and compare with ==.
+type CompatibilityKey struct {
+	Material      string
+	NozzleLeft    string
+	NozzleRight   string
+	QualityMM     string
+	MachineFamily string
+}
+
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.
 func ValidBatchStatusTarget(s string) bool { return batchStatusTargets[s] }
 

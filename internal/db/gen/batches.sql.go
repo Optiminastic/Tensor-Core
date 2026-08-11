@@ -450,3 +450,60 @@ func (q *Queries) UpdateBatch(ctx context.Context, arg UpdateBatchParams) (Batch
 	)
 	return i, err
 }
+
+const updateBatchDerivedMetrics = `-- name: UpdateBatchDerivedMetrics :one
+UPDATE batches SET
+    preview_file_id         = $1,
+    units_per_bed            = $2,
+    bed_utilization_percent = $3::float8,
+    total_filament_grams    = $4::float8,
+    updated_at               = now()
+WHERE id = $5
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, created_at, updated_at
+`
+
+type UpdateBatchDerivedMetricsParams struct {
+	PreviewFileID         *uuid.UUID
+	UnitsPerBed           *int32
+	BedUtilizationPercent *float64
+	TotalFilamentGrams    *float64
+	ID                    uuid.UUID
+}
+
+// Refreshes a Draft batch's computed snapshot fields after its job
+// membership changes (add/remove a job) - the same fields
+// cachePreview/buildMergedPlate already compute at creation time, just not
+// previously persisted outside creation/approval. All nullable so an
+// emptied-out batch (every job removed) clears back to unset rather than
+// keeping stale numbers.
+func (q *Queries) UpdateBatchDerivedMetrics(ctx context.Context, arg UpdateBatchDerivedMetricsParams) (Batch, error) {
+	row := q.db.QueryRow(ctx, updateBatchDerivedMetrics,
+		arg.PreviewFileID,
+		arg.UnitsPerBed,
+		arg.BedUtilizationPercent,
+		arg.TotalFilamentGrams,
+		arg.ID,
+	)
+	var i Batch
+	err := row.Scan(
+		&i.ID,
+		&i.BatchNumber,
+		&i.MachineID,
+		&i.Status,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.MaterialShortage,
+		&i.MergedFileID,
+		&i.PreviewFileID,
+		&i.UnitsPerBed,
+		&i.TotalPrintTimeMinutes,
+		&i.EffectiveTimePerUnitMinutes,
+		&i.TotalFilamentGrams,
+		&i.BedUtilizationPercent,
+		&i.PackingStrategy,
+		&i.FilamentReserved,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

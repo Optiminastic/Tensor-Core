@@ -226,6 +226,38 @@ WHERE batch_id IS NULL
 -- name: ListJobsForBatch :many
 SELECT * FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC;
 
+-- name: ListUnassignedCompatibleJobs :many
+-- Unassigned jobs sharing a reference job's physical/slicing-profile
+-- signature (material, both nozzle diameters, quality, machine family) -
+-- "same machine configuration" for manually adding a job to an existing
+-- Draft batch (see production.CompatibilityKey). Eligibility bar mirrors
+-- ListBatchableJobs (queued, no issue) plus the compatibility filter. IS NOT
+-- DISTINCT FROM (not =) so a null-vs-null field (e.g. a single-nozzle job's
+-- unused right nozzle) still counts as matching, same as the planner's own
+-- grouping key treats it.
+SELECT * FROM production_jobs
+WHERE batch_id IS NULL
+  AND status = 'queued'
+  AND quantity > 0
+  AND personalisation_status IN ('validated', 'not_required')
+  AND issue_reason IS NULL
+  AND material IS NOT DISTINCT FROM sqlc.narg('material')::text
+  AND left_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('left_nozzle_mm')::float8
+  AND right_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('right_nozzle_mm')::float8
+  AND quality_mm::float8 IS NOT DISTINCT FROM sqlc.narg('quality_mm')::float8
+  AND machine_family IS NOT DISTINCT FROM sqlc.narg('machine_family')::text
+ORDER BY created_at ASC, id ASC;
+
+-- name: RemoveJobFromBatch :one
+-- Detaches one job from its batch (Draft-only editing - enforced by the
+-- caller checking the batch's status before calling this). Scoped to
+-- batch_id = $2 as a safety check so a stale/wrong batch id in the request
+-- can't silently detach a job from a different batch than the URL named.
+-- Zero rows back (pgx.ErrNoRows) means the job isn't actually on that batch.
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE id = sqlc.arg('id') AND batch_id = sqlc.arg('batch_id')
+RETURNING *;
+
 -- name: CountJobsInBatch :one
 SELECT count(*) FROM production_jobs WHERE batch_id = $1;
 

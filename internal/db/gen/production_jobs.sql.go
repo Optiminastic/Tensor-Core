@@ -997,6 +997,204 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 	return items, nil
 }
 
+const listUnassignedCompatibleJobs = `-- name: ListUnassignedCompatibleJobs :many
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at FROM production_jobs
+WHERE batch_id IS NULL
+  AND status = 'queued'
+  AND quantity > 0
+  AND personalisation_status IN ('validated', 'not_required')
+  AND issue_reason IS NULL
+  AND material IS NOT DISTINCT FROM $1::text
+  AND left_nozzle_mm::float8 IS NOT DISTINCT FROM $2::float8
+  AND right_nozzle_mm::float8 IS NOT DISTINCT FROM $3::float8
+  AND quality_mm::float8 IS NOT DISTINCT FROM $4::float8
+  AND machine_family IS NOT DISTINCT FROM $5::text
+ORDER BY created_at ASC, id ASC
+`
+
+type ListUnassignedCompatibleJobsParams struct {
+	Material      *string
+	LeftNozzleMm  *float64
+	RightNozzleMm *float64
+	QualityMm     *float64
+	MachineFamily *string
+}
+
+// Unassigned jobs sharing a reference job's physical/slicing-profile
+// signature (material, both nozzle diameters, quality, machine family) -
+// "same machine configuration" for manually adding a job to an existing
+// Draft batch (see production.CompatibilityKey). Eligibility bar mirrors
+// ListBatchableJobs (queued, no issue) plus the compatibility filter. IS NOT
+// DISTINCT FROM (not =) so a null-vs-null field (e.g. a single-nozzle job's
+// unused right nozzle) still counts as matching, same as the planner's own
+// grouping key treats it.
+func (q *Queries) ListUnassignedCompatibleJobs(ctx context.Context, arg ListUnassignedCompatibleJobsParams) ([]ProductionJob, error) {
+	rows, err := q.db.Query(ctx, listUnassignedCompatibleJobs,
+		arg.Material,
+		arg.LeftNozzleMm,
+		arg.RightNozzleMm,
+		arg.QualityMm,
+		arg.MachineFamily,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductionJob{}
+	for rows.Next() {
+		var i ProductionJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const removeJobFromBatch = `-- name: RemoveJobFromBatch :one
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE id = $1 AND batch_id = $2
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+`
+
+type RemoveJobFromBatchParams struct {
+	ID      uuid.UUID
+	BatchID *uuid.UUID
+}
+
+// Detaches one job from its batch (Draft-only editing - enforced by the
+// caller checking the batch's status before calling this). Scoped to
+// batch_id = $2 as a safety check so a stale/wrong batch id in the request
+// can't silently detach a job from a different batch than the URL named.
+// Zero rows back (pgx.ErrNoRows) means the job isn't actually on that batch.
+func (q *Queries) RemoveJobFromBatch(ctx context.Context, arg RemoveJobFromBatchParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, removeJobFromBatch, arg.ID, arg.BatchID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const setProductionJobPrintFile = `-- name: SetProductionJobPrintFile :one
 UPDATE production_jobs SET print_file_id = $1, updated_at = now()
 WHERE id = $2

@@ -50,7 +50,7 @@ func setupStore(t *testing.T) *db.Store {
 		user_roles, role_permissions, permissions, roles, cost_assumption_sets,
 		material_profiles, machine_profiles,
 		orders, production_jobs, batches, filament_inventory, dispatch_orders,
-		file_assets, shopify_connections RESTART IDENTITY CASCADE`)
+		file_assets, shopify_connections, river_job RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

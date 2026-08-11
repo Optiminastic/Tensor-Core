@@ -122,6 +122,33 @@ func TestAllowedPatchFieldsByRole(t *testing.T) {
 	}
 }
 
+func TestCompatibilityKeyEquality(t *testing.T) {
+	base := CompatibilityKey{
+		Material: "PLA", NozzleLeft: "0.4", NozzleRight: "", QualityMM: "0.2", MachineFamily: "H2C",
+	}
+	same := base
+	if same != base {
+		t.Error("identical keys should be equal")
+	}
+
+	tests := []struct {
+		name  string
+		other CompatibilityKey
+	}{
+		{"different material", CompatibilityKey{Material: "PETG", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
+		{"different left nozzle", CompatibilityKey{Material: "PLA", NozzleLeft: "0.6", QualityMM: "0.2", MachineFamily: "H2C"}},
+		{"different quality", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.12", MachineFamily: "H2C"}},
+		{"different machine family", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2S"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if base == tc.other {
+				t.Errorf("keys should differ: %+v vs %+v", base, tc.other)
+			}
+		})
+	}
+}
+
 func TestStatusPatchTargetExcludesFailed(t *testing.T) {
 	if ValidStatusTarget(StatusFailed) {
 		t.Error("PATCH must not be able to set status=failed")

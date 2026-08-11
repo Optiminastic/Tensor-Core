@@ -56,7 +56,9 @@ internal/
              production pipeline: orders.go, production_jobs.go, production_qc.go
              (assembly/qc/packaging), files.go, batches.go, filament.go,
              machines_ops.go, dispatch.go, shopify_oauth.go (store connect),
-             webhooks.go (orders/paid import) (+ production_helpers.go); guarded by
+             shopify_import.go (order import - pull-only, no webhooks: every
+             order arrives via the on-demand sync in connections.go or the
+             post-connect catch-up in shopify_backfill.go) (+ production_helpers.go); guarded by
              production/order/batch/filament/machine/qc/packaging/assembly/dispatch/integration permissions
   db/
     migrations/  goose SQL (0001 baseline, idempotent, never touches Better Auth tables)

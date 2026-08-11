@@ -44,7 +44,7 @@ func seedOrder(t *testing.T, store *db.Store, shopifyID int64, items []map[strin
 	id := uuid.New()
 	if _, err := store.Q.InsertOrder(context.Background(), gen.InsertOrderParams{
 		ID: id, ShopifyOrderID: shopifyID, OrderNumber: "1001", FinancialStatus: "paid",
-		TotalPrice: 1499, Currency: "INR", LineItems: lineItems, Status: "queued",
+		TotalPrice: 1499, Currency: "INR", LineItems: lineItems, Status: "queued", Source: "seed",
 	}); err != nil {
 		t.Fatalf("insert order: %v", err)
 	}

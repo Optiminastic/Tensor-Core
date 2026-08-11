@@ -40,3 +40,12 @@ RETURNING id, brand_slug, provider, status, external_account_id,
 
 -- name: DeleteConnection :execrows
 DELETE FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
+
+-- GetShopifyConnectionByDomain lets the inbound order webhooks (webhooks.go)
+-- accept a store connected only via the brand-level Shopify OAuth flow
+-- (brand_connections), not just the dedicated shopify_connections one - a
+-- webhook has no brand_slug to key off, only the shop domain Shopify sends.
+-- name: GetShopifyConnectionByDomain :one
+SELECT id FROM brand_connections
+WHERE provider = 'shopify' AND status = 'connected' AND lower(external_account_id) = lower(sqlc.arg('domain'))
+LIMIT 1;

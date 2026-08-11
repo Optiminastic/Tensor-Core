@@ -76,6 +76,22 @@ UPDATE batches SET preview_file_id = sqlc.arg('preview_file_id'), updated_at = n
 WHERE id = sqlc.arg('id')
 RETURNING *;
 
+-- name: UpdateBatchDerivedMetrics :one
+-- Refreshes a Draft batch's computed snapshot fields after its job
+-- membership changes (add/remove a job) - the same fields
+-- cachePreview/buildMergedPlate already compute at creation time, just not
+-- previously persisted outside creation/approval. All nullable so an
+-- emptied-out batch (every job removed) clears back to unset rather than
+-- keeping stale numbers.
+UPDATE batches SET
+    preview_file_id         = sqlc.narg('preview_file_id'),
+    units_per_bed            = sqlc.narg('units_per_bed'),
+    bed_utilization_percent = sqlc.narg('bed_utilization_percent')::float8,
+    total_filament_grams    = sqlc.narg('total_filament_grams')::float8,
+    updated_at               = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
 -- name: ListPendingApprovalBatchesForMachine :many
 -- Draft batches still parked on a machine profile that's about to go
 -- offline/maintenance - reassignBatchesForOfflineMachine's candidates (see

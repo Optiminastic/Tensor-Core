@@ -440,6 +440,218 @@ func seedJobOnBatch(t *testing.T, store *db.Store, batchID uuid.UUID, jobNumber,
 	return j.ID
 }
 
+// jobConfig is the subset of a production job's fields the batch job-
+// membership tests below actually vary.
+type jobConfig struct {
+	batchID       *uuid.UUID
+	material      string
+	leftNozzleMm  float64
+	machineFamily string
+	printFileID   *uuid.UUID
+}
+
+// seedConfiguredJob inserts a job with real material/nozzle/machine-family
+// values (unlike seedJobOnBatch/seedDraftBatch, which leave those unset) -
+// queued, personalisation not_required, no issue, matching
+// ListUnassignedCompatibleJobs's eligibility bar exactly.
+func seedConfiguredJob(t *testing.T, store *db.Store, jobNumber string, cfg jobConfig) uuid.UUID {
+	t.Helper()
+	j, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: jobNumber, BatchID: cfg.batchID, Description: "Test job",
+		Quantity: 1, Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
+		Material: &cfg.material, LeftNozzleMm: &cfg.leftNozzleMm, MachineFamily: &cfg.machineFamily,
+		PrintFileID: cfg.printFileID,
+	})
+	if err != nil {
+		t.Fatalf("insert configured job: %v", err)
+	}
+	return j.ID
+}
+
+func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+
+	fileID := seedFileAsset(t, store, 50, 50, 20)
+	b, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-ADD-1", Status: production.BatchPendingApproval, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+	bID := &b.ID
+	seedConfiguredJob(t, store, "BATCH-ADD-1-J1", jobConfig{
+		batchID: bID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	compatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J2", jobConfig{
+		material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	incompatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J3", jobConfig{
+		material: "PETG", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	otherBatch, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-ADD-2", Status: production.BatchPendingApproval, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert other batch: %v", err)
+	}
+	alreadyAssigned := seedConfiguredJob(t, store, "BATCH-ADD-1-J4", jobConfig{
+		batchID: &otherBatch.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+
+	// Only the compatible, unassigned job is offered.
+	rr := doJSON(router, http.MethodGet, "/batches/"+b.ID.String()+"/compatible-jobs", manage, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("compatible-jobs = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var jobs []jobView
+	_ = json.Unmarshal(rr.Body.Bytes(), &jobs)
+	if len(jobs) != 1 || jobs[0].ID != compatible.String() {
+		t.Fatalf("compatible-jobs = %+v, want only %s", jobs, compatible)
+	}
+
+	// Rejects an incompatible job.
+	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{incompatible.String()}}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("add incompatible = %d, want 422", rr.Code)
+	}
+	// Rejects a job already assigned elsewhere.
+	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{alreadyAssigned.String()}}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("add already-assigned = %d, want 422", rr.Code)
+	}
+
+	// Accepts the compatible job: membership is committed before the plate
+	// re-merge, which needs object storage - unconfigured in this test
+	// environment (see testServer/NewServer, storage is always nil here, the
+	// same known gap approveBatch/previewBatch already have). So the request
+	// itself 503s on the re-merge step, but the membership change it already
+	// made is real and durable - assert that directly against the DB rather
+	// than asserting on the (unreachable-here) 200 response body.
+	rr = doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{compatible.String()}})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("add compatible = %d body=%s, want 503 (no storage configured in tests)", rr.Code, rr.Body.String())
+	}
+	job, err := store.Q.GetProductionJobByID(ctx, compatible)
+	if err != nil || job.BatchID == nil || *job.BatchID != b.ID {
+		t.Errorf("job batch_id after add = %v, want %s", job.BatchID, b.ID)
+	}
+}
+
+func TestIntegrationBatchRemoveJob(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+
+	fileID := seedFileAsset(t, store, 50, 50, 20)
+	b, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-REMOVE-1", Status: production.BatchPendingApproval, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert batch: %v", err)
+	}
+	// A single job, so removing it empties the batch entirely - the one
+	// recomputeBatchPlate path that needs no object storage (there's nothing
+	// left to merge), so it's fully exercisable in this test environment
+	// (see TestIntegrationBatchCompatibleJobsAndAdd for why the non-empty,
+	// storage-touching re-merge path can't be asserted on here).
+	toRemove := seedConfiguredJob(t, store, "BATCH-REMOVE-1-J1", jobConfig{
+		batchID: &b.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+	rr := doJSON(router, http.MethodDelete, "/batches/"+b.ID.String()+"/jobs/"+toRemove.String(), manage, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("remove job = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var updated batchResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &updated)
+	if updated.UnitsPerBed != nil {
+		t.Errorf("units_per_bed after emptying batch = %v, want nil", updated.UnitsPerBed)
+	}
+	if updated.PreviewFileID != nil {
+		t.Errorf("preview_file_id after emptying batch = %v, want nil", updated.PreviewFileID)
+	}
+	job, err := store.Q.GetProductionJobByID(ctx, toRemove)
+	if err != nil || job.BatchID != nil {
+		t.Errorf("job batch_id after remove = %v, want nil", job.BatchID)
+	}
+
+	// Removing a job that isn't on this batch 404s.
+	if rr := doJSON(router, http.MethodDelete, "/batches/"+b.ID.String()+"/jobs/"+toRemove.String(), manage, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("remove already-removed job = %d, want 404", rr.Code)
+	}
+}
+
+func TestIntegrationBatchJobEditingGuards(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+
+	fileID := seedFileAsset(t, store, 50, 50, 20)
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+
+	// A non-Draft batch rejects both add and remove.
+	approved, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-GUARD-1", Status: production.BatchOpen, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert approved batch: %v", err)
+	}
+	onApproved := seedConfiguredJob(t, store, "BATCH-GUARD-1-J1", jobConfig{
+		batchID: &approved.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	unassigned := seedConfiguredJob(t, store, "BATCH-GUARD-1-J2", jobConfig{
+		material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	if rr := doJSON(router, http.MethodPost, "/batches/"+approved.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{unassigned.String()}}); rr.Code != http.StatusConflict {
+		t.Errorf("add to non-draft batch = %d, want 409", rr.Code)
+	}
+	if rr := doJSON(router, http.MethodDelete, "/batches/"+approved.ID.String()+"/jobs/"+onApproved.String(), manage, nil); rr.Code != http.StatusConflict {
+		t.Errorf("remove from non-draft batch = %d, want 409", rr.Code)
+	}
+
+	// A Draft batch already at/above the 80% target rejects further adds.
+	full, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-GUARD-2", Status: production.BatchPendingApproval, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert full batch: %v", err)
+	}
+	seedConfiguredJob(t, store, "BATCH-GUARD-2-J1", jobConfig{
+		batchID: &full.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	fullPercent := 85.0
+	if _, err := store.Q.UpdateBatchDerivedMetrics(ctx, gen.UpdateBatchDerivedMetricsParams{
+		ID: full.ID, BedUtilizationPercent: &fullPercent,
+	}); err != nil {
+		t.Fatalf("set full batch utilisation: %v", err)
+	}
+	anotherUnassigned := seedConfiguredJob(t, store, "BATCH-GUARD-2-J2", jobConfig{
+		material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	if rr := doJSON(router, http.MethodPost, "/batches/"+full.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{anotherUnassigned.String()}}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("add to full batch = %d, want 422", rr.Code)
+	}
+}
+
 func TestIntegrationBatchCompletedAutoCompletesItsJobs(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)

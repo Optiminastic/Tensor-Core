@@ -18,7 +18,6 @@ func TestListRecentOrders(t *testing.T) {
 				"name": "#1001",
 				"displayFinancialStatus": "PAID",
 				"totalPriceSet": {"shopMoney": {"amount": "1499.00", "currencyCode": "INR"}},
-				"customer": {"id": "gid://shopify/Customer/9001", "firstName": "Ada", "lastName": "Lovelace", "email": "ada@example.com", "phone": "+1234"},
 				"lineItems": {"nodes": [
 					{
 						"sku": "ART-UNICORN-01",
@@ -35,7 +34,6 @@ func TestListRecentOrders(t *testing.T) {
 				"name": "#1002",
 				"displayFinancialStatus": "PENDING",
 				"totalPriceSet": {"shopMoney": {"amount": "999.00", "currencyCode": "INR"}},
-				"customer": null,
 				"lineItems": {"nodes": []}
 			}
 		]}}}`))
@@ -57,8 +55,8 @@ func TestListRecentOrders(t *testing.T) {
 	if paid.TotalPrice != "1499.00" || paid.Currency != "INR" {
 		t.Errorf("unexpected price/currency: %+v", paid)
 	}
-	if paid.Customer == nil || paid.Customer.ID != 9001 || paid.Customer.Email != "ada@example.com" {
-		t.Errorf("unexpected customer: %+v", paid.Customer)
+	if paid.Customer != nil {
+		t.Errorf("customer should be unset (no read_customers scope): %+v", paid.Customer)
 	}
 	if len(paid.LineItems) != 1 {
 		t.Fatalf("got %d line items, want 1", len(paid.LineItems))

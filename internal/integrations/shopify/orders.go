@@ -56,6 +56,10 @@ type OrderLineProp struct {
 // unless the app has been granted `read_all_orders` protected-data access.
 const maxBackfillOrders = 250
 
+// customer is deliberately omitted: it requires the read_customers scope,
+// which apps only granted read_orders/read_products don't have - requesting
+// an inaccessible field fails the entire GraphQL call (see Client.do), not
+// just that field, so synced orders carry no customer name/email/phone.
 const listOrdersQuery = `query ListOrders($first: Int!) {
   orders(first: $first, sortKey: CREATED_AT, reverse: true) {
     nodes {
@@ -63,7 +67,6 @@ const listOrdersQuery = `query ListOrders($first: Int!) {
       name
       displayFinancialStatus
       totalPriceSet { shopMoney { amount currencyCode } }
-      customer { id firstName lastName email phone }
       lineItems(first: 50) {
         nodes {
           sku
@@ -96,13 +99,6 @@ type orderNode struct {
 			CurrencyCode string `json:"currencyCode"`
 		} `json:"shopMoney"`
 	} `json:"totalPriceSet"`
-	Customer *struct {
-		ID        string `json:"id"`
-		FirstName string `json:"firstName"`
-		LastName  string `json:"lastName"`
-		Email     string `json:"email"`
-		Phone     string `json:"phone"`
-	} `json:"customer"`
 	LineItems struct {
 		Nodes []struct {
 			SKU      string `json:"sku"`
@@ -140,6 +136,8 @@ func (c *Client) ListRecentOrders(ctx context.Context, shop, token string, limit
 	return summaries, nil
 }
 
+// toOrderSummary leaves Customer unset - the query above can't request it
+// without the read_customers scope.
 func toOrderSummary(n orderNode) OrderSummary {
 	s := OrderSummary{
 		ID:              gidNumericID(n.ID),
@@ -147,12 +145,6 @@ func toOrderSummary(n orderNode) OrderSummary {
 		FinancialStatus: strings.ToLower(n.DisplayFinancialStatus),
 		TotalPrice:      n.TotalPriceSet.ShopMoney.Amount,
 		Currency:        n.TotalPriceSet.ShopMoney.CurrencyCode,
-	}
-	if n.Customer != nil {
-		s.Customer = &OrderCustomer{
-			ID: gidNumericID(n.Customer.ID), FirstName: n.Customer.FirstName, LastName: n.Customer.LastName,
-			Email: n.Customer.Email, Phone: n.Customer.Phone,
-		}
 	}
 	s.LineItems = make([]OrderLineItem, 0, len(n.LineItems.Nodes))
 	for _, li := range n.LineItems.Nodes {
