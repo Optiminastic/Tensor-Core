@@ -253,6 +253,7 @@ type ProductionJob struct {
 	Quantity                   int32
 	Status                     string
 	AssemblyStatus             string
+	PolishingStatus            string
 	QcStatus                   string
 	PackagingStatus            string
 	ShopifyOrderID             *int64
@@ -342,6 +343,19 @@ type ProductionJobPackagingDetail struct {
 	PhotoFileID      *uuid.UUID
 	PackedBy         string
 	PackedAt         pgtype.Timestamptz
+}
+
+type ProductionJobPolishingCheck struct {
+	ID              uuid.UUID
+	JobID           uuid.UUID
+	SupportsRemoved bool
+	Sanded          bool
+	SeamsCleaned    bool
+	SurfaceFinishOk bool
+	PhotoFileID     *uuid.UUID
+	Notes           *string
+	PolishedBy      string
+	PolishedAt      pgtype.Timestamptz
 }
 
 type ProductionJobQcCheck struct {

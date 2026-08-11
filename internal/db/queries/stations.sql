@@ -1,6 +1,17 @@
--- Station records: assembly, QC, packaging. Assembly and QC are append-only;
--- packaging is one row per job (re-packaging updates it). All boolean/text, so the
--- queries return the model types directly.
+-- Station records: assembly, polishing, QC, packaging. Assembly, polishing and
+-- QC are append-only; packaging is one row per job (re-packaging updates it).
+-- All boolean/text, so the queries return the model types directly.
+
+-- name: InsertPolishingCheck :one
+INSERT INTO production_job_polishing_checks (
+    id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok,
+    photo_file_id, notes, polished_by
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('job_id'), sqlc.arg('supports_removed'), sqlc.arg('sanded'),
+    sqlc.arg('seams_cleaned'), sqlc.arg('surface_finish_ok'), sqlc.narg('photo_file_id'),
+    sqlc.narg('notes'), sqlc.arg('polished_by')
+)
+RETURNING *;
 
 -- name: InsertAssemblyCheck :one
 INSERT INTO production_job_assembly_checks (

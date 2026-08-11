@@ -30,6 +30,16 @@ const (
 	AssemblyNotRequired = "not_required"
 )
 
+// Polishing sub-status. The finishing station between assembly and QC -
+// sanding, seam cleanup, coating. Same three values as assembly, and the same
+// meaning: not_required is an explicit human decision that this part needs no
+// finishing, not an absence of one.
+const (
+	PolishingPending     = "pending"
+	PolishingCompleted   = "completed"
+	PolishingNotRequired = "not_required"
+)
+
 // QC sub-status.
 const (
 	QcPending = "pending"
@@ -125,6 +135,7 @@ func ValidMachineStatus(s string) bool { return machineStatuses[s] }
 var statusPatchTargets = set(StatusQueued, StatusInProduction, StatusCompleted)
 
 var assemblyStatuses = set(AssemblyPending, AssemblyCompleted, AssemblyNotRequired)
+var polishingStatuses = set(PolishingPending, PolishingCompleted, PolishingNotRequired)
 var qcStatuses = set(QcPending, QcPassed, QcFailed)
 var packagingStatuses = set(PackagingPending, PackagingPackaged)
 
@@ -138,9 +149,10 @@ var failureReasons = set(
 // ValidStatusTarget reports whether s is a PATCH-settable primary status.
 func ValidStatusTarget(s string) bool { return statusPatchTargets[s] }
 
-// ValidAssemblyStatus / ValidQcStatus / ValidPackagingStatus validate a PATCH
-// sub-status value.
+// ValidAssemblyStatus / ValidPolishingStatus / ValidQcStatus /
+// ValidPackagingStatus validate a PATCH sub-status value.
 func ValidAssemblyStatus(s string) bool  { return assemblyStatuses[s] }
+func ValidPolishingStatus(s string) bool { return polishingStatuses[s] }
 func ValidQcStatus(s string) bool        { return qcStatuses[s] }
 func ValidPackagingStatus(s string) bool { return packagingStatuses[s] }
 
@@ -161,7 +173,8 @@ const (
 // move the primary status; the QC/packaging role uses the dedicated endpoints
 // and gets no PATCH fields at all.
 var allPatchFields = set(
-	"status", "assembly_status", "qc_status", "packaging_status", "batch_id", "priority", "held",
+	"status", "assembly_status", "polishing_status", "qc_status", "packaging_status",
+	"batch_id", "priority", "held",
 )
 
 var patchFieldsByRole = map[string]map[string]bool{
@@ -312,9 +325,9 @@ const (
 // (when batched) its batch - resolved by the caller (httpapi), since this
 // package stays DB-free by design.
 type PipelineStageInput struct {
-	Status, AssemblyStatus, QcStatus, PackagingStatus, PersonalisationStatus string
-	Held                                                                     bool
-	IssueReason                                                              *string
+	Status, AssemblyStatus, PolishingStatus, QcStatus, PackagingStatus, PersonalisationStatus string
+	Held                                                                                      bool
+	IssueReason                                                                               *string
 	// BatchStatus is nil when the job is unbatched, else one of
 	// BatchPendingApproval/BatchOpen/BatchInProgress/BatchCompleted.
 	BatchStatus *string

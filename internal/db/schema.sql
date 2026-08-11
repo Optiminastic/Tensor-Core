@@ -326,6 +326,7 @@ CREATE TABLE production_jobs (
     quantity                      integer NOT NULL DEFAULT 1,
     status                        varchar(32) NOT NULL DEFAULT 'queued',
     assembly_status               varchar(32) NOT NULL DEFAULT 'pending',
+    polishing_status              varchar(32) NOT NULL DEFAULT 'pending',
     qc_status                     varchar(32) NOT NULL DEFAULT 'pending',
     packaging_status              varchar(32) NOT NULL DEFAULT 'pending',
     shopify_order_id              bigint,
@@ -497,6 +498,20 @@ CREATE TABLE production_job_assembly_checks (
     assembled_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_assembly_checks_job_id ON production_job_assembly_checks (job_id);
+
+CREATE TABLE production_job_polishing_checks (
+    id                uuid PRIMARY KEY,
+    job_id            uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
+    supports_removed  boolean NOT NULL DEFAULT false,
+    sanded            boolean NOT NULL DEFAULT false,
+    seams_cleaned     boolean NOT NULL DEFAULT false,
+    surface_finish_ok boolean NOT NULL DEFAULT false,
+    photo_file_id     uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    notes             varchar(1000),
+    polished_by       varchar(64) NOT NULL,
+    polished_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_polishing_checks_job_id ON production_job_polishing_checks (job_id);
 
 CREATE TABLE production_job_qc_checks (
     id                      uuid PRIMARY KEY,

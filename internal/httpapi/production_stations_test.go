@@ -35,6 +35,7 @@ func TestIntegrationStationGatingAndLifecycle(t *testing.T) {
 	jobID := fromOrderJobs(t, router, minter, orderID)[0].ID
 
 	assemblyTok := minter.mint(t, []string{"assembly:submit"})
+	polishTok := minter.mint(t, []string{"polishing:submit"})
 	qcTok := minter.mint(t, []string{"qc:submit"})
 	packTok := minter.mint(t, []string{"packaging:submit"})
 
@@ -62,6 +63,22 @@ func TestIntegrationStationGatingAndLifecycle(t *testing.T) {
 	if rr := doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/assembly", assemblyTok,
 		map[string]any{"parts_combined": true, "fit_check_ok": true}); rr.Code != http.StatusOK {
 		t.Fatalf("assembly = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Polishing authorization: needs polishing:submit.
+	if rr := doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/polishing", qcTok,
+		map[string]any{"sanded": true}); rr.Code != http.StatusForbidden {
+		t.Errorf("polishing without permission = %d, want 403", rr.Code)
+	}
+	// QC before polishing is resolved -> 409: assembly is done, polishing is not.
+	if rr := doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/qc", qcTok,
+		map[string]any{"decision": "pass"}); rr.Code != http.StatusConflict {
+		t.Errorf("qc before polishing = %d, want 409", rr.Code)
+	}
+	// Record polishing.
+	if rr := doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/polishing", polishTok,
+		map[string]any{"supports_removed": true, "sanded": true, "surface_finish_ok": true}); rr.Code != http.StatusOK {
+		t.Fatalf("polishing = %d body=%s", rr.Code, rr.Body.String())
 	}
 
 	// Packaging before QC passes -> 409.
@@ -106,6 +123,8 @@ func TestIntegrationQcFailCreatesReprint(t *testing.T) {
 
 	assemblyTok := minter.mint(t, []string{"assembly:submit"})
 	doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/assembly/skip", assemblyTok, nil)
+	polishTok := minter.mint(t, []string{"polishing:submit"})
+	doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/polishing/skip", polishTok, nil)
 
 	qcTok := minter.mint(t, []string{"qc:submit"})
 	rr := doJSON(router, http.MethodPost, "/production-jobs/"+jobID+"/qc", qcTok, map[string]any{"decision": "fail"})

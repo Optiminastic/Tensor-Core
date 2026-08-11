@@ -35,7 +35,7 @@ INSERT INTO production_jobs (
     sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -48,7 +48,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 
 -- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -61,10 +61,10 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs WHERE id = $1;
 
 -- name: ListProductionJobs :many
--- Full list, newest first, with optional status / assembly_status / qc_status /
+-- Full list, newest first, with optional status / assembly_status / polishing_status / qc_status /
 -- packaging_status filters (null = any).
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -77,6 +77,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
+  AND (sqlc.narg('polishing_status')::text IS NULL OR polishing_status = sqlc.narg('polishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -86,7 +87,7 @@ ORDER BY created_at DESC, id DESC;
 -- name: ListProductionJobsPage :many
 -- Keyset page over (created_at, id) with the same optional filters.
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -99,6 +100,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
+  AND (sqlc.narg('polishing_status')::text IS NULL OR polishing_status = sqlc.narg('polishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -119,6 +121,7 @@ SELECT count(*) FROM production_jobs WHERE order_id = $1;
 UPDATE production_jobs SET
     status           = COALESCE(sqlc.narg('status'), status),
     assembly_status  = COALESCE(sqlc.narg('assembly_status'), assembly_status),
+    polishing_status = COALESCE(sqlc.narg('polishing_status'), polishing_status),
     qc_status        = COALESCE(sqlc.narg('qc_status'), qc_status),
     packaging_status = COALESCE(sqlc.narg('packaging_status'), packaging_status),
     priority         = COALESCE(sqlc.narg('priority'), priority),
@@ -127,7 +130,7 @@ UPDATE production_jobs SET
     updated_at       = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -154,7 +157,7 @@ UPDATE production_jobs SET
     updated_at                    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -169,7 +172,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 UPDATE production_jobs SET print_file_id = sqlc.arg('print_file_id'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -184,7 +187,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 UPDATE production_jobs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -284,7 +287,7 @@ WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
 UPDATE production_jobs SET quantity = quantity - sqlc.arg('delta'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,

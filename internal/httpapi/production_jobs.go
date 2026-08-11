@@ -29,6 +29,7 @@ type productionJobResponse struct {
 	Quantity                   int32      `json:"quantity"`
 	Status                     string     `json:"status"`
 	AssemblyStatus             string     `json:"assembly_status"`
+	PolishingStatus            string     `json:"polishing_status"`
 	QcStatus                   string     `json:"qc_status"`
 	PackagingStatus            string     `json:"packaging_status"`
 	ShopifyOrderID             *int64     `json:"shopify_order_id"`
@@ -118,14 +119,16 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 	}
 	required := j.PersonalisationStatus != production.PersonalisationNotRequired
 	stage := production.PipelineStage(production.PipelineStageInput{
-		Status: j.Status, AssemblyStatus: j.AssemblyStatus, QcStatus: j.QcStatus,
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, PolishingStatus: j.PolishingStatus,
+		QcStatus:        j.QcStatus,
 		PackagingStatus: j.PackagingStatus, PersonalisationStatus: j.PersonalisationStatus,
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
 	})
 	return productionJobResponse{
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
-		Status: j.Status, AssemblyStatus: j.AssemblyStatus, QcStatus: j.QcStatus,
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, PolishingStatus: j.PolishingStatus,
+		QcStatus:        j.QcStatus,
 		PackagingStatus: j.PackagingStatus, ShopifyOrderID: j.ShopifyOrderID,
 		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
@@ -242,6 +245,8 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.POST("/:id/fail", s.guards.RequirePermission(auth.ProductionFail.Key()), s.failProductionJob)
 	g.POST("/:id/assembly", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.submitAssembly)
 	g.POST("/:id/assembly/skip", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.skipAssembly)
+	g.POST("/:id/polishing", s.guards.RequirePermission(auth.PolishingSubmit.Key()), s.submitPolishing)
+	g.POST("/:id/polishing/skip", s.guards.RequirePermission(auth.PolishingSubmit.Key()), s.skipPolishing)
 	g.POST("/:id/qc", s.guards.RequirePermission(auth.QcSubmit.Key()), s.submitQc)
 	g.POST("/:id/packaging", s.guards.RequirePermission(auth.PackagingSubmit.Key()), s.submitPackaging)
 }
@@ -275,6 +280,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 	statusFilter := nilIfEmpty(c.Query("status"))
 	assemblyFilter := nilIfEmpty(c.Query("assembly_status"))
+	polishingFilter := nilIfEmpty(c.Query("polishing_status"))
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
 	packagingFilter := nilIfEmpty(c.Query("packaging_status"))
 	stageFilter := c.Query("pipeline_stage")
@@ -291,7 +297,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 
 	if !page.paginate {
 		rows, err := s.store.Q.ListProductionJobs(ctx, gen.ListProductionJobsParams{
-			Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+			Status: statusFilter, AssemblyStatus: assemblyFilter, PolishingStatus: polishingFilter,
+			QcStatus:        qcFilter,
 			PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		})
 		if err != nil {
@@ -303,7 +310,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 
 	rows, err := s.store.Q.ListProductionJobsPage(ctx, gen.ListProductionJobsPageParams{
-		Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+		Status: statusFilter, AssemblyStatus: assemblyFilter, PolishingStatus: polishingFilter,
+		QcStatus:        qcFilter,
 		PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
 	})
@@ -641,6 +649,9 @@ func applyJobPatch(c *gin.Context, raw map[string]json.RawMessage, params *gen.U
 			return false
 		}
 		params.Status = &status
+	}
+	if !patchEnum(c, raw, "polishing_status", production.ValidPolishingStatus, func(v string) { params.PolishingStatus = &v }) {
+		return false
 	}
 	if !patchEnum(c, raw, "assembly_status", production.ValidAssemblyStatus, func(v string) { params.AssemblyStatus = &v }) {
 		return false

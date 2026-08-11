@@ -12,7 +12,6 @@ import (
 )
 
 const insertAssemblyCheck = `-- name: InsertAssemblyCheck :one
-
 INSERT INTO production_job_assembly_checks (
     id, job_id, parts_combined, hardware_attached, addons_attached, fit_check_ok,
     photo_file_id, notes, assembled_by
@@ -36,9 +35,6 @@ type InsertAssemblyCheckParams struct {
 	AssembledBy      string
 }
 
-// Station records: assembly, QC, packaging. Assembly and QC are append-only;
-// packaging is one row per job (re-packaging updates it). All boolean/text, so the
-// queries return the model types directly.
 func (q *Queries) InsertAssemblyCheck(ctx context.Context, arg InsertAssemblyCheckParams) (ProductionJobAssemblyCheck, error) {
 	row := q.db.QueryRow(ctx, insertAssemblyCheck,
 		arg.ID,
@@ -63,6 +59,62 @@ func (q *Queries) InsertAssemblyCheck(ctx context.Context, arg InsertAssemblyChe
 		&i.Notes,
 		&i.AssembledBy,
 		&i.AssembledAt,
+	)
+	return i, err
+}
+
+const insertPolishingCheck = `-- name: InsertPolishingCheck :one
+
+INSERT INTO production_job_polishing_checks (
+    id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok,
+    photo_file_id, notes, polished_by
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7,
+    $8, $9
+)
+RETURNING id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok, photo_file_id, notes, polished_by, polished_at
+`
+
+type InsertPolishingCheckParams struct {
+	ID              uuid.UUID
+	JobID           uuid.UUID
+	SupportsRemoved bool
+	Sanded          bool
+	SeamsCleaned    bool
+	SurfaceFinishOk bool
+	PhotoFileID     *uuid.UUID
+	Notes           *string
+	PolishedBy      string
+}
+
+// Station records: assembly, polishing, QC, packaging. Assembly, polishing and
+// QC are append-only; packaging is one row per job (re-packaging updates it).
+// All boolean/text, so the queries return the model types directly.
+func (q *Queries) InsertPolishingCheck(ctx context.Context, arg InsertPolishingCheckParams) (ProductionJobPolishingCheck, error) {
+	row := q.db.QueryRow(ctx, insertPolishingCheck,
+		arg.ID,
+		arg.JobID,
+		arg.SupportsRemoved,
+		arg.Sanded,
+		arg.SeamsCleaned,
+		arg.SurfaceFinishOk,
+		arg.PhotoFileID,
+		arg.Notes,
+		arg.PolishedBy,
+	)
+	var i ProductionJobPolishingCheck
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.SupportsRemoved,
+		&i.Sanded,
+		&i.SeamsCleaned,
+		&i.SurfaceFinishOk,
+		&i.PhotoFileID,
+		&i.Notes,
+		&i.PolishedBy,
+		&i.PolishedAt,
 	)
 	return i, err
 }

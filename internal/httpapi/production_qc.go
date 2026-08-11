@@ -10,9 +10,10 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// The station handlers (assembly, QC, packaging) move a completed job through the
-// post-print stages. Each records an audit row and advances the matching
-// sub-status, and each gates on the prior stage so the order cannot be skipped.
+// The station handlers (assembly, polishing, QC, packaging) move a completed job
+// through the post-print stages. Each records an audit row and advances the
+// matching sub-status, and each gates on the prior stage so the order cannot be
+// skipped.
 
 type assemblyRequest struct {
 	PartsCombined    bool    `json:"parts_combined"`
@@ -95,6 +96,95 @@ func (s *Server) skipAssembly(c *gin.Context) {
 	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
 }
 
+type polishingRequest struct {
+	SupportsRemoved bool    `json:"supports_removed"`
+	Sanded          bool    `json:"sanded"`
+	SeamsCleaned    bool    `json:"seams_cleaned"`
+	SurfaceFinishOk bool    `json:"surface_finish_ok"`
+	PhotoFileID     *string `json:"photo_file_id"`
+	Notes           *string `json:"notes"`
+}
+
+// submitPolishing records the finishing pass. It gates on assembly the same way
+// QC gates on polishing: a job whose parts aren't together yet has nothing to
+// sand.
+func (s *Server) submitPolishing(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req polishingRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	ctx := c.Request.Context()
+
+	job, err := s.store.Q.GetProductionJobByID(ctx, id)
+	if err != nil {
+		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
+		return
+	}
+	if job.Status != production.StatusCompleted {
+		detail(c, http.StatusConflict, "The job must be completed before polishing.")
+		return
+	}
+	if job.AssemblyStatus == production.AssemblyPending {
+		detail(c, http.StatusConflict, "Assembly must be completed or skipped before polishing.")
+		return
+	}
+	photoID, ok := s.resolveOptionalFile(c, req.PhotoFileID)
+	if !ok {
+		return
+	}
+
+	var updated gen.ProductionJob
+	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		if _, err := q.InsertPolishingCheck(ctx, gen.InsertPolishingCheckParams{
+			ID: uuid.New(), JobID: id, SupportsRemoved: req.SupportsRemoved, Sanded: req.Sanded,
+			SeamsCleaned: req.SeamsCleaned, SurfaceFinishOk: req.SurfaceFinishOk,
+			PhotoFileID: photoID, Notes: req.Notes, PolishedBy: currentUserID(c),
+		}); err != nil {
+			return err
+		}
+		updated, err = q.UpdateProductionJobFields(ctx, gen.UpdateProductionJobFieldsParams{
+			ID: id, PolishingStatus: ptr(production.PolishingCompleted),
+		})
+		return err
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not record the polishing.")
+		return
+	}
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
+}
+
+// skipPolishing marks polishing as not required for a part that needs no
+// finishing - no form, just the decision, mirroring skipAssembly.
+func (s *Server) skipPolishing(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	job, err := s.store.Q.GetProductionJobByID(ctx, id)
+	if err != nil {
+		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
+		return
+	}
+	if job.Status != production.StatusCompleted {
+		detail(c, http.StatusConflict, "The job must be completed before polishing can be skipped.")
+		return
+	}
+	updated, err := s.store.Q.UpdateProductionJobFields(ctx, gen.UpdateProductionJobFieldsParams{
+		ID: id, PolishingStatus: ptr(production.PolishingNotRequired),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not skip polishing.")
+		return
+	}
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, updated))
+}
+
 type qcRequest struct {
 	CorrectPersonalisation bool    `json:"correct_personalisation"`
 	CorrectColour          bool    `json:"correct_colour"`
@@ -141,6 +231,10 @@ func (s *Server) submitQc(c *gin.Context) {
 	}
 	if job.AssemblyStatus == production.AssemblyPending {
 		detail(c, http.StatusConflict, "Assembly must be completed or skipped before QC.")
+		return
+	}
+	if job.PolishingStatus == production.PolishingPending {
+		detail(c, http.StatusConflict, "Polishing must be completed or skipped before QC.")
 		return
 	}
 	photoID, ok := s.resolveOptionalFile(c, req.PhotoFileID)

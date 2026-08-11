@@ -84,6 +84,7 @@ var (
 	DispatchRead   = PermissionSpec{"dispatch", "read", "View dispatch orders"}
 	DispatchManage = PermissionSpec{"dispatch", "manage", "Create and mark dispatch orders"}
 
+	PolishingSubmit = PermissionSpec{"polishing", "submit", "Record a polishing/finishing check"}
 	QcSubmit        = PermissionSpec{"qc", "submit", "Record a quality-control check"}
 	AssemblySubmit  = PermissionSpec{"assembly", "submit", "Record an assembly check"}
 	PackagingSubmit = PermissionSpec{"packaging", "submit", "Record packaging details"}
@@ -108,7 +109,7 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (36 permissions).
+// AllPermissions is the full catalog in seed order (38 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
 	PricingRead, PricingGenerate, PricingOverride,
@@ -118,7 +119,7 @@ var AllPermissions = []PermissionSpec{
 	OrderRead,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
-	QcSubmit, AssemblySubmit, PackagingSubmit,
+	QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
 	MachineRead, MachineManage,
 	FilamentRead, FilamentManage,
 	IntegrationManage,
@@ -144,7 +145,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 		BatchRead, BatchManage,
 		DispatchRead, DispatchManage,
-		QcSubmit, AssemblySubmit, PackagingSubmit,
+		QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
 		MachineRead, MachineManage,
 		FilamentRead, FilamentManage,
 	},
@@ -153,14 +154,14 @@ var roleGrants = map[RoleName][]PermissionSpec{
 	// machine status and reads filament. Never sees costs; never does QC/packaging.
 	RoleOperator: {
 		DesignRead,
-		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit,
+		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit, PolishingSubmit,
 		MachineRead, MachineManage, FilamentRead,
 	},
 	// QC/packaging station: records QC, assembly and packaging through their
 	// dedicated endpoints. No production:update (cannot advance a job directly),
 	// no cost or pricing visibility.
 	RolePackagingQc: {
-		ProductionRead, QcSubmit, AssemblySubmit, PackagingSubmit,
+		ProductionRead, QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
 	},
 }
 
