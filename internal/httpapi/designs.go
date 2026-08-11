@@ -238,10 +238,20 @@ func (s *Server) requireDesignBrandAccess(c *gin.Context) {
 	c.Next()
 }
 
-// listDesigns returns a brand's designs, newest first. The brand is a required
-// query parameter so the frontend lists per brand-scoped page.
+// allBrandsSlug is the sentinel the frontend sends (or omits the brand entirely)
+// to request the global "all brands" view instead of a single brand's designs.
+const allBrandsSlug = "all"
+
+// listDesigns returns designs newest first. With a `brand` query parameter it
+// lists that one brand (the caller must have access); with the brand omitted or
+// set to the "all" sentinel it aggregates across every brand the caller can
+// access, for the global dashboard view.
 func (s *Server) listDesigns(c *gin.Context) {
 	slug := c.Query("brand")
+	if slug == "" || slug == allBrandsSlug {
+		s.listDesignsForAccessibleBrands(c)
+		return
+	}
 	if !slugPattern.MatchString(slug) {
 		detail(c, http.StatusUnprocessableEntity, "A valid 'brand' query parameter is required.")
 		return
@@ -289,6 +299,90 @@ func (s *Server) listDesigns(c *gin.Context) {
 		setNextCursor(c, n, page.limit, last.CreatedAt.Time, last.ID)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// accessibleBrandSlugs is the set of brand slugs the caller may read: every brand
+// for an admin (brand:manage), otherwise only their assigned brands. Mirrors the
+// admin/member split in listBrands so the global view never leaks another brand.
+func (s *Server) accessibleBrandSlugs(ctx context.Context, user auth.AuthenticatedUser) ([]string, error) {
+	if user.Has(auth.BrandManage.Key()) {
+		brands, err := s.store.Q.ListBrands(ctx)
+		if err != nil {
+			return nil, err
+		}
+		slugs := make([]string, len(brands))
+		for i, b := range brands {
+			slugs[i] = b.Slug
+		}
+		return slugs, nil
+	}
+	return s.store.Q.ListUserBrandSlugs(ctx, user.ID)
+}
+
+// listDesignsForAccessibleBrands powers the global "all brands" view: designs
+// across every brand the caller can access, newest first, same body shape and
+// keyset pagination as the per-brand list.
+func (s *Server) listDesignsForAccessibleBrands(c *gin.Context) {
+	ctx := c.Request.Context()
+	user, ok := auth.UserFrom(c)
+	if !ok {
+		detail(c, http.StatusUnauthorized, "Not authenticated.")
+		return
+	}
+	slugs, err := s.accessibleBrandSlugs(ctx, user)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not resolve brand access.")
+		return
+	}
+	page, ok := parsePageParams(c)
+	if !ok {
+		return
+	}
+	if len(slugs) == 0 {
+		c.JSON(http.StatusOK, []designResponse{})
+		return
+	}
+	if !page.paginate {
+		rows, err := s.store.Q.ListDesignsForBrands(ctx, slugs)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list designs.")
+			return
+		}
+		c.JSON(http.StatusOK, designsFromForBrands(rows))
+		return
+	}
+	rows, err := s.store.Q.ListDesignsForBrandsPage(ctx, gen.ListDesignsForBrandsPageParams{
+		BrandSlugs: slugs, CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list designs.")
+		return
+	}
+	if n := len(rows); n > 0 {
+		last := rows[n-1]
+		setNextCursor(c, n, page.limit, last.CreatedAt.Time, last.ID)
+	}
+	c.JSON(http.StatusOK, designsFromForBrandsPage(rows))
+}
+
+// designsFromForBrands maps the full cross-brand rows to the API response shape.
+func designsFromForBrands(rows []gen.ListDesignsForBrandsRow) []designResponse {
+	out := make([]designResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
+			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.Sku, r.CreatedAt, r.UpdatedAt))
+	}
+	return out
+}
+
+// designsFromForBrandsPage maps one keyset page of cross-brand rows.
+func designsFromForBrandsPage(rows []gen.ListDesignsForBrandsPageRow) []designResponse {
+	out := make([]designResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, designDTO(r.ID, r.BrandSlug, r.Name, r.CreatedBy, r.Status, r.Material,
+			r.Colour, r.Finish, r.UnitsPerBed, r.Quality, r.InfillPct, r.PreviewKey, r.Sku, r.CreatedAt, r.UpdatedAt))
+	}
+	return out
 }
 
 // getDesign returns a design with its latest job, metrics and pricing so the

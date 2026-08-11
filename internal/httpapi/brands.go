@@ -24,12 +24,15 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // reservedBrandSlugs would collide with the frontend's static dashboard routes
 // (/dashboard/<slug> is dynamic, but these segments resolve to their own pages
-// first), so a brand may not take them.
+// first), so a brand may not take them. "all" is the frontend's sentinel for the
+// global "all brands" view, which rides the same /dashboard/<slug> routes, so a
+// real brand named "all" would shadow it.
 var reservedBrandSlugs = map[string]bool{
 	"users":    true,
 	"settings": true,
 	"brands":   true,
 	"projects": true,
+	"all":      true,
 }
 
 type brandResponse struct {

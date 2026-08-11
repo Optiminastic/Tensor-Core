@@ -766,6 +766,158 @@ func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByB
 	return items, nil
 }
 
+const listDesignsForBrands = `-- name: ListDesignsForBrands :many
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, created_at, updated_at
+FROM designs
+WHERE brand_slug = ANY($1::text[])
+ORDER BY created_at DESC, id DESC
+`
+
+type ListDesignsForBrandsRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	PreviewKey  string
+	Sku         *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// All designs across a set of brands (the caller's accessible brands), newest
+// first. Powers the global "all brands" dashboard view.
+func (q *Queries) ListDesignsForBrands(ctx context.Context, brandSlugs []string) ([]ListDesignsForBrandsRow, error) {
+	rows, err := q.db.Query(ctx, listDesignsForBrands, brandSlugs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDesignsForBrandsRow{}
+	for rows.Next() {
+		var i ListDesignsForBrandsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BrandSlug,
+			&i.Name,
+			&i.CreatedBy,
+			&i.Status,
+			&i.StlKey,
+			&i.Material,
+			&i.Colour,
+			&i.Finish,
+			&i.UnitsPerBed,
+			&i.Quality,
+			&i.InfillPct,
+			&i.PreviewKey,
+			&i.Sku,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDesignsForBrandsPage = `-- name: ListDesignsForBrandsPage :many
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, created_at, updated_at
+FROM designs
+WHERE brand_slug = ANY($1::text[])
+  AND (
+    $2::timestamptz IS NULL
+    OR (created_at, id) < ($2::timestamptz, $3::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT $4
+`
+
+type ListDesignsForBrandsPageParams struct {
+	BrandSlugs      []string
+	CursorCreatedAt pgtype.Timestamptz
+	CursorID        *uuid.UUID
+	PageLimit       int32
+}
+
+type ListDesignsForBrandsPageRow struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	Name        string
+	CreatedBy   string
+	Status      string
+	StlKey      string
+	Material    string
+	Colour      *string
+	Finish      string
+	UnitsPerBed int32
+	Quality     string
+	InfillPct   float64
+	PreviewKey  string
+	Sku         *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+// Keyset page of the global "all brands" view: rows across the given brands
+// strictly before the (created_at, id) cursor, newest first. A null cursor
+// returns the first page.
+func (q *Queries) ListDesignsForBrandsPage(ctx context.Context, arg ListDesignsForBrandsPageParams) ([]ListDesignsForBrandsPageRow, error) {
+	rows, err := q.db.Query(ctx, listDesignsForBrandsPage,
+		arg.BrandSlugs,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDesignsForBrandsPageRow{}
+	for rows.Next() {
+		var i ListDesignsForBrandsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BrandSlug,
+			&i.Name,
+			&i.CreatedBy,
+			&i.Status,
+			&i.StlKey,
+			&i.Material,
+			&i.Colour,
+			&i.Finish,
+			&i.UnitsPerBed,
+			&i.Quality,
+			&i.InfillPct,
+			&i.PreviewKey,
+			&i.Sku,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextAttemptForDesign = `-- name: NextAttemptForDesign :one
 SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt
 FROM slice_jobs WHERE design_id = $1

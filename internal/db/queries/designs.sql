@@ -81,6 +81,32 @@ WHERE brand_slug = sqlc.arg('brand_slug')
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg('page_limit');
 
+-- name: ListDesignsForBrands :many
+-- All designs across a set of brands (the caller's accessible brands), newest
+-- first. Powers the global "all brands" dashboard view.
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, created_at, updated_at
+FROM designs
+WHERE brand_slug = ANY(sqlc.arg('brand_slugs')::text[])
+ORDER BY created_at DESC, id DESC;
+
+-- name: ListDesignsForBrandsPage :many
+-- Keyset page of the global "all brands" view: rows across the given brands
+-- strictly before the (created_at, id) cursor, newest first. A null cursor
+-- returns the first page.
+SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
+       finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
+       preview_key, sku, created_at, updated_at
+FROM designs
+WHERE brand_slug = ANY(sqlc.arg('brand_slugs')::text[])
+  AND (
+    sqlc.narg('cursor_created_at')::timestamptz IS NULL
+    OR (created_at, id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('page_limit');
+
 -- name: UpdateDesignStatus :exec
 UPDATE designs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id');

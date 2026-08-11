@@ -224,6 +224,7 @@ CREATE TABLE design_reviews (
 );
 CREATE INDEX ix_design_reviews_design ON design_reviews (design_id, created_at);
 CREATE INDEX ix_designs_brand_created ON designs (brand_slug, created_at DESC, id DESC);
+CREATE INDEX ix_designs_created ON designs (created_at DESC, id DESC);
 
 CREATE TABLE slice_jobs (
     id         uuid PRIMARY KEY,
