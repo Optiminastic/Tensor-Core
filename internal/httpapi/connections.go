@@ -80,6 +80,9 @@ func (s *Server) registerConnections(r *gin.Engine) {
 	g := r.Group("/brands/:slug/connections")
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.BrandRead.Key()), s.listConnections)
+	// Shopify one-click OAuth connect for this brand's store: returns the authorize
+	// URL the frontend redirects the browser to (the callback finishes the connect).
+	g.GET("/shopify/authorize", s.guards.RequirePermission(auth.BrandManage.Key()), s.shopifyBrandAuthorizeURL)
 	g.PUT("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.upsertConnection)
 	g.DELETE("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.deleteConnection)
 }

@@ -88,6 +88,17 @@ internal/
 - Validate all external input at the HTTP boundary (Gin binding tags + explicit business checks).
 - Regenerate sqlc after editing `internal/db/queries` or `schema.sql`; `schema.sql` and the goose baseline must describe the same tables (the integration tests catch drift).
 
+## Multi-part products
+
+A product stays one design and one SKU, but a design may declare named **parts** (its recipe): body, lid, two legs. A design with no parts is a single-part product and behaves exactly as before - the whole feature is additive and legacy-safe.
+
+- `design_parts` (migration 0027) is the recipe: one row per named `role` on a design (unique per design), with a `quantity` for identical duplicates and optional per-part `print_file_id` / material / colour / nozzle overrides that fall back to the design. Authored via `GET/POST /designs/:id/parts` and `PATCH/DELETE /designs/:id/parts/:partId` (`designs_parts.go`), gated by `design:read` / `design:update` / `design:delete`.
+- At order time (`planJobsForOrder` in `production_jobs.go`), a line whose SKU resolves to a design **with** parts fans out into one `assembly_groups` row per ordered unit and one job per `(part, instance)`. Everything else stays one job per line.
+- A part's identity is `(assembly_group_id, part_role, part_instance)`. `assembly_group_parts.part_uid` (`PART-XXXXXX`, minted once) is the stable, never-reused id for the slot; it is carried across reprints while `job_id` repoints to the current attempt. Both tables are migration 0028; `production_jobs` is unchanged (identity lives in the side tables, so no existing job query changed).
+- Selective reprint: print-`/fail` and QC-`fail` already clone a reprint; `repointAssemblyPart` moves the failed part's slot onto that reprint, so only the failed part reprints and it stays the same tracked part. Siblings are untouched.
+- Gating (`assembly_groups.go`): when a part passes QC it is **held** (`awaiting_sibling_parts`) until every part of its unit is built; then the unit becomes `ready_to_assemble` and its parts are released. `POST /assembly-groups/:id/assemble` fails closed unless every part is completed and QC-passed; `GET /assembly-groups/:id` reads a unit and its parts.
+- Not yet done (follow-ups): packaging/dispatch are still per-job (should key off the group for a multi-part product); no reprint-attempt cap / `needs_design_review` escalation; slicing still costs a whole file, so per-part filament is left unset.
+
 ## Auth - `internal/auth/`
 
 Authentication (who you are) belongs to Better Auth in the frontend. **This service owns authorization** (what you may do). Gin verifies the Better Auth JWT (`Authorization: Bearer ...`) against the frontend's JWKS (`AUTH_JWKS_URL`): signature, `exp`, `iss`, `aud`, algorithms pinned to EdDSA/RS256/ES256. A verified token is trusted data.
@@ -101,7 +112,7 @@ Authentication (who you are) belongs to Better Auth in the frontend. **This serv
 - **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, guarded at the router level. No secret configured means 503, not open.
 - Add a new permission to `AllPermissions` and the relevant `roleGrants` entry, then re-run the seed. `ADMIN` is the whole catalog by construction.
 
-Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`. The catalog holds 37 permissions across 6 roles (91 grants). Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions) - those tests are the spec, do not relax them.
+Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`, `MARKETING_HEAD`. The catalog holds 38 permissions across 7 roles (95 grants). `MARKETING_HEAD` writes product marketing copy only (`brand:read`, `design:read`, `design:content`) - it cannot approve, price or publish. Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions; Marketing-Head writes copy only) - those tests are the spec, do not relax them.
 
 ### Contract with the frontend
 Every route, method, JSON shape, status code, and error `detail` string must stay identical - the frontend validates responses with Zod. Domain responses are snake_case; `permissionsVersion` and `adminExists` are camelCase. POST-create returns 201; revoke/bootstrap/accept return 204.

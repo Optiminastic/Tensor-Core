@@ -177,9 +177,16 @@ func (s *Server) submitQc(c *gin.Context) {
 			if err != nil {
 				return err
 			}
+			if err := s.repointAssemblyPart(ctx, q, id, r.ID); err != nil {
+				return err
+			}
 			reprint = &r
+			return nil
 		}
-		return nil
+		// A pass: if this job is one part of a multi-part unit, hold it as WIP until
+		// its siblings are built, or release the whole unit for assembly if it was
+		// the last part.
+		return s.reconcileAssemblyGroupAfterQcPass(ctx, q, id)
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not record the QC check.")

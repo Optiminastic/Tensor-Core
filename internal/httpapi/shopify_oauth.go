@@ -48,10 +48,40 @@ func (s *Server) shopifyAuthorize(c *gin.Context) {
 		detail(c, http.StatusUnprocessableEntity, "A valid myshopify.com shop_domain is required.")
 		return
 	}
-	state := shopify.SignState(shop, uuid.NewString(), s.cfg.ShopifyClientSecret, time.Now().Add(oauthStateTTL))
+	state := shopify.SignState(shop, "", uuid.NewString(), s.cfg.ShopifyClientSecret, time.Now().Add(oauthStateTTL))
 	redirectURI := s.cfg.PublicBaseURL + "/integrations/shopify/oauth/callback"
 	url := shopify.AuthorizeURL(shop, s.cfg.ShopifyClientID, shopify.OrderImportScopes, redirectURI, state)
 	c.Redirect(http.StatusFound, url)
+}
+
+type shopifyAuthorizeResponse struct {
+	AuthorizeURL string `json:"authorize_url"`
+}
+
+// shopifyBrandAuthorizeURL builds the OAuth authorize URL for connecting one
+// brand's store (with publish scopes). The browser cannot call this guarded
+// endpoint directly, so the frontend fetches the URL with the admin's token and
+// redirects the browser to it; the callback finishes the connect for that brand.
+func (s *Server) shopifyBrandAuthorizeURL(c *gin.Context) {
+	if !s.shopifyReady(c) {
+		return
+	}
+	slug, ok := brandSlugParam(c)
+	if !ok {
+		return
+	}
+	if !s.brandMustExist(c, slug) {
+		return
+	}
+	shop := c.Query("shop_domain")
+	if !shopify.ValidShopDomain(shop) {
+		detail(c, http.StatusUnprocessableEntity, "A valid myshopify.com shop_domain is required.")
+		return
+	}
+	state := shopify.SignState(shop, slug, uuid.NewString(), s.cfg.ShopifyClientSecret, time.Now().Add(oauthStateTTL))
+	redirectURI := s.cfg.PublicBaseURL + "/integrations/shopify/oauth/callback"
+	url := shopify.AuthorizeURL(shop, s.cfg.ShopifyClientID, shopify.BrandConnectScopes, redirectURI, state)
+	c.JSON(http.StatusOK, shopifyAuthorizeResponse{AuthorizeURL: url})
 }
 
 // shopifyCallback handles Shopify's OAuth redirect: verify the query HMAC and
@@ -73,25 +103,57 @@ func (s *Server) shopifyCallback(c *gin.Context) {
 		fail()
 		return
 	}
-	if state := query.Get("state"); state != "" {
-		stateShop, ok := shopify.VerifyState(state, s.cfg.ShopifyClientSecret, time.Now())
-		if !ok || stateShop != shop {
-			fail()
-			return
-		}
-	}
-	ctx := c.Request.Context()
-
-	if _, err := s.store.Q.GetActiveConnectionByDomain(ctx, shop); err == nil {
-		// Already connected; treat as success rather than a hard error.
-		c.Redirect(http.StatusFound, s.cfg.FrontendURL+"/dashboard/settings?shopify=connected")
+	// State is always signed now (brand connect carries the brand; order import
+	// carries an empty brand), so it is required and must match the shop.
+	stateShop, brand, ok := shopify.VerifyState(query.Get("state"), s.cfg.ShopifyClientSecret, time.Now())
+	if !ok || stateShop != shop {
+		fail()
 		return
 	}
+	ctx := c.Request.Context()
 
 	token, scopes, err := s.shopify.ExchangeCode(ctx, shop, s.cfg.ShopifyClientID, s.cfg.ShopifyClientSecret, code)
 	if err != nil {
 		obs.FromContext(ctx).Error("shopify oauth exchange failed", "error", err)
 		fail()
+		return
+	}
+
+	if brand != "" {
+		s.completeBrandShopifyConnect(c, brand, shop, token)
+		return
+	}
+	s.completeOrderImportConnect(c, shop, token, scopes)
+}
+
+// completeBrandShopifyConnect stores the OAuth token as the brand's Shopify
+// connection - the exact row the publish/edit path reads via
+// GetConnectionWithToken - so a new store publishes with no per-store app. The
+// token is stored plaintext to match how that path reads it (like the manual
+// token); sealing brand_connections is a separate hardening follow-up.
+func (s *Server) completeBrandShopifyConnect(c *gin.Context, brand, shop, token string) {
+	ctx := c.Request.Context()
+	if _, err := s.store.Q.UpsertConnection(ctx, gen.UpsertConnectionParams{
+		ID: uuid.New(), BrandSlug: brand, Provider: shopifyProvider, Status: "connected",
+		ExternalAccountID: &shop, AccessToken: &token,
+	}); err != nil {
+		obs.FromContext(ctx).Error("shopify brand connection upsert failed", "error", err)
+		c.Redirect(http.StatusFound, s.cfg.FrontendURL+"/dashboard/"+brand+"/integrations?shopify=error")
+		return
+	}
+	c.Redirect(http.StatusFound, s.cfg.FrontendURL+"/dashboard/"+brand+"/integrations?shopify=connected")
+}
+
+// completeOrderImportConnect is the legacy, workspace-wide order-import flow:
+// register the orders/paid webhook and store the sealed token in
+// shopify_connections (keyed by domain). Unchanged behaviour, extracted so the
+// callback can branch cleanly.
+func (s *Server) completeOrderImportConnect(c *gin.Context, shop, token, scopes string) {
+	ctx := c.Request.Context()
+	fail := func() { c.Redirect(http.StatusFound, s.cfg.FrontendURL+"/dashboard/settings?shopify=error") }
+	if _, err := s.store.Q.GetActiveConnectionByDomain(ctx, shop); err == nil {
+		// Already connected; treat as success rather than a hard error.
+		c.Redirect(http.StatusFound, s.cfg.FrontendURL+"/dashboard/settings?shopify=connected")
 		return
 	}
 	subID, err := s.shopify.RegisterOrdersPaidWebhook(ctx, shop, token, s.callbackURL())

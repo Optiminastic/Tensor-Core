@@ -23,6 +23,8 @@ func (s *Server) registerWebhooks(r *gin.Engine) {
 	g := r.Group("/webhooks/shopify")
 	// Authenticated by the request HMAC, not a user token.
 	g.POST("/orders-paid", s.ordersPaidWebhook)
+	// Shopify's mandatory GDPR compliance webhooks (required for every public app).
+	s.registerComplianceWebhooks(g)
 }
 
 // ordersPaidWebhook receives Shopify's orders/paid callback, verifies the body

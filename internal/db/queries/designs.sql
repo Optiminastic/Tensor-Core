@@ -50,6 +50,31 @@ SELECT brand_slug FROM designs WHERE id = $1;
 -- name: DeleteDesign :execrows
 DELETE FROM designs WHERE id = $1;
 
+-- ListDesignCostReport lists a brand's priced designs with their Design CP,
+-- recommended SP, CP% and Green/Yellow/Red verdict, newest first. It INNER JOINs
+-- pricing, so designs still slicing (no cost yet) and archived designs are excluded
+-- - a cost report only lists designs that actually have a cost.
+-- name: ListDesignCostReport :many
+SELECT d.id, d.brand_slug, d.name, d.sku, d.status,
+       p.design_cp::float8 AS design_cp, p.verdict,
+       p.cp_pct::float8 AS cp_pct, p.recommended_sp, d.updated_at
+FROM designs d
+JOIN design_pricing p ON p.design_id = d.id
+WHERE d.brand_slug = $1 AND d.status <> 'archived'
+ORDER BY d.created_at DESC, d.id DESC;
+
+-- ArchiveDesign soft-deletes a design: hidden from every view but "Archived", and
+-- restorable. No-op (0 rows) if it is already archived.
+-- name: ArchiveDesign :execrows
+UPDATE designs SET status = 'archived', updated_at = now()
+WHERE id = $1 AND status <> 'archived';
+
+-- UnarchiveDesign restores an archived design back into the pipeline as priced, so
+-- it can be reviewed and resubmitted. No-op (0 rows) if it is not archived.
+-- name: UnarchiveDesign :execrows
+UPDATE designs SET status = 'priced', updated_at = now()
+WHERE id = $1 AND status = 'archived';
+
 -- SetDesignPersonalisationRules stores (or clears, with NULL) the product's
 -- personalization rule set. The jsonb shape is validated in Go before it is set.
 -- name: SetDesignPersonalisationRules :one

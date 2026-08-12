@@ -9,8 +9,8 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 37 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 37 each", len(admin), len(AllPermissions))
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 38 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 38 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -80,9 +80,29 @@ func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
 		}
 	}
 	// The working roles can read brands (to see their assigned ones).
-	for _, role := range []RoleName{RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator} {
+	for _, role := range []RoleName{
+		RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator, RoleMarketingHead,
+	} {
 		if !has(PermissionsFor(role), "brand:read") {
 			t.Errorf("%s should have brand:read", role)
+		}
+	}
+}
+
+func TestMarketingHeadWritesCopyOnly(t *testing.T) {
+	mh := PermissionsFor(RoleMarketingHead)
+	for _, expected := range []string{"brand:read", "design:read", "design:content"} {
+		if !has(mh, expected) {
+			t.Errorf("marketing head should have %s", expected)
+		}
+	}
+	// Copy only: never approves, edits, prices, publishes or manages users.
+	for _, forbidden := range []string{
+		"design:approve", "design:update", "design:delete",
+		"pricing:read", "pricing:generate", "shopify:publish", "config:read", "user:manage",
+	} {
+		if has(mh, forbidden) {
+			t.Errorf("marketing head must not have %s", forbidden)
 		}
 	}
 }
@@ -99,14 +119,14 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 37 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 13 (operator)
-	// + 4 (packaging_qc) = 91. Operator runs the whole Production tab; project lead
-	// holds user:read (roster + remove juniors) and design:delete.
+	// 38 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 13 (operator)
+	// + 4 (packaging_qc) + 3 (marketing head) = 95. Admin gained design:content;
+	// marketing head is brand:read + design:read + design:content.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 91 {
-		t.Fatalf("total grants = %d, want 91", total)
+	if total != 95 {
+		t.Fatalf("total grants = %d, want 95", total)
 	}
 }

@@ -33,6 +33,9 @@ const (
 	designChangesRequested = "changes_requested"
 	designApproved         = "approved"
 	designPublished        = "published"
+	// Archived is a soft delete: the design is hidden from every list view except
+	// "Archived" and can be restored. It is not a pipeline stage.
+	designArchived = "archived"
 )
 
 // Review event kinds recorded on the design_reviews thread.
@@ -180,6 +183,16 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.Use(s.requireDesignBrandAccess)
 	id.GET("", s.guards.RequirePermission(auth.DesignRead.Key()), s.getDesign)
 	id.DELETE("", s.guards.RequirePermission(auth.DesignDelete.Key()), s.deleteDesign)
+	// Archive is the soft-delete alternative to DELETE: reversible, and the design
+	// only shows under the "Archived" view. Same guard as delete.
+	id.PATCH("/archive", s.guards.RequirePermission(auth.DesignDelete.Key()), s.archiveDesign)
+	id.PATCH("/unarchive", s.guards.RequirePermission(auth.DesignDelete.Key()), s.unarchiveDesign)
+	// A multi-part product's parts (its recipe). Reading needs design:read; adding,
+	// editing and removing a part is a design edit (design:update / design:delete).
+	id.GET("/parts", s.guards.RequirePermission(auth.DesignRead.Key()), s.listDesignParts)
+	id.POST("/parts", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.createDesignPart)
+	id.PATCH("/parts/:partId", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.updateDesignPart)
+	id.DELETE("/parts/:partId", s.guards.RequirePermission(auth.DesignDelete.Key()), s.deleteDesignPart)
 	id.GET("/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
 	id.GET("/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
 	id.GET("/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
@@ -207,6 +220,8 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.PATCH("/name", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.renameDesign)
 	id.PATCH("/notes", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignNotes)
 	id.PATCH("/attributes", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignAttributes)
+	// The Marketing Head writes the product marketing copy (design:content only).
+	id.PATCH("/description", s.guards.RequirePermission(auth.DesignContent.Key()), s.setDesignDescription)
 	id.PATCH("/preview", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.replaceDesignPreview)
 	id.PATCH("/personalisation-rules",
 		s.guards.RequirePermission(auth.ShopifyPublish.Key()), s.setDesignPersonalisationRules)
@@ -462,6 +477,44 @@ func (s *Server) deleteDesign(c *gin.Context) {
 	}
 	if rows == 0 {
 		detail(c, http.StatusNotFound, "That design does not exist.")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// archiveDesign soft-deletes a design (status -> archived): it drops out of every
+// list view except "Archived" and can be restored. Guarded by design:delete and
+// the /:id brand-access gate. Idempotent - archiving an archived design is a 404.
+func (s *Server) archiveDesign(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := s.store.Q.ArchiveDesign(c.Request.Context(), id)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not archive the design.")
+		return
+	}
+	if rows == 0 {
+		detail(c, http.StatusNotFound, "That design does not exist or is already archived.")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// unarchiveDesign restores an archived design back into the pipeline as priced.
+func (s *Server) unarchiveDesign(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := s.store.Q.UnarchiveDesign(c.Request.Context(), id)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not restore the design.")
+		return
+	}
+	if rows == 0 {
+		detail(c, http.StatusNotFound, "That design does not exist or is not archived.")
 		return
 	}
 	c.Status(http.StatusNoContent)

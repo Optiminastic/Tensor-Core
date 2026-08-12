@@ -550,3 +550,52 @@ CREATE TABLE user_brands (
     PRIMARY KEY (user_id, brand_slug)
 );
 CREATE INDEX ix_user_brands_brand ON user_brands (brand_slug);
+
+-- Multi-part products (migration 0027): a design's named parts (its recipe). A
+-- design with no design_parts row is a single-part product and behaves as before.
+CREATE TABLE design_parts (
+    id             uuid PRIMARY KEY,
+    design_id      uuid NOT NULL REFERENCES designs (id) ON DELETE CASCADE,
+    role           varchar(64) NOT NULL,
+    part_index     integer NOT NULL DEFAULT 0,
+    quantity       integer NOT NULL DEFAULT 1 CHECK (quantity >= 1),
+    print_file_id  uuid REFERENCES file_assets (id) ON DELETE SET NULL,
+    material       varchar(255),
+    colour         varchar(255),
+    nozzle_profile varchar(255),
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX design_parts_design_role_key ON design_parts (design_id, role);
+CREATE INDEX ix_design_parts_design ON design_parts (design_id, part_index);
+
+-- One physical unit of a multi-part product (migration 0028). An order line of
+-- quantity N for a multi-part SKU yields N groups; single-part products create none.
+CREATE TABLE assembly_groups (
+    id         uuid PRIMARY KEY,
+    order_id   uuid REFERENCES orders (id) ON DELETE SET NULL,
+    design_sku varchar(128),
+    unit_index integer NOT NULL DEFAULT 1,
+    status     varchar(32) NOT NULL DEFAULT 'printing',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_assembly_groups_order ON assembly_groups (order_id);
+
+-- One part slot in a unit (migration 0028), keyed by (group, role, instance).
+-- part_uid is the stable, never-reused id (PART-XXXXXX) carried across reprints;
+-- job_id points at the slot's current print attempt and is repointed on reprint.
+CREATE TABLE assembly_group_parts (
+    id                uuid PRIMARY KEY,
+    assembly_group_id uuid NOT NULL REFERENCES assembly_groups (id) ON DELETE CASCADE,
+    job_id            uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
+    part_role         varchar(64) NOT NULL,
+    part_instance     integer NOT NULL DEFAULT 1,
+    part_uid          varchar(64) NOT NULL,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX assembly_group_parts_uid_key ON assembly_group_parts (part_uid);
+CREATE UNIQUE INDEX assembly_group_parts_slot_key
+    ON assembly_group_parts (assembly_group_id, part_role, part_instance);
+CREATE INDEX ix_assembly_group_parts_group ON assembly_group_parts (assembly_group_id);
+CREATE INDEX ix_assembly_group_parts_job ON assembly_group_parts (job_id);

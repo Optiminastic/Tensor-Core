@@ -196,6 +196,14 @@ func parseAttributes(c *gin.Context) []byte {
 			addOns = append(addOns, t)
 		}
 	}
+	// Colours auto-detected from a 3MF on upload (the full palette; the design's
+	// Colour field is a length-capped human label).
+	var detectedColours []string
+	for _, hexVal := range strings.Split(c.PostForm("detected_colours"), ",") {
+		if t := strings.TrimSpace(hexVal); t != "" {
+			detectedColours = append(detectedColours, t)
+		}
+	}
 
 	attrs := map[string]any{}
 	if productType != "" {
@@ -212,6 +220,9 @@ func parseAttributes(c *gin.Context) []byte {
 	}
 	if len(addOns) > 0 {
 		attrs["add_ons"] = addOns
+	}
+	if len(detectedColours) > 0 {
+		attrs["detected_colours"] = detectedColours
 	}
 	// Shopify import snapshot: the source product id + a price snapshot, so the
 	// design detail can compare true cost against the live listing price.

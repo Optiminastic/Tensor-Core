@@ -64,8 +64,8 @@ func seedAll(t *testing.T, store *db.Store) {
 	if err != nil {
 		t.Fatalf("seed auth: %v", err)
 	}
-	if res.Permissions != 37 || res.Roles != 6 || res.Grants != 80 {
-		t.Fatalf("seed counts = %+v, want 37/6/80", res)
+	if res.Permissions != 38 || res.Roles != 7 || res.Grants != 95 {
+		t.Fatalf("seed counts = %+v, want 38/7/95", res)
 	}
 	seedGiftingBrand(t, store)
 }
@@ -107,7 +107,7 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 
 	// Re-seeding is idempotent.
 	res, err := auth.SyncAll(ctx, store)
-	if err != nil || res.Grants != 80 {
+	if err != nil || res.Grants != 95 {
 		t.Fatalf("re-seed: %+v err=%v", res, err)
 	}
 
@@ -126,8 +126,8 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 	if len(authz.Roles) != 1 || authz.Roles[0] != auth.RoleAdmin {
 		t.Errorf("roles = %v, want [ADMIN]", authz.Roles)
 	}
-	if len(authz.Permissions) != 37 {
-		t.Errorf("permissions = %d, want 37", len(authz.Permissions))
+	if len(authz.Permissions) != 38 {
+		t.Errorf("permissions = %d, want 38", len(authz.Permissions))
 	}
 
 	// Unknown user resolves to empty, version 0.

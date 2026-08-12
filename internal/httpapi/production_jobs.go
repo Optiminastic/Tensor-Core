@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -242,26 +245,36 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		return
 	}
 
-	params, err := jobsFromLineItems(order, items)
+	// Plan the jobs (and, for multi-part products, the assembly groups and part
+	// slots). A single-part line stays one job, exactly as before; a line whose SKU
+	// resolves to a design with named parts fans out into one unit per ordered
+	// quantity and one job per part instance.
+	groups, jobs, err := s.planJobsForOrder(ctx, order, items)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not prepare the production jobs.")
 		return
 	}
 
-	// Resolve catalogued SKUs to their design: attach the design's model (STL) and
-	// fill material/colour from the catalog. Unresolved SKUs keep the order's own
-	// line-item values, so a non-catalog order still works exactly as before.
-	if err := s.enrichJobsFromCatalog(ctx, params, items); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not resolve the order's SKUs to designs.")
-		return
-	}
-
-	created := make([]productionJobResponse, 0, len(params))
+	created := make([]productionJobResponse, 0, len(jobs))
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
-		for _, p := range params {
-			job, err := q.InsertProductionJob(ctx, p)
+		for _, g := range groups {
+			if _, err := q.InsertAssemblyGroup(ctx, g); err != nil {
+				return err
+			}
+		}
+		for _, pj := range jobs {
+			job, err := q.InsertProductionJob(ctx, pj.params)
 			if err != nil {
 				return err
+			}
+			if pj.part != nil {
+				jobID := job.ID
+				if _, err := q.InsertAssemblyGroupPart(ctx, gen.InsertAssemblyGroupPartParams{
+					ID: uuid.New(), AssemblyGroupID: pj.part.groupID, JobID: &jobID,
+					PartRole: pj.part.role, PartInstance: pj.part.instance, PartUid: pj.part.partUID,
+				}); err != nil {
+					return err
+				}
 			}
 			created = append(created, productionJobDTO(job))
 		}
@@ -274,44 +287,202 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 	c.JSON(http.StatusCreated, created)
 }
 
-// jobsFromLineItems decomposes an order's line items into job insert params, one
-// per line, snapshotting the print facts and auto-validating personalisation.
-func jobsFromLineItems(order gen.Order, items []production.LineItem) ([]gen.InsertProductionJobParams, error) {
-	shopifyID := order.ShopifyOrderID
-	out := make([]gen.InsertProductionJobParams, 0, len(items))
-	for _, li := range items {
-		jobNumber, err := production.NewJobNumber()
-		if err != nil {
-			return nil, err
-		}
-		quantity := int32(li.Quantity)
-		if quantity < 1 {
-			quantity = 1
-		}
-		status, confirms := production.AutoValidatePersonalisation(li)
+// plannedJob is one job to insert, optionally linked to a product-unit part slot.
+type plannedJob struct {
+	params gen.InsertProductionJobParams
+	part   *plannedPart // nil for a single-part product's job
+}
 
-		p := gen.InsertProductionJobParams{
-			ID: uuid.New(), JobNumber: jobNumber,
-			OrderID: ptr(order.ID), ShopifyOrderID: &shopifyID,
-			Description: descriptionOf(li), Quantity: quantity,
-			Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
-			QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-			Sku: nonEmptyPtr(firstNonEmpty(li.SKU, li.ProductID)), ProductName: nonEmptyPtr(li.ProductName),
-			Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
-			FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
-			EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
-			DueDate:                   db.Timestamptz(li.DueDate),
-			Priority:                  int32(li.Priority),
-			PersonalisationName:       li.PersonalisationName, PersonalisationFont: li.PersonalisationFont,
-			PersonalisationColour: li.PersonalisationColour, PersonalisationVariant: li.PersonalisationVariant,
-			PersonalisationStatus: status,
-			NameConfirmed:         confirms.Name, PhotoConfirmed: confirms.Photo, FontConfirmed: confirms.Font,
-			ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
-			CustomerApprovalReceived: confirms.Approval,
+// plannedPart is the slot a fanned-out job fills within its product unit.
+type plannedPart struct {
+	groupID  uuid.UUID
+	role     string
+	instance int32
+	partUID  string
+}
+
+// planJobsForOrder turns an order's line items into the jobs to insert, plus the
+// assembly groups and part slots for any multi-part products. Resolution per line:
+//   - SKU is empty or not catalogued -> one job with the line's own values (legacy).
+//   - SKU resolves to a design with no parts -> one job, catalog model + material.
+//   - SKU resolves to a design with named parts -> one assembly group per ordered
+//     unit, and one job per (part, instance), each independently reprintable.
+func (s *Server) planJobsForOrder(
+	ctx context.Context, order gen.Order, items []production.LineItem,
+) ([]gen.InsertAssemblyGroupParams, []plannedJob, error) {
+	var groups []gen.InsertAssemblyGroupParams
+	var jobs []plannedJob
+	// Cache per design so two lines sharing a SKU create one template file, not two.
+	templateByDesign := make(map[uuid.UUID]uuid.UUID)
+
+	for _, li := range items {
+		base, err := jobParamsForLine(order, li)
+		if err != nil {
+			return nil, nil, err
 		}
-		out = append(out, p)
+
+		sku := strings.TrimSpace(li.SKU)
+		if sku == "" {
+			jobs = append(jobs, plannedJob{params: base})
+			continue
+		}
+		design, err := s.store.Q.GetDesignBySku(ctx, &sku)
+		if err != nil {
+			if isNoRows(err) {
+				jobs = append(jobs, plannedJob{params: base}) // not catalogued; keep the fallback
+				continue
+			}
+			return nil, nil, err
+		}
+
+		// Attach the design's model + material/colour and re-validate personalisation
+		// against the product's rules, exactly as the single-part catalog path did.
+		templateFile, ok := templateByDesign[design.ID]
+		if !ok {
+			templateFile, err = s.ensureTemplateFile(ctx, design)
+			if err != nil {
+				return nil, nil, err
+			}
+			templateByDesign[design.ID] = templateFile
+		}
+		base.PrintFileID = &templateFile
+		material := design.Material
+		base.Material = &material
+		if design.Colour != nil {
+			base.Colour = design.Colour
+		}
+		if len(design.PersonalisationRules) > 0 {
+			applyPersonalisationRules(&base, design.PersonalisationRules, li)
+		}
+
+		parts, err := s.store.Q.ListDesignPartsByDesign(ctx, design.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(parts) == 0 {
+			jobs = append(jobs, plannedJob{params: base}) // single-part product
+			continue
+		}
+
+		// Multi-part product: one assembly group per ordered unit, one job per part
+		// instance within it.
+		units := int(base.Quantity)
+		if units < 1 {
+			units = 1
+		}
+		for u := 1; u <= units; u++ {
+			groupID := uuid.New()
+			orderID := order.ID
+			skuCopy := sku
+			groups = append(groups, gen.InsertAssemblyGroupParams{
+				ID: groupID, OrderID: &orderID, DesignSku: &skuCopy,
+				UnitIndex: int32(u), Status: production.GroupPrinting,
+			})
+			for _, p := range parts {
+				count := int(p.Quantity)
+				if count < 1 {
+					count = 1
+				}
+				for inst := 1; inst <= count; inst++ {
+					pj, err := partJobFromBase(base, p, templateFile, inst)
+					if err != nil {
+						return nil, nil, err
+					}
+					partUID, err := production.NewPartUID()
+					if err != nil {
+						return nil, nil, err
+					}
+					jobs = append(jobs, plannedJob{
+						params: pj,
+						part: &plannedPart{
+							groupID: groupID, role: p.Role, instance: int32(inst), partUID: partUID,
+						},
+					})
+				}
+			}
+		}
 	}
-	return out, nil
+	return groups, jobs, nil
+}
+
+// jobParamsForLine builds the insert params for one order line's job: the print
+// facts snapshot plus auto-validated personalisation. Catalog resolution (print
+// file, material/colour, personalisation rules) is layered on by the caller.
+func jobParamsForLine(order gen.Order, li production.LineItem) (gen.InsertProductionJobParams, error) {
+	jobNumber, err := production.NewJobNumber()
+	if err != nil {
+		return gen.InsertProductionJobParams{}, err
+	}
+	quantity := int32(li.Quantity)
+	if quantity < 1 {
+		quantity = 1
+	}
+	status, confirms := production.AutoValidatePersonalisation(li)
+	shopifyID := order.ShopifyOrderID
+
+	return gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: jobNumber,
+		OrderID: ptr(order.ID), ShopifyOrderID: &shopifyID,
+		Description: descriptionOf(li), Quantity: quantity,
+		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		Sku: nonEmptyPtr(firstNonEmpty(li.SKU, li.ProductID)), ProductName: nonEmptyPtr(li.ProductName),
+		Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
+		FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
+		EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
+		DueDate:                   db.Timestamptz(li.DueDate),
+		Priority:                  int32(li.Priority),
+		PersonalisationName:       li.PersonalisationName, PersonalisationFont: li.PersonalisationFont,
+		PersonalisationColour: li.PersonalisationColour, PersonalisationVariant: li.PersonalisationVariant,
+		PersonalisationStatus: status,
+		NameConfirmed:         confirms.Name, PhotoConfirmed: confirms.Photo, FontConfirmed: confirms.Font,
+		ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
+		CustomerApprovalReceived: confirms.Approval,
+	}, nil
+}
+
+// partJobFromBase builds one part-job from a product's base job: a fresh id and job
+// number, quantity 1, the part's own print file and material/colour overrides (each
+// falling back to the product's), and a description naming the part (and its
+// instance when a product needs several identical ones). Per-part filament is left
+// unset because slicing does not yet meter parts individually.
+func partJobFromBase(
+	base gen.InsertProductionJobParams, p gen.DesignPart, templateFile uuid.UUID, instance int,
+) (gen.InsertProductionJobParams, error) {
+	jobNumber, err := production.NewJobNumber()
+	if err != nil {
+		return gen.InsertProductionJobParams{}, err
+	}
+	pj := base
+	pj.ID = uuid.New()
+	pj.JobNumber = jobNumber
+	pj.Quantity = 1
+	pj.FilamentGramsRequired = nil
+	pj.Description = partDescription(base.Description, p, instance)
+	if p.PrintFileID != nil {
+		pj.PrintFileID = p.PrintFileID
+	} else {
+		pj.PrintFileID = &templateFile
+	}
+	if p.Material != nil {
+		pj.Material = p.Material
+	}
+	if p.Colour != nil {
+		pj.Colour = p.Colour
+	}
+	if p.NozzleProfile != nil {
+		pj.NozzleProfile = p.NozzleProfile
+	}
+	return pj, nil
+}
+
+// partDescription labels a part-job by its product and role, adding an instance
+// number only when the product needs more than one of that identical part.
+func partDescription(base string, p gen.DesignPart, instance int) string {
+	if p.Quantity > 1 {
+		return fmt.Sprintf("%s - %s #%d", base, p.Role, instance)
+	}
+	return base + " - " + p.Role
 }
 
 // --- PATCH --------------------------------------------------------------------
@@ -625,13 +796,31 @@ func (s *Server) failProductionJob(c *gin.Context) {
 			}
 		}
 		reprint, err = q.InsertProductionJob(ctx, reprintParams)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.repointAssemblyPart(ctx, q, id, reprint.ID)
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not fail the production job.")
 		return
 	}
 	c.JSON(http.StatusOK, failJobResponse{FailedJob: productionJobDTO(failed), ReprintJob: productionJobDTO(reprint)})
+}
+
+// repointAssemblyPart moves a failed part's slot onto its reprint job, so the part
+// (its stable part_uid, role, and instance) stays trackable across attempts. It is
+// a no-op for a single-part product's job, which fills no slot.
+func (s *Server) repointAssemblyPart(ctx context.Context, q *gen.Queries, oldJobID, newJobID uuid.UUID) error {
+	slot, err := q.GetAssemblyPartByJob(ctx, &oldJobID)
+	if err != nil {
+		if isNoRows(err) {
+			return nil
+		}
+		return err
+	}
+	next := newJobID
+	return q.RepointAssemblyPartJob(ctx, gen.RepointAssemblyPartJobParams{ID: slot.ID, JobID: &next})
 }
 
 // cloneForReprint builds the insert params for a fresh queued reprint of a failed

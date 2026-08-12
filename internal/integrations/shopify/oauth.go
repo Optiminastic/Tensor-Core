@@ -19,6 +19,11 @@ import (
 // OrderImportScopes are the scopes the inbound order-import app requests.
 const OrderImportScopes = "read_orders,read_products"
 
+// BrandConnectScopes are the scopes a brand's store grants when it connects via
+// OAuth: enough to publish and manage listings and stock, plus order read, so one
+// connect covers publishing and (future) order import without a per-store app.
+const BrandConnectScopes = "write_products,read_products,read_orders,read_inventory,write_inventory"
+
 // shopDomainPattern validates a store domain before it is used in a URL, so a
 // crafted value cannot redirect the OAuth flow elsewhere.
 var shopDomainPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*\.myshopify\.com$`)
@@ -75,40 +80,43 @@ func VerifyWebhookHMAC(body []byte, headerB64, secret string) bool {
 }
 
 // statePayload is the signed OAuth state carried through the redirect: the shop it
-// was issued for, a nonce, and an expiry.
+// was issued for, the brand connecting it (empty for the legacy order-import
+// flow), a nonce, and an expiry.
 type statePayload struct {
 	Shop  string `json:"shop"`
+	Brand string `json:"brand,omitempty"`
 	Nonce string `json:"nonce"`
 	Exp   int64  `json:"exp"`
 }
 
 // SignState returns an opaque, HMAC-signed state token binding the flow to a shop
-// until expiresAt. nonce should be random per authorize call.
-func SignState(shop, nonce, secret string, expiresAt time.Time) string {
-	payload, _ := json.Marshal(statePayload{Shop: shop, Nonce: nonce, Exp: expiresAt.Unix()})
+// and (optionally) a brand until expiresAt. nonce should be random per authorize
+// call. Pass brand="" for the order-import flow that is not brand-scoped.
+func SignState(shop, brand, nonce, secret string, expiresAt time.Time) string {
+	payload, _ := json.Marshal(statePayload{Shop: shop, Brand: brand, Nonce: nonce, Exp: expiresAt.Unix()})
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	return body + "." + signStateBody(body, secret)
 }
 
-// VerifyState checks a state token's signature and expiry and returns the shop it
-// was issued for.
-func VerifyState(token, secret string, now time.Time) (string, bool) {
+// VerifyState checks a state token's signature and expiry and returns the shop and
+// brand it was issued for (brand is empty for the order-import flow).
+func VerifyState(token, secret string, now time.Time) (shop, brand string, ok bool) {
 	body, sig, found := strings.Cut(token, ".")
 	if !found || !hmac.Equal([]byte(sig), []byte(signStateBody(body, secret))) {
-		return "", false
+		return "", "", false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var p statePayload
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if now.Unix() > p.Exp {
-		return "", false
+		return "", "", false
 	}
-	return p.Shop, true
+	return p.Shop, p.Brand, true
 }
 
 func signStateBody(body, secret string) string {

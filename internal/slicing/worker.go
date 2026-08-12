@@ -18,6 +18,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/meshio"
 	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -121,7 +122,19 @@ func (w *SliceWorker) slice(ctx context.Context, args SliceArgs) (PerUnitMetrics
 
 	out, err := RunSlice(ctx, w.bambuRoot, profiles, stlPath, infill, units, args.Settings, workdir, w.sliceTimeout)
 	if err != nil {
-		return PerUnitMetrics{}, err
+		// Bambu Studio's CLI rejects some 3MFs it cannot parse (e.g. a foreign
+		// PrusaSlicer/Slic3r project 3MF), even though our own mesh loader reads
+		// them. Rebuild a clean STL from the mesh and slice that: geometry and cost
+		// are preserved; the slice is single-material (fine on the single-nozzle H2S).
+		fallback, ok := w.fallbackSTL(stlPath, args.StlKey, workdir)
+		if !ok {
+			return PerUnitMetrics{}, err
+		}
+		w.logger.Info("retrying slice via normalised STL", "key", args.StlKey, "reason", err)
+		out, err = RunSlice(ctx, w.bambuRoot, profiles, fallback, infill, units, args.Settings, workdir, w.sliceTimeout)
+		if err != nil {
+			return PerUnitMetrics{}, err
+		}
 	}
 
 	result, err := LoadResultJSON(out.ResultJSONPath)
@@ -210,6 +223,26 @@ func pickFilament(raw []byte, chosenPreset, material string) (string, float64, e
 		}
 	}
 	return fallback.FilamentPreset, fallback.Density, nil
+}
+
+// fallbackSTL rebuilds a clean binary STL from a 3MF the slicer could not parse,
+// to recover foreign/complex 3MFs (e.g. PrusaSlicer projects). It returns false
+// when the model is not a 3MF or its mesh cannot be read, so the caller keeps the
+// original slice failure. The rebuilt STL is geometry only - correct for costing,
+// single-material on the single-nozzle H2S.
+func (w *SliceWorker) fallbackSTL(modelPath, stlKey, workdir string) (string, bool) {
+	if !strings.EqualFold(filepath.Ext(stlKey), ".3mf") {
+		return "", false
+	}
+	mesh, err := orientation.LoadModel(modelPath, filepath.Ext(stlKey))
+	if err != nil || len(mesh.Triangles) == 0 {
+		return "", false
+	}
+	outPath := filepath.Join(workdir, "model-normalised.stl")
+	if err := os.WriteFile(outPath, meshio.ConcatBinarySTL("tensor", mesh.Triangles), 0o600); err != nil {
+		return "", false
+	}
+	return outPath, true
 }
 
 // recommendOrientation reads the model mesh and computes the least-support

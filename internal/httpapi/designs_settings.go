@@ -113,6 +113,53 @@ func (s *Server) setDesignAttributes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": id.String()})
 }
 
+type descriptionRequest struct {
+	Description string `json:"description"`
+}
+
+const maxProductDescription = 8000
+
+// setDesignDescription stores the product marketing description on the design (in
+// the attributes bag, preserving every other key). The publish dialog pre-fills
+// from it. Guarded by design:content - the Marketing Head's one write. An empty
+// body clears the description.
+func (s *Server) setDesignDescription(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req descriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		detail(c, http.StatusUnprocessableEntity, "A JSON body with a 'description' field is required.")
+		return
+	}
+	d, err := s.store.Q.GetDesignByID(c.Request.Context(), id)
+	if err != nil {
+		dbError(c, err, "That design does not exist.", "Could not load the design.")
+		return
+	}
+
+	attrs := map[string]any{}
+	if len(d.Attributes) > 0 {
+		_ = json.Unmarshal(d.Attributes, &attrs)
+	}
+	if v := trimMax(req.Description, maxProductDescription); v != "" {
+		attrs["product_description"] = v
+	} else {
+		delete(attrs, "product_description")
+	}
+
+	var out []byte
+	if len(attrs) > 0 {
+		out, _ = json.Marshal(attrs)
+	}
+	if err := s.store.Q.SetDesignAttributes(c.Request.Context(), gen.SetDesignAttributesParams{ID: id, Attributes: out}); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not save the description.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id.String()})
+}
+
 // replaceDesignPreview swaps the design's cover image. It reuses the create-flow
 // resolver, so it accepts an uploaded "preview" file or a "preview_url" (a Shopify
 // image). Guarded by design:update; needs object storage.

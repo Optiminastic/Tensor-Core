@@ -73,6 +73,20 @@ const (
 	MachineMaintenance = "maintenance"
 )
 
+// Assembly-group status: the lifecycle of one physical unit of a multi-part
+// product. It stays printing until every part slot is built, then can be
+// assembled, QC'd as a whole, and packaged. needs_design_review parks a unit whose
+// part keeps failing beyond the reprint cap.
+const (
+	GroupPrinting        = "printing"
+	GroupAwaitingParts   = "awaiting_parts"
+	GroupReadyToAssemble = "ready_to_assemble"
+	GroupAssembled       = "assembled"
+	GroupQc              = "qc"
+	GroupPackaged        = "packaged"
+	GroupNeedsReview     = "needs_design_review"
+)
+
 var batchStatusTargets = set(BatchOpen, BatchInProgress, BatchCompleted)
 var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMaintenance)
 
@@ -225,6 +239,11 @@ func NewJobNumber() (string, error) { return newNumber("JOB-") }
 
 // NewBatchNumber returns a batch identifier of the form BATCH-XXXXXX.
 func NewBatchNumber() (string, error) { return newNumber("BATCH-") }
+
+// NewPartUID returns a stable, system-minted identifier for one product part slot,
+// of the form PART-XXXXXX. It is minted once when the slot is created and carried
+// across reprints, so a part stays trackable through every reprint attempt.
+func NewPartUID() (string, error) { return newNumber("PART-") }
 
 func newNumber(prefix string) (string, error) {
 	b := make([]byte, 3)

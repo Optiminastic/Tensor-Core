@@ -474,6 +474,14 @@ func buildMetafields(
 			Value: fmt.Sprintf("%d", *pricing.RecommendedSp),
 		})
 	}
+	// The spec's required metafield set includes the approved selling price; the
+	// value is already loaded, it just was never published.
+	if pricing.ApprovedSp != nil {
+		mf = append(mf, shopify.Metafield{
+			Namespace: "tensor", Key: "approved_sp", Type: "number_integer",
+			Value: fmt.Sprintf("%d", *pricing.ApprovedSp),
+		})
+	}
 	if hasMetrics {
 		mf = append(mf,
 			shopify.Metafield{Namespace: "tensor", Key: "print_time_hr", Type: "number_decimal", Value: fmt.Sprintf("%.4f", metrics.PrintTimeHr)},

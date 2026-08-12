@@ -20,11 +20,15 @@ const (
 	// packaging_qc role: it records QC/assembly/packaging but never advances a job
 	// directly (no production:update) and never sees costs.
 	RolePackagingQc RoleName = "PACKAGING_QC"
+	// RoleMarketingHead writes the product marketing description. It cannot approve,
+	// price or publish - copy only, kept separate from the Project Lead.
+	RoleMarketingHead RoleName = "MARKETING_HEAD"
 )
 
 // AllRoles lists every role in a stable order.
 var AllRoles = []RoleName{
 	RoleAdmin, RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator, RolePackagingQc,
+	RoleMarketingHead,
 }
 
 // Valid reports whether r is one of the known roles.
@@ -58,6 +62,7 @@ var (
 	DesignSubmit  = PermissionSpec{"design", "submit", "Submit a design for review"}
 	DesignApprove = PermissionSpec{"design", "approve", "Approve a design and its selling price"}
 	DesignReject  = PermissionSpec{"design", "reject", "Send a design back to the designer"}
+	DesignContent = PermissionSpec{"design", "content", "Write the product marketing description"}
 
 	PricingRead     = PermissionSpec{"pricing", "read", "See Design CP, selling price and margins"}
 	PricingGenerate = PermissionSpec{"pricing", "generate", "Generate a selling price from the ladder"}
@@ -108,9 +113,10 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (37 permissions).
+// AllPermissions is the full catalog in seed order (38 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
+	DesignContent,
 	PricingRead, PricingGenerate, PricingOverride,
 	ConfigRead, ConfigManage,
 	ShopifyPublish,
@@ -154,6 +160,10 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		FilamentRead, FilamentManage,
 	},
 	RolePerformanceMarketer: {BrandRead, DesignRead, PricingRead},
+	// Marketing head: writes the product marketing copy on a design and reads
+	// designs to do it. Never approves, prices or publishes - separation from the
+	// Project Lead, who approves and pushes the copy to Shopify.
+	RoleMarketingHead: {BrandRead, DesignRead, DesignContent},
 	// Machine operator: runs the whole Production tab - jobs, orders, batches,
 	// machines and filament inventory. Records assembly, fails/advances a job,
 	// manages machine status, and reads orders + manages batches/inventory. Still
@@ -183,6 +193,7 @@ var RoleDescriptions = map[RoleName]string{
 	RolePerformanceMarketer: "Reads pricing and margins to plan ad spend",
 	RoleOperator:            "Runs production jobs and machines; cannot see cost assumptions",
 	RolePackagingQc:         "Runs the QC and packaging stations; cannot see cost assumptions",
+	RoleMarketingHead:       "Writes product marketing copy; cannot approve, price or publish",
 }
 
 // GrantsFor returns the permission specs granted to a role (nil for unknown).

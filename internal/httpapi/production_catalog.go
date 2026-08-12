@@ -12,59 +12,6 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// enrichJobsFromCatalog resolves each order line's SKU to a design and fills the
-// job's print file and material/colour from that design, so an order for a
-// catalogued SKU becomes a ready-to-print job automatically. A line whose SKU
-// does not resolve is left untouched - the order's own line-item values (the
-// legacy path) still apply, so non-catalog orders are unaffected.
-//
-// It runs before the insert transaction: attaching a job's print_file_id needs
-// the design's template file_asset to exist first (a foreign key), and that row
-// is created here.
-func (s *Server) enrichJobsFromCatalog(
-	ctx context.Context, params []gen.InsertProductionJobParams, items []production.LineItem,
-) error {
-	// Cache per design so two lines sharing a SKU create one template file, not two.
-	templateByDesign := make(map[uuid.UUID]uuid.UUID)
-	for i := range items {
-		sku := strings.TrimSpace(items[i].SKU)
-		if sku == "" {
-			continue
-		}
-		design, err := s.store.Q.GetDesignBySku(ctx, &sku)
-		if err != nil {
-			if isNoRows(err) {
-				continue // not a catalogued SKU; keep the line-item fallback
-			}
-			return err
-		}
-
-		fileID, ok := templateByDesign[design.ID]
-		if !ok {
-			fileID, err = s.ensureTemplateFile(ctx, design)
-			if err != nil {
-				return err
-			}
-			templateByDesign[design.ID] = fileID
-		}
-
-		params[i].PrintFileID = &fileID
-		material := design.Material
-		params[i].Material = &material
-		if design.Colour != nil {
-			params[i].Colour = design.Colour
-		}
-
-		// Validate the order's personalisation against the product's rules (allowed
-		// fonts/colours/variants, name length, required fields), overriding the
-		// generic non-empty check. No rules -> the generic result stands.
-		if len(design.PersonalisationRules) > 0 {
-			applyPersonalisationRules(&params[i], design.PersonalisationRules, items[i])
-		}
-	}
-	return nil
-}
-
 // applyPersonalisationRules re-validates a job's personalisation against its
 // product's rules and overrides the status, per-field confirmations, and notes.
 // Malformed rules are ignored (the generic result stays), so a bad rule blob can

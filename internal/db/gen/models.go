@@ -9,6 +9,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AssemblyGroup struct {
+	ID        uuid.UUID
+	OrderID   *uuid.UUID
+	DesignSku *string
+	UnitIndex int32
+	Status    string
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
+type AssemblyGroupPart struct {
+	ID              uuid.UUID
+	AssemblyGroupID uuid.UUID
+	JobID           *uuid.UUID
+	PartRole        string
+	PartInstance    int32
+	PartUid         string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
 type Batch struct {
 	ID                          uuid.UUID
 	BatchNumber                 string
@@ -111,6 +132,19 @@ type DesignOptimization struct {
 	Result    []byte
 	Model     string
 	CreatedAt pgtype.Timestamptz
+}
+
+type DesignPart struct {
+	ID            uuid.UUID
+	DesignID      uuid.UUID
+	Role          string
+	PartIndex     int32
+	Quantity      int32
+	PrintFileID   *uuid.UUID
+	Material      *string
+	Colour        *string
+	NozzleProfile *string
+	CreatedAt     pgtype.Timestamptz
 }
 
 type DesignPricing struct {
