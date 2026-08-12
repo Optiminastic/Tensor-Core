@@ -29,7 +29,7 @@ type productionJobResponse struct {
 	Quantity                   int32      `json:"quantity"`
 	Status                     string     `json:"status"`
 	AssemblyStatus             string     `json:"assembly_status"`
-	PolishingStatus            string     `json:"polishing_status"`
+	FinishingStatus            string     `json:"finishing_status"`
 	QcStatus                   string     `json:"qc_status"`
 	PackagingStatus            string     `json:"packaging_status"`
 	ShopifyOrderID             *int64     `json:"shopify_order_id"`
@@ -119,7 +119,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 	}
 	required := j.PersonalisationStatus != production.PersonalisationNotRequired
 	stage := production.PipelineStage(production.PipelineStageInput{
-		Status: j.Status, AssemblyStatus: j.AssemblyStatus, PolishingStatus: j.PolishingStatus,
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
 		QcStatus:        j.QcStatus,
 		PackagingStatus: j.PackagingStatus, PersonalisationStatus: j.PersonalisationStatus,
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
@@ -127,7 +127,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 	return productionJobResponse{
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
-		Status: j.Status, AssemblyStatus: j.AssemblyStatus, PolishingStatus: j.PolishingStatus,
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
 		QcStatus:        j.QcStatus,
 		PackagingStatus: j.PackagingStatus, ShopifyOrderID: j.ShopifyOrderID,
 		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
@@ -245,8 +245,8 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.POST("/:id/fail", s.guards.RequirePermission(auth.ProductionFail.Key()), s.failProductionJob)
 	g.POST("/:id/assembly", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.submitAssembly)
 	g.POST("/:id/assembly/skip", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.skipAssembly)
-	g.POST("/:id/polishing", s.guards.RequirePermission(auth.PolishingSubmit.Key()), s.submitPolishing)
-	g.POST("/:id/polishing/skip", s.guards.RequirePermission(auth.PolishingSubmit.Key()), s.skipPolishing)
+	g.POST("/:id/finishing", s.guards.RequirePermission(auth.FinishingSubmit.Key()), s.submitFinishing)
+	g.POST("/:id/finishing/skip", s.guards.RequirePermission(auth.FinishingSubmit.Key()), s.skipFinishing)
 	g.POST("/:id/qc", s.guards.RequirePermission(auth.QcSubmit.Key()), s.submitQc)
 	g.POST("/:id/packaging", s.guards.RequirePermission(auth.PackagingSubmit.Key()), s.submitPackaging)
 }
@@ -280,7 +280,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 	statusFilter := nilIfEmpty(c.Query("status"))
 	assemblyFilter := nilIfEmpty(c.Query("assembly_status"))
-	polishingFilter := nilIfEmpty(c.Query("polishing_status"))
+	finishingFilter := nilIfEmpty(c.Query("finishing_status"))
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
 	packagingFilter := nilIfEmpty(c.Query("packaging_status"))
 	stageFilter := c.Query("pipeline_stage")
@@ -297,7 +297,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 
 	if !page.paginate {
 		rows, err := s.store.Q.ListProductionJobs(ctx, gen.ListProductionJobsParams{
-			Status: statusFilter, AssemblyStatus: assemblyFilter, PolishingStatus: polishingFilter,
+			Status: statusFilter, AssemblyStatus: assemblyFilter, FinishingStatus: finishingFilter,
 			QcStatus:        qcFilter,
 			PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		})
@@ -310,7 +310,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 
 	rows, err := s.store.Q.ListProductionJobsPage(ctx, gen.ListProductionJobsPageParams{
-		Status: statusFilter, AssemblyStatus: assemblyFilter, PolishingStatus: polishingFilter,
+		Status: statusFilter, AssemblyStatus: assemblyFilter, FinishingStatus: finishingFilter,
 		QcStatus:        qcFilter,
 		PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
@@ -390,7 +390,7 @@ func (s *Server) createProductionJob(c *gin.Context) {
 		customerName = order.CustomerName
 	}
 
-	jobNumber, err := production.NewJobNumber()
+	jobNumber, err := s.store.Q.NextJobNumber(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not generate a job number.")
 		return
@@ -449,6 +449,9 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	if err != nil {
 		return nil, fmt.Errorf("load order: %w", err)
 	}
+	// A fast path only: it skips buildJobsForOrder's per-line design lookups on
+	// a replay. The authoritative check is the locked one inside the
+	// transaction below - this one races by construction.
 	existing, err := s.store.Q.CountJobsForOrder(ctx, &orderID)
 	if err != nil {
 		return nil, fmt.Errorf("check existing jobs: %w", err)
@@ -468,15 +471,45 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 
 	var created []gen.ProductionJob
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		// Lock, then re-count. Both are needed: the lock serialises concurrent
+		// runs for this order (a re-sync enqueues a second job, and the manual
+		// backfill endpoint can race either), and the re-count is what the
+		// loser of that race sees. Under READ COMMITTED an unlocked count
+		// cannot see the winner's uncommitted inserts.
+		if err := q.LockOrderForJobCreation(ctx, orderID.String()); err != nil {
+			return err
+		}
+		locked, err := q.CountJobsForOrder(ctx, &orderID)
+		if err != nil {
+			return err
+		}
+		if locked > 0 {
+			return errJobsAlreadyCreated
+		}
 		for _, p := range params {
 			job, err := q.InsertProductionJob(ctx, p)
 			if err != nil {
 				return err
 			}
+			if err := recordJobEvent(ctx, q, jobEvent{
+				JobID: job.ID, EventType: production.EventJobCreated, ActorID: systemActor,
+				Metadata: map[string]any{"order_id": orderID.String()},
+			}); err != nil {
+				return err
+			}
 			created = append(created, job)
 		}
-		return nil
+		// Clearing here is what makes POST /production-jobs/from-order/:id the
+		// retry mechanism for a discarded import - no separate retry route.
+		// A no-op on an order that never failed.
+		return q.ClearOrderJobCreationFailure(ctx, orderID)
 	})
+	// Returned unwrapped: the 409 mapping in createJobsFromOrder and the
+	// worker's success-ack both match on this sentinel, and it is not an
+	// insert failure.
+	if errors.Is(err, errJobsAlreadyCreated) {
+		return nil, errJobsAlreadyCreated
+	}
 	if err != nil {
 		return nil, fmt.Errorf("insert jobs: %w", err)
 	}
@@ -497,7 +530,7 @@ func (s *Server) buildJobsForOrder(
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
 	for _, li := range items {
-		jobNumber, err := production.NewJobNumber()
+		jobNumber, err := s.store.Q.NextJobNumber(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -650,7 +683,7 @@ func applyJobPatch(c *gin.Context, raw map[string]json.RawMessage, params *gen.U
 		}
 		params.Status = &status
 	}
-	if !patchEnum(c, raw, "polishing_status", production.ValidPolishingStatus, func(v string) { params.PolishingStatus = &v }) {
+	if !patchEnum(c, raw, "finishing_status", production.ValidFinishingStatus, func(v string) { params.FinishingStatus = &v }) {
 		return false
 	}
 	if !patchEnum(c, raw, "assembly_status", production.ValidAssemblyStatus, func(v string) { params.AssemblyStatus = &v }) {
@@ -660,6 +693,27 @@ func applyJobPatch(c *gin.Context, raw map[string]json.RawMessage, params *gen.U
 		return false
 	}
 	if !patchEnum(c, raw, "packaging_status", production.ValidPackagingStatus, func(v string) { params.PackagingStatus = &v }) {
+		return false
+	}
+	// issue_reason takes patchField[*string] rather than patchEnum because the
+	// point of exposing it is clearing it: only a *string decodes JSON null,
+	// and patchEnum is string-only. Empty string clears too, matching
+	// UpdateDesignSku's existing frontend contract.
+	if !patchField(c, raw, "issue_reason",
+		func(v *string) string {
+			if v == nil || *v == "" || production.ValidIssueReason(*v) {
+				return ""
+			}
+			return "That issue_reason is not valid."
+		},
+		func(v *string) {
+			params.SetIssueReason = true
+			if v != nil && *v == "" {
+				v = nil
+			}
+			params.IssueReason = v
+		},
+	) {
 		return false
 	}
 	if v, ok := raw["priority"]; ok {
@@ -829,6 +883,12 @@ func (s *Server) setPrintFile(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not set the print file.")
 		return
 	}
+	// The upload may have cleared an stl_missing flag, which is precisely the
+	// event that makes a job batchable - without this it would wait for the
+	// periodic tick.
+	if job.IssueReason == nil {
+		s.triggerBatchPlanIfThresholdMet(ctx)
+	}
 	c.JSON(http.StatusOK, s.singleJobDTO(ctx, job))
 }
 
@@ -874,15 +934,24 @@ func (s *Server) failProductionJob(c *gin.Context) {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
 	}
-	if job.Status != production.StatusInProduction {
-		detail(c, http.StatusConflict, "Only a job that is in production can be failed.")
+	// A print can be failed while it is still on the bed (in_production) or
+	// after it comes off (completed) - a part is very often only found to be
+	// bad at assembly, once someone picks it up. Restricting this to
+	// in_production made the whole endpoint unreachable in practice, because
+	// batch completion sets every job on the bed to 'completed'.
+	if job.Status != production.StatusInProduction && job.Status != production.StatusCompleted {
+		detail(c, http.StatusConflict, "Only a job that is printing or printed can be failed.")
 		return
 	}
 
-	reprintParams := cloneForReprint(job)
 	var failed, reprint gen.ProductionJob
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		var err error
+		reprintNumber, err := q.NextJobNumber(ctx)
+		if err != nil {
+			return err
+		}
+		reprintParams := reprintParamsFor(job, job.Quantity, reprintNumber)
 		failed, err = q.SetProductionJobStatus(ctx, gen.SetProductionJobStatusParams{
 			ID: id, Status: production.StatusFailed,
 		})
@@ -907,7 +976,20 @@ func (s *Server) failProductionJob(c *gin.Context) {
 			}
 		}
 		reprint, err = q.InsertProductionJob(ctx, reprintParams)
-		return err
+		if err != nil {
+			return err
+		}
+		if err := recordJobEvent(ctx, q, jobEvent{
+			JobID: id, EventType: production.EventPrintFailed, Stage: production.FailureStagePrint,
+			Reason: req.Reason, Comment: req.Notes, ActorID: currentUserID(c), BatchID: job.BatchID,
+		}); err != nil {
+			return err
+		}
+		return recordJobEvent(ctx, q, jobEvent{
+			JobID: id, EventType: production.EventReprintCreated, Stage: production.FailureStagePrint,
+			Reason: req.Reason, ActorID: currentUserID(c), RelatedJobID: &reprint.ID,
+			Metadata: map[string]any{"quantity": reprint.Quantity, "job_number": reprint.JobNumber},
+		})
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not fail the production job.")
@@ -922,49 +1004,11 @@ func (s *Server) failProductionJob(c *gin.Context) {
 	})
 }
 
-// cloneForReprint builds the insert params for a fresh queued reprint of a failed
-// job. It carries the print facts and personalisation, resets the lifecycle
-// sub-states to their defaults, leaves the job unbatched, and links back to the
-// source via reprint_of_job_id. Priority is always forced to urgent - a
-// reprint represents an already-late order and must jump the queue ahead of
-// routine jobs regardless of what priority the original job had.
-func cloneForReprint(src gen.ProductionJob) gen.InsertProductionJobParams {
-	jobNumber, _ := production.NewJobNumber()
-	priority := src.Priority
-	if priority > production.UrgentPriority {
-		priority = production.UrgentPriority
-	}
-	return gen.InsertProductionJobParams{
-		ID: uuid.New(), JobNumber: jobNumber,
-		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,
-		ShopifyCustomerID: src.ShopifyCustomerID, CustomerName: src.CustomerName,
-		Description: src.Description, Quantity: src.Quantity,
-		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
-		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-		Sku: src.Sku, ProductName: src.ProductName, Material: src.Material, Colour: src.Colour,
-		NozzleProfile: src.NozzleProfile, FilamentGramsRequired: db.NumFloatPtr(src.FilamentGramsRequired),
-		PrintFileID: src.PrintFileID, EstimatedPrintTimeMinutes: src.EstimatedPrintTimeMinutes,
-		DueDate: src.DueDate, Priority: priority,
-		PersonalisationName: src.PersonalisationName, PersonalisationFont: src.PersonalisationFont,
-		PersonalisationColour: src.PersonalisationColour, PersonalisationVariant: src.PersonalisationVariant,
-		PersonalisationStatus: src.PersonalisationStatus,
-		NameConfirmed:         src.NameConfirmed, PhotoConfirmed: src.PhotoConfirmed, FontConfirmed: src.FontConfirmed,
-		ColourConfirmed: src.ColourConfirmed, VariantConfirmed: src.VariantConfirmed,
-		CustomerApprovalReceived:   src.CustomerApprovalReceived,
-		PersonalisationPhotoFileID: src.PersonalisationPhotoFileID,
-		ReprintOfJobID:             ptr(src.ID),
-	}
-}
-
-// splitProductionJob builds the insert params for a fragment peeled off src's
-// quantity because the whole amount didn't fit on one bed (see
-// AutoCreateBatches/production.packJobs's splitJobToFit). Unlike
-// cloneForReprint this carries every grouping/compatibility fact and the
-// original priority/due date unchanged - it's the same physical product,
-// just fewer units, not a failure - and links back via split_of_job_id
-// instead of reprint_of_job_id.
-func splitProductionJob(src gen.ProductionJob, quantity int32) gen.InsertProductionJobParams {
-	jobNumber, _ := production.NewJobNumber()
+// splitProductionJob builds a fragment of src carrying `quantity` units. The
+// job number is passed in rather than minted here: it now comes from a database
+// sequence (NextJobNumber), so it needs the caller's queries handle - and the
+// caller is already inside the transaction the fragment is inserted in.
+func splitProductionJob(src gen.ProductionJob, quantity int32, jobNumber string) gen.InsertProductionJobParams {
 	return gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber,
 		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,

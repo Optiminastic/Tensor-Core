@@ -35,7 +35,7 @@ INSERT INTO production_jobs (
     sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -48,7 +48,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 
 -- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -61,10 +61,10 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs WHERE id = $1;
 
 -- name: ListProductionJobs :many
--- Full list, newest first, with optional status / assembly_status / polishing_status / qc_status /
+-- Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
 -- packaging_status filters (null = any).
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -77,7 +77,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
-  AND (sqlc.narg('polishing_status')::text IS NULL OR polishing_status = sqlc.narg('polishing_status')::text)
+  AND (sqlc.narg('finishing_status')::text IS NULL OR finishing_status = sqlc.narg('finishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -87,7 +87,7 @@ ORDER BY created_at DESC, id DESC;
 -- name: ListProductionJobsPage :many
 -- Keyset page over (created_at, id) with the same optional filters.
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -100,7 +100,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
-  AND (sqlc.narg('polishing_status')::text IS NULL OR polishing_status = sqlc.narg('polishing_status')::text)
+  AND (sqlc.narg('finishing_status')::text IS NULL OR finishing_status = sqlc.narg('finishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -117,20 +117,22 @@ SELECT count(*) FROM production_jobs WHERE order_id = $1;
 
 -- name: UpdateProductionJobFields :one
 -- Applies the role-gated PATCH fields. Each null arg leaves its column unchanged;
--- batch_id uses a set-flag so it can be cleared to NULL explicitly.
+-- batch_id and issue_reason use a set-flag so they can be cleared to NULL
+-- explicitly - COALESCE cannot express "set this to NULL", only "leave it".
 UPDATE production_jobs SET
     status           = COALESCE(sqlc.narg('status'), status),
     assembly_status  = COALESCE(sqlc.narg('assembly_status'), assembly_status),
-    polishing_status = COALESCE(sqlc.narg('polishing_status'), polishing_status),
+    finishing_status = COALESCE(sqlc.narg('finishing_status'), finishing_status),
     qc_status        = COALESCE(sqlc.narg('qc_status'), qc_status),
     packaging_status = COALESCE(sqlc.narg('packaging_status'), packaging_status),
     priority         = COALESCE(sqlc.narg('priority'), priority),
     held             = COALESCE(sqlc.narg('held'), held),
     batch_id         = CASE WHEN sqlc.arg('set_batch_id')::bool THEN sqlc.narg('batch_id') ELSE batch_id END,
+    issue_reason     = CASE WHEN sqlc.arg('set_issue_reason')::bool THEN sqlc.narg('issue_reason') ELSE issue_reason END,
     updated_at       = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -157,7 +159,7 @@ UPDATE production_jobs SET
     updated_at                    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -169,10 +171,19 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobPrintFile :one
-UPDATE production_jobs SET print_file_id = sqlc.arg('print_file_id'), updated_at = now()
+-- Clears issue_reason only when it is exactly 'stl_missing' - the flag this
+-- upload is the direct remedy for (see applyMatch). Leaving it set would keep
+-- the job out of ListBatchableJobs after an operator did the one thing that
+-- fixes it. Any other reason survives untouched: an STL upload does not fix
+-- colour_missing or filament_out_of_stock, and blanket-clearing would push a
+-- genuinely unvalidated job into batching.
+UPDATE production_jobs SET
+    print_file_id = sqlc.arg('print_file_id'),
+    issue_reason  = CASE WHEN issue_reason = 'stl_missing' THEN NULL ELSE issue_reason END,
+    updated_at    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -187,7 +198,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 UPDATE production_jobs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -287,7 +298,7 @@ WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
 UPDATE production_jobs SET quantity = quantity - sqlc.arg('delta'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          polishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -327,3 +338,43 @@ INSERT INTO production_job_failures (
 RETURNING id, job_id, stage, reason, notes,
           filament_wasted_grams, time_wasted_minutes,
           created_by, created_at;
+
+-- name: CountJobsNotPackagedForOrder :one
+-- Order-level dispatch readiness: how many of an order's products are not yet
+-- packed. A failed job is excluded - its reprint is the row that still has to
+-- get there, and counting both would make the order permanently unready.
+SELECT count(*) FROM production_jobs
+WHERE order_id = sqlc.arg('order_id')
+  AND status <> 'failed'
+  AND packaging_status <> 'packaged';
+
+-- name: CountJobsForOrderTotal :one
+SELECT count(*) FROM production_jobs
+WHERE order_id = sqlc.arg('order_id') AND status <> 'failed';
+
+-- name: LockOrderForJobCreation :exec
+-- Serialises job creation for one order across processes, for the rest of the
+-- caller's transaction.
+--
+-- Necessary because CountJobsForOrder cannot see a concurrent transaction's
+-- uncommitted inserts under READ COMMITTED (which is what InTx/InTxWith use):
+-- two create_jobs_from_order runs for the same order would both count zero and
+-- both insert. That is not hypothetical - importShopifyOrder enqueues a job on
+-- every re-sync of the same order, and the manual backfill endpoint can race
+-- either of them.
+--
+-- A unique constraint cannot do this job instead: an order may legitimately
+-- contain the same SKU twice with different personalisation, so (order_id, sku)
+-- is not unique and there is no natural key without inventing a line-item index.
+--
+-- Keyed on the order id alone, so different orders never block each other. The
+-- second argument namespaces the key against any future advisory-lock user.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg('order_id')::text, 8021));
+
+-- name: NextJobNumber :one
+-- Mints the next job number from a sequence. Replaces production.NewJobNumber's
+-- 5 random digits, which had a 100k space, no unique index, and therefore a
+-- collision probability that grew with the table - a pure function pretending
+-- to a uniqueness guarantee it structurally could not provide. Sequence gaps on
+-- a rolled-back transaction are harmless.
+SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_number;

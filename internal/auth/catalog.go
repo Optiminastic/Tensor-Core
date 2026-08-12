@@ -84,7 +84,7 @@ var (
 	DispatchRead   = PermissionSpec{"dispatch", "read", "View dispatch orders"}
 	DispatchManage = PermissionSpec{"dispatch", "manage", "Create and mark dispatch orders"}
 
-	PolishingSubmit = PermissionSpec{"polishing", "submit", "Record a polishing/finishing check"}
+	FinishingSubmit = PermissionSpec{"finishing", "submit", "Record a finishing check"}
 	QcSubmit        = PermissionSpec{"qc", "submit", "Record a quality-control check"}
 	AssemblySubmit  = PermissionSpec{"assembly", "submit", "Record an assembly check"}
 	PackagingSubmit = PermissionSpec{"packaging", "submit", "Record packaging details"}
@@ -119,7 +119,7 @@ var AllPermissions = []PermissionSpec{
 	OrderRead,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
-	QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
+	QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
 	MachineRead, MachineManage,
 	FilamentRead, FilamentManage,
 	IntegrationManage,
@@ -145,7 +145,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 		BatchRead, BatchManage,
 		DispatchRead, DispatchManage,
-		QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
+		QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
 		MachineRead, MachineManage,
 		FilamentRead, FilamentManage,
 	},
@@ -154,14 +154,14 @@ var roleGrants = map[RoleName][]PermissionSpec{
 	// machine status and reads filament. Never sees costs; never does QC/packaging.
 	RoleOperator: {
 		DesignRead,
-		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit, PolishingSubmit,
+		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit, FinishingSubmit,
 		MachineRead, MachineManage, FilamentRead,
 	},
 	// QC/packaging station: records QC, assembly and packaging through their
 	// dedicated endpoints. No production:update (cannot advance a job directly),
 	// no cost or pricing visibility.
 	RolePackagingQc: {
-		ProductionRead, QcSubmit, AssemblySubmit, PolishingSubmit, PackagingSubmit,
+		ProductionRead, QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
 	},
 }
 

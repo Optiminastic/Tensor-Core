@@ -85,7 +85,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	created := make([]gen.Batch, 0, len(planned))
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		for _, p := range planned {
-			number, err := production.NewBatchNumber()
+			number, err := q.NextBatchNumber(ctx)
 			if err != nil {
 				return err
 			}
@@ -183,7 +183,11 @@ func (s *Server) splitJobIDsFor(
 		if err != nil {
 			return nil, err
 		}
-		frag, err := q.InsertProductionJob(ctx, splitProductionJob(orig, int32(j.Quantity)))
+		fragNumber, err := q.NextJobNumber(ctx)
+		if err != nil {
+			return nil, err
+		}
+		frag, err := q.InsertProductionJob(ctx, splitProductionJob(orig, int32(j.Quantity), fragNumber))
 		if err != nil {
 			return nil, err
 		}

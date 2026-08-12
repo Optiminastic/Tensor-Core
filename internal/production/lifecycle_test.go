@@ -1,38 +1,10 @@
 package production
 
 import (
-	"regexp"
 	"testing"
 )
 
 func strptr(s string) *string { return &s }
-
-var jobNumberPattern = regexp.MustCompile(`^JOB-\d{5}$`)
-var batchNumberPattern = regexp.MustCompile(`^BATCH-\d{5}$`)
-
-func TestNewJobNumberFormat(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		n, err := NewJobNumber()
-		if err != nil {
-			t.Fatalf("NewJobNumber: %v", err)
-		}
-		if !jobNumberPattern.MatchString(n) {
-			t.Fatalf("job number %q does not match JOB-##### (5 digits)", n)
-		}
-	}
-}
-
-func TestNewBatchNumberFormat(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		n, err := NewBatchNumber()
-		if err != nil {
-			t.Fatalf("NewBatchNumber: %v", err)
-		}
-		if !batchNumberPattern.MatchString(n) {
-			t.Fatalf("batch number %q does not match BATCH-##### (5 digits)", n)
-		}
-	}
-}
 
 func TestAutoValidateNotRequired(t *testing.T) {
 	status, c := AutoValidatePersonalisation(LineItem{PersonalisationRequired: false})
@@ -260,5 +232,48 @@ func TestPipelineStage(t *testing.T) {
 				t.Errorf("PipelineStage() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestValidIssueReason guards the taxonomy the PATCH allow-list now exposes.
+// issue_reason used to be write-once at creation and absent from the allow-list
+// entirely, so a job flagged stl_missing stayed out of ListBatchableJobs
+// forever - even after someone uploaded the missing STL.
+func TestValidIssueReason(t *testing.T) {
+	for _, reason := range []string{
+		IssueSKUMissing, IssueNoApprovedDesign, IssueSTLMissing,
+		IssueColourMissing, IssueMaterialMissing, IssueProfileMissing,
+		IssueFilamentOutOfStock,
+	} {
+		if !ValidIssueReason(reason) {
+			t.Errorf("ValidIssueReason(%q) = false, want true", reason)
+		}
+	}
+	for _, reason := range []string{"", "banana", "sku missing", "STL_MISSING", "warping"} {
+		if ValidIssueReason(reason) {
+			t.Errorf("ValidIssueReason(%q) = true, want false", reason)
+		}
+	}
+	// "warping" is a failure reason, not an issue reason - the two taxonomies
+	// are deliberately separate and must not leak into each other.
+	if ValidIssueReason("warping") || !ValidFailureReason("warping") {
+		t.Error("the failure and issue taxonomies have been conflated")
+	}
+}
+
+// TestIssueReasonIsPatchableBySupervisorsOnly pins who may clear the flag.
+// Clearing it is a judgement about whether the underlying problem is actually
+// fixed, so it sits with the roles that can already reassign batch_id - not
+// with the operator or the packaging/QC station.
+func TestIssueReasonIsPatchableBySupervisorsOnly(t *testing.T) {
+	for _, role := range []string{roleAdmin, roleProjectLead} {
+		if !AllowedPatchFields([]string{role})["issue_reason"] {
+			t.Errorf("%s cannot patch issue_reason, but should", role)
+		}
+	}
+	for _, role := range []string{roleOperator, rolePackagingQc} {
+		if AllowedPatchFields([]string{role})["issue_reason"] {
+			t.Errorf("%s can patch issue_reason, but should not", role)
+		}
 	}
 }

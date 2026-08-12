@@ -366,6 +366,19 @@ func (q *Queries) ListPendingApprovalBatchesForMachine(ctx context.Context, mach
 	return items, nil
 }
 
+const nextBatchNumber = `-- name: NextBatchNumber :one
+SELECT ('BATCH-' || nextval('batch_number_seq')::text)::text AS batch_number
+`
+
+// The batch counterpart of NextJobNumber - same rationale, same sequence
+// treatment. See migration 0033.
+func (q *Queries) NextBatchNumber(ctx context.Context) (string, error) {
+	row := q.db.QueryRow(ctx, nextBatchNumber)
+	var batch_number string
+	err := row.Scan(&batch_number)
+	return batch_number, err
+}
+
 const setBatchPreviewFile = `-- name: SetBatchPreviewFile :one
 UPDATE batches SET preview_file_id = $1, updated_at = now()
 WHERE id = $2

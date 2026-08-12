@@ -98,3 +98,8 @@ RETURNING *;
 -- machine_scheduler.go). Only pending_approval: an approved batch is a human
 -- commitment and is left alone for a human to move manually.
 SELECT * FROM batches WHERE machine_id = sqlc.arg('machine_id') AND status = 'pending_approval';
+
+-- name: NextBatchNumber :one
+-- The batch counterpart of NextJobNumber - same rationale, same sequence
+-- treatment. See migration 0033.
+SELECT ('BATCH-' || nextval('batch_number_seq')::text)::text AS batch_number;

@@ -155,7 +155,7 @@ func (s *Server) createBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	number, err := production.NewBatchNumber()
+	number, err := s.store.Q.NextBatchNumber(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not generate a batch number.")
 		return

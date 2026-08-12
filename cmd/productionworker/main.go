@@ -102,6 +102,22 @@ func main() {
 		log.Fatalf("build river client: %v", err)
 	}
 
+	// The workers hold *Server by pointer, so attaching the enqueuers after the
+	// client exists but before Start is what makes triggerBatchPlanIfThresholdMet
+	// real in this process. Without it s.batchEnqueuer stays nil, the trigger
+	// hits its nil guard and silently returns, and job creation here never
+	// prompts a replan - leaving the periodic tick as the only path, up to
+	// BatchPlanIntervalMinutes late.
+	//
+	// A consuming client can Insert as well as Work, so there is no need for a
+	// second insert-only client. Nor is there a double-enqueue hazard: Enqueue
+	// and the periodic job share UniqueOpts{ByPeriod: debounce}, which dedupes
+	// in the database across every process.
+	server.EnableProductionQueue(
+		production.NewJobCreationEnqueuer(client),
+		production.NewBatchPlanEnqueuer(client, debounce),
+	)
+
 	if err := client.Start(ctx); err != nil {
 		log.Fatalf("start river: %v", err)
 	}

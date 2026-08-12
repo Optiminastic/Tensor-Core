@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -11,6 +12,11 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 )
+
+// orderStatusCancelled mirrors orders.status. Nothing sets it yet (the Shopify
+// import does not map cancelled_at), so this guard is inert today - but it is
+// the correct place for it, and it costs one comparison.
+const orderStatusCancelled = "cancelled"
 
 type dispatchResponse struct {
 	ID             string     `json:"id"`
@@ -106,8 +112,31 @@ func (s *Server) createDispatch(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if _, err := s.store.Q.GetOrderByID(ctx, orderID); err != nil {
+	order, err := s.store.Q.GetOrderByID(ctx, orderID)
+	if err != nil {
 		dbError(c, err, "That order does not exist.", "Could not load the order.")
+		return
+	}
+	// A dispatch is an order-level promise, but production is per job: an order
+	// is only ready once every one of its products has been packed. Without
+	// this an order could be booked - and marked dispatched - while jobs were
+	// still queued.
+	if order.Status == orderStatusCancelled {
+		detail(c, http.StatusConflict, "That order was cancelled and cannot be dispatched.")
+		return
+	}
+	pending, err := s.store.Q.CountJobsNotPackagedForOrder(ctx, &orderID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not check the order's products.")
+		return
+	}
+	if pending > 0 {
+		total, err := s.store.Q.CountJobsForOrderTotal(ctx, &orderID)
+		if err != nil {
+			total = pending
+		}
+		detail(c, http.StatusConflict, fmt.Sprintf(
+			"%d of %d products are not packed yet.", pending, total))
 		return
 	}
 	d, err := s.store.Q.InsertDispatch(ctx, gen.InsertDispatchParams{

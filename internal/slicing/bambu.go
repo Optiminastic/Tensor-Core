@@ -63,6 +63,13 @@ func RunSlice(
 	if runCtx.Err() == context.DeadlineExceeded {
 		return SliceOutput{}, fmt.Errorf("slice timed out after %s", timeout)
 	}
+	// A cancelled parent (River's job timeout, or a worker shutdown) kills the
+	// subprocess before it can write anything. Reporting that honestly matters:
+	// falling through to the os.Stat check below would blame the slicer for
+	// "producing no result.json" when nothing was ever given the chance to run.
+	if err := runCtx.Err(); err != nil {
+		return SliceOutput{}, fmt.Errorf("slice aborted before completing: %w", err)
+	}
 
 	resultPath := filepath.Join(outdir, resultName)
 	if _, err := os.Stat(resultPath); err != nil {

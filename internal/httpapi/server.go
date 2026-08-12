@@ -103,6 +103,8 @@ func (s *Server) Router() *gin.Engine {
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)
+	s.registerJobEvents(r)
+	s.registerJobIssues(r)
 	s.registerShopify(r)
 	s.registerInternal(r)
 

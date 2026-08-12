@@ -51,7 +51,25 @@ func (w *JobCreationWorker) Work(ctx context.Context, job *river.Job[production.
 	}
 	if err != nil {
 		w.logger.Error("job creation failed", "order", orderID, "attempt", job.Attempt, "error", err)
+		// Mirror River's discard rule in our own records, the same way
+		// SliceWorker does: after the final attempt nothing will ever retry
+		// this, and until now the order was left with zero jobs and no trace of
+		// why. Best effort - a failure to record the failure must not itself be
+		// retried into a loop.
+		if job.Attempt >= job.MaxAttempts {
+			if markErr := w.server.markOrderJobCreationFailed(ctx, orderID, err); markErr != nil {
+				w.logger.Error("could not record the job-creation failure",
+					"order", orderID, "error", markErr)
+			}
+		}
 		return fmt.Errorf("create jobs for order %s: %w", orderID, err)
+	}
+
+	// Zero jobs is a success as far as River is concerned, but it means an
+	// order arrived with no line items to build from - worth a line in the log,
+	// because the order will otherwise sit forever looking merely un-batched.
+	if len(jobs) == 0 {
+		w.logger.Warn("job creation produced no jobs", "order", orderID)
 	}
 
 	w.logger.Info("job creation done", "order", orderID, "jobs", len(jobs))

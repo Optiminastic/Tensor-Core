@@ -114,6 +114,17 @@ type Settings struct {
 	BatchPlanIntervalMinutes int
 	BatchPlanJobThreshold    int
 	BatchPlanDebounceSeconds int
+	// River cancels a job's context at its own JobTimeoutDefault (1 minute)
+	// unless the worker overrides Timeout(). Neither of these has a natural
+	// inner deadline to derive one from, the way the slice worker derives its
+	// from SLICE_TIMEOUT_SECONDS, so they are configured directly.
+	//
+	// A replan's cost scales with the backlog: it lists every batchable job,
+	// runs the multi-strategy pack search, then for each created batch
+	// downloads its jobs' print files, merges the meshes and uploads the plate.
+	// Twenty batches of sixteen jobs is minutes, not seconds.
+	BatchPlanTimeoutMinutes   int
+	JobCreationTimeoutMinutes int
 
 	// Machine selection weighted scoring (production.MachineScoreWeights, see
 	// machine_scheduler.go/scheduler.go): minutes-equivalent adjustments to a
@@ -209,7 +220,10 @@ func Load() Settings {
 
 		BatchPlanIntervalMinutes: intEnvOr("BATCH_PLAN_INTERVAL_MINUTES", 7),
 		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
-		BatchPlanDebounceSeconds: intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+
+		BatchPlanTimeoutMinutes:   intEnvOr("BATCH_PLAN_TIMEOUT_MINUTES", 15),
+		JobCreationTimeoutMinutes: intEnvOr("JOB_CREATION_TIMEOUT_MINUTES", 5),
+		BatchPlanDebounceSeconds:  intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),

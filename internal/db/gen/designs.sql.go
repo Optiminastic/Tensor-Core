@@ -441,63 +441,6 @@ func (q *Queries) InsertSliceJob(ctx context.Context, arg InsertSliceJobParams) 
 	return i, err
 }
 
-const insertSliceMetrics = `-- name: InsertSliceMetrics :exec
-INSERT INTO slice_metrics (
-    job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
-    colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
-    wall_loops, support_used, filament_length_mm, gcode_key, orientation
-) VALUES (
-    $1, $2::float8,
-    $3::float8, $4::float8,
-    $5::float8, $6::float8, $7,
-    $8::float8, $9,
-    $10::float8, $11::float8,
-    $12, $13, $14::float8,
-    $15, $16::jsonb
-)
-`
-
-type InsertSliceMetricsParams struct {
-	JobID                  uuid.UUID
-	PrintTimeHr            float64
-	EffectiveMachineTimeHr float64
-	FilamentG              float64
-	PurgeG                 float64
-	SupportG               float64
-	ColourChanges          int32
-	ElectricityKwh         float64
-	UnitsPerBed            int32
-	LayerHeightMm          float64
-	InfillDensityPct       float64
-	WallLoops              int32
-	SupportUsed            bool
-	FilamentLengthMm       float64
-	GcodeKey               string
-	Orientation            []byte
-}
-
-func (q *Queries) InsertSliceMetrics(ctx context.Context, arg InsertSliceMetricsParams) error {
-	_, err := q.db.Exec(ctx, insertSliceMetrics,
-		arg.JobID,
-		arg.PrintTimeHr,
-		arg.EffectiveMachineTimeHr,
-		arg.FilamentG,
-		arg.PurgeG,
-		arg.SupportG,
-		arg.ColourChanges,
-		arg.ElectricityKwh,
-		arg.UnitsPerBed,
-		arg.LayerHeightMm,
-		arg.InfillDensityPct,
-		arg.WallLoops,
-		arg.SupportUsed,
-		arg.FilamentLengthMm,
-		arg.GcodeKey,
-		arg.Orientation,
-	)
-	return err
-}
-
 const listDesignsByBrand = `-- name: ListDesignsByBrand :many
 SELECT id, brand_slug, name, created_by, status, stl_key, material, colour,
        finish, units_per_bed, quality, infill_pct::float8 AS infill_pct,
@@ -644,6 +587,22 @@ func (q *Queries) ListDesignsByBrandPage(ctx context.Context, arg ListDesignsByB
 		return nil, err
 	}
 	return items, nil
+}
+
+const markDesignSlicing = `-- name: MarkDesignSlicing :exec
+UPDATE designs SET status = 'slicing', updated_at = now()
+WHERE id = $1 AND status <> 'priced'
+`
+
+// Flips a design to 'slicing' when a worker picks up its job, but never
+// demotes one that is already priced. A River retry re-runs Work from the top,
+// and this write happens OUTSIDE ProcessSliceResult's transaction - so on a
+// retry after a partial commit it would drag a correctly-priced design back to
+// 'slicing' and, if the retry then failed, strand it there. The guard makes
+// that impossible regardless of what the rest of the attempt does.
+func (q *Queries) MarkDesignSlicing(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markDesignSlicing, id)
+	return err
 }
 
 const nextAttemptForDesign = `-- name: NextAttemptForDesign :one
@@ -932,6 +891,91 @@ func (q *Queries) UpsertShopifyProduct(ctx context.Context, arg UpsertShopifyPro
 		arg.AdminUrl,
 		arg.Status,
 		arg.PublishedBy,
+	)
+	return err
+}
+
+const upsertSliceMetrics = `-- name: UpsertSliceMetrics :exec
+INSERT INTO slice_metrics (
+    job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
+    colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
+    wall_loops, support_used, filament_length_mm, gcode_key, orientation
+) VALUES (
+    $1, $2::float8,
+    $3::float8, $4::float8,
+    $5::float8, $6::float8, $7,
+    $8::float8, $9,
+    $10::float8, $11::float8,
+    $12, $13, $14::float8,
+    $15, $16::jsonb
+)
+ON CONFLICT (job_id) DO UPDATE SET
+    print_time_hr             = EXCLUDED.print_time_hr,
+    effective_machine_time_hr = EXCLUDED.effective_machine_time_hr,
+    filament_g                = EXCLUDED.filament_g,
+    purge_g                   = EXCLUDED.purge_g,
+    support_g                 = EXCLUDED.support_g,
+    colour_changes            = EXCLUDED.colour_changes,
+    electricity_kwh           = EXCLUDED.electricity_kwh,
+    units_per_bed             = EXCLUDED.units_per_bed,
+    layer_height_mm           = EXCLUDED.layer_height_mm,
+    infill_density_pct        = EXCLUDED.infill_density_pct,
+    wall_loops                = EXCLUDED.wall_loops,
+    support_used              = EXCLUDED.support_used,
+    filament_length_mm        = EXCLUDED.filament_length_mm,
+    gcode_key                 = EXCLUDED.gcode_key,
+    orientation               = EXCLUDED.orientation
+`
+
+type UpsertSliceMetricsParams struct {
+	JobID                  uuid.UUID
+	PrintTimeHr            float64
+	EffectiveMachineTimeHr float64
+	FilamentG              float64
+	PurgeG                 float64
+	SupportG               float64
+	ColourChanges          int32
+	ElectricityKwh         float64
+	UnitsPerBed            int32
+	LayerHeightMm          float64
+	InfillDensityPct       float64
+	WallLoops              int32
+	SupportUsed            bool
+	FilamentLengthMm       float64
+	GcodeKey               string
+	Orientation            []byte
+}
+
+// Idempotent on job_id (the primary key), because a River retry re-runs the
+// whole slice for the same domain job id. Without this, a crash after
+// ProcessSliceResult committed but before River acked the job left every
+// remaining attempt unique-violating on this insert - burning the attempts and
+// getting discarded, while the design was already correctly priced.
+//
+// DO UPDATE rather than DO NOTHING, deliberately: priceDesign prices from the
+// in-memory PerUnitMetrics, not from this row. Keeping the first attempt's row
+// while re-deriving the price from the second attempt's numbers would leave the
+// stored slicer facts and the price describing different slices, which breaks
+// "slicer output is the source of truth". created_at deliberately keeps the
+// first attempt's timestamp - the row describes a design, not an attempt.
+func (q *Queries) UpsertSliceMetrics(ctx context.Context, arg UpsertSliceMetricsParams) error {
+	_, err := q.db.Exec(ctx, upsertSliceMetrics,
+		arg.JobID,
+		arg.PrintTimeHr,
+		arg.EffectiveMachineTimeHr,
+		arg.FilamentG,
+		arg.PurgeG,
+		arg.SupportG,
+		arg.ColourChanges,
+		arg.ElectricityKwh,
+		arg.UnitsPerBed,
+		arg.LayerHeightMm,
+		arg.InfillDensityPct,
+		arg.WallLoops,
+		arg.SupportUsed,
+		arg.FilamentLengthMm,
+		arg.GcodeKey,
+		arg.Orientation,
 	)
 	return err
 }

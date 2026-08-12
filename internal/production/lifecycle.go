@@ -6,9 +6,7 @@
 package production
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
 )
@@ -30,14 +28,14 @@ const (
 	AssemblyNotRequired = "not_required"
 )
 
-// Polishing sub-status. The finishing station between assembly and QC -
+// Finishing sub-status. The finishing station between assembly and QC -
 // sanding, seam cleanup, coating. Same three values as assembly, and the same
 // meaning: not_required is an explicit human decision that this part needs no
 // finishing, not an absence of one.
 const (
-	PolishingPending     = "pending"
-	PolishingCompleted   = "completed"
-	PolishingNotRequired = "not_required"
+	FinishingPending     = "pending"
+	FinishingCompleted   = "completed"
+	FinishingNotRequired = "not_required"
 )
 
 // QC sub-status.
@@ -135,9 +133,19 @@ func ValidMachineStatus(s string) bool { return machineStatuses[s] }
 var statusPatchTargets = set(StatusQueued, StatusInProduction, StatusCompleted)
 
 var assemblyStatuses = set(AssemblyPending, AssemblyCompleted, AssemblyNotRequired)
-var polishingStatuses = set(PolishingPending, PolishingCompleted, PolishingNotRequired)
+var finishingStatuses = set(FinishingPending, FinishingCompleted, FinishingNotRequired)
 var qcStatuses = set(QcPending, QcPassed, QcFailed)
 var packagingStatuses = set(PackagingPending, PackagingPackaged)
+
+// issueReasons is the Validation-stage taxonomy above, as a set. It exists so a
+// supervisor can PATCH the flag - most often clear it once the underlying
+// problem is fixed. Until this, issue_reason was write-once at creation and
+// absent from the PATCH allow-list, so a job flagged stl_missing stayed
+// excluded from batching forever even after its STL was uploaded.
+var issueReasons = set(
+	IssueSKUMissing, IssueNoApprovedDesign, IssueSTLMissing, IssueColourMissing,
+	IssueMaterialMissing, IssueProfileMissing, IssueFilamentOutOfStock,
+)
 
 var failureStages = set(FailureStagePrint, FailureStageQc)
 var failureReasons = set(
@@ -149,12 +157,31 @@ var failureReasons = set(
 // ValidStatusTarget reports whether s is a PATCH-settable primary status.
 func ValidStatusTarget(s string) bool { return statusPatchTargets[s] }
 
-// ValidAssemblyStatus / ValidPolishingStatus / ValidQcStatus /
+// ValidAssemblyStatus / ValidFinishingStatus / ValidQcStatus /
 // ValidPackagingStatus validate a PATCH sub-status value.
 func ValidAssemblyStatus(s string) bool  { return assemblyStatuses[s] }
-func ValidPolishingStatus(s string) bool { return polishingStatuses[s] }
+func ValidFinishingStatus(s string) bool { return finishingStatuses[s] }
 func ValidQcStatus(s string) bool        { return qcStatuses[s] }
 func ValidPackagingStatus(s string) bool { return packagingStatuses[s] }
+
+// ScaleForQuantity rescales a per-run weight when only part of a run is being
+// reprinted: a job of 5 that reserved 250 g reprints 1 unit at 50 g. Returns
+// nil for a nil input (the field is genuinely unknown), and leaves the value
+// untouched when either quantity is non-positive or the quantities match, so
+// the common full-quantity case is exact rather than round-tripped through
+// floating point.
+func ScaleForQuantity(v *float64, from, to int32) *float64 {
+	if v == nil || from <= 0 || to <= 0 || from == to {
+		return v
+	}
+	scaled := *v * float64(to) / float64(from)
+	return &scaled
+}
+
+// ValidIssueReason validates a PATCH-settable issue reason, mirroring
+// ValidFailureReason. Clearing is expressed as JSON null by the caller, not as
+// an empty string here - an empty reason is not a valid one.
+func ValidIssueReason(s string) bool { return issueReasons[s] }
 
 // ValidFailureStage / ValidFailureReason validate a /fail request.
 func ValidFailureStage(s string) bool  { return failureStages[s] }
@@ -173,8 +200,8 @@ const (
 // move the primary status; the QC/packaging role uses the dedicated endpoints
 // and gets no PATCH fields at all.
 var allPatchFields = set(
-	"status", "assembly_status", "polishing_status", "qc_status", "packaging_status",
-	"batch_id", "priority", "held",
+	"status", "assembly_status", "finishing_status", "qc_status", "packaging_status",
+	"batch_id", "priority", "held", "issue_reason",
 )
 
 var patchFieldsByRole = map[string]map[string]bool{
@@ -325,7 +352,7 @@ const (
 // (when batched) its batch - resolved by the caller (httpapi), since this
 // package stays DB-free by design.
 type PipelineStageInput struct {
-	Status, AssemblyStatus, PolishingStatus, QcStatus, PackagingStatus, PersonalisationStatus string
+	Status, AssemblyStatus, FinishingStatus, QcStatus, PackagingStatus, PersonalisationStatus string
 	Held                                                                                      bool
 	IssueReason                                                                               *string
 	// BatchStatus is nil when the job is unbatched, else one of
@@ -397,29 +424,12 @@ func PipelineStage(in PipelineStageInput) string {
 	return StageWaitingBatch
 }
 
-// numberDigits is how many random digits follow a generated identifier's
-// prefix (5, e.g. JOB-12345 / BATCH-12345).
-const numberDigits = 5
-
-// numberBound is the exclusive upper bound for a numberDigits-digit number
-// (10^numberDigits) - rand.Int draws from [0, numberBound).
-var numberBound = new(big.Int).Exp(big.NewInt(10), big.NewInt(numberDigits), nil)
-
-// NewJobNumber returns a job identifier of the form JOB-12345 (a random
-// 5-digit number, zero-padded).
-func NewJobNumber() (string, error) { return newNumber("JOB-") }
-
-// NewBatchNumber returns a batch identifier of the form BATCH-12345 (a
-// random 5-digit number, zero-padded) - same shape as NewJobNumber.
-func NewBatchNumber() (string, error) { return newNumber("BATCH-") }
-
-func newNumber(prefix string) (string, error) {
-	n, err := rand.Int(rand.Reader, numberBound)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%0*d", prefix, numberDigits, n.Int64()), nil
-}
+// Job and batch numbers are minted by a Postgres sequence, not here - see
+// NextJobNumber / NextBatchNumber in internal/db/queries and migration 0033.
+// They used to be 5 random digits generated in this package, which made this a
+// pure function pretending to a uniqueness guarantee it structurally could not
+// provide: a 100k space, no unique index, and a collision probability that grew
+// with the table. Uniqueness belongs where it can actually be enforced.
 
 func nonEmpty(s *string) bool { return s != nil && strings.TrimSpace(*s) != "" }
 

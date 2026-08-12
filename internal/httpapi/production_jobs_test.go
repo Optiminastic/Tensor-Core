@@ -87,7 +87,7 @@ func TestSplitProductionJobCopiesGeometrySnapshot(t *testing.T) {
 		SupportWeightG: numeric(supportG), PurgeWeightG: numeric(purgeG), ColourCount: &colourCount,
 	}
 
-	fragment := splitProductionJob(src, 4)
+	fragment := splitProductionJob(src, 4, "JOB-1000002")
 
 	if fragment.BboxXMm == nil || *fragment.BboxXMm != bx {
 		t.Errorf("fragment BboxXMm = %v, want %v", fragment.BboxXMm, bx)

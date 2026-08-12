@@ -296,10 +296,16 @@ CREATE TABLE orders (
     source              varchar(20) NOT NULL DEFAULT 'shopify_webhook'
         CHECK (source IN ('shopify_webhook', 'seed')),
     imported_at         timestamptz NOT NULL DEFAULT now(),
+    -- Why the create_jobs_from_order River job gave up, and when. Null on a
+    -- healthy order; see migration 0034.
+    job_creation_error     text,
+    job_creation_failed_at timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX ix_orders_shopify_order_id ON orders (shopify_order_id);
+CREATE INDEX ix_orders_job_creation_failed ON orders (job_creation_failed_at DESC)
+    WHERE job_creation_error IS NOT NULL;
 CREATE INDEX ix_orders_imported ON orders (imported_at DESC, id DESC);
 CREATE INDEX ix_orders_source ON orders (source);
 
@@ -326,7 +332,7 @@ CREATE TABLE production_jobs (
     quantity                      integer NOT NULL DEFAULT 1,
     status                        varchar(32) NOT NULL DEFAULT 'queued',
     assembly_status               varchar(32) NOT NULL DEFAULT 'pending',
-    polishing_status              varchar(32) NOT NULL DEFAULT 'pending',
+    finishing_status              varchar(32) NOT NULL DEFAULT 'pending',
     qc_status                     varchar(32) NOT NULL DEFAULT 'pending',
     packaging_status              varchar(32) NOT NULL DEFAULT 'pending',
     shopify_order_id              bigint,
@@ -393,6 +399,7 @@ CREATE TABLE production_jobs (
     created_at                    timestamptz NOT NULL DEFAULT now(),
     updated_at                    timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX uq_production_jobs_job_number ON production_jobs (job_number);
 CREATE INDEX ix_production_jobs_order_id ON production_jobs (order_id);
 CREATE INDEX ix_production_jobs_batch_id ON production_jobs (batch_id);
 CREATE INDEX ix_production_jobs_created ON production_jobs (created_at DESC, id DESC);
@@ -439,6 +446,7 @@ CREATE TABLE batches (
     created_at                      timestamptz NOT NULL DEFAULT now(),
     updated_at                      timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX uq_batches_batch_number ON batches (batch_number);
 CREATE INDEX ix_batches_created ON batches (created_at DESC, id DESC);
 CREATE INDEX ix_batches_machine_status ON batches (machine_id, status);
 
@@ -499,7 +507,7 @@ CREATE TABLE production_job_assembly_checks (
 );
 CREATE INDEX ix_assembly_checks_job_id ON production_job_assembly_checks (job_id);
 
-CREATE TABLE production_job_polishing_checks (
+CREATE TABLE production_job_finishing_checks (
     id                uuid PRIMARY KEY,
     job_id            uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
     supports_removed  boolean NOT NULL DEFAULT false,
@@ -508,10 +516,10 @@ CREATE TABLE production_job_polishing_checks (
     surface_finish_ok boolean NOT NULL DEFAULT false,
     photo_file_id     uuid REFERENCES file_assets (id) ON DELETE SET NULL,
     notes             varchar(1000),
-    polished_by       varchar(64) NOT NULL,
-    polished_at       timestamptz NOT NULL DEFAULT now()
+    finished_by       varchar(64) NOT NULL,
+    finished_at       timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX ix_polishing_checks_job_id ON production_job_polishing_checks (job_id);
+CREATE INDEX ix_finishing_checks_job_id ON production_job_finishing_checks (job_id);
 
 CREATE TABLE production_job_qc_checks (
     id                      uuid PRIMARY KEY,
@@ -580,3 +588,29 @@ ALTER TABLE orders
     FOREIGN KEY (shop_connection_id) REFERENCES shopify_connections (id) ON DELETE SET NULL;
 CREATE UNIQUE INDEX uq_orders_shop_order_number
     ON orders (shop_connection_id, order_number);
+
+-- Number minting for production_jobs.job_number and batches.batch_number (see
+-- migration 0033). Sequences rather than random digits: uniqueness becomes
+-- structural instead of probabilistic, and the unique indexes above can be
+-- relied on rather than merely hoped for.
+CREATE SEQUENCE production_job_number_seq START WITH 1000000;
+CREATE SEQUENCE batch_number_seq START WITH 1000000;
+
+-- One append-only stream per job (see migration 0035). seq orders events
+-- written in the same transaction, which created_at alone cannot.
+CREATE TABLE production_job_events (
+    id             uuid PRIMARY KEY,
+    job_id         uuid NOT NULL REFERENCES production_jobs (id) ON DELETE CASCADE,
+    seq            bigserial NOT NULL,
+    event_type     varchar(48) NOT NULL,
+    stage          varchar(24),
+    reason         varchar(64),
+    comment        varchar(1000),
+    actor_id       varchar(64) NOT NULL,
+    batch_id       uuid REFERENCES batches (id) ON DELETE SET NULL,
+    related_job_id uuid REFERENCES production_jobs (id) ON DELETE SET NULL,
+    metadata       jsonb NOT NULL DEFAULT '{}',
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_job_events_job ON production_job_events (job_id, seq);
+CREATE INDEX ix_job_events_type ON production_job_events (event_type);

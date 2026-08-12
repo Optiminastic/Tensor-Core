@@ -104,7 +104,19 @@ UPDATE slice_jobs
 SET status = sqlc.arg('status'), error = sqlc.narg('error'), updated_at = now()
 WHERE id = sqlc.arg('id');
 
--- name: InsertSliceMetrics :exec
+-- name: UpsertSliceMetrics :exec
+-- Idempotent on job_id (the primary key), because a River retry re-runs the
+-- whole slice for the same domain job id. Without this, a crash after
+-- ProcessSliceResult committed but before River acked the job left every
+-- remaining attempt unique-violating on this insert - burning the attempts and
+-- getting discarded, while the design was already correctly priced.
+--
+-- DO UPDATE rather than DO NOTHING, deliberately: priceDesign prices from the
+-- in-memory PerUnitMetrics, not from this row. Keeping the first attempt's row
+-- while re-deriving the price from the second attempt's numbers would leave the
+-- stored slicer facts and the price describing different slices, which breaks
+-- "slicer output is the source of truth". created_at deliberately keeps the
+-- first attempt's timestamp - the row describes a design, not an attempt.
 INSERT INTO slice_metrics (
     job_id, print_time_hr, effective_machine_time_hr, filament_g, purge_g, support_g,
     colour_changes, electricity_kwh, units_per_bed, layer_height_mm, infill_density_pct,
@@ -117,7 +129,23 @@ INSERT INTO slice_metrics (
     sqlc.arg('layer_height_mm')::float8, sqlc.arg('infill_density_pct')::float8,
     sqlc.arg('wall_loops'), sqlc.arg('support_used'), sqlc.arg('filament_length_mm')::float8,
     sqlc.arg('gcode_key'), sqlc.narg('orientation')::jsonb
-);
+)
+ON CONFLICT (job_id) DO UPDATE SET
+    print_time_hr             = EXCLUDED.print_time_hr,
+    effective_machine_time_hr = EXCLUDED.effective_machine_time_hr,
+    filament_g                = EXCLUDED.filament_g,
+    purge_g                   = EXCLUDED.purge_g,
+    support_g                 = EXCLUDED.support_g,
+    colour_changes            = EXCLUDED.colour_changes,
+    electricity_kwh           = EXCLUDED.electricity_kwh,
+    units_per_bed             = EXCLUDED.units_per_bed,
+    layer_height_mm           = EXCLUDED.layer_height_mm,
+    infill_density_pct        = EXCLUDED.infill_density_pct,
+    wall_loops                = EXCLUDED.wall_loops,
+    support_used              = EXCLUDED.support_used,
+    filament_length_mm        = EXCLUDED.filament_length_mm,
+    gcode_key                 = EXCLUDED.gcode_key,
+    orientation               = EXCLUDED.orientation;
 
 -- name: GetLatestMetricsForDesign :one
 SELECT m.job_id, m.print_time_hr::float8 AS print_time_hr,
@@ -189,3 +217,13 @@ ON CONFLICT (design_id) DO UPDATE SET
 SELECT design_id, brand_slug, product_gid, variant_gid, handle, admin_url, status,
        published_by, created_at, updated_at
 FROM shopify_products WHERE design_id = $1;
+
+-- name: MarkDesignSlicing :exec
+-- Flips a design to 'slicing' when a worker picks up its job, but never
+-- demotes one that is already priced. A River retry re-runs Work from the top,
+-- and this write happens OUTSIDE ProcessSliceResult's transaction - so on a
+-- retry after a partial commit it would drag a correctly-priced design back to
+-- 'slicing' and, if the retry then failed, strand it there. The guard makes
+-- that impossible regardless of what the rest of the attempt does.
+UPDATE designs SET status = 'slicing', updated_at = now()
+WHERE id = sqlc.arg('id') AND status <> 'priced';
