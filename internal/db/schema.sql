@@ -443,10 +443,23 @@ CREATE TABLE batches (
     -- Set true the moment approveBatch debits filament stock, so a lost race
     -- against the pending_approval-only guard can't double-reserve.
     filament_reserved               boolean NOT NULL DEFAULT false,
+    -- Set when the merged plate itself was sliced (see 0036). While NULL,
+    -- total_print_time_minutes is batchTimeFromJobs' MAX-of-jobs
+    -- approximation rather than a measurement of this actual bed.
+    plate_sliced_at                 timestamptz,
+    plate_slice_error               text,
+    -- What slicing the merged plate measured beyond time and total filament
+    -- (see 0039). Plate-level figures, not sums of per-job estimates.
+    total_layers                    integer,
+    support_grams                   numeric(10, 2),
+    purge_grams                     numeric(10, 2),
+    colour_changes                  integer,
+    filament_by_colour              jsonb NOT NULL DEFAULT '[]',
     created_at                      timestamptz NOT NULL DEFAULT now(),
     updated_at                      timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX uq_batches_batch_number ON batches (batch_number);
+CREATE INDEX ix_batches_unsliced ON batches (created_at DESC) WHERE plate_sliced_at IS NULL;
 CREATE INDEX ix_batches_created ON batches (created_at DESC, id DESC);
 CREATE INDEX ix_batches_machine_status ON batches (machine_id, status);
 

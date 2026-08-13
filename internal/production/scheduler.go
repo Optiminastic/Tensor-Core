@@ -48,7 +48,13 @@ func MachineFreeAt(now time.Time, m FleetMachineState, queued []QueuedBatch) tim
 type MachineCandidate struct {
 	MachineID uuid.UUID
 	ProfileID uuid.UUID
-	FreeAt    time.Time
+	// FreeAt is when the machine's GUARANTEED workload ends: now plus the
+	// remaining current print plus every Locked batch already queued on it.
+	// Draft work is excluded on purpose - see MachineScoreInputs.DraftMinutes.
+	FreeAt time.Time
+	// Now is the instant FreeAt was computed against, so the idle-recency
+	// tie-break has a clock without EffectiveFreeAt reading one itself.
+	Now time.Time
 }
 
 // EarliestFreeMachine picks the candidate that is free soonest. Returns nil
@@ -77,7 +83,25 @@ type MachineScoreInputs struct {
 	LoadedMaterial string
 	LoadedColours  []string
 	QueueLength    int
-	Healthy        bool
+	// DraftMinutes is how much flexible, not-yet-committed work is already
+	// pointed at this machine.
+	//
+	// Deliberately separate from FreeAt, which carries only GUARANTEED load
+	// (the remaining current print plus every Locked batch). A Draft may still
+	// be re-planned onto another machine, so treating it as committed would
+	// overstate the machine's real obligations. But ignoring it entirely is
+	// what let one printer collect an entire planning run's worth of Drafts
+	// while the rest stood idle - during a single run every machine's
+	// committed queue is unchanged, so they all look identical.
+	//
+	// It is therefore counted at a discount (DraftLoadFraction) as a fleet
+	// balance signal rather than as time the machine truly owes.
+	DraftMinutes int
+	// IdleSince is when this machine last changed state, used only to break a
+	// tie between otherwise-equal candidates in favour of the one that has
+	// been unused longest. Nil disables the tie-break for this machine.
+	IdleSince *time.Time
+	Healthy   bool
 }
 
 // MachineScoreWeights are the minutes-equivalent adjustments EffectiveFreeAt
@@ -90,16 +114,40 @@ type MachineScoreWeights struct {
 	ColourMatchBonus      time.Duration
 	MaterialChangePenalty time.Duration
 	QueueLengthPenalty    time.Duration
-	HealthBonus           time.Duration
+	// DraftLoadFraction is how much of a machine's Draft minutes count towards
+	// its apparent load, 0..1. Below 1 because Draft work is not owed yet; above
+	// 0 because a machine already carrying eight hours of proposals is a worse
+	// home for a ninth than an empty one.
+	DraftLoadFraction float64
+	HealthBonus       time.Duration
+	// IdleRecencyBonus is the most a long-idle machine can be favoured by,
+	// reached after IdleRecencyWindow. It only ever separates candidates that
+	// are otherwise close, so it cannot override a genuinely earlier finish.
+	IdleRecencyBonus  time.Duration
+	IdleRecencyWindow time.Duration
 }
 
-// EffectiveFreeAt adjusts a candidate's raw FreeAt by the material/colour
-// match, queue length, and health signals. Material match and the material-
-// change penalty are mutually exclusive: match applies only when the loaded
-// material is known and equal to the batch's; the penalty applies only when
-// it's known and different. Unknown loaded material (idle, nothing queued)
-// applies neither - a genuinely available empty machine is never penalised
-// just for not currently having anything loaded.
+// EffectiveFreeAt ranks a machine for a batch: when it would realistically
+// finish the work, adjusted for the things that make one machine a better home
+// than another.
+//
+// The base is c.FreeAt - now plus the remaining current print plus every
+// Locked batch queued on it. That is the machine's GUARANTEED workload, and it
+// is what makes this a fleet scheduler rather than "whichever machine is free".
+// A machine with 1h left and 2h locked finishes a new 2h batch at +5h; one with
+// 1h left and 1h locked finishes it at +4h and should get the work, even though
+// neither is idle.
+//
+// The new batch's own duration is added by the caller for reporting; it is the
+// same on every candidate, so it never changes which one wins.
+//
+// On top of that: Draft load at a discount (fleet balance), material and colour
+// changeover, health, and finally idle recency as a tie-break. Material match
+// and the change penalty are mutually exclusive - a match applies only when the
+// loaded material is known and equal, the penalty only when known and
+// different. Unknown loaded material (idle, nothing queued) applies neither, so
+// a genuinely available empty machine is never penalised for having nothing on
+// it.
 func EffectiveFreeAt(c MachineCandidate, in MachineScoreInputs, batchMaterial string, batchColours []string, w MachineScoreWeights) time.Time {
 	adjusted := c.FreeAt
 	switch {
@@ -110,10 +158,31 @@ func EffectiveFreeAt(c MachineCandidate, in MachineScoreInputs, batchMaterial st
 		adjusted = adjusted.Add(w.MaterialChangePenalty)
 	}
 	adjusted = adjusted.Add(time.Duration(in.QueueLength) * w.QueueLengthPenalty)
+	// Flexible work, discounted - see DraftMinutes.
+	adjusted = adjusted.Add(time.Duration(float64(in.DraftMinutes)*w.DraftLoadFraction) * time.Minute)
 	if in.Healthy {
 		adjusted = adjusted.Add(-w.HealthBonus)
 	}
+	adjusted = adjusted.Add(-idleRecencyBonus(in.IdleSince, c.Now, w))
 	return adjusted
+}
+
+// idleRecencyBonus favours the machine that has gone unused longest, ramping to
+// IdleRecencyBonus over IdleRecencyWindow. Its only job is to stop an exact tie
+// between equally-loaded machines always resolving to the same one, so it is
+// capped well below the other terms.
+func idleRecencyBonus(idleSince *time.Time, now time.Time, w MachineScoreWeights) time.Duration {
+	if idleSince == nil || w.IdleRecencyBonus <= 0 || w.IdleRecencyWindow <= 0 {
+		return 0
+	}
+	idle := now.Sub(*idleSince)
+	if idle <= 0 {
+		return 0
+	}
+	if idle >= w.IdleRecencyWindow {
+		return w.IdleRecencyBonus
+	}
+	return time.Duration(float64(w.IdleRecencyBonus) * (float64(idle) / float64(w.IdleRecencyWindow)))
 }
 
 // scaledColourBonus scales bonus by what fraction of the batch's required

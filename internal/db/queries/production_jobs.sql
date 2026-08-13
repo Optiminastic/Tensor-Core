@@ -276,8 +276,20 @@ RETURNING *;
 SELECT count(*) FROM production_jobs WHERE batch_id = $1;
 
 -- name: AssignJobsToBatch :exec
+-- Puts jobs on a batch. A job may only be moved if it is unassigned or still
+-- sitting in a Draft; one that belongs to an approved, printing or completed
+-- batch is left exactly where it is.
+--
+-- That guard is not theoretical. The planner reads its pool, plans, and only
+-- then writes - and a human can approve a Draft in that window. The dissolve
+-- step correctly refuses to touch the newly-approved batch, but without this
+-- the plan built moments earlier would still reassign its jobs onto a fresh
+-- Draft, stealing the contents of a plate whose filament is already reserved
+-- and which a machine is about to print.
 UPDATE production_jobs SET batch_id = sqlc.arg('batch_id'), updated_at = now()
-WHERE id = ANY(sqlc.arg('job_ids')::uuid[]);
+WHERE id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval'));
 
 -- name: CompleteProductionJobsForBatch :execrows
 -- Auto-completes every non-terminal job on a batch that just finished
@@ -378,3 +390,35 @@ SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg('order_id')::text, 8021))
 -- to a uniqueness guarantee it structurally could not provide. Sequence gaps on
 -- a rolled-back transaction are harmless.
 SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_number;
+
+-- name: ListReplannableJobs :many
+-- Everything the batch planner may reconsider on a run: jobs not yet on a bed,
+-- PLUS jobs currently sitting in a Draft (pending_approval) batch.
+--
+-- The second half is what makes batching a loop instead of a one-shot. With
+-- only `batch_id IS NULL` - which is what ListBatchableJobs gives, and all the
+-- planner ever saw - a job was frozen into whatever bed it first landed on, so
+-- a Draft that formed at 40% utilisation stayed at 40% forever no matter how
+-- much compatible work arrived afterwards.
+--
+-- A Draft is a proposal, not a commitment: no filament is reserved (that
+-- happens at approval) and no plate is promised, so its jobs are free to be
+-- re-planned. Approved batches and beyond are deliberately absent - their
+-- jobs have left 'queued' anyway, so the status filter excludes them twice
+-- over.
+SELECT j.* FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
+WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+  AND j.status = 'queued'
+  AND j.quantity > 0
+  AND j.personalisation_status IN ('validated', 'not_required')
+  AND j.issue_reason IS NULL
+ORDER BY j.created_at ASC, j.id ASC;
+
+-- name: UnassignJobsFromBatches :exec
+-- Detaches jobs from the given batches so they can be re-planned. Guarded on
+-- the batch still being a Draft, so a batch approved between the planner
+-- reading the pool and writing its result keeps every one of its jobs.
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE batch_id = ANY(sqlc.arg('batch_ids')::uuid[])
+  AND batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval');

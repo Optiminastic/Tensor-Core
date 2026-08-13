@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
+	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -16,6 +17,32 @@ import (
 
 // seedFileAsset inserts a file_assets row with the given bounding box and returns
 // its id (no object-storage bytes; only the metadata the planner reads).
+// givePrintFile makes a job batchable the way the product does: attach a print
+// file and clear the validation flag.
+//
+// Both steps are needed. A job created from an order whose SKU has no approved
+// design is stamped issue_reason = no_approved_design (see applyMatch), and
+// ListBatchableJobs excludes any flagged job - by design, so a job with an
+// unresolved problem is never printed. SetProductionJobPrintFile only clears
+// the flag when it is exactly 'stl_missing', because an STL upload is not the
+// remedy for a missing design. Clearing the rest is a deliberate human act
+// (PATCH issue_reason, Admin/Project Lead only), which is what this stands in
+// for.
+func givePrintFile(t *testing.T, store *db.Store, jobID, fileID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.Q.SetProductionJobPrintFile(ctx, gen.SetProductionJobPrintFileParams{
+		ID: jobID, PrintFileID: &fileID,
+	}); err != nil {
+		t.Fatalf("set print file: %v", err)
+	}
+	if _, err := store.Q.UpdateProductionJobFields(ctx, gen.UpdateProductionJobFieldsParams{
+		ID: jobID, SetIssueReason: true, IssueReason: nil,
+	}); err != nil {
+		t.Fatalf("clear issue reason: %v", err)
+	}
+}
+
 func seedFileAsset(t *testing.T, store *db.Store, x, y, z float64) uuid.UUID {
 	t.Helper()
 	f, err := store.Q.InsertFileAsset(context.Background(), gen.InsertFileAssetParams{
@@ -211,11 +238,7 @@ func TestIntegrationBatchAutoCreateSplitsLargeQuantityOrder(t *testing.T) {
 	// 100x100mm on the 330x320 bed only fits a handful per bed, so quantity
 	// 20 must split across multiple batches instead of being unbatchable.
 	fileID := seedFileAsset(t, store, 100, 100, 20)
-	if _, err := store.Q.SetProductionJobPrintFile(context.Background(), gen.SetProductionJobPrintFileParams{
-		ID: originalID, PrintFileID: &fileID,
-	}); err != nil {
-		t.Fatalf("set print file: %v", err)
-	}
+	givePrintFile(t, store, originalID, fileID)
 
 	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
 	rr := doJSON(router, http.MethodPost, "/batches/auto-create", manage, nil)
@@ -228,7 +251,8 @@ func TestIntegrationBatchAutoCreateSplitsLargeQuantityOrder(t *testing.T) {
 		t.Fatalf("unbatchable = %+v, want none (should split instead)", resp.Unbatchable)
 	}
 	if len(resp.Created) < 2 {
-		t.Fatalf("created batches = %d, want >1 (quantity 20 shouldn't fit on one bed)", len(resp.Created))
+		t.Fatalf("created batches = %d (held=%d unbatchable=%d), want >1 (quantity 20 shouldn't fit on one bed)",
+			len(resp.Created), len(resp.Held), len(resp.Unbatchable))
 	}
 
 	// The split group (the original row plus every split_of_job_id
@@ -277,12 +301,7 @@ func TestIntegrationBatchAutoCreate(t *testing.T) {
 	// Give both jobs a small measurable print file.
 	fileID := seedFileAsset(t, store, 50, 50, 20)
 	for _, j := range jobs {
-		id := uuid.MustParse(j.ID)
-		if _, err := store.Q.SetProductionJobPrintFile(context.Background(), gen.SetProductionJobPrintFileParams{
-			ID: id, PrintFileID: &fileID,
-		}); err != nil {
-			t.Fatalf("set print file: %v", err)
-		}
+		givePrintFile(t, store, uuid.MustParse(j.ID), fileID)
 	}
 
 	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
@@ -692,4 +711,167 @@ func TestIntegrationBatchCompletedAutoCompletesItsJobs(t *testing.T) {
 			t.Errorf("%s: status = %q, want %q", tc.name, job.Status, tc.want)
 		}
 	}
+}
+
+// TestIntegrationApprovalKeepsMeasuredPlateTime locks the ordering rule between
+// the plate-slice worker and approval.
+//
+// The plate slice (SliceBatchArgs) replaces batches.total_print_time_minutes -
+// which is otherwise batchTimeFromJobs' MAX-of-each-job's-own-estimate
+// approximation - with a measurement of the actual merged bed. Approval then
+// recomputes the batch's derived metrics, and recomputing the time
+// unconditionally would overwrite that measurement, so every batch would reach
+// the machine scheduler on an estimate and the plate slice would have been for
+// nothing.
+//
+// The batch's job here has no per-job estimate, so batchTimeFromJobs yields
+// nil. That makes the failure unambiguous: nil means approval clobbered the
+// measurement, 999 means it kept it.
+func TestIntegrationApprovalKeepsMeasuredPlateTime(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	ctx := context.Background()
+
+	machineID := seedMachine(t, store, "H2C-01")
+	batchID := seedDraftBatch(t, store, "BATCH-PLATE-SLICED", production.BatchPendingApproval, &machineID, "H2C")
+
+	// A cached preview file stands in for the merged plate, so mergedPlateFor
+	// reuses it instead of trying to merge real STL bytes from object storage
+	// (which this fixture has none of).
+	fileID := seedFileAsset(t, store, 50, 50, 20)
+	if _, err := store.Q.SetBatchPreviewFile(ctx, gen.SetBatchPreviewFileParams{
+		ID: batchID, PreviewFileID: &fileID,
+	}); err != nil {
+		t.Fatalf("set preview file: %v", err)
+	}
+
+	// Stand in for the plate-slice worker having measured this bed.
+	measured := int32(999)
+	if _, err := store.Q.SetBatchPlateSliceResult(ctx, gen.SetBatchPlateSliceResultParams{
+		ID: batchID, TotalPrintTimeMinutes: &measured,
+	}); err != nil {
+		t.Fatalf("record plate slice result: %v", err)
+	}
+
+	cfg := config.Settings{Environment: "development", AuthAudience: "tensor-core"}
+	srv := NewServer(cfg, store, auth.NewGuards(newTokenMinter(t).verifier, ""), nil)
+
+	approved, err := srv.ApproveBatchFor(ctx, batchID, &machineID, "usr_admin")
+	if err != nil {
+		t.Fatalf("ApproveBatchFor: %v", err)
+	}
+	if approved.TotalPrintTimeMinutes == nil {
+		t.Fatalf("total_print_time_minutes after approval = nil, want %d: approval overwrote the measured plate time with batchTimeFromJobs' approximation", measured)
+	}
+	if *approved.TotalPrintTimeMinutes != measured {
+		t.Errorf("total_print_time_minutes after approval = %d, want %d (the measured plate time)",
+			*approved.TotalPrintTimeMinutes, measured)
+	}
+	if !approved.PlateSlicedAt.Valid {
+		t.Error("plate_sliced_at was cleared by approval; it marks the time as measured rather than estimated")
+	}
+}
+
+// TestIntegrationReplanGrowsDraftAndSparesLocked is the core of the batching
+// loop: a Draft is a proposal that keeps improving, and a Locked batch is a
+// commitment that never moves.
+//
+// Before this, ListBatchableJobs filtered `batch_id IS NULL`, so the moment a
+// job landed in a Draft it was invisible to every later planner run - a bed
+// that formed at 5% utilisation stayed at 5% forever no matter how much
+// compatible work arrived. The assertion that the Draft ends up holding BOTH
+// jobs is the whole feature.
+//
+// The second half is the guard rail: the same run must not disturb an approved
+// batch. If dissolve-and-reform ever reaches past pending_approval, a plate
+// whose filament is already reserved and which a machine is about to print
+// would silently change contents.
+func TestIntegrationReplanGrowsDraftAndSparesLocked(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+	router := testServer(t, store, guards)
+	ctx := context.Background()
+	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
+
+	// A locked batch that must survive untouched, seeded directly so it is
+	// already approved before the planner ever runs.
+	machineID := seedMachine(t, store, "H2C-01")
+	lockedID := seedDraftBatch(t, store, "BATCH-LOCKED-KEEP", production.BatchOpen, &machineID, "H2C")
+	lockedBefore, err := store.Q.GetBatchByID(ctx, lockedID)
+	if err != nil {
+		t.Fatalf("load locked batch: %v", err)
+	}
+	lockedJobsBefore, err := store.Q.ListJobsForBatch(ctx, &lockedID)
+	if err != nil {
+		t.Fatalf("load locked batch jobs: %v", err)
+	}
+
+	// First job in, first plan: one thin Draft.
+	fileID := seedFileAsset(t, store, 50, 50, 20)
+	first := seedOrder(t, store, 9101, []map[string]any{
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
+	})
+	for _, j := range fromOrderJobs(t, router, minter, first) {
+		givePrintFile(t, store, uuid.MustParse(j.ID), fileID)
+	}
+	if rr := doJSON(router, http.MethodPost, "/batches/auto-create", manage, nil); rr.Code != http.StatusOK {
+		t.Fatalf("first auto-create = %d body=%s", rr.Code, rr.Body.String())
+	}
+	draftsAfterFirst := draftBatches(t, store)
+	if len(draftsAfterFirst) != 1 {
+		t.Fatalf("drafts after first plan = %d, want 1", len(draftsAfterFirst))
+	}
+
+	// A compatible job arrives, and the planner runs again.
+	second := seedOrder(t, store, 9102, []map[string]any{
+		{"product_id": "SKU2", "product_name": "Block", "quantity": 1, "material": "PLA"},
+	})
+	for _, j := range fromOrderJobs(t, router, minter, second) {
+		givePrintFile(t, store, uuid.MustParse(j.ID), fileID)
+	}
+	if rr := doJSON(router, http.MethodPost, "/batches/auto-create", manage, nil); rr.Code != http.StatusOK {
+		t.Fatalf("second auto-create = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// The two compatible jobs must now share one bed, not sit on two.
+	drafts := draftBatches(t, store)
+	if len(drafts) != 1 {
+		t.Fatalf("drafts after re-plan = %d, want 1 - the new job should have joined the existing bed, not started its own", len(drafts))
+	}
+	grown, err := store.Q.ListJobsForBatch(ctx, &drafts[0])
+	if err != nil {
+		t.Fatalf("load draft jobs: %v", err)
+	}
+	if len(grown) != 2 {
+		t.Errorf("draft holds %d jobs, want 2 - the draft did not absorb the newly-arrived compatible job", len(grown))
+	}
+
+	// The locked batch is byte-identical: same row, same membership.
+	lockedAfter, err := store.Q.GetBatchByID(ctx, lockedID)
+	if err != nil {
+		t.Fatalf("locked batch disappeared during re-plan: %v", err)
+	}
+	if lockedAfter.BatchNumber != lockedBefore.BatchNumber || lockedAfter.Status != lockedBefore.Status {
+		t.Errorf("locked batch changed: %q/%q -> %q/%q",
+			lockedBefore.BatchNumber, lockedBefore.Status, lockedAfter.BatchNumber, lockedAfter.Status)
+	}
+	lockedJobsAfter, err := store.Q.ListJobsForBatch(ctx, &lockedID)
+	if err != nil {
+		t.Fatalf("load locked batch jobs after: %v", err)
+	}
+	if len(lockedJobsAfter) != len(lockedJobsBefore) {
+		t.Errorf("locked batch membership changed: %d jobs -> %d", len(lockedJobsBefore), len(lockedJobsAfter))
+	}
+}
+
+// draftBatches returns every pending_approval batch id.
+func draftBatches(t *testing.T, store *db.Store) []uuid.UUID {
+	t.Helper()
+	ids, err := store.Q.ListDraftBatchIDs(context.Background())
+	if err != nil {
+		t.Fatalf("list draft batches: %v", err)
+	}
+	return ids
 }

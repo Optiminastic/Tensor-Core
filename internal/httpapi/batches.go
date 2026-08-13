@@ -56,6 +56,21 @@ type batchResponse struct {
 	PlateBboxXMm *float64 `json:"plate_bbox_x_mm,omitempty"`
 	PlateBboxYMm *float64 `json:"plate_bbox_y_mm,omitempty"`
 	PlateBboxZMm *float64 `json:"plate_bbox_z_mm,omitempty"`
+	// PlateSlicedAt says whether TotalPrintTimeMinutes is a measurement of
+	// this actual bed or batchTimeFromJobs' MAX-of-jobs approximation. Null
+	// means the latter - the plate slice has not run, is still queued, or
+	// failed (in which case PlateSliceError says why).
+	PlateSlicedAt   *time.Time `json:"plate_sliced_at"`
+	PlateSliceError *string    `json:"plate_slice_error"`
+	// Measured on the merged plate, present only once it has been sliced.
+	// Support and purge in particular are properties of the combined plate
+	// rather than of any single job on it, which is why they cannot be summed
+	// from per-job estimates.
+	TotalLayers      *int32          `json:"total_layers"`
+	SupportGrams     *float64        `json:"support_grams"`
+	PurgeGrams       *float64        `json:"purge_grams"`
+	ColourChanges    *int32          `json:"colour_changes"`
+	FilamentByColour json.RawMessage `json:"filament_by_colour"`
 }
 
 func batchDTO(b gen.Batch) batchResponse {
@@ -70,7 +85,20 @@ func batchDTO(b gen.Batch) batchResponse {
 		TotalFilamentGrams: db.NumFloatPtr(b.TotalFilamentGrams), BedUtilizationPercent: utilisation,
 		OccupiedAreaMm2: occupied, FreeAreaMm2: free,
 		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
+		PlateSlicedAt: db.TimePtr(b.PlateSlicedAt), PlateSliceError: b.PlateSliceError,
+		TotalLayers: b.TotalLayers, SupportGrams: db.NumFloatPtr(b.SupportGrams),
+		PurgeGrams: db.NumFloatPtr(b.PurgeGrams), ColourChanges: b.ColourChanges,
+		FilamentByColour: rawOrEmptyArray(b.FilamentByColour),
 	}
+}
+
+// rawOrEmptyArray keeps a null or empty JSONB column rendering as [] rather
+// than null, so the frontend's array schema never has to special-case it.
+func rawOrEmptyArray(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage("[]")
+	}
+	return raw
 }
 
 // occupiedFreeArea derives absolute occupied/free mm^2 from a utilisation
@@ -213,36 +241,10 @@ func (s *Server) patchBatch(c *gin.Context) {
 	}
 	completing := req.Status != nil && *req.Status == production.BatchCompleted
 
-	var b gen.Batch
-	err := s.store.InTx(ctx, func(q *gen.Queries) error {
-		var err error
-		b, err = q.UpdateBatch(ctx, params)
-		if err != nil {
-			return err
-		}
-		if completing {
-			// The bed finished printing: every job on it is done unless it
-			// individually failed (that job's reprint was already queued via
-			// /fail, and force-completing it here would erase the failure
-			// and let a bad print slip into assembly/QC as if it passed).
-			// This is what actually makes a job reachable from the
-			// Assembly/QC/Packaging queues without an operator manually
-			// completing every job by hand.
-			if _, err := q.CompleteProductionJobsForBatch(ctx, &id); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	b, err := s.updateBatchAnd(ctx, params, completing)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not update the batch.")
+		writeStatusError(c, err, "Could not update the batch.")
 		return
-	}
-	if completing {
-		// A machine just freed up - worth a replan regardless of how much
-		// else is currently queued, unlike the threshold-gated per-job
-		// triggers (see triggerBatchPlan's doc comment).
-		s.triggerBatchPlan(ctx)
 	}
 	c.JSON(http.StatusOK, batchDTO(b))
 }
@@ -398,18 +400,8 @@ func (s *Server) approveBatch(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	ctx := c.Request.Context()
-
-	batch, err := s.store.Q.GetBatchByID(ctx, id)
-	if err != nil {
-		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
-		return
-	}
-	if batch.Status != production.BatchPendingApproval {
-		detail(c, http.StatusConflict, "This batch has already been approved.")
-		return
-	}
-
+	// Parsed here rather than in ApproveBatchFor: the override arrives as a
+	// string only over HTTP, and a malformed one is a request-shape error.
 	var machineID *uuid.UUID
 	if req.MachineID != nil {
 		parsed, err := uuid.Parse(*req.MachineID)
@@ -418,68 +410,11 @@ func (s *Server) approveBatch(c *gin.Context) {
 			return
 		}
 		machineID = &parsed
-	} else {
-		machineID = batch.MachineID
 	}
-	if machineID == nil {
-		detail(c, http.StatusUnprocessableEntity, "This batch has no machine assigned yet; provide a machine_id.")
-		return
-	}
-	if _, err := s.store.Q.GetMachineOps(ctx, *machineID); err != nil {
-		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
-		return
-	}
-	jobs, err := s.store.Q.ListJobsForBatch(ctx, &id)
+
+	b, err := s.ApproveBatchFor(c.Request.Context(), id, machineID, currentUserID(c))
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the batch's jobs.")
-		return
-	}
-	if len(jobs) == 0 {
-		detail(c, http.StatusConflict, "The batch has no jobs to approve.")
-		return
-	}
-	for _, j := range jobs {
-		if j.PersonalisationStatus == production.PersonalisationPending {
-			detail(c, http.StatusConflict, "A job in this batch has unvalidated personalisation.")
-			return
-		}
-	}
-
-	mergedID, unitsPerBed, utilisation, ok := s.mergedPlateFor(ctx, c, batch, jobs)
-	if !ok {
-		return
-	}
-
-	total, eff := batchTimeFromJobs(jobs)
-	filament := sumFilament(jobs)
-	split := filamentSplitForJobs(jobs)
-	shortage := !s.filamentAvailableByColour(ctx, s.store.Q, split)
-	approvedBy := currentUserID(c)
-
-	var b gen.Batch
-	err = s.store.InTx(ctx, func(q *gen.Queries) error {
-		// Reserve filament in the same transaction as the Draft->Locked
-		// transition below, so a lost race against the guard (WHERE
-		// status = 'pending_approval') can never leave stock debited without
-		// the batch actually moving to open, or vice versa.
-		if err := s.adjustFilamentByColour(ctx, q, split, -1); err != nil {
-			return err
-		}
-		var err error
-		b, err = q.ApproveBatch(ctx, gen.ApproveBatchParams{
-			ID: id, MachineID: machineID, ApprovedBy: &approvedBy, MergedFileID: &mergedID,
-			MaterialShortage: shortage, UnitsPerBed: unitsPerBed, TotalPrintTimeMinutes: total,
-			EffectiveTimePerUnitMinutes: eff, TotalFilamentGrams: &filament,
-			BedUtilizationPercent: utilisation,
-		})
-		return err
-	})
-	if isNoRows(err) {
-		detail(c, http.StatusConflict, "This batch has already been approved.")
-		return
-	}
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not approve the batch.")
+		writeStatusError(c, err, "Could not approve the batch.")
 		return
 	}
 	c.JSON(http.StatusOK, batchDTO(b))
@@ -687,14 +622,26 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 	filament := sumFilament(jobs)
 	unitsPerBed := int32(plate.unitsPerBed)
 	utilisation := plate.utilisation
+	// Recomputed from the batch's NEW membership. Leaving these behind was a
+	// real defect: the machine scheduler ranks load on total_print_time_minutes,
+	// so a batch edited after creation was assigned on the strength of a plate
+	// that no longer existed.
+	total, effective := batchTimeFromJobs(jobs)
 	updated, err := s.store.Q.UpdateBatchDerivedMetrics(ctx, gen.UpdateBatchDerivedMetricsParams{
 		ID: batch.ID, PreviewFileID: &fileID, UnitsPerBed: &unitsPerBed,
 		BedUtilizationPercent: &utilisation, TotalFilamentGrams: &filament,
+		TotalPrintTimeMinutes: total, EffectiveTimePerUnitMinutes: effective,
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not update the batch.")
 		return gen.Batch{}, false
 	}
+	// The plate just changed, so its measured print time describes a bed that no
+	// longer exists - UpdateBatchDerivedMetrics cleared plate_sliced_at for
+	// exactly that reason. Re-measure it. Without this an edited Draft silently
+	// falls back to batchTimeFromJobs' MAX-of-estimates for good, which is the
+	// number the whole plate-slicing path exists to replace.
+	s.enqueuePlateSlice(ctx, updated, jobs, fileID, plate.unitsPerBed)
 	return updated, true
 }
 
@@ -706,21 +653,28 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 // itself and returns ok=false on any failure, same convention as
 // resolveOptionalMachine/resolveOptionalFile.
 func (s *Server) mergedPlateFor(
-	ctx context.Context, c *gin.Context, batch gen.Batch, jobs []gen.ProductionJob,
-) (fileID uuid.UUID, unitsPerBed *int32, utilisation *float64, ok bool) {
+	ctx context.Context, batch gen.Batch, jobs []gen.ProductionJob, uploadedBy string,
+) (fileID uuid.UUID, unitsPerBed *int32, utilisation *float64, err error) {
 	if batch.PreviewFileID != nil {
-		return *batch.PreviewFileID, batch.UnitsPerBed, db.NumFloatPtr(batch.BedUtilizationPercent), true
+		return *batch.PreviewFileID, batch.UnitsPerBed, db.NumFloatPtr(batch.BedUtilizationPercent), nil
+	}
+	// Building a plate downloads every job's model. The HTTP path checks this
+	// via filesReady before the handler runs; a non-HTTP caller has no such
+	// gate, and without this the nil client panics deep inside the merge
+	// rather than reporting that storage was never configured.
+	if s.storage == nil {
+		return uuid.Nil, nil, nil, statusErr(http.StatusServiceUnavailable,
+			"Object storage is not configured, so the merged plate cannot be built.")
 	}
 	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
 	if herr != nil {
-		detail(c, herr.status, herr.msg)
-		return uuid.Nil, nil, nil, false
+		return uuid.Nil, nil, nil, statusErr(herr.status, herr.msg)
 	}
-	id, err := s.storePlate(ctx, batch.ID, "plate", batch.BatchNumber, plate.data, plate.bbox, c)
+	id, err := s.storePlateAs(ctx, batch.ID, "plate", batch.BatchNumber, plate.data, plate.bbox, uploadedBy)
 	if err != nil {
-		return uuid.Nil, nil, nil, false
+		return uuid.Nil, nil, nil, err
 	}
-	return id, int32ptr(plate.unitsPerBed), &plate.utilisation, true
+	return id, int32ptr(plate.unitsPerBed), &plate.utilisation, nil
 }
 
 // --- merge orchestration ------------------------------------------------------
@@ -816,23 +770,38 @@ func (s *Server) loadModelMesh(ctx context.Context, file gen.FileAsset) (orienta
 	return mesh, nil
 }
 
-// storePlate uploads merged plate bytes and records a file asset (with the
-// plate's overall bbox, so its dimensions can be displayed/downloaded
-// alongside it), returning its id.
+// storePlate is storePlateAs for a request-scoped caller: the plate is
+// attributed to the signed-in user, and the two failure modes are written to
+// the response here rather than returned.
 func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchNumber string, data []byte, bbox meshio.Bbox, c *gin.Context) (uuid.UUID, error) {
+	fileID, err := s.storePlateAs(ctx, batchID, kind, batchNumber, data, bbox, currentUserID(c))
+	if err != nil {
+		writeStatusError(c, err, "Could not store the merged plate.")
+		return uuid.Nil, err
+	}
+	return fileID, nil
+}
+
+// storePlateAs uploads merged plate bytes and records a file asset (with the
+// plate's overall bbox, so its dimensions can be displayed/downloaded
+// alongside it), returning its id. uploadedBy is the signed-in user for a
+// request-driven merge and "system" for one a background process builds,
+// matching design_match.go's convention.
+func (s *Server) storePlateAs(
+	ctx context.Context, batchID uuid.UUID, kind, batchNumber string,
+	data []byte, bbox meshio.Bbox, uploadedBy string,
+) (uuid.UUID, error) {
 	key := fmt.Sprintf("batches/%s/%s.stl", batchID, kind)
 	if err := s.storage.Put(ctx, key, bytes.NewReader(data), int64(len(data)), "model/stl"); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not store the merged plate.")
-		return uuid.Nil, err
+		return uuid.Nil, statusErrf(http.StatusInternalServerError, "Could not store the merged plate.", err)
 	}
 	fileID := uuid.New()
 	if _, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
 		ID: fileID, Filename: batchNumber + "-" + kind + ".stl", ContentType: "model/stl",
-		SizeBytes: int64(len(data)), StorageKey: key, UploadedBy: currentUserID(c),
+		SizeBytes: int64(len(data)), StorageKey: key, UploadedBy: uploadedBy,
 		BboxXMm: &bbox.XMM, BboxYMm: &bbox.YMM, BboxZMm: &bbox.ZMM,
 	}); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not record the merged plate.")
-		return uuid.Nil, err
+		return uuid.Nil, statusErrf(http.StatusInternalServerError, "Could not record the merged plate.", err)
 	}
 	return fileID, nil
 }

@@ -120,3 +120,18 @@ func recordJobEvent(ctx context.Context, q *gen.Queries, e jobEvent) error {
 // systemActor is the actor for an event no human triggered - a batch completing,
 // a worker creating jobs from an order.
 const systemActor = "system"
+
+// RecordJobEvent appends one history entry for a caller outside the HTTP layer
+// - the print simulator today, a Bambu bridge reporting real printer telemetry
+// later.
+//
+// print.started and print.completed are declared in internal/production/
+// events.go and, until this existed, had no writer at all: nothing in the
+// system ever recorded when a job actually went on or came off a bed, so a
+// job's history jumped from "created" straight to whatever an operator did at
+// assembly. This is that missing writer.
+func (s *Server) RecordJobEvent(ctx context.Context, jobID uuid.UUID, eventType string, batchID uuid.UUID, actor string) error {
+	return recordJobEvent(ctx, s.store.Q, jobEvent{
+		JobID: jobID, EventType: eventType, ActorID: actor, BatchID: &batchID,
+	})
+}

@@ -1,0 +1,39 @@
+# Everything both Dockerfiles must never see. They each do `COPY . .`, so
+# without this file the build context carries the live Neon DSN, the AWS keys
+# and the Shopify secrets to the daemon and bakes them into a build-stage
+# layer - recoverable from the image even though the final stage copies out
+# only the compiled binary.
+
+# Secrets - the whole reason this file exists.
+.env
+.env.*
+!.env.example
+env/
+
+# Git history: large, and carries every secret ever committed.
+.git
+.github
+.gitignore
+
+# Build artefacts and local binaries. createunicornorder.exe alone is ~30MB of
+# context that no build stage reads.
+bin/
+*.exe
+*.test
+*.out
+*.log
+
+# Docs and editor/OS noise.
+CLAUDE.md
+README.md
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# The Dockerfiles themselves - naming them keeps an edit to one from busting
+# the other's cached layers.
+Dockerfile
+*.Dockerfile
+.dockerignore
+docker-compose*.yml

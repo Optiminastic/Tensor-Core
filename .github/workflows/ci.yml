@@ -41,4 +41,44 @@ jobs:
       - name: Test
         env:
           TENSOR_TEST_DB: postgres://tensor:tensor@localhost:5432/tensor_test?sslmode=disable
-        run: go test ./...
+        # -p 1 runs packages one at a time. Two packages have DB-backed
+        # integration tests (internal/httpapi and internal/slicing) and both
+        # TRUNCATE shared tables in their setup. Go tests different packages
+        # concurrently by default, so without this they wipe each other's
+        # fixtures mid-run and fail with foreign-key or duplicate-key errors
+        # that look like real bugs and move around between runs.
+        #
+        # The alternative is a database per package; this is the cheaper fix
+        # for two packages.
+        run: go test -p 1 ./...
+
+  slice-worker:
+    name: Slice worker image
+    runs-on: ubuntu-latest
+    # Builds the Bambu Studio runtime and slices a real model through
+    # RunSlice. This is the only place the slicer is exercised for real: the
+    # unit suite cannot see a bad preset name or a CLI that refuses to map
+    # filaments to extruders, which is exactly how the H2C profile shipped
+    # broken behind FAKE_SLICE (see internal/slicing/profiles.go).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build the image
+        run: docker build -f sliceworker.Dockerfile -t tensor-slice-worker .
+
+      - name: Compile the slicing tests for the image
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o slicing.test ./internal/slicing/
+
+      # Slices the cube Bambu Studio bundles, so CI needs no committed fixture
+      # and no access to the shop's model library.
+      - name: Slice for real
+        run: |
+          docker run --rm -v "$PWD:/t:ro" \
+            -e BAMBU_ROOT=/opt/bambu/squashfs-root \
+            -e SLICE_TEST_MODEL=/opt/bambu/squashfs-root/resources/model/Bambu_Cube.stl \
+            tensor-slice-worker /t/slicing.test -test.run RealInstall -test.v

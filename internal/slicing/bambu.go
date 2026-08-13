@@ -25,7 +25,7 @@ type SliceOutput struct {
 	Gcode3mfPath   string
 }
 
-// RunSlice slices stlPath with the resolved H2S profiles into outdir. It enables
+// RunSlice slices stlPath with the caller's resolved profiles into outdir. It enables
 // auto-support and applies the infill override, mirroring the Python invocation.
 // It fails with a clear reason when the slicer crashes or exports no G-code,
 // rather than letting the caller trip over a missing file.

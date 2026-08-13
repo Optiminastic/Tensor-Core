@@ -39,9 +39,23 @@ func sliceTestStore(t *testing.T) *db.Store {
 }
 
 // seedDesignAndJob creates the minimum a slice result needs to land against.
+//
+// The brand comes first and is not optional: sliceTestStore truncates brands,
+// and designs.brand_slug is a foreign key, so inserting the design without it
+// fails on designs_brand_slug_fkey. priceDesign also reads this row's ladder
+// and thresholds, so a brand with a real ladder is what makes pricing produce
+// anything at all.
 func seedDesignAndJob(t *testing.T, store *db.Store) (designID, jobID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
+	entryHours, entryRung := 2.0, int32(1)
+	if _, err := store.Q.InsertBrand(ctx, gen.InsertBrandParams{
+		ID: uuid.New(), Slug: "gifting", Name: "Gifting", StartingPrice: 499, IsActive: true,
+		Ladder:     []byte(`[299,499,799,999,1499,1999,2999]`),
+		CpGreenMax: 0.25, CpYellowMax: 0.30, EntryMachineHours: &entryHours, EntryRung: &entryRung,
+	}); err != nil {
+		t.Fatalf("insert brand: %v", err)
+	}
 	design, err := store.Q.InsertDesign(ctx, gen.InsertDesignParams{
 		ID: uuid.New(), BrandSlug: "gifting", Name: "Cube", CreatedBy: "tester",
 		Status: "slicing", StlKey: "designs/cube.stl", Material: "PLA",

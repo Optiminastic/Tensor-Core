@@ -64,8 +64,16 @@ func seedAll(t *testing.T, store *db.Store) {
 	if err != nil {
 		t.Fatalf("seed auth: %v", err)
 	}
-	if res.Permissions != 37 || res.Roles != 6 || res.Grants != 80 {
-		t.Fatalf("seed counts = %+v, want 37/6/80", res)
+	// Derived from the catalog, not restated. These numbers are already pinned
+	// as the spec in internal/auth/catalog_test.go; hard-coding them a second
+	// time here meant that adding a permission failed EVERY integration test
+	// in this package with an unrelated-looking message, which is exactly what
+	// happened when the finishing/dispatch/audit grants landed (37/80 -> 38/84).
+	// What this actually needs to check is that SyncAll wrote the whole
+	// catalog, whatever size it currently is.
+	if res.Permissions != len(auth.AllPermissions) || res.Roles != len(auth.AllRoles) {
+		t.Fatalf("seed wrote %+v, want %d permissions and %d roles (the whole catalog)",
+			res, len(auth.AllPermissions), len(auth.AllRoles))
 	}
 	seedGiftingBrand(t, store)
 }
@@ -105,10 +113,20 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 	seedAll(t, store)
 	ctx := context.Background()
 
-	// Re-seeding is idempotent.
-	res, err := auth.SyncAll(ctx, store)
-	if err != nil || res.Grants != 80 {
-		t.Fatalf("re-seed: %+v err=%v", res, err)
+	// Re-seeding is idempotent: it reports the same catalog the first pass did,
+	// not a second copy of it. Derived rather than hard-coded for the same
+	// reason as seedAll's counts.
+	first, err := auth.SyncAll(ctx, store)
+	if err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+	again, err := auth.SyncAll(ctx, store)
+	if err != nil {
+		t.Fatalf("re-seed twice: %v", err)
+	}
+	if first != again || first.Permissions != len(auth.AllPermissions) {
+		t.Fatalf("re-seed is not idempotent: %+v then %+v (catalog has %d permissions)",
+			first, again, len(auth.AllPermissions))
 	}
 
 	adminRole, err := store.Q.GetRoleIDByName(ctx, "ADMIN")
@@ -126,8 +144,11 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 	if len(authz.Roles) != 1 || authz.Roles[0] != auth.RoleAdmin {
 		t.Errorf("roles = %v, want [ADMIN]", authz.Roles)
 	}
-	if len(authz.Permissions) != 37 {
-		t.Errorf("permissions = %d, want 37", len(authz.Permissions))
+	// ADMIN is the whole catalog by construction (see catalog.go), so this is
+	// derived too rather than being a third hand-maintained copy of the count.
+	if len(authz.Permissions) != len(auth.AllPermissions) {
+		t.Errorf("permissions = %d, want %d (ADMIN holds the whole catalog)",
+			len(authz.Permissions), len(auth.AllPermissions))
 	}
 
 	// Unknown user resolves to empty, version 0.

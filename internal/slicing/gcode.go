@@ -10,9 +10,11 @@ package slicing
 //     filament between model and support (Bambu tags each region "; FEATURE: <name>"
 //     and emits relative E).
 //
-// The CLI's reported grams are unreliable (0 on the H2S profile, whose density is
-// 0), so weight is derived from length x cross-section x density, and the support
-// share from the gcode's per-feature extrusion.
+// The CLI's reported grams are unreliable - they came back 0 on the H2S profile
+// this pipeline originally used, whose bundled density is 0, and nothing
+// guarantees the current H2C presets are any better. Weight is therefore always
+// derived from length x cross-section x the density in profiles.go's
+// materialFilament, and the support share from the gcode's per-feature extrusion.
 
 import (
 	"archive/zip"

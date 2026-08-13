@@ -23,6 +23,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
@@ -117,6 +118,23 @@ func main() {
 		production.NewJobCreationEnqueuer(client),
 		production.NewBatchPlanEnqueuer(client, debounce),
 	)
+	// The slice enqueuer, for the same reason - this process is where batches
+	// are created, and creating one is what queues the slice of its merged
+	// plate (see enqueuePlateSlice). Without it every batch silently keeps
+	// batchTimeFromJobs' MAX-of-jobs approximation instead of a measurement of
+	// its own bed.
+	//
+	// This one DOES need its own insert-only client, unlike the two above. A
+	// consuming client validates every inserted job against its Workers
+	// bundle, and this process deliberately registers no slice workers (it has
+	// no Bambu Studio) - so enqueuing through `client` fails at runtime with
+	// "job kind is not registered in the client's Workers bundle: slice_batch".
+	// An insert-only client has no bundle and no such check.
+	insertOnly, err := slicing.NewInsertOnlyClient(store.Pool)
+	if err != nil {
+		log.Fatalf("build insert-only river client: %v", err)
+	}
+	server.EnableSliceEnqueuer(slicing.NewEnqueuer(insertOnly))
 
 	if err := client.Start(ctx); err != nil {
 		log.Fatalf("start river: %v", err)

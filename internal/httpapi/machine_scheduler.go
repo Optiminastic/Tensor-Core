@@ -28,7 +28,17 @@ import (
 // is eligible (empty family, no fleet machine linked/online for it, or the
 // lookup fails) - the batch is simply created unassigned, same as before
 // this scheduler existed, and a human assigns one at approval.
-func (s *Server) assignMachineForBatch(ctx context.Context, family, material string, colours []string) *uuid.UUID {
+// inRunLoad carries the minutes this planning run has already assigned to each
+// machine profile. It exists because AutoCreateBatches creates every batch
+// inside ONE transaction, and draftLoadByMachine reads through the pool - so
+// during a run it sees the state from before the transaction started and
+// reports zero Drafts for every machine, every time. Without this the balancer
+// cannot see its own assignments and sends the entire run to one printer.
+type inRunLoad map[uuid.UUID]int
+
+func (s *Server) assignMachineForBatch(
+	ctx context.Context, family, material string, colours []string, pending inRunLoad,
+) *uuid.UUID {
 	if family == "" {
 		return nil
 	}
@@ -43,8 +53,14 @@ func (s *Server) assignMachineForBatch(ctx context.Context, family, material str
 		ColourMatchBonus:      time.Duration(s.cfg.MachineColourMatchBonusMinutes * float64(time.Minute)),
 		MaterialChangePenalty: time.Duration(s.cfg.MachineMaterialChangePenaltyMinutes * float64(time.Minute)),
 		QueueLengthPenalty:    time.Duration(s.cfg.MachineQueueLengthPenaltyMinutes * float64(time.Minute)),
+		DraftLoadFraction:     s.cfg.MachineDraftLoadFraction,
+		IdleRecencyBonus:      time.Duration(s.cfg.MachineIdleRecencyBonusMinutes * float64(time.Minute)),
+		IdleRecencyWindow:     time.Duration(s.cfg.MachineIdleRecencyWindowMinutes * float64(time.Minute)),
 		HealthBonus:           time.Duration(s.cfg.MachineHealthBonusMinutes * float64(time.Minute)),
 	}
+
+	// Read once for the whole ranking rather than per candidate.
+	draftLoad := s.draftLoadByMachine(ctx)
 
 	var candidates []production.MachineCandidate
 	inputs := make(map[uuid.UUID]production.MachineScoreInputs)
@@ -68,12 +84,22 @@ func (s *Server) assignMachineForBatch(ctx context.Context, family, material str
 			MachineID: r.ID,
 			ProfileID: *r.MachineProfileID,
 			FreeAt:    production.MachineFreeAt(now, state, queued),
+			Now:       now,
 		})
 		loadedMaterial, loadedColours := s.currentlyLoadedMaterial(ctx, r.CurrentBatchID, r.ID)
 		inputs[r.ID] = production.MachineScoreInputs{
 			LoadedMaterial: loadedMaterial, LoadedColours: loadedColours,
 			QueueLength: len(queued),
-			Healthy:     r.ProfileStatus == nil || *r.ProfileStatus == production.MachineOnline,
+			// Flexible work already pointed at this machine, in minutes.
+			// Without it every Draft in a planning run sees the same
+			// committed queues and they all land on whichever machine sorts
+			// first - three printers, one of them doing all the work.
+			DraftMinutes: draftLoad[*r.MachineProfileID] + pending[*r.MachineProfileID],
+			// updated_at is the closest thing to "when this machine last
+			// changed hands": it is stamped every time the simulator or a
+			// bridge writes its state, including the transition back to idle.
+			IdleSince: db.TimePtr(r.UpdatedAt),
+			Healthy:   r.ProfileStatus == nil || *r.ProfileStatus == production.MachineOnline,
 		}
 	}
 
@@ -141,12 +167,24 @@ func (s *Server) queuedBatchLoad(ctx context.Context, fleetMachineID uuid.UUID) 
 	}
 	queued := make([]production.QueuedBatch, 0, len(rows))
 	for _, b := range rows {
-		if b.TotalPrintTimeMinutes != nil {
-			queued = append(queued, production.QueuedBatch{TotalPrintTimeMinutes: int(*b.TotalPrintTimeMinutes)})
+		// A batch with no estimate still occupies the machine for real. This
+		// used to skip it, so a machine holding unestimated work looked
+		// EMPTIER than one holding estimated work - and therefore attracted
+		// more of it, which is exactly backwards. An unknown-length plate is
+		// charged a nominal cost instead of nothing.
+		minutes := unestimatedBatchMinutes
+		if b.TotalPrintTimeMinutes != nil && *b.TotalPrintTimeMinutes > 0 {
+			minutes = int(*b.TotalPrintTimeMinutes)
 		}
+		queued = append(queued, production.QueuedBatch{TotalPrintTimeMinutes: minutes})
 	}
 	return queued
 }
+
+// unestimatedBatchMinutes is what a queued batch with no print-time estimate
+// is charged when ranking machine load. Deliberately a middling plate rather
+// than zero: the point is that unknown work is not free.
+const unestimatedBatchMinutes = 120
 
 // reassignBatchesForOfflineMachine runs right after a machine_profiles row is
 // PATCHed to offline/maintenance: every Draft (pending_approval) batch still
@@ -177,7 +215,7 @@ func (s *Server) reassignBatchesForOfflineMachine(ctx context.Context, machinePr
 			family = *jobs[0].MachineFamily
 		}
 		material, colours := materialColoursOf(jobs)
-		next := s.assignMachineForBatch(ctx, family, material, colours)
+		next := s.assignMachineForBatch(ctx, family, material, colours, inRunLoad{})
 		if _, err := s.store.Q.UpdateBatch(ctx, gen.UpdateBatchParams{
 			ID: b.ID, SetMachineID: true, MachineID: next,
 		}); err != nil {
@@ -197,4 +235,21 @@ func (s *Server) reassignBatchesForOfflineMachine(ctx context.Context, machinePr
 		// since a batch above may have just been cleared to fully unassigned.
 		s.triggerBatchPlan(ctx)
 	}
+}
+
+// draftLoadByMachine is how many MINUTES of Draft work each machine profile
+// already holds. Best-effort: on error every machine simply looks equally
+// unloaded, which is the behaviour this replaces rather than something worse.
+func (s *Server) draftLoadByMachine(ctx context.Context) map[uuid.UUID]int {
+	out := map[uuid.UUID]int{}
+	rows, err := s.store.Q.CountDraftBatchesPerMachine(ctx)
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		if r.MachineID != nil {
+			out[*r.MachineID] = int(r.DraftMinutes)
+		}
+	}
+	return out
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +41,13 @@ type Server struct {
 	// creation (Stage 2 never fires), matching how the design pipeline degrades.
 	jobEnqueuer   *production.JobCreationEnqueuer
 	batchEnqueuer *production.BatchPlanEnqueuer
+
+	// lastPlannedPool is the signature of the job pool the last completed
+	// batch plan ran over, so an unchanged pool can be skipped. See
+	// AutoCreateBatches. Guarded by its mutex because the periodic tick and an
+	// event trigger can both reach the planner.
+	planMu          sync.Mutex
+	lastPlannedPool string
 }
 
 // NewServer wires the HTTP layer. logger may be nil, in which case the request
@@ -148,4 +156,15 @@ func (s *Server) cors() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// EnableSliceEnqueuer attaches the slice-job enqueuer on its own, for a
+// process that builds its River client after EnablePipeline has already run.
+//
+// cmd/productionworker is exactly that case: it needs object storage wired
+// early (EnablePipeline) but cannot pass an enqueuer until its client exists,
+// and it is the process that creates batches - so without this the plate-slice
+// job is never queued and every batch keeps its estimated time.
+func (s *Server) EnableSliceEnqueuer(enqueuer *slicing.Enqueuer) {
+	s.enqueuer = enqueuer
 }

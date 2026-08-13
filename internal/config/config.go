@@ -137,7 +137,16 @@ type Settings struct {
 	MachineColourMatchBonusMinutes      float64
 	MachineMaterialChangePenaltyMinutes float64
 	MachineQueueLengthPenaltyMinutes    float64
-	MachineHealthBonusMinutes           float64
+	// MachineDraftLoadFraction is how much of a machine's Draft minutes count
+	// towards its apparent load when choosing where a batch goes. Below 1
+	// because Draft work is not owed yet; above 0 because a machine already
+	// holding eight hours of proposals is a worse home for a ninth.
+	MachineDraftLoadFraction float64
+	// Idle recency only ever separates otherwise-equal candidates, so a tie
+	// does not always resolve to the same machine.
+	MachineIdleRecencyBonusMinutes  float64
+	MachineIdleRecencyWindowMinutes float64
+	MachineHealthBonusMinutes       float64
 
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
@@ -229,6 +238,9 @@ func Load() Settings {
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
 		MachineMaterialChangePenaltyMinutes: floatEnvOr("MACHINE_MATERIAL_CHANGE_PENALTY_MINUTES", 45),
 		MachineQueueLengthPenaltyMinutes:    floatEnvOr("MACHINE_QUEUE_LENGTH_PENALTY_MINUTES", 10),
+		MachineDraftLoadFraction:            floatEnvOr("MACHINE_DRAFT_LOAD_FRACTION", 0.5),
+		MachineIdleRecencyBonusMinutes:      floatEnvOr("MACHINE_IDLE_RECENCY_BONUS_MINUTES", 5),
+		MachineIdleRecencyWindowMinutes:     floatEnvOr("MACHINE_IDLE_RECENCY_WINDOW_MINUTES", 60),
 		MachineHealthBonusMinutes:           floatEnvOr("MACHINE_HEALTH_BONUS_MINUTES", 10),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),

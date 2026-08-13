@@ -26,6 +26,13 @@ type Batch struct {
 	BedUtilizationPercent       pgtype.Numeric
 	PackingStrategy             *string
 	FilamentReserved            bool
+	PlateSlicedAt               pgtype.Timestamptz
+	PlateSliceError             *string
+	TotalLayers                 *int32
+	SupportGrams                pgtype.Numeric
+	PurgeGrams                  pgtype.Numeric
+	ColourChanges               *int32
+	FilamentByColour            []byte
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 }

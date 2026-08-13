@@ -75,3 +75,25 @@ JOIN machines m ON m.machine_profile_id = b.machine_id
 WHERE m.id = sqlc.arg('fleet_machine_id')
   AND b.status IN ('open', 'in_progress')
 ORDER BY b.created_at ASC, b.id ASC;
+
+-- name: ListAllBatchesForFleetMachine :many
+-- Every batch on this fleet machine's linked profile, newest first, whatever
+-- its status - what the machine's own Kanban board renders.
+--
+-- Deliberately separate from ListQueuedBatchesForFleetMachine rather than a
+-- widening of it. That query means "work still outstanding on this machine",
+-- and two callers depend on exactly that meaning: the scheduler's load
+-- calculation (queuedBatchLoad, which sums remaining print time to rank
+-- machines) and computeLiveFilaments. Including completed batches there would
+-- make every machine look permanently overloaded.
+--
+-- The board, by contrast, has Draft and Completed columns that were
+-- structurally always empty, because its feed could only ever return 'open'
+-- and 'in_progress'. LIMIT keeps a machine with a long history from returning
+-- everything it has ever printed.
+SELECT b.*
+FROM batches b
+JOIN machines m ON m.machine_profile_id = b.machine_id
+WHERE m.id = sqlc.arg('fleet_machine_id')
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT sqlc.arg('row_limit');

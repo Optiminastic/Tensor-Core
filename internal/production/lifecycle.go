@@ -74,12 +74,30 @@ const (
 )
 
 // Operational machine status. Only online machines are batch-eligible.
+// These belong to machine_profiles - the printer model and its slicing config.
 const (
 	MachineOnline      = "online"
 	MachineBusy        = "busy"
 	MachineOffline     = "offline"
 	MachineMaintenance = "maintenance"
 )
+
+// Live state of a physical unit in the fleet (table: machines). A different
+// axis from the four above and a different table: a profile can be "online"
+// (eligible for batching) while every physical unit running it is "running"
+// (busy with a plate right now). Matches the machines.status CHECK.
+const (
+	FleetMachineIdle    = "idle"
+	FleetMachineRunning = "running"
+	// FleetMachineOff covers both powered-down and unreachable - the fleet
+	// table records what the shop floor can see, not why.
+	FleetMachineOff = "off"
+)
+
+// ValidFleetMachineState reports whether s is a fleet machine's live state.
+func ValidFleetMachineState(s string) bool { return fleetMachineStates[s] }
+
+var fleetMachineStates = set(FleetMachineIdle, FleetMachineRunning, FleetMachineOff)
 
 // Issue reasons (production_jobs.issue_reason): the Validation stage's fixed
 // taxonomy. A job with any of these set is excluded from batching until fixed,

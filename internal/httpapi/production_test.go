@@ -238,7 +238,7 @@ func TestIntegrationJobCarriesOrderAndCustomerTraceability(t *testing.T) {
 	orderID := uuid.New()
 	if _, err := store.Q.InsertOrder(context.Background(), gen.InsertOrderParams{
 		ID: orderID, ShopifyOrderID: 5003, OrderNumber: "1003", FinancialStatus: "paid",
-		TotalPrice: 499, Currency: "INR", LineItems: items, Status: "queued",
+		TotalPrice: 499, Currency: "INR", LineItems: items, Status: "queued", Source: "seed",
 		ShopifyCustomerID: &custID, CustomerName: &custName,
 	}); err != nil {
 		t.Fatalf("insert order: %v", err)

@@ -106,6 +106,80 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 	return i, err
 }
 
+const listAllBatchesForFleetMachine = `-- name: ListAllBatchesForFleetMachine :many
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at
+FROM batches b
+JOIN machines m ON m.machine_profile_id = b.machine_id
+WHERE m.id = $1
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT $2
+`
+
+type ListAllBatchesForFleetMachineParams struct {
+	FleetMachineID uuid.UUID
+	RowLimit       int32
+}
+
+// Every batch on this fleet machine's linked profile, newest first, whatever
+// its status - what the machine's own Kanban board renders.
+//
+// Deliberately separate from ListQueuedBatchesForFleetMachine rather than a
+// widening of it. That query means "work still outstanding on this machine",
+// and two callers depend on exactly that meaning: the scheduler's load
+// calculation (queuedBatchLoad, which sums remaining print time to rank
+// machines) and computeLiveFilaments. Including completed batches there would
+// make every machine look permanently overloaded.
+//
+// The board, by contrast, has Draft and Completed columns that were
+// structurally always empty, because its feed could only ever return 'open'
+// and 'in_progress'. LIMIT keeps a machine with a long history from returning
+// everything it has ever printed.
+func (q *Queries) ListAllBatchesForFleetMachine(ctx context.Context, arg ListAllBatchesForFleetMachineParams) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listAllBatchesForFleetMachine, arg.FleetMachineID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Batch{}
+	for rows.Next() {
+		var i Batch
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.PlateSlicedAt,
+			&i.PlateSliceError,
+			&i.TotalLayers,
+			&i.SupportGrams,
+			&i.PurgeGrams,
+			&i.ColourChanges,
+			&i.FilamentByColour,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFleetMachines = `-- name: ListFleetMachines :many
 
 SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at FROM machines ORDER BY machine_id
@@ -221,7 +295,7 @@ func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetM
 }
 
 const listQueuedBatchesForFleetMachine = `-- name: ListQueuedBatchesForFleetMachine :many
-SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.created_at, b.updated_at
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
 WHERE m.id = $1
@@ -258,6 +332,13 @@ func (q *Queries) ListQueuedBatchesForFleetMachine(ctx context.Context, fleetMac
 			&i.BedUtilizationPercent,
 			&i.PackingStrategy,
 			&i.FilamentReserved,
+			&i.PlateSlicedAt,
+			&i.PlateSliceError,
+			&i.TotalLayers,
+			&i.SupportGrams,
+			&i.PurgeGrams,
+			&i.ColourChanges,
+			&i.FilamentByColour,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

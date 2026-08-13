@@ -47,5 +47,12 @@ ENV BAMBU_ROOT=/opt/bambu/squashfs-root
 
 COPY --from=build /out/sliceworker /usr/local/bin/sliceworker
 
+# Runs unprivileged, matching the API image. Bambu Studio needs a writable HOME
+# (it drops config and logs there) and xvfb needs a writable /tmp for its X
+# socket; everything under /opt/bambu is read-only to this user.
+RUN useradd --create-home --uid 10001 slicer
 WORKDIR /app
+RUN chown slicer:slicer /app
+USER slicer
+ENV HOME=/home/slicer
 CMD ["sliceworker"]

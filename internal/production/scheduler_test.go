@@ -179,3 +179,110 @@ func TestBestMachineEmpty(t *testing.T) {
 		t.Fatalf("expected nil for no candidates, got %+v", got)
 	}
 }
+
+// TestFleetAssignmentPrefersEarliestGuaranteedFinish is the scheduler's core
+// rule, in the user's own example.
+//
+// Machine A: 1h remaining + 2h locked = 3h guaranteed.
+// Machine B: 1h remaining + 1h locked = 2h.
+// Machine C: idle       + 2h locked = 2h.
+//
+// A new 2h batch finishes at +5h on A and +4h on B or C, so A must not get it -
+// even though all three are "available" and A might sort first. This is what
+// separates a fleet scheduler from "whichever machine is free".
+func TestFleetAssignmentPrefersEarliestGuaranteedFinish(t *testing.T) {
+	now := time.Now()
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	hours := func(h float64) time.Time { return now.Add(time.Duration(h * float64(time.Hour))) }
+
+	candidates := []MachineCandidate{
+		{MachineID: a, ProfileID: a, FreeAt: hours(3), Now: now},
+		{MachineID: b, ProfileID: b, FreeAt: hours(2), Now: now},
+		{MachineID: c, ProfileID: c, FreeAt: hours(2), Now: now},
+	}
+	inputs := map[uuid.UUID]MachineScoreInputs{a: {Healthy: true}, b: {Healthy: true}, c: {Healthy: true}}
+	w := MachineScoreWeights{HealthBonus: 10 * time.Minute}
+
+	best := BestMachine(candidates, inputs, "PLA", nil, w)
+	if best == nil {
+		t.Fatal("no machine chosen")
+	}
+	if best.MachineID == a {
+		t.Error("chose the machine with 3h of guaranteed work over two with 2h; a busier machine must not win on tie-break order")
+	}
+}
+
+// TestFleetBalanceUsesDraftLoad covers the case where guaranteed workloads are
+// equal and only flexible work separates the machines: 7h, 6h and 4h of Draft
+// work means the next batch belongs on the 4h machine.
+func TestFleetBalanceUsesDraftLoad(t *testing.T) {
+	now := time.Now()
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	candidates := []MachineCandidate{
+		{MachineID: a, ProfileID: a, FreeAt: now, Now: now},
+		{MachineID: b, ProfileID: b, FreeAt: now, Now: now},
+		{MachineID: c, ProfileID: c, FreeAt: now, Now: now},
+	}
+	inputs := map[uuid.UUID]MachineScoreInputs{
+		a: {DraftMinutes: 7 * 60, Healthy: true},
+		b: {DraftMinutes: 6 * 60, Healthy: true},
+		c: {DraftMinutes: 4 * 60, Healthy: true},
+	}
+	w := MachineScoreWeights{DraftLoadFraction: 0.5, HealthBonus: 10 * time.Minute}
+
+	best := BestMachine(candidates, inputs, "PLA", nil, w)
+	if best == nil || best.MachineID != c {
+		t.Errorf("chose the machine with %d draft minutes; want the one with 240 - the fleet is unbalanced otherwise",
+			inputs[best.MachineID].DraftMinutes)
+	}
+}
+
+// TestGuaranteedWorkOutweighsDraftLoad keeps the discount honest: committed
+// work is owed, Draft work may yet move, so a machine that genuinely finishes
+// later must not win merely because it holds fewer proposals.
+func TestGuaranteedWorkOutweighsDraftLoad(t *testing.T) {
+	now := time.Now()
+	busy, free := uuid.New(), uuid.New()
+	candidates := []MachineCandidate{
+		// Four hours of real, committed work but no proposals.
+		{MachineID: busy, ProfileID: busy, FreeAt: now.Add(4 * time.Hour), Now: now},
+		// Free now, holding two hours of re-plannable Drafts.
+		{MachineID: free, ProfileID: free, FreeAt: now, Now: now},
+	}
+	inputs := map[uuid.UUID]MachineScoreInputs{
+		busy: {DraftMinutes: 0, Healthy: true},
+		free: {DraftMinutes: 120, Healthy: true},
+	}
+	w := MachineScoreWeights{DraftLoadFraction: 0.5, HealthBonus: 10 * time.Minute}
+
+	best := BestMachine(candidates, inputs, "PLA", nil, w)
+	if best == nil || best.MachineID != free {
+		t.Error("chose the machine with 4h of committed work over one free now; discounted Draft load has overwhelmed guaranteed load")
+	}
+}
+
+// TestIdleRecencyBreaksExactTies stops three identical machines always
+// resolving to the same one.
+func TestIdleRecencyBreaksExactTies(t *testing.T) {
+	now := time.Now()
+	recent, stale := uuid.New(), uuid.New()
+	candidates := []MachineCandidate{
+		{MachineID: recent, ProfileID: recent, FreeAt: now, Now: now},
+		{MachineID: stale, ProfileID: stale, FreeAt: now, Now: now},
+	}
+	justNow := now.Add(-time.Minute)
+	longAgo := now.Add(-4 * time.Hour)
+	inputs := map[uuid.UUID]MachineScoreInputs{
+		recent: {IdleSince: &justNow, Healthy: true},
+		stale:  {IdleSince: &longAgo, Healthy: true},
+	}
+	w := MachineScoreWeights{
+		HealthBonus:      10 * time.Minute,
+		IdleRecencyBonus: 5 * time.Minute, IdleRecencyWindow: time.Hour,
+	}
+
+	best := BestMachine(candidates, inputs, "PLA", nil, w)
+	if best == nil || best.MachineID != stale {
+		t.Error("an exact tie did not go to the longest-idle machine")
+	}
+}

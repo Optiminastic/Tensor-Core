@@ -617,6 +617,24 @@ func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, 
 		reason := production.IssueSTLMissing
 		p.IssueReason = &reason
 	}
+	// A design with no printer profile (designs.machine_id is null, or its
+	// profile row would not load) yields a job with no machine family and no
+	// nozzle. Such a job is not merely under-specified, it is unprintable:
+	// batchMachineFamily refuses to guess a family for a bed, so any batch made
+	// only of these is created with machine_id null, and
+	// ListApprovableDraftsForMachine - which selects a machine's drafts by
+	// machine_id - can never see it. The batch sits in Draft for ever while the
+	// printers stand idle, which is exactly what was observed: 68 queued jobs
+	// across five Drafts that no machine could ever pick up.
+	//
+	// Flagging it keeps it out of ListBatchableJobs (issue_reason IS NULL) and
+	// puts it in front of a human on the issues board, which is the same
+	// contract stl_missing above already follows: never drop the job, never let
+	// a job that cannot print reach batching.
+	if p.MachineFamily == nil {
+		reason := production.IssueProfileMissing
+		p.IssueReason = &reason
+	}
 }
 
 // --- PATCH --------------------------------------------------------------------
@@ -915,90 +933,16 @@ func (s *Server) failProductionJob(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if !production.ValidFailureReason(req.Reason) {
-		detail(c, http.StatusUnprocessableEntity, "That failure reason is not valid.")
-		return
-	}
-	if req.FilamentWastedGrams != nil && *req.FilamentWastedGrams < 0 {
-		detail(c, http.StatusUnprocessableEntity, "Filament wasted cannot be negative.")
-		return
-	}
-	if req.TimeWastedMinutes != nil && *req.TimeWastedMinutes < 0 {
-		detail(c, http.StatusUnprocessableEntity, "Time wasted cannot be negative.")
-		return
-	}
 	ctx := c.Request.Context()
 
-	job, err := s.store.Q.GetProductionJobByID(ctx, id)
+	failed, reprint, err := s.FailProductionJob(ctx, id, FailJobInput{
+		Reason: req.Reason, Notes: req.Notes,
+		FilamentWastedGrams: req.FilamentWastedGrams, TimeWastedMinutes: req.TimeWastedMinutes,
+	}, currentUserID(c))
 	if err != nil {
-		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
+		writeStatusError(c, err, "Could not fail the production job.")
 		return
 	}
-	// A print can be failed while it is still on the bed (in_production) or
-	// after it comes off (completed) - a part is very often only found to be
-	// bad at assembly, once someone picks it up. Restricting this to
-	// in_production made the whole endpoint unreachable in practice, because
-	// batch completion sets every job on the bed to 'completed'.
-	if job.Status != production.StatusInProduction && job.Status != production.StatusCompleted {
-		detail(c, http.StatusConflict, "Only a job that is printing or printed can be failed.")
-		return
-	}
-
-	var failed, reprint gen.ProductionJob
-	err = s.store.InTx(ctx, func(q *gen.Queries) error {
-		var err error
-		reprintNumber, err := q.NextJobNumber(ctx)
-		if err != nil {
-			return err
-		}
-		reprintParams := reprintParamsFor(job, job.Quantity, reprintNumber)
-		failed, err = q.SetProductionJobStatus(ctx, gen.SetProductionJobStatusParams{
-			ID: id, Status: production.StatusFailed,
-		})
-		if err != nil {
-			return err
-		}
-		if _, err := q.InsertProductionJobFailure(ctx, gen.InsertProductionJobFailureParams{
-			ID: uuid.New(), JobID: id, Stage: production.FailureStagePrint, Reason: req.Reason,
-			Notes: req.Notes, FilamentWastedGrams: req.FilamentWastedGrams,
-			TimeWastedMinutes: req.TimeWastedMinutes, CreatedBy: currentUserID(c),
-		}); err != nil {
-			return err
-		}
-		// Decrement the wasted filament from stock, split across the job's
-		// colours (best-effort per bucket, no-op if untracked) - the same fix
-		// as the colour-blind shortage check this batch approval used to have.
-		if req.FilamentWastedGrams != nil {
-			waste := make(map[filamentKey]float64)
-			filamentSplit(waste, job.Material, decodeColours(job.Colours), *req.FilamentWastedGrams)
-			if err := s.adjustFilamentByColour(ctx, q, waste, -1); err != nil {
-				return err
-			}
-		}
-		reprint, err = q.InsertProductionJob(ctx, reprintParams)
-		if err != nil {
-			return err
-		}
-		if err := recordJobEvent(ctx, q, jobEvent{
-			JobID: id, EventType: production.EventPrintFailed, Stage: production.FailureStagePrint,
-			Reason: req.Reason, Comment: req.Notes, ActorID: currentUserID(c), BatchID: job.BatchID,
-		}); err != nil {
-			return err
-		}
-		return recordJobEvent(ctx, q, jobEvent{
-			JobID: id, EventType: production.EventReprintCreated, Stage: production.FailureStagePrint,
-			Reason: req.Reason, ActorID: currentUserID(c), RelatedJobID: &reprint.ID,
-			Metadata: map[string]any{"quantity": reprint.Quantity, "job_number": reprint.JobNumber},
-		})
-	})
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not fail the production job.")
-		return
-	}
-	// A fresh urgent reprint just entered the queue - worth a replan
-	// regardless of how much else is currently queued, unlike the
-	// threshold-gated per-job triggers (see triggerBatchPlan's doc comment).
-	s.triggerBatchPlan(ctx)
 	c.JSON(http.StatusOK, failJobResponse{
 		FailedJob: s.singleJobDTO(ctx, failed), ReprintJob: s.singleJobDTO(ctx, reprint),
 	})

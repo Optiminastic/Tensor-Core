@@ -133,6 +133,7 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.MachineRead.Key()), s.listFleetMachines)
 	g.GET("/:id", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachine)
 	g.GET("/:id/queue", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachineQueue)
+	s.registerFleetMachineWrites(g)
 }
 
 func (s *Server) listFleetMachines(c *gin.Context) {
@@ -176,7 +177,13 @@ func (s *Server) getFleetMachineQueue(c *gin.Context) {
 		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
 		return
 	}
-	rows, err := s.store.Q.ListQueuedBatchesForFleetMachine(ctx, id)
+	// Every status, not just open/in_progress: this feeds the machine's Kanban
+	// board, whose Draft and Completed columns could otherwise never contain
+	// anything. The narrower ListQueuedBatchesForFleetMachine still backs the
+	// scheduler's load calculation, where "outstanding work" is the point.
+	rows, err := s.store.Q.ListAllBatchesForFleetMachine(ctx, gen.ListAllBatchesForFleetMachineParams{
+		FleetMachineID: id, RowLimit: machineQueueLimit,
+	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list the machine's queue.")
 		return
@@ -187,3 +194,8 @@ func (s *Server) getFleetMachineQueue(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+// machineQueueLimit caps a machine's board history. Generous enough to cover
+// any plausible working period, bounded so a long-lived machine does not
+// return every plate it has ever printed.
+const machineQueueLimit = 200

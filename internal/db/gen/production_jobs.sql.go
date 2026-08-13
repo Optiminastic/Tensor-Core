@@ -15,6 +15,8 @@ import (
 const assignJobsToBatch = `-- name: AssignJobsToBatch :exec
 UPDATE production_jobs SET batch_id = $1, updated_at = now()
 WHERE id = ANY($2::uuid[])
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval'))
 `
 
 type AssignJobsToBatchParams struct {
@@ -22,6 +24,16 @@ type AssignJobsToBatchParams struct {
 	JobIds  []uuid.UUID
 }
 
+// Puts jobs on a batch. A job may only be moved if it is unassigned or still
+// sitting in a Draft; one that belongs to an approved, printing or completed
+// batch is left exactly where it is.
+//
+// That guard is not theoretical. The planner reads its pool, plans, and only
+// then writes - and a human can approve a Draft in that window. The dissolve
+// step correctly refuses to touch the newly-approved batch, but without this
+// the plan built moments earlier would still reassign its jobs onto a fresh
+// Draft, stealing the contents of a plate whose filament is already reserved
+// and which a machine is about to print.
 func (q *Queries) AssignJobsToBatch(ctx context.Context, arg AssignJobsToBatchParams) error {
 	_, err := q.db.Exec(ctx, assignJobsToBatch, arg.BatchID, arg.JobIds)
 	return err
@@ -1039,6 +1051,111 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 	return items, nil
 }
 
+const listReplannableJobs = `-- name: ListReplannableJobs :many
+SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
+WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+  AND j.status = 'queued'
+  AND j.quantity > 0
+  AND j.personalisation_status IN ('validated', 'not_required')
+  AND j.issue_reason IS NULL
+ORDER BY j.created_at ASC, j.id ASC
+`
+
+// Everything the batch planner may reconsider on a run: jobs not yet on a bed,
+// PLUS jobs currently sitting in a Draft (pending_approval) batch.
+//
+// The second half is what makes batching a loop instead of a one-shot. With
+// only `batch_id IS NULL` - which is what ListBatchableJobs gives, and all the
+// planner ever saw - a job was frozen into whatever bed it first landed on, so
+// a Draft that formed at 40% utilisation stayed at 40% forever no matter how
+// much compatible work arrived afterwards.
+//
+// A Draft is a proposal, not a commitment: no filament is reserved (that
+// happens at approval) and no plate is promised, so its jobs are free to be
+// re-planned. Approved batches and beyond are deliberately absent - their
+// jobs have left 'queued' anyway, so the status filter excludes them twice
+// over.
+func (q *Queries) ListReplannableJobs(ctx context.Context) ([]ProductionJob, error) {
+	rows, err := q.db.Query(ctx, listReplannableJobs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductionJob{}
+	for rows.Next() {
+		var i ProductionJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.FinishingStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnassignedCompatibleJobs = `-- name: ListUnassignedCompatibleJobs :many
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at FROM production_jobs
 WHERE batch_id IS NULL
@@ -1463,6 +1580,20 @@ func (q *Queries) SetProductionJobStatus(ctx context.Context, arg SetProductionJ
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const unassignJobsFromBatches = `-- name: UnassignJobsFromBatches :exec
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE batch_id = ANY($1::uuid[])
+  AND batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval')
+`
+
+// Detaches jobs from the given batches so they can be re-planned. Guarded on
+// the batch still being a Draft, so a batch approved between the planner
+// reading the pool and writing its result keeps every one of its jobs.
+func (q *Queries) UnassignJobsFromBatches(ctx context.Context, batchIds []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, unassignJobsFromBatches, batchIds)
+	return err
 }
 
 const updateProductionJobFields = `-- name: UpdateProductionJobFields :one
