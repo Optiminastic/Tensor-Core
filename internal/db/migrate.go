@@ -29,7 +29,12 @@ func Migrate(dsn string) error {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return err
 	}
-	return goose.Up(sqlDB, "migrations")
+	// WithAllowMissing lets goose apply out-of-order migrations. Neon is seeded
+	// from dumps that can be ahead of the goose sequence, so a migration added
+	// later with a lower version number (e.g. 0027) shows up as "missing" below
+	// the current DB version. Every migration is written with IF NOT EXISTS, so
+	// applying a missing one out of order is a safe no-op if it was already run.
+	return goose.Up(sqlDB, "migrations", goose.WithAllowMissing())
 }
 
 // MigrateRiver applies River's own schema (river_job, river_leader, ...) against
