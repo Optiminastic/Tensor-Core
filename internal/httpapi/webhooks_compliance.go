@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -16,9 +17,43 @@ import (
 // imported order - so data_request/redact acknowledge and log, while shop/redact
 // also deactivates the store's connection so its token can no longer be used.
 func (s *Server) registerComplianceWebhooks(g *gin.RouterGroup) {
+	// Single endpoint for all three compliance topics: the current Shopify app
+	// config model subscribes to compliance_topics with one uri and sends the
+	// specific topic in the X-Shopify-Topic header. The three per-topic routes
+	// below remain for the older per-URL dashboard style.
+	g.POST("/compliance", s.complianceWebhook)
 	g.POST("/customers-data-request", s.customersDataRequestWebhook)
 	g.POST("/customers-redact", s.customersRedactWebhook)
 	g.POST("/shop-redact", s.shopRedactWebhook)
+}
+
+// complianceWebhook is the single-URL entry point for all mandatory compliance
+// webhooks. It verifies the HMAC once, then dispatches on X-Shopify-Topic so one
+// configured uri serves customers/data_request, customers/redact and shop/redact.
+func (s *Server) complianceWebhook(c *gin.Context) {
+	if _, ok := s.readVerifiedWebhook(c); !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	topic := c.GetHeader("X-Shopify-Topic")
+	shop := c.GetHeader("X-Shopify-Shop-Domain")
+	obs.FromContext(ctx).Info("shopify compliance webhook", "topic", topic, "shop", shop)
+	if topic == "shop/redact" && shop != "" {
+		s.deactivateShopConnection(ctx, shop)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// deactivateShopConnection revokes a store's connection on shop/redact so its
+// access token can no longer be used. A missing connection is not an error.
+func (s *Server) deactivateShopConnection(ctx context.Context, shop string) {
+	conn, err := s.store.Q.GetActiveConnectionByDomain(ctx, shop)
+	if err != nil {
+		return
+	}
+	if _, err := s.store.Q.DeactivateConnection(ctx, conn.ID); err != nil {
+		obs.FromContext(ctx).Warn("shop/redact deactivate failed", "shop", shop, "error", err)
+	}
 }
 
 // readVerifiedWebhook reads the raw body and verifies the Shopify HMAC, writing the
@@ -75,10 +110,8 @@ func (s *Server) shopRedactWebhook(c *gin.Context) {
 	ctx := c.Request.Context()
 	shop := c.GetHeader("X-Shopify-Shop-Domain")
 	obs.FromContext(ctx).Info("shopify compliance webhook", "topic", "shop/redact", "shop", shop)
-	if conn, err := s.store.Q.GetActiveConnectionByDomain(ctx, shop); err == nil {
-		if _, err := s.store.Q.DeactivateConnection(ctx, conn.ID); err != nil {
-			obs.FromContext(ctx).Warn("shop/redact deactivate failed", "shop", shop, "error", err)
-		}
+	if shop != "" {
+		s.deactivateShopConnection(ctx, shop)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
