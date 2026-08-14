@@ -294,8 +294,7 @@ const listApprovableDraftsForMachine = `-- name: ListApprovableDraftsForMachine 
 SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches
 WHERE machine_id = $1
   AND status = 'pending_approval'
-ORDER BY (plate_sliced_at IS NOT NULL) DESC,
-         bed_utilization_percent DESC NULLS LAST,
+ORDER BY bed_utilization_percent DESC NULLS LAST,
          created_at ASC
 LIMIT $2
 `
@@ -308,16 +307,16 @@ type ListApprovableDraftsForMachineParams struct {
 // Draft batches assigned to a machine profile, most ready first, for promotion
 // into the locked queue.
 //
-// Sliced plates come first, and that ordering is load-bearing rather than a
-// preference. A batch with no measured print time is not yet committable - the
-// caller skips it while it waits for its slice - so ranking purely by
-// utilisation let a handful of fuller, unsliced Drafts fill this result set and
-// permanently hide the ones that were actually ready. Nothing promoted, every
-// machine sat idle, and the queue looked simply stuck.
+// Order is the planner's own preference: fuller beds first, then
+// longest-waiting, so promotion picks what the optimizer would have picked.
 //
-// Within the sliced group the order is the planner's own preference: fuller
-// beds first, then longest-waiting, so promotion picks what the optimizer
-// would have picked.
+// This used to lead with `(plate_sliced_at IS NOT NULL) DESC`, from when Drafts
+// were sliced on creation and an unsliced one could not be committed. Slicing
+// now happens AT approval, so no Draft ever carries plate_sliced_at and the
+// term was dead - always false for every row, sorting nothing. Removed rather
+// than left in place: an ordering rule that cannot fire reads as a rule that
+// matters, and the next person to touch this would have to re-derive that it
+// does not.
 func (q *Queries) ListApprovableDraftsForMachine(ctx context.Context, arg ListApprovableDraftsForMachineParams) ([]Batch, error) {
 	rows, err := q.db.Query(ctx, listApprovableDraftsForMachine, arg.MachineID, arg.RowLimit)
 	if err != nil {

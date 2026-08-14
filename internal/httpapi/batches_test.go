@@ -467,6 +467,7 @@ type jobConfig struct {
 	leftNozzleMm  float64
 	machineFamily string
 	printFileID   *uuid.UUID
+	held          bool
 }
 
 // seedConfiguredJob inserts a job with real material/nozzle/machine-family
@@ -481,12 +482,113 @@ func seedConfiguredJob(t *testing.T, store *db.Store, jobNumber string, cfg jobC
 		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
 		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
 		Material: &cfg.material, LeftNozzleMm: &cfg.leftNozzleMm, MachineFamily: &cfg.machineFamily,
-		PrintFileID: cfg.printFileID,
+		PrintFileID: cfg.printFileID, Held: cfg.held,
 	})
 	if err != nil {
 		t.Fatalf("insert configured job: %v", err)
 	}
 	return j.ID
+}
+
+// TestIntegrationHeldJobsNeverReachBatching covers the four queries that gate
+// the batchable pool.
+//
+// A hold is an operator saying "not this one, not yet". It used to be enforced
+// only at ApproveBatchFor - by which point the held job had already been planned
+// onto a bed, so its hold blocked approval of every unrelated job planned beside
+// it, and the planner rebuilt that same doomed bed every cycle.
+//
+// The two jobs here are identical apart from the hold, which is the whole point:
+// the held one must vanish from the pool while its twin batches normally. A
+// regression that dropped the predicate from only one of the four queries would
+// still show up, because each is asserted separately.
+func TestIntegrationHeldJobsNeverReachBatching(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	ctx := context.Background()
+
+	cfg := jobConfig{material: "PLA Basics", leftNozzleMm: 0.4, machineFamily: "H2C"}
+	freeID := seedConfiguredJob(t, store, "JOB-FREE", cfg)
+
+	heldCfg := cfg
+	heldCfg.held = true
+	heldID := seedConfiguredJob(t, store, "JOB-HELD", heldCfg)
+
+	contains := func(ids []uuid.UUID, want uuid.UUID) bool {
+		for _, id := range ids {
+			if id == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("ListBatchableJobs", func(t *testing.T) {
+		rows, err := store.Q.ListBatchableJobs(ctx)
+		if err != nil {
+			t.Fatalf("ListBatchableJobs: %v", err)
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
+		}
+		if contains(ids, heldID) {
+			t.Error("a held job is in the batchable pool; it will be planned onto a bed and then block that bed's approval")
+		}
+		if !contains(ids, freeID) {
+			t.Error("the unheld job is missing from the pool; the hold predicate must not exclude anything else")
+		}
+	})
+
+	t.Run("ListReplannableJobs", func(t *testing.T) {
+		rows, err := store.Q.ListReplannableJobs(ctx)
+		if err != nil {
+			t.Fatalf("ListReplannableJobs: %v", err)
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
+		}
+		if contains(ids, heldID) {
+			t.Error("a held job is replannable; this is the query AutoCreateBatches actually plans from")
+		}
+		if !contains(ids, freeID) {
+			t.Error("the unheld job is not replannable")
+		}
+	})
+
+	t.Run("CountBatchableJobs matches ListBatchableJobs", func(t *testing.T) {
+		rows, err := store.Q.ListBatchableJobs(ctx)
+		if err != nil {
+			t.Fatalf("ListBatchableJobs: %v", err)
+		}
+		count, err := store.Q.CountBatchableJobs(ctx)
+		if err != nil {
+			t.Fatalf("CountBatchableJobs: %v", err)
+		}
+		// These two are kept deliberately in sync - the count drives the
+		// replan trigger threshold, so a count that disagrees with the list
+		// either fires pointless replans or suppresses needed ones.
+		if int(count) != len(rows) {
+			t.Errorf("CountBatchableJobs = %d, ListBatchableJobs returned %d rows; the two WHERE clauses have drifted",
+				count, len(rows))
+		}
+	})
+
+	t.Run("ListUnassignedCompatibleJobs", func(t *testing.T) {
+		material, nozzle, family := "PLA Basics", 0.4, "H2C"
+		rows, err := store.Q.ListUnassignedCompatibleJobs(ctx, gen.ListUnassignedCompatibleJobsParams{
+			Material: &material, LeftNozzleMm: &nozzle, MachineFamily: &family,
+		})
+		if err != nil {
+			t.Fatalf("ListUnassignedCompatibleJobs: %v", err)
+		}
+		for _, r := range rows {
+			if r.ID == heldID {
+				t.Error("a held job is offered for manual addition to a Draft; that reintroduces the approval block by another route")
+			}
+		}
+	})
 }
 
 func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
@@ -717,12 +819,17 @@ func TestIntegrationBatchCompletedAutoCompletesItsJobs(t *testing.T) {
 // the plate-slice worker and approval.
 //
 // The plate slice (SliceBatchArgs) replaces batches.total_print_time_minutes -
-// which is otherwise batchTimeFromJobs' MAX-of-each-job's-own-estimate
-// approximation - with a measurement of the actual merged bed. Approval then
-// recomputes the batch's derived metrics, and recomputing the time
-// unconditionally would overwrite that measurement, so every batch would reach
-// the machine scheduler on an estimate and the plate slice would have been for
-// nothing.
+// which is otherwise batchTimeFromJobs' fast estimate, the summed per-unit
+// times of the bed scaled by the shared-overhead correction - with a
+// measurement of the actual merged bed. Approval then recomputes the batch's
+// derived metrics, and recomputing the time unconditionally would overwrite
+// that measurement, so every batch would reach the machine scheduler on an
+// estimate and the plate slice would have been for nothing.
+//
+// Still meaningful now that slicing happens AT approval rather than on the
+// Draft: a batch re-approved after a slice already landed, or one measured by
+// any other path, must keep the measurement rather than being reset to the
+// estimate.
 //
 // The batch's job here has no per-job estimate, so batchTimeFromJobs yields
 // nil. That makes the failure unambiguous: nil means approval clobbered the

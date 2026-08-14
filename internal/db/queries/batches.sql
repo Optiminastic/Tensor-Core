@@ -186,21 +186,20 @@ WHERE machine_id = sqlc.arg('machine_id')
 -- Draft batches assigned to a machine profile, most ready first, for promotion
 -- into the locked queue.
 --
--- Sliced plates come first, and that ordering is load-bearing rather than a
--- preference. A batch with no measured print time is not yet committable - the
--- caller skips it while it waits for its slice - so ranking purely by
--- utilisation let a handful of fuller, unsliced Drafts fill this result set and
--- permanently hide the ones that were actually ready. Nothing promoted, every
--- machine sat idle, and the queue looked simply stuck.
+-- Order is the planner's own preference: fuller beds first, then
+-- longest-waiting, so promotion picks what the optimizer would have picked.
 --
--- Within the sliced group the order is the planner's own preference: fuller
--- beds first, then longest-waiting, so promotion picks what the optimizer
--- would have picked.
+-- This used to lead with `(plate_sliced_at IS NOT NULL) DESC`, from when Drafts
+-- were sliced on creation and an unsliced one could not be committed. Slicing
+-- now happens AT approval, so no Draft ever carries plate_sliced_at and the
+-- term was dead - always false for every row, sorting nothing. Removed rather
+-- than left in place: an ordering rule that cannot fire reads as a rule that
+-- matters, and the next person to touch this would have to re-derive that it
+-- does not.
 SELECT * FROM batches
 WHERE machine_id = sqlc.arg('machine_id')
   AND status = 'pending_approval'
-ORDER BY (plate_sliced_at IS NOT NULL) DESC,
-         bed_utilization_percent DESC NULLS LAST,
+ORDER BY bed_utilization_percent DESC NULLS LAST,
          created_at ASC
 LIMIT sqlc.arg('row_limit');
 

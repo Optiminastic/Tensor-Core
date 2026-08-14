@@ -69,12 +69,36 @@ ORDER BY m.machine_id;
 -- Batches already open/in_progress on this fleet machine's linked profile,
 -- oldest first (FCFS) - both the scheduler's load calculation and the
 -- GET /machine-fleet/:id/queue endpoint.
+-- Order is the order these will actually print, so it is also the order the
+-- machine's queue is shown in and the order startNextBatch picks from.
+--
+-- This used to be plain created_at, which quietly threw away every scheduling
+-- decision made upstream: a batch full of urgent, due-today work queued behind
+-- a routine one simply because the routine one was planned an hour earlier. All
+-- the priority and due-date weighting in batch scoring stopped mattering the
+-- moment the batch reached a machine.
+--
+-- Priority and due date live on the jobs, not the batch, so both are taken from
+-- the bed's most pressing job - a plate prints as one unit and inherits the
+-- tightest deadline on it.
+--
+-- in_progress sorts first unconditionally. That batch is physically on the bed;
+-- its position is not a scheduling decision any more and re-ordering it would
+-- only misreport what the machine is doing.
 SELECT b.*
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
+LEFT JOIN LATERAL (
+    SELECT min(j.priority) AS min_priority, min(j.due_date) AS earliest_due
+    FROM production_jobs j
+    WHERE j.batch_id = b.id
+) urgency ON true
 WHERE m.id = sqlc.arg('fleet_machine_id')
   AND b.status IN ('open', 'in_progress')
-ORDER BY b.created_at ASC, b.id ASC;
+ORDER BY (b.status = 'in_progress') DESC,
+         urgency.min_priority ASC NULLS LAST,
+         urgency.earliest_due ASC NULLS LAST,
+         b.created_at ASC, b.id ASC;
 
 -- name: ListAllBatchesForFleetMachine :many
 -- Every batch on this fleet machine's linked profile, newest first, whatever

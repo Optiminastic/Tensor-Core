@@ -74,6 +74,67 @@ func TestApplyMatchSnapshotsGeometryAndSlicedWeights(t *testing.T) {
 	}
 }
 
+// TestApplyMatchAlwaysLeavesAPerUnitPrintTime covers the Level-1 estimate.
+//
+// Most designs carry no measured metrics, and a job with no print time is not
+// merely imprecise - it is invisible to scheduling. batchTimeFromJobs returns
+// nothing for a bed on which no job has a time, so the machine scheduler ranks
+// that batch as free work and piles more onto the same printer.
+//
+// The estimate must also vary with the part. A flat constant would satisfy
+// "every job has a time" while reproducing the FAKE_SLICE failure exactly:
+// every design 25 minutes, so bed occupancy, queue order and every countdown
+// were equally fictional.
+func TestApplyMatchAlwaysLeavesAPerUnitPrintTime(t *testing.T) {
+	fileID := uuid.New()
+	family := "H2C"
+
+	build := func(x, y, z float64, measured *int) gen.InsertProductionJobParams {
+		var p gen.InsertProductionJobParams
+		applyMatch(&p, production.MatchResult{Design: &production.DesignFacts{
+			Material: "PLA Basics", PrintFileID: &fileID, MachineFamily: family,
+			BboxXMM: &x, BboxYMM: &y, BboxZMM: &z, PrintTimeMin: measured,
+		}}, 1)
+		return p
+	}
+
+	t.Run("derived from geometry when the design has no metrics", func(t *testing.T) {
+		small := build(40, 40, 20, nil)
+		large := build(150, 150, 100, nil)
+
+		if small.EstimatedPrintTimeMinutes == nil || large.EstimatedPrintTimeMinutes == nil {
+			t.Fatalf("estimate missing: small=%v large=%v; a job with no time makes its whole bed look free to the scheduler",
+				small.EstimatedPrintTimeMinutes, large.EstimatedPrintTimeMinutes)
+		}
+		if *large.EstimatedPrintTimeMinutes <= *small.EstimatedPrintTimeMinutes {
+			t.Errorf("large part estimated %d, small %d; a constant makes every design identical, which is the FAKE_SLICE failure",
+				*large.EstimatedPrintTimeMinutes, *small.EstimatedPrintTimeMinutes)
+		}
+	})
+
+	t.Run("a real measurement always wins over the default", func(t *testing.T) {
+		measured := 123
+		p := build(150, 150, 100, &measured)
+
+		if p.EstimatedPrintTimeMinutes == nil || *p.EstimatedPrintTimeMinutes != int32(measured) {
+			t.Errorf("EstimatedPrintTimeMinutes = %v, want %d; the design catalogue is the real source and the geometry default is only a stand-in",
+				p.EstimatedPrintTimeMinutes, measured)
+		}
+	})
+
+	t.Run("no bounding box leaves it unset rather than guessing zero", func(t *testing.T) {
+		var p gen.InsertProductionJobParams
+		applyMatch(&p, production.MatchResult{Design: &production.DesignFacts{
+			Material: "PLA Basics", PrintFileID: &fileID, MachineFamily: family,
+		}}, 1)
+
+		if p.EstimatedPrintTimeMinutes != nil {
+			t.Errorf("EstimatedPrintTimeMinutes = %d with no bbox, want nil: zero minutes would be worse than absent, telling the scheduler the job is free",
+				*p.EstimatedPrintTimeMinutes)
+		}
+	})
+}
+
 // TestApplyMatchFlagsADesignWithNoPrinterProfile is the regression test for a
 // silent floor stall. A design whose machine_id is null contributes no machine
 // family (matchDesignForSKU only reads the profile when d.MachineID != nil), so

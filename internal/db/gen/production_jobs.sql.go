@@ -65,6 +65,7 @@ WHERE batch_id IS NULL
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
+  AND held = false
 `
 
 // Cheap count-only companion to ListBatchableJobs (identical WHERE clause,
@@ -621,6 +622,7 @@ WHERE batch_id IS NULL
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
+  AND held = false
 ORDER BY created_at ASC, id ASC
 `
 
@@ -631,6 +633,14 @@ ORDER BY created_at ASC, id ASC
 // been peeled off into split_of_job_id rows across earlier batches - it stays
 // around at quantity 0 purely as the split group's root for progress
 // tracking (see GetSplitJobProgress), never as something left to batch.
+//
+// held = false belongs here for the same reason issue_reason does. A hold is an
+// operator saying "not this one, not yet", and it used to be enforced only at
+// ApproveBatchFor - by which point the held job had already been planned onto a
+// bed, so its hold blocked approval of every unrelated job planned beside it,
+// and the planner rebuilt that same doomed bed every cycle. Keeping it out of
+// the pool means the rest of the bed batches normally. The approval check stays
+// as defence in depth, for a job held after its batch was planned.
 func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listBatchableJobs)
 	if err != nil {
@@ -700,6 +710,63 @@ func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExcludedQueuedJobs = `-- name: ListExcludedQueuedJobs :many
+SELECT id, job_number, held, personalisation_status, issue_reason
+FROM production_jobs
+WHERE batch_id IS NULL
+  AND status = 'queued'
+  AND quantity > 0
+  AND (
+    held = true
+    OR personalisation_status NOT IN ('validated', 'not_required')
+    OR issue_reason IS NOT NULL
+  )
+ORDER BY created_at ASC, id ASC
+`
+
+type ListExcludedQueuedJobsRow struct {
+	ID                    uuid.UUID
+	JobNumber             string
+	Held                  bool
+	PersonalisationStatus string
+	IssueReason           *string
+}
+
+// Queued, unbatched jobs the planner will NOT see, and the facts needed to say
+// why. The exact complement of ListBatchableJobs' eligibility bar, over the
+// same queued/quantity base.
+//
+// Without this a held or unvalidated job simply is not in any planner output:
+// it is not batched, not held below target, not unbatchable, not deferred -
+// it is absent, and absent looks identical to lost. Reporting the exclusion is
+// what makes "why is this job not on a bed?" answerable for every job rather
+// than only the ones planning happened to reach.
+func (q *Queries) ListExcludedQueuedJobs(ctx context.Context) ([]ListExcludedQueuedJobsRow, error) {
+	rows, err := q.db.Query(ctx, listExcludedQueuedJobs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExcludedQueuedJobsRow{}
+	for rows.Next() {
+		var i ListExcludedQueuedJobsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.Held,
+			&i.PersonalisationStatus,
+			&i.IssueReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1059,6 +1126,7 @@ WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
   AND j.issue_reason IS NULL
+  AND j.held = false
 ORDER BY j.created_at ASC, j.id ASC
 `
 
@@ -1163,6 +1231,7 @@ WHERE batch_id IS NULL
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
+  AND held = false
   AND material IS NOT DISTINCT FROM $1::text
   AND left_nozzle_mm::float8 IS NOT DISTINCT FROM $2::float8
   AND right_nozzle_mm::float8 IS NOT DISTINCT FROM $3::float8

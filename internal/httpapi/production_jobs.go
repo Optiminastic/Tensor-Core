@@ -568,6 +568,16 @@ func (s *Server) buildJobsForOrder(
 	return out, nil
 }
 
+// defaultUnitPrintMinutes derives a per-unit print time from the bounding box
+// already snapshotted onto the job. Zero when there is no usable box, which the
+// caller treats as "still no estimate" rather than "zero minutes".
+func defaultUnitPrintMinutes(p *gen.InsertProductionJobParams) int32 {
+	if p.BboxXMm == nil || p.BboxYMm == nil || p.BboxZMm == nil {
+		return 0
+	}
+	return int32(production.DefaultPrintTimeMinutes(*p.BboxXMm, *p.BboxYMm, *p.BboxZMm))
+}
+
 // applyMatch overlays a matched design's print facts onto a job's insert
 // params, or records why nothing was matched.
 func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, quantity int32) {
@@ -613,6 +623,25 @@ func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, 
 	// planner's compatibility grouping (groupKey), but were never populated
 	// here - every job had the same false/0 value on both axes.
 	p.SupportUsed, p.InfillPct = d.SupportUsed, d.InfillPct
+	// Every job leaves here with a per-unit print time, even when its design
+	// has never been sliced.
+	//
+	// The design catalogue is the proper source (GetLatestMetricsForDesign
+	// above), but most designs carry no metrics yet, and a job with no estimate
+	// is not merely imprecise - it is invisible to scheduling. batchTimeFromJobs
+	// returns nothing for a whole batch if a single job on it lacks a time, so
+	// one unmeasured job strips the estimate from every job beside it and the
+	// machine scheduler then ranks that bed as free work.
+	//
+	// Derived from the bounding box rather than a flat constant so parts at
+	// least order correctly against each other; a constant reproduces the
+	// FAKE_SLICE failure where every design took the same 25 minutes. Replaced
+	// by the real plate slice once the batch is committed.
+	if p.EstimatedPrintTimeMinutes == nil {
+		if minutes := defaultUnitPrintMinutes(p); minutes > 0 {
+			p.EstimatedPrintTimeMinutes = &minutes
+		}
+	}
 	if p.PrintFileID == nil {
 		reason := production.IssueSTLMissing
 		p.IssueReason = &reason

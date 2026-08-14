@@ -168,8 +168,8 @@ func TestPlanOversizedJobIsUnbatchable(t *testing.T) {
 	if len(batches) != 0 || len(unb) != 1 {
 		t.Fatalf("batches=%d unbatchable=%d, want 0/1", len(batches), len(unb))
 	}
-	if unb[0].Reason != "Exceeds the print bed's capacity even on its own." {
-		t.Errorf("reason = %q", unb[0].Reason)
+	if unb[0].Reason != ReasonOversized {
+		t.Errorf("reason = %q, want ReasonOversized", unb[0].Reason)
 	}
 }
 

@@ -182,6 +182,24 @@ func (s *Server) ApproveBatchFor(
 	if err != nil {
 		return gen.Batch{}, statusErrf(http.StatusInternalServerError, "Could not approve the batch.", err)
 	}
+	// This is the one point where slicing is worth its cost. The bed is now
+	// committed: filament is reserved, a machine is stamped, and re-planning
+	// will not touch it again - so the plate about to be measured is the plate
+	// that will actually print.
+	//
+	// Slicing Drafts instead (which this used to do) measured beds the next
+	// planner pass would dissolve, at minutes of Bambu Studio CPU each. The
+	// result lands via SetBatchPlateSliceResult, replacing the estimate the
+	// batch was scheduled on; the machine scheduler reads
+	// total_print_time_minutes, so its projection self-corrects with no extra
+	// wiring. Best-effort - a failed slice leaves the batch on its estimate.
+	if !b.PlateSlicedAt.Valid {
+		units := 0
+		if unitsPerBed != nil {
+			units = int(*unitsPerBed)
+		}
+		s.enqueuePlateSlice(ctx, b, jobs, mergedID, units)
+	}
 	return b, nil
 }
 

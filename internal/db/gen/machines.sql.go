@@ -298,14 +298,38 @@ const listQueuedBatchesForFleetMachine = `-- name: ListQueuedBatchesForFleetMach
 SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
+LEFT JOIN LATERAL (
+    SELECT min(j.priority) AS min_priority, min(j.due_date) AS earliest_due
+    FROM production_jobs j
+    WHERE j.batch_id = b.id
+) urgency ON true
 WHERE m.id = $1
   AND b.status IN ('open', 'in_progress')
-ORDER BY b.created_at ASC, b.id ASC
+ORDER BY (b.status = 'in_progress') DESC,
+         urgency.min_priority ASC NULLS LAST,
+         urgency.earliest_due ASC NULLS LAST,
+         b.created_at ASC, b.id ASC
 `
 
 // Batches already open/in_progress on this fleet machine's linked profile,
 // oldest first (FCFS) - both the scheduler's load calculation and the
 // GET /machine-fleet/:id/queue endpoint.
+// Order is the order these will actually print, so it is also the order the
+// machine's queue is shown in and the order startNextBatch picks from.
+//
+// This used to be plain created_at, which quietly threw away every scheduling
+// decision made upstream: a batch full of urgent, due-today work queued behind
+// a routine one simply because the routine one was planned an hour earlier. All
+// the priority and due-date weighting in batch scoring stopped mattering the
+// moment the batch reached a machine.
+//
+// Priority and due date live on the jobs, not the batch, so both are taken from
+// the bed's most pressing job - a plate prints as one unit and inherits the
+// tightest deadline on it.
+//
+// in_progress sorts first unconditionally. That batch is physically on the bed;
+// its position is not a scheduling decision any more and re-ordering it would
+// only misreport what the machine is doing.
 func (q *Queries) ListQueuedBatchesForFleetMachine(ctx context.Context, fleetMachineID uuid.UUID) ([]Batch, error) {
 	rows, err := q.db.Query(ctx, listQueuedBatchesForFleetMachine, fleetMachineID)
 	if err != nil {

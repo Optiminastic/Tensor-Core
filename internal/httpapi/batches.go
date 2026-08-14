@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -636,12 +637,12 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 		detail(c, http.StatusInternalServerError, "Could not update the batch.")
 		return gen.Batch{}, false
 	}
-	// The plate just changed, so its measured print time describes a bed that no
-	// longer exists - UpdateBatchDerivedMetrics cleared plate_sliced_at for
-	// exactly that reason. Re-measure it. Without this an edited Draft silently
-	// falls back to batchTimeFromJobs' MAX-of-estimates for good, which is the
-	// number the whole plate-slicing path exists to replace.
-	s.enqueuePlateSlice(ctx, updated, jobs, fileID, plate.unitsPerBed)
+	// No re-slice here. UpdateBatchDerivedMetrics has already cleared
+	// plate_sliced_at, because the measurement described a bed that no longer
+	// exists, and the batch is back on the fast estimate recomputed just above.
+	// This is a Draft being edited - still a proposal, still free to change
+	// again - so it is measured at approval like every other bed, not on each
+	// keystroke of a job being added or removed.
 	return updated, true
 }
 
@@ -721,6 +722,26 @@ func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob,
 			units = append(units, box)
 		}
 	}
+
+	// Largest first. bedpack is a guillotine packer, and guillotine packing is
+	// ORDER-SENSITIVE: placing a small part first splits the free space into
+	// offcuts too narrow for a large one later, so the same set of units can
+	// pack in one order and be rejected in another.
+	//
+	// This is not theoretical. The planner tries four orderings and keeps the
+	// best (see production.packingStrategies), then this function re-packed the
+	// same jobs in whatever order the database returned them - and rejected
+	// beds the planner had just proved fit. A batch of 3x(88x200) plus
+	// 4x(55x69) fits comfortably three-across with the hooks in the leftover
+	// strip, but interleaved small-first it does not, and the batch silently
+	// lost its preview plate with "The batch's jobs do not fit on a single bed".
+	//
+	// Sorting by descending area is the standard heuristic for this packer and
+	// matches the planner's own strategyArea. Placements carry RefID, so
+	// reordering here cannot mis-attach a mesh to the wrong job.
+	sort.SliceStable(units, func(a, b int) bool {
+		return units[a].XMM*units[a].YMM > units[b].XMM*units[b].YMM
+	})
 
 	placements, rejected := bedpack.Pack(units)
 	if len(rejected) > 0 {
@@ -881,6 +902,13 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 			Quantity: int(j.Quantity), EstimatedMinutes: int32PtrToIntPtr(j.EstimatedPrintTimeMinutes),
 			DueDate: db.TimePtr(j.DueDate), CreatedAt: db.Time(j.CreatedAt),
 			FilamentGrams: db.NumFloat(j.FilamentGramsRequired), Footprint: box,
+			// Already on a Draft. ListReplannableJobs is the only source that
+			// returns batched jobs at all, and everything it returns with a
+			// batch_id is on a pending_approval batch by its own predicate - so
+			// this is exactly "is in a Draft". The planning window keeps these
+			// whatever they score, or the run could not reproduce that Draft's
+			// job set and would dissolve it purely because the backlog grew.
+			InDraft: j.BatchID != nil,
 		})
 	}
 	return out, nil
@@ -929,19 +957,38 @@ func planColours(jobs []production.PlanJob) []string {
 	return out
 }
 
+// batchTimeFromJobs is the fast (Level 1) batch estimate: the summed per-unit
+// print time of everything on the bed, discounted for the overhead parts share
+// when printed together. It is what batch planning and machine scheduling run
+// on until the merged plate is really sliced, at which point the measurement
+// replaces it (callers check plate_sliced_at first).
+//
+// Sum, not max. Max was the previous model and wrong in the worst direction: a
+// bed of eight 40-minute parts was scheduled as 40 minutes, so a machine could
+// be handed a full day of work while looking nearly idle to the scheduler.
+//
+// A job with no estimate no longer voids the whole batch. It used to return
+// (nil, nil) the moment one job lacked a time, which stripped the estimate from
+// every job beside it and made the bed look free; jobs now carry a
+// geometry-derived default (see applyMatch), and anything still missing is
+// simply skipped rather than poisoning its neighbours.
 func batchTimeFromJobs(jobs []gen.ProductionJob) (*int32, *float64) {
 	units := 0
-	var maxTime int32
+	unitMinutes := make([]int, 0, len(jobs))
+	quantities := make([]int, 0, len(jobs))
 	for _, j := range jobs {
-		units += int(jobQuantity(j.Quantity))
+		qty := int(jobQuantity(j.Quantity))
+		units += qty
 		if j.EstimatedPrintTimeMinutes == nil {
-			return nil, nil
+			continue
 		}
-		if *j.EstimatedPrintTimeMinutes > maxTime {
-			maxTime = *j.EstimatedPrintTimeMinutes
-		}
+		unitMinutes = append(unitMinutes, int(*j.EstimatedPrintTimeMinutes))
+		quantities = append(quantities, qty)
 	}
-	total := maxTime
+	if len(unitMinutes) == 0 {
+		return nil, nil
+	}
+	total := int32(production.EstimateBatchMinutes(unitMinutes, quantities, production.DefaultBatchTimeCorrection))
 	if units == 0 {
 		return &total, nil
 	}

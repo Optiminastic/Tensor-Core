@@ -114,6 +114,34 @@ type Settings struct {
 	BatchPlanIntervalMinutes int
 	BatchPlanJobThreshold    int
 	BatchPlanDebounceSeconds int
+
+	// BatchReplanMinImprovementPercent is how much better a new plan must be,
+	// as a percentage of the current Drafts' combined score, before those
+	// Drafts are dissolved and rebuilt.
+	//
+	// Without a floor here the planner churns: it re-plans every couple of
+	// minutes, and any reshuffle scoring even 0.01 better destroys every Draft
+	// and mints new ones. Batch numbers change under the operator, cached
+	// preview plates are rebuilt, and the board rewrites itself for no
+	// production benefit.
+	//
+	// The threshold applies only when the new plan batches no more work than
+	// the current one. A plan that places a job nothing was placing before is
+	// real progress and always applies, however small its score delta.
+	BatchReplanMinImprovementPercent float64
+
+	// BatchHorizonJobs caps how many jobs of one compatibility group a single
+	// planning run considers (production.BatchGate.HorizonJobs). The packing
+	// search is superlinear in group size, so an unbounded group is what turns
+	// a growing backlog into a planner that never finishes. Zero uses
+	// production.DefaultHorizonJobs.
+	BatchHorizonJobs int
+
+	// BatchIdleWaitMinutes is how long a thin bed may be held back while a
+	// printer is free, hoping a short wait produces a fuller plate
+	// (production.BatchGate.IdleWaitWindow). Zero disables the wait: an idle
+	// machine then takes the best available bed immediately.
+	BatchIdleWaitMinutes float64
 	// River cancels a job's context at its own JobTimeoutDefault (1 minute)
 	// unless the worker overrides Timeout(). Neither of these has a natural
 	// inner deadline to derive one from, the way the slice worker derives its
@@ -230,9 +258,12 @@ func Load() Settings {
 		BatchPlanIntervalMinutes: intEnvOr("BATCH_PLAN_INTERVAL_MINUTES", 7),
 		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
 
-		BatchPlanTimeoutMinutes:   intEnvOr("BATCH_PLAN_TIMEOUT_MINUTES", 15),
-		JobCreationTimeoutMinutes: intEnvOr("JOB_CREATION_TIMEOUT_MINUTES", 5),
-		BatchPlanDebounceSeconds:  intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+		BatchPlanTimeoutMinutes:          intEnvOr("BATCH_PLAN_TIMEOUT_MINUTES", 15),
+		JobCreationTimeoutMinutes:        intEnvOr("JOB_CREATION_TIMEOUT_MINUTES", 5),
+		BatchPlanDebounceSeconds:         intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),
+		BatchHorizonJobs:                 intEnvOr("BATCH_HORIZON_JOBS", 250),
+		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),

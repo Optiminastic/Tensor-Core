@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -85,10 +86,52 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		AgingWindow:       time.Duration(s.cfg.BatchAgingWindowMinutes * float64(time.Minute)),
 		AgingFloorPercent: s.cfg.BatchAgingFloorPercent,
 		IdleMachines:      s.idleMachineCount(ctx),
+		IdleWaitWindow:    time.Duration(s.cfg.BatchIdleWaitMinutes * float64(time.Minute)),
+		HorizonJobs:       s.cfg.BatchHorizonJobs,
 	}
-	planned, unbatchable, held := production.Plan(planJobs, time.Now(), gate)
+	now := time.Now()
+	planStart := now
+	planned, unbatchable, held, deferred := production.PlanWithReasons(planJobs, now, gate, production.DefaultNester)
 
 	log := obs.FromContext(ctx)
+	// Every queued job not on a bed, with why - the planner's own deferrals
+	// plus the ones its queries excluded before it ran (held, personalisation
+	// unconfirmed, flagged). Together these cover every queued job, so nothing
+	// appears to simply vanish from scheduling.
+	excluded := s.excludedJobReasons(ctx)
+	deferred = append(deferred, excluded...)
+
+	log.Info("batch plan evaluated",
+		"jobs_considered", len(planJobs), "existing_drafts", len(draftIDs),
+		"candidates", len(planned), "held", len(held), "unbatchable", len(unbatchable),
+		"deferred", len(deferred), "excluded_before_planning", len(excluded),
+		"horizon", gate.HorizonJobs, "idle_machines", gate.IdleMachines,
+		"duration_ms", time.Since(planStart).Milliseconds())
+	// Debug rather than Info: on a large backlog this is one line per job.
+	for _, d := range deferred {
+		log.Debug("job not batched this run", "job", d.JobNumber, "reason", d.Reason)
+	}
+	for _, p := range planned {
+		log.Debug("batch candidate",
+			"jobs", len(p.Jobs), "utilisation_percent", p.BedUtilisationPercent,
+			"minutes", derefInt(p.TotalPrintTimeMinutes), "units", p.UnitsPerBed,
+			"strategy", p.PackingStrategy)
+	}
+
+	// Stability gate. A Draft is a proposal, but it is a proposal an operator
+	// can already see, so it is not rebuilt for a rounding difference - see
+	// worthReplanning.
+	poolByID := make(map[string]production.PlanJob, len(planJobs))
+	for _, j := range planJobs {
+		poolByID[j.ID] = j
+	}
+	if ok, why := s.worthReplanning(planned, poolByID, s.draftJobsByBatch(ctx), now, gate); !ok {
+		log.Info("batch replan skipped, existing drafts kept", "reason", why)
+		return nil, unbatchable, held, nil
+	} else if len(draftIDs) > 0 {
+		log.Info("batch replan proceeding", "reason", why)
+	}
+
 	for _, h := range held {
 		// Not silent: these jobs are genuinely not being batched this run -
 		// fillBed already exhausted every compatible job in the cluster, the
@@ -258,12 +301,12 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		for _, b := range created {
 			s.cachePreview(ctx, b)
 		}
-		// Kept Drafts never pass through the creation loop, so nothing above
-		// builds their plate or queues its slice. Most already have both from
-		// the run that created them - but one whose slice failed, or which was
-		// created before plate slicing existed, would otherwise sit unsliced
-		// forever, and an unsliced Draft can never be promoted to a machine.
-		s.ensurePlateSliceForKeptDrafts(ctx, keep)
+		// Drafts are deliberately NOT sliced here. A Draft is a proposal that
+		// this loop rewrites every pass, so slicing one buys a measurement of a
+		// bed that may not survive the next run - and each slice is minutes of
+		// Bambu Studio CPU. Planning and scheduling run on the fast estimate
+		// (batchTimeFromJobs); the real slice happens once at approval, when the
+		// plate is actually committed to a machine. See ApproveBatchFor.
 	}
 	return created, unbatchable, held, nil
 }
@@ -339,10 +382,9 @@ func (s *Server) cachePreview(ctx context.Context, b gen.Batch) {
 	if _, err := s.store.Q.SetBatchPreviewFile(ctx, gen.SetBatchPreviewFileParams{ID: b.ID, PreviewFileID: &fileID}); err != nil {
 		log.Warn("could not cache preview file id", "batch", b.ID, "error", err)
 	}
-	// The plate now exists in object storage, which is the earliest moment it
-	// can be sliced - hence enqueued here rather than in the batch-creation
-	// transaction (see EnqueueBatch's doc comment for why that race matters).
-	s.enqueuePlateSlice(ctx, b, jobs, fileID, plate.unitsPerBed)
+	// No slice here: the preview exists so an operator can see the bed, not to
+	// be measured. Slicing every Draft meant slicing beds that the next planner
+	// pass would dissolve. The measurement happens once, at approval.
 }
 
 // enqueuePlateSlice queues the measurement that replaces the batch's
@@ -613,14 +655,7 @@ func jobSetKey(jobs []production.PlanJob) string {
 // on error every Draft is simply treated as changed, which is the rebuild-
 // everything behaviour this replaces.
 func (s *Server) draftJobSets(ctx context.Context) map[string]uuid.UUID {
-	rows, err := s.store.Q.ListDraftBatchJobIDs(ctx)
-	if err != nil {
-		return nil
-	}
-	byBatch := map[uuid.UUID][]string{}
-	for _, r := range rows {
-		byBatch[r.BatchID] = append(byBatch[r.BatchID], r.JobID.String())
-	}
+	byBatch := s.draftJobsByBatch(ctx)
 	out := make(map[string]uuid.UUID, len(byBatch))
 	for id, ids := range byBatch {
 		sort.Strings(ids)
@@ -629,18 +664,146 @@ func (s *Server) draftJobSets(ctx context.Context) map[string]uuid.UUID {
 	return out
 }
 
-// ensurePlateSliceForKeptDrafts gives any preserved Draft that still has no
-// measured plate a preview and a queued slice. Best-effort per batch: one that
-// cannot be merged simply stays on its estimate.
-func (s *Server) ensurePlateSliceForKeptDrafts(ctx context.Context, keep map[uuid.UUID]bool) {
-	for id := range keep {
-		b, err := s.store.Q.GetBatchByID(ctx, id)
-		if err != nil || b.PlateSlicedAt.Valid {
-			continue
-		}
-		// cachePreview rebuilds the plate and enqueues the slice; it is
-		// idempotent enough to repeat, and only runs for Drafts genuinely
-		// missing a measurement.
-		s.cachePreview(ctx, b)
+// excludedJobReasons reports every queued job the planner never saw, with why.
+//
+// These are excluded by the batchable queries themselves (held, personalisation
+// unconfirmed, or carrying an issue), so they appear in no planner output at
+// all - not batched, not held, not unbatchable, not deferred. Absent looks
+// exactly like lost, which is what this closes: combined with the planner's own
+// deferred list, every queued job now has an answer to "why is this not on a
+// bed?".
+//
+// Best-effort: this is reporting, not control flow, so a failed read costs a
+// log line and nothing else.
+func (s *Server) excludedJobReasons(ctx context.Context) []production.Unbatchable {
+	rows, err := s.store.Q.ListExcludedQueuedJobs(ctx)
+	if err != nil {
+		obs.FromContext(ctx).Warn("could not read excluded jobs for reporting", "error", err)
+		return nil
 	}
+	out := make([]production.Unbatchable, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, production.Unbatchable{
+			JobID: r.ID.String(), JobNumber: r.JobNumber,
+			Reason: exclusionReason(r.Held, r.PersonalisationStatus, r.IssueReason),
+		})
+	}
+	return out
+}
+
+// exclusionReason picks the one reason to show for a job the planner skipped.
+//
+// Ordered by what an operator would act on first: a hold is a deliberate human
+// decision and outranks everything; personalisation is a concrete task someone
+// can complete; an issue is last because it is often a consequence of the
+// design rather than the job. A job can carry several of these at once and only
+// one can be shown.
+func exclusionReason(held bool, personalisation string, issue *string) string {
+	switch {
+	case held:
+		return production.ReasonHeld
+	case personalisation == production.PersonalisationPending:
+		return production.ReasonPersonalisationPending
+	case issue != nil && *issue == production.IssueProfileMissing:
+		return production.ReasonConfigurationMissing
+	case issue != nil:
+		return *issue
+	default:
+		// Excluded by the query but matching none of its arms - only reachable
+		// if the two drift apart, which is worth seeing rather than hiding.
+		return "Not currently eligible for batching."
+	}
+}
+
+// derefInt reads an optional int for logging, where a missing estimate should
+// read as 0 rather than crash the log line.
+func derefInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// draftJobsByBatch is which job ids each Draft currently holds - the same read
+// draftJobSets keys by job set, kept separately because the stability check
+// needs the membership itself to rebuild each Draft as a scorable batch.
+func (s *Server) draftJobsByBatch(ctx context.Context) map[uuid.UUID][]string {
+	rows, err := s.store.Q.ListDraftBatchJobIDs(ctx)
+	if err != nil {
+		return nil
+	}
+	byBatch := map[uuid.UUID][]string{}
+	for _, r := range rows {
+		byBatch[r.BatchID] = append(byBatch[r.BatchID], r.JobID.String())
+	}
+	return byBatch
+}
+
+// worthReplanning decides whether a freshly-planned partition is enough of an
+// improvement on the Drafts already on the floor to justify replacing them.
+//
+// Dissolving a Draft is not free: its batch number changes under whoever is
+// looking at it, its cached preview plate is rebuilt (a full STL download and
+// mesh merge per batch), and its history restarts. Doing that every couple of
+// minutes for a reshuffle worth 0.01 of a score point is pure churn - the board
+// rewrites itself and production is no better off.
+//
+// Two rules, in order:
+//
+//  1. A plan that batches MORE jobs than the current Drafts always wins. Placing
+//     work that nothing was placing before is real progress whatever the score
+//     says, and this is the case that lets a Draft absorb a newly-arrived
+//     compatible job.
+//  2. Otherwise the new plan must beat the current one by at least
+//     BatchReplanMinImprovementPercent of its score.
+//
+// Both plans are scored through production.ScorePlan, so "better" means exactly
+// what it means to the optimizer that produced the proposal.
+func (s *Server) worthReplanning(
+	planned []production.PlannedBatch, poolByID map[string]production.PlanJob,
+	draftJobs map[uuid.UUID][]string, now time.Time, gate production.BatchGate,
+) (bool, string) {
+	if len(draftJobs) == 0 {
+		return true, "no existing drafts to preserve"
+	}
+
+	current := make([]production.PlannedBatch, 0, len(draftJobs))
+	currentJobs := 0
+	for _, ids := range draftJobs {
+		jobs := make([]production.PlanJob, 0, len(ids))
+		for _, id := range ids {
+			if j, ok := poolByID[id]; ok {
+				jobs = append(jobs, j)
+			}
+		}
+		// A Draft whose jobs are no longer all in the pool (approved, held,
+		// flagged since) cannot be rebuilt or compared. Treat the comparison as
+		// unsafe and let the replan proceed.
+		if len(jobs) != len(ids) {
+			return true, "a draft's membership changed outside planning"
+		}
+		b, ok := production.EvaluateBatch(jobs)
+		if !ok {
+			return true, "an existing draft no longer packs onto one bed"
+		}
+		current = append(current, b)
+		currentJobs += len(jobs)
+	}
+
+	plannedJobs := 0
+	for _, p := range planned {
+		plannedJobs += len(p.Jobs)
+	}
+	if plannedJobs > currentJobs {
+		return true, fmt.Sprintf("plan batches %d jobs against the drafts' %d", plannedJobs, currentJobs)
+	}
+
+	currentScore := production.ScorePlan(current, now, gate)
+	newScore := production.ScorePlan(planned, now, gate)
+	minGain := math.Abs(currentScore) * s.cfg.BatchReplanMinImprovementPercent / 100
+	if newScore-currentScore < minGain {
+		return false, fmt.Sprintf("improvement %.2f is under the %.2f needed (%.1f%% of %.2f)",
+			newScore-currentScore, minGain, s.cfg.BatchReplanMinImprovementPercent, currentScore)
+	}
+	return true, fmt.Sprintf("improvement %.2f clears the %.2f threshold", newScore-currentScore, minGain)
 }
