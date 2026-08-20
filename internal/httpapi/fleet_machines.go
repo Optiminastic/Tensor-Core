@@ -12,6 +12,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
 // fleetMachineResponse is the physical printer fleet (table: machines) - live
@@ -133,6 +134,11 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.MachineRead.Key()), s.listFleetMachines)
 	g.GET("/:id", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachine)
 	g.GET("/:id/queue", s.guards.RequirePermission(auth.MachineRead.Key()), s.getFleetMachineQueue)
+	// Discovering the real fleet changes it (creates, updates and removes
+	// machines), so it needs the manage permission, not read.
+	g.POST("/sync", s.guards.RequirePermission(auth.MachineManage.Key()), s.syncFleetMachines)
+	s.registerFleetMachineLive(g)
+	s.registerFleetMachineUpload(g)
 	s.registerFleetMachineWrites(g)
 }
 
@@ -199,3 +205,24 @@ func (s *Server) getFleetMachineQueue(c *gin.Context) {
 // any plausible working period, bounded so a long-lived machine does not
 // return every plate it has ever printed.
 const machineQueueLimit = 200
+
+// syncFleetMachines reconciles the fleet with BambuBuddy: every printer it
+// reports is created or refreshed, and anything else is removed.
+//
+// 409 rather than 500 when BambuBuddy is not configured - that is a deployment
+// state to correct, not a fault, and it is the same distinction the Shopify
+// routes already make.
+func (s *Server) syncFleetMachines(c *gin.Context) {
+	if !s.bambu.Configured() {
+		detail(c, http.StatusConflict,
+			"BambuBuddy is not configured on this service.")
+		return
+	}
+	result, err := s.SyncFleetFromBambuBuddy(c.Request.Context())
+	if err != nil {
+		obs.FromContext(c.Request.Context()).Error("fleet sync failed", "error", err)
+		detail(c, http.StatusBadGateway, "Could not reach BambuBuddy to sync the fleet.")
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}

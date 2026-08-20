@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"strings"
 
 	"github.com/joho/godotenv"
 
@@ -31,16 +32,22 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
-const (
-	brandSlug = "my-store"
-	createdBy = "seed-script"
-)
+const createdBy = "seed-script"
+
+// brandSlug is the brand every seeded design and order belongs to. It was a
+// hardcoded "my-store" constant, which silently assumed a brand that need not
+// exist - brands are user-created, so on a fresh database that assumption is
+// simply wrong. It is a flag now, checked against the database before anything
+// is written.
+var brandSlug = "my-store"
 
 func main() {
 	dir := flag.String("dir", `C:\Users\optiminastic\Desktop\3mf file`, "folder of .3mf/.stl model files to import")
 	orderCount := flag.Int("orders", 35, "how many orders to generate")
 	reset := flag.Bool("reset", false, "delete previous seed orders and their jobs first (designs are kept)")
+	brand := flag.String("brand", brandSlug, "slug of the brand to seed designs and orders into")
 	flag.Parse()
+	brandSlug = strings.ToLower(strings.TrimSpace(*brand))
 
 	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
@@ -70,6 +77,29 @@ func main() {
 	guards := auth.NewGuards(nil, "")
 	server := httpapi.NewServer(cfg, store, guards, logger)
 	server.EnablePipeline(objects, nil)
+
+	var brandExists bool
+	if err := store.Pool.QueryRow(ctx,
+		`SELECT exists(SELECT 1 FROM brands WHERE slug = $1)`, brandSlug).Scan(&brandExists); err != nil {
+		log.Fatalf("check brand: %v", err)
+	}
+	if !brandExists {
+		rows, err := store.Pool.Query(ctx, `SELECT slug FROM brands ORDER BY slug`)
+		if err != nil {
+			log.Fatalf("brand %q does not exist (and listing brands failed: %v)", brandSlug, err)
+		}
+		defer rows.Close()
+		var known []string
+		for rows.Next() {
+			var slug string
+			if err := rows.Scan(&slug); err != nil {
+				log.Fatal(err)
+			}
+			known = append(known, slug)
+		}
+		log.Fatalf("brand %q does not exist; existing brands: %s", brandSlug, strings.Join(known, ", "))
+	}
+	log.Printf("seeding into brand %q", brandSlug)
 
 	profiles, err := machineProfiles(ctx, store)
 	if err != nil {

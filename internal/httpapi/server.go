@@ -12,6 +12,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -46,6 +47,12 @@ type Server struct {
 	// batch plan ran over, so an unchanged pool can be skipped. See
 	// AutoCreateBatches. Guarded by its mutex because the periodic tick and an
 	// event trigger can both reach the planner.
+	// bambu is the client for the local BambuBuddy service that holds the MQTT
+	// connection to each physical printer. Always non-nil; Configured() reports
+	// whether it has anywhere to call, so an install with no printers simply
+	// never syncs rather than erroring every cycle.
+	bambu *bambubuddy.Client
+
 	planMu          sync.Mutex
 	lastPlannedPool string
 }
@@ -63,6 +70,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		logger:  logger,
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
 		secrets: box,
+		bambu:   bambubuddy.New(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey),
 	}
 }
 

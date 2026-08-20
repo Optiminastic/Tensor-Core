@@ -121,3 +121,44 @@ JOIN machines m ON m.machine_profile_id = b.machine_id
 WHERE m.id = sqlc.arg('fleet_machine_id')
 ORDER BY b.created_at DESC, b.id DESC
 LIMIT sqlc.arg('row_limit');
+
+-- name: UpsertFleetMachineFromSource :one
+-- Creates or refreshes a physical unit discovered from BambuBuddy, keyed on
+-- machine_id (the printer's serial number, which is stable across renames).
+--
+-- Deliberately narrow: identity and liveness only. current_batch_id,
+-- print_started_at, batch_total_time_minutes and total_waste_grams are Tensor's
+-- own scheduling state and are NOT touched here - the printer is the authority
+-- on what it is doing, but Tensor is the authority on what it was asked to do,
+-- and a sync that overwrote both would lose the link between a running print
+-- and the batch it belongs to.
+INSERT INTO machines (
+    id, machine_id, name, image_url, status, filaments, current_layer, total_layers
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('machine_id'), sqlc.arg('name'), sqlc.narg('image_url'),
+    sqlc.arg('status'), sqlc.arg('filaments'), sqlc.narg('current_layer'), sqlc.narg('total_layers')
+)
+ON CONFLICT (machine_id) DO UPDATE SET
+    name          = EXCLUDED.name,
+    status        = EXCLUDED.status,
+    filaments     = EXCLUDED.filaments,
+    current_layer = EXCLUDED.current_layer,
+    total_layers  = EXCLUDED.total_layers,
+    updated_at    = now()
+RETURNING *;
+
+-- name: ListFleetMachineCodes :many
+-- Every physical unit's machine_id, for reconciling Tensor's fleet against the
+-- set BambuBuddy reports.
+SELECT id, machine_id FROM machines ORDER BY machine_id;
+
+-- name: DeleteFleetMachinesNotIn :exec
+-- Removes fleet units whose machine_id is not in the given list - the printers
+-- BambuBuddy no longer has.
+--
+-- Guarded on having no live print: a machine mid-print is not deleted even if
+-- it vanished from BambuBuddy, because that would orphan the batch it is
+-- running. Such a unit is left for a human to resolve.
+DELETE FROM machines
+WHERE machine_id <> ALL(sqlc.arg('keep_codes')::text[])
+  AND current_batch_id IS NULL;

@@ -30,6 +30,23 @@ func (q *Queries) AdjustFleetMachineWaste(ctx context.Context, arg AdjustFleetMa
 	return err
 }
 
+const deleteFleetMachinesNotIn = `-- name: DeleteFleetMachinesNotIn :exec
+DELETE FROM machines
+WHERE machine_id <> ALL($1::text[])
+  AND current_batch_id IS NULL
+`
+
+// Removes fleet units whose machine_id is not in the given list - the printers
+// BambuBuddy no longer has.
+//
+// Guarded on having no live print: a machine mid-print is not deleted even if
+// it vanished from BambuBuddy, because that would orphan the batch it is
+// running. Such a unit is left for a human to resolve.
+func (q *Queries) DeleteFleetMachinesNotIn(ctx context.Context, keepCodes []string) error {
+	_, err := q.db.Exec(ctx, deleteFleetMachinesNotIn, keepCodes)
+	return err
+}
+
 const getFleetMachine = `-- name: GetFleetMachine :one
 SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at FROM machines WHERE id = $1
 `
@@ -170,6 +187,37 @@ func (q *Queries) ListAllBatchesForFleetMachine(ctx context.Context, arg ListAll
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFleetMachineCodes = `-- name: ListFleetMachineCodes :many
+SELECT id, machine_id FROM machines ORDER BY machine_id
+`
+
+type ListFleetMachineCodesRow struct {
+	ID        uuid.UUID
+	MachineID string
+}
+
+// Every physical unit's machine_id, for reconciling Tensor's fleet against the
+// set BambuBuddy reports.
+func (q *Queries) ListFleetMachineCodes(ctx context.Context) ([]ListFleetMachineCodesRow, error) {
+	rows, err := q.db.Query(ctx, listFleetMachineCodes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFleetMachineCodesRow{}
+	for rows.Next() {
+		var i ListFleetMachineCodesRow
+		if err := rows.Scan(&i.ID, &i.MachineID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -484,6 +532,75 @@ func (q *Queries) UpdateFleetMachineState(ctx context.Context, arg UpdateFleetMa
 		arg.BatchTotalTimeMinutes,
 		arg.PrintStartedAt,
 		arg.ID,
+	)
+	var i Machine
+	err := row.Scan(
+		&i.ID,
+		&i.MachineID,
+		&i.Name,
+		&i.ImageUrl,
+		&i.Status,
+		&i.Filaments,
+		&i.CurrentBatchID,
+		&i.CurrentLayer,
+		&i.TotalLayers,
+		&i.BatchTotalTimeMinutes,
+		&i.PrintStartedAt,
+		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertFleetMachineFromSource = `-- name: UpsertFleetMachineFromSource :one
+INSERT INTO machines (
+    id, machine_id, name, image_url, status, filaments, current_layer, total_layers
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7, $8
+)
+ON CONFLICT (machine_id) DO UPDATE SET
+    name          = EXCLUDED.name,
+    status        = EXCLUDED.status,
+    filaments     = EXCLUDED.filaments,
+    current_layer = EXCLUDED.current_layer,
+    total_layers  = EXCLUDED.total_layers,
+    updated_at    = now()
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, created_at, updated_at
+`
+
+type UpsertFleetMachineFromSourceParams struct {
+	ID           uuid.UUID
+	MachineID    string
+	Name         string
+	ImageUrl     *string
+	Status       string
+	Filaments    []byte
+	CurrentLayer *int32
+	TotalLayers  *int32
+}
+
+// Creates or refreshes a physical unit discovered from BambuBuddy, keyed on
+// machine_id (the printer's serial number, which is stable across renames).
+//
+// Deliberately narrow: identity and liveness only. current_batch_id,
+// print_started_at, batch_total_time_minutes and total_waste_grams are Tensor's
+// own scheduling state and are NOT touched here - the printer is the authority
+// on what it is doing, but Tensor is the authority on what it was asked to do,
+// and a sync that overwrote both would lose the link between a running print
+// and the batch it belongs to.
+func (q *Queries) UpsertFleetMachineFromSource(ctx context.Context, arg UpsertFleetMachineFromSourceParams) (Machine, error) {
+	row := q.db.QueryRow(ctx, upsertFleetMachineFromSource,
+		arg.ID,
+		arg.MachineID,
+		arg.Name,
+		arg.ImageUrl,
+		arg.Status,
+		arg.Filaments,
+		arg.CurrentLayer,
+		arg.TotalLayers,
 	)
 	var i Machine
 	err := row.Scan(

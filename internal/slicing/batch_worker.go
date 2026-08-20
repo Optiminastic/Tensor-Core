@@ -23,6 +23,17 @@ import (
 
 const plateName = "plate.stl"
 
+// PlateGcodeKey is where a batch's sliced plate is kept, and the single place
+// that layout is decided so the worker that writes it and the handler that
+// sends it to a printer cannot disagree.
+//
+// Derived from the batch id rather than recorded in a column: it is a pure
+// function of the batch, so a column would be a second source of truth that
+// can drift from the object that actually exists.
+func PlateGcodeKey(batchID fmt.Stringer) string {
+	return fmt.Sprintf("batches/%s/plate.gcode.3mf", batchID)
+}
+
 // BatchSliceWorker slices one merged plate per job.
 type BatchSliceWorker struct {
 	river.WorkerDefaults[SliceBatchArgs]
@@ -149,6 +160,22 @@ func (w *BatchSliceWorker) slicePlate(ctx context.Context, args SliceBatchArgs) 
 	if err != nil {
 		return SliceMetrics{}, err
 	}
+
+	// Keep the sliced plate. Bambu Studio has just produced the exact artifact
+	// a printer needs, and it used to be read for its numbers and then deleted
+	// with the temp directory - so sending a locked batch to a machine meant
+	// slicing the same bed a second time somewhere else, with a second chance
+	// to disagree about presets. What prints is now what was measured.
+	//
+	// Best-effort: a failure here must not fail the slice. The measurement is
+	// this job's contract; the saved file is a bonus the print handler checks
+	// for and reports honestly when it is absent.
+	if err := w.objects.Upload(ctx, PlateGcodeKey(args.BatchID), out.Gcode3mfPath,
+		"application/vnd.ms-package.3dmanufacturing-3dmodel+xml"); err != nil {
+		w.logger.Warn("could not store the sliced plate; the batch can still be measured but not sent to a printer",
+			"batch", args.BatchID, "error", err)
+	}
+
 	result, err := LoadResultJSON(out.ResultJSONPath)
 	if err != nil {
 		return SliceMetrics{}, fmt.Errorf("read result.json: %w", err)

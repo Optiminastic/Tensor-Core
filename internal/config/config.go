@@ -137,6 +137,16 @@ type Settings struct {
 	// production.DefaultHorizonJobs.
 	BatchHorizonJobs int
 
+	// BambuBuddy is the local service holding the MQTT connection to each
+	// physical printer. With BambuBuddyURL unset, Tensor's fleet is whatever
+	// is in the machines table and nothing syncs - which is the correct
+	// behaviour for an environment with no printers attached.
+	//
+	// The API key is a credential: it belongs in the environment, never in the
+	// repository, and it is never logged or returned on any response.
+	BambuBuddyURL    string
+	BambuBuddyAPIKey string
+
 	// BatchIdleWaitMinutes is how long a thin bed may be held back while a
 	// printer is free, hoping a short wait produces a fuller plate
 	// (production.BatchGate.IdleWaitWindow). Zero disables the wait: an idle
@@ -264,6 +274,8 @@ func Load() Settings {
 		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),
 		BatchHorizonJobs:                 intEnvOr("BATCH_HORIZON_JOBS", 250),
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
+		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
+		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
