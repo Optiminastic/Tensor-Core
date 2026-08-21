@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,11 +36,21 @@ type Client struct {
 const requestTimeout = 10 * time.Second
 
 // New builds a client. baseURL is the service root, e.g.
-// "http://192.168.1.19:8000".
+// "http://192.168.1.19:8000" or "http://host.tailnet.ts.net:8000".
+//
+// A trailing slash is trimmed because every call appends a rooted path, so
+// "http://host:8000/" would otherwise produce "http://host:8000//api/v1/...".
+// Whether a double slash works is up to the far end - FastAPI redirects some
+// and 404s others - and "I pasted the URL with the slash the browser showed"
+// is not a configuration mistake worth debugging at runtime.
+//
+// Surrounding whitespace goes too: a value copied out of a chat message or a
+// .env file often carries a trailing space, and an unreachable host is a
+// miserable way to discover it.
 func New(baseURL, apiKey string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		apiKey:  strings.TrimSpace(apiKey),
 		http:    &http.Client{Timeout: requestTimeout},
 	}
 }
