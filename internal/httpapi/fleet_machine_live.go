@@ -123,7 +123,7 @@ func (s *Server) getFleetMachineLive(c *gin.Context) {
 		return
 	}
 
-	st, err := s.bambu.GetStatus(ctx, printerID)
+	st, err := s.bambuCache.status(ctx, printerID, s.bambu.GetStatus)
 	if err != nil {
 		detail(c, http.StatusBadGateway, "Could not read the printer's status.")
 		return
@@ -228,14 +228,5 @@ func (s *Server) registerFleetMachineLive(g *gin.RouterGroup) {
 // printer renamed on either side still resolves. Returns -1 when BambuBuddy
 // does not have it.
 func (s *Server) bambuPrinterIDFor(ctx context.Context, machineCode string) (int, error) {
-	printers, err := s.bambu.ListPrinters(ctx)
-	if err != nil {
-		return -1, err
-	}
-	for _, p := range printers {
-		if fleetCode(p) == machineCode {
-			return p.ID, nil
-		}
-	}
-	return -1, nil
+	return s.bambuCache.printerID(ctx, machineCode, s.bambu.ListPrinters)
 }

@@ -52,6 +52,11 @@ type Server struct {
 	// whether it has anywhere to call, so an install with no printers simply
 	// never syncs rather than erroring every cycle.
 	bambu *bambubuddy.Client
+	// bambuCache collapses the BambuBuddy reads that the live-status poll would
+	// otherwise multiply by the number of open tabs. Constructed here rather
+	// than opted into per-process (as permission freshness is) because there is
+	// no process for which caching these two reads is wrong.
+	bambuCache *bambuCache
 
 	planMu          sync.Mutex
 	lastPlannedPool string
@@ -71,8 +76,18 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
 		secrets: box,
 		bambu:   bambubuddy.New(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey),
+		bambuCache: newBambuCache(
+			cfg.BambuPrinterIndexTTL, cfg.BambuStatusTTL, cfg.BambuErrorTTL,
+		),
 	}
 }
+
+// BambuConfigured reports whether this deployment has a BambuBuddy to talk to.
+//
+// Exported for the fleet-sync worker, which lives in this package but must not
+// reach into s.bambu directly - and which treats "not configured" as a reason
+// to do nothing rather than a failure.
+func (s *Server) BambuConfigured() bool { return s.bambu.Configured() }
 
 // EnablePipeline attaches the object store and River slice enqueuer so the design
 // routes can accept uploads and enqueue slices transactionally.

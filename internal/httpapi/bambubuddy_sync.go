@@ -36,7 +36,36 @@ type SyncFleetResult struct {
 // Machine Management. A unit mid-print is never removed - deleting it would
 // orphan the batch it is running - so a printer that genuinely disappeared
 // while printing is left for a human.
+//
+// This is the operator-initiated path (POST /machine-fleet/sync). The prune is
+// safe here precisely because somebody asked for it.
 func (s *Server) SyncFleetFromBambuBuddy(ctx context.Context) (SyncFleetResult, error) {
+	return s.syncFleet(ctx, syncFleetOptions{Prune: true})
+}
+
+// RefreshFleetFromBambuBuddy updates the fleet WITHOUT removing anything.
+//
+// This is what the periodic job runs, and the distinction is the whole reason
+// the split exists. Reconciliation ends in DeleteFleetMachinesNotIn, so putting
+// the full sync on a timer would make a destructive operation automatic: one
+// transiently partial ListPrinters - a restarting BambuBuddy, a Tailscale blip -
+// and machines are deleted, with only those mid-print protected.
+//
+// Removing a decommissioned printer is a once-in-a-while act a human can ask
+// for. Refreshing status is the thing that has to happen every minute. They do
+// not belong on the same schedule.
+func (s *Server) RefreshFleetFromBambuBuddy(ctx context.Context) (SyncFleetResult, error) {
+	return s.syncFleet(ctx, syncFleetOptions{Prune: false})
+}
+
+// syncFleetOptions selects how far a sync goes.
+type syncFleetOptions struct {
+	// Prune removes fleet rows BambuBuddy no longer reports. Only ever true on
+	// a path a human initiated.
+	Prune bool
+}
+
+func (s *Server) syncFleet(ctx context.Context, opts syncFleetOptions) (SyncFleetResult, error) {
 	log := obs.FromContext(ctx)
 	if !s.bambu.Configured() {
 		return SyncFleetResult{}, fmt.Errorf("BambuBuddy is not configured (set BAMBUBUDDY_URL and BAMBUBUDDY_API_KEY)")
@@ -46,6 +75,12 @@ func (s *Server) SyncFleetFromBambuBuddy(ctx context.Context) (SyncFleetResult, 
 	if err != nil {
 		return SyncFleetResult{}, fmt.Errorf("list printers: %w", err)
 	}
+
+	// The sync reads the client directly - it is the writer of truth and must
+	// never read through a cache it fills - but sharing what it just fetched
+	// costs nothing and means a manual Sync makes a newly added printer
+	// resolvable immediately rather than after the index TTL.
+	s.bambuCache.putIndex(printers)
 
 	out := SyncFleetResult{Names: make([]string, 0, len(printers))}
 	keep := make([]string, 0, len(printers))
@@ -61,6 +96,10 @@ func (s *Server) SyncFleetFromBambuBuddy(ctx context.Context) (SyncFleetResult, 
 		if statusErr != nil {
 			log.Warn("bambubuddy status unavailable, recording the printer as off",
 				"printer", p.Name, "error", statusErr)
+		} else {
+			// Only a good status is shared. Seeding a failure would make the
+			// sync's bad luck everyone's for the whole error TTL.
+			s.bambuCache.putStatus(p.ID, status)
 		}
 
 		profileID, err := s.profileForPrinter(ctx, p, status)
@@ -92,6 +131,11 @@ func (s *Server) SyncFleetFromBambuBuddy(ctx context.Context) (SyncFleetResult, 
 
 		out.Synced++
 		out.Names = append(out.Names, p.Name)
+	}
+
+	if !opts.Prune {
+		log.Info("fleet refreshed from bambubuddy", "printers", out.Synced)
+		return out, nil
 	}
 
 	before, err := s.store.Q.ListFleetMachineCodes(ctx)

@@ -46,6 +46,30 @@ type PlanBatchesArgs struct{}
 
 func (PlanBatchesArgs) Kind() string { return "plan_batches" }
 
+// FleetSyncQueueName keeps the fleet refresh off the batch-plan queue. A
+// refresh is 1 + N sequential calls to a printer host that may be asleep, and
+// it must never occupy the single batch-plan slot while it waits.
+const FleetSyncQueueName = "fleet_sync"
+
+// SyncFleetArgs refreshes the machines table from BambuBuddy. No payload: the
+// refresh always covers the whole fleet, which is what lets River's UniqueOpts
+// collapse a periodic tick and a manual sync landing together into one run.
+type SyncFleetArgs struct{}
+
+func (SyncFleetArgs) Kind() string { return "sync_fleet" }
+
+// PeriodicFleetSyncConstructor builds the periodic insert for the fleet
+// refresh, deduped over period the same way PeriodicBatchPlanConstructor is -
+// so K worker replicas produce one refresh per period between them, not K.
+func PeriodicFleetSyncConstructor(period time.Duration) func() (river.JobArgs, *river.InsertOpts) {
+	return func() (river.JobArgs, *river.InsertOpts) {
+		return SyncFleetArgs{}, &river.InsertOpts{
+			Queue:      FleetSyncQueueName,
+			UniqueOpts: river.UniqueOpts{ByPeriod: period},
+		}
+	}
+}
+
 // JobCreationEnqueuer inserts CreateJobsArgs jobs into River. Wraps the same
 // insert-only client cmd/api already builds for slicing (see
 // slicing.NewInsertOnlyClient) - one such client can enqueue any registered
