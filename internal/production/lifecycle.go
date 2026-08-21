@@ -6,9 +6,7 @@
 package production
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strings"
 	"time"
 )
@@ -28,6 +26,16 @@ const (
 	AssemblyPending     = "pending"
 	AssemblyCompleted   = "completed"
 	AssemblyNotRequired = "not_required"
+)
+
+// Finishing sub-status. The finishing station between assembly and QC -
+// sanding, seam cleanup, coating. Same three values as assembly, and the same
+// meaning: not_required is an explicit human decision that this part needs no
+// finishing, not an absence of one.
+const (
+	FinishingPending     = "pending"
+	FinishingCompleted   = "completed"
+	FinishingNotRequired = "not_required"
 )
 
 // QC sub-status.
@@ -66,12 +74,30 @@ const (
 )
 
 // Operational machine status. Only online machines are batch-eligible.
+// These belong to machine_profiles - the printer model and its slicing config.
 const (
 	MachineOnline      = "online"
 	MachineBusy        = "busy"
 	MachineOffline     = "offline"
 	MachineMaintenance = "maintenance"
 )
+
+// Live state of a physical unit in the fleet (table: machines). A different
+// axis from the four above and a different table: a profile can be "online"
+// (eligible for batching) while every physical unit running it is "running"
+// (busy with a plate right now). Matches the machines.status CHECK.
+const (
+	FleetMachineIdle    = "idle"
+	FleetMachineRunning = "running"
+	// FleetMachineOff covers both powered-down and unreachable - the fleet
+	// table records what the shop floor can see, not why.
+	FleetMachineOff = "off"
+)
+
+// ValidFleetMachineState reports whether s is a fleet machine's live state.
+func ValidFleetMachineState(s string) bool { return fleetMachineStates[s] }
+
+var fleetMachineStates = set(FleetMachineIdle, FleetMachineRunning, FleetMachineOff)
 
 // Issue reasons (production_jobs.issue_reason): the Validation stage's fixed
 // taxonomy. A job with any of these set is excluded from batching until fixed,
@@ -92,6 +118,27 @@ const (
 var batchStatusTargets = set(BatchOpen, BatchInProgress, BatchCompleted)
 var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMaintenance)
 
+// TargetBedUtilisationPercent (planner.go) is the same "batch is full" cutoff
+// reused here for manually adding a job to an existing Draft batch - see
+// CompatibilityKey's doc comment for the narrower compatibility definition
+// this pairs with.
+
+// CompatibilityKey is a job's physical/slicing-profile signature - the "same
+// machine configuration" check used when manually adding a job to an
+// existing batch. Deliberately a narrower subset of planner.go's groupKey
+// (which also folds in supportUsed/infillBucket/priorityTier for batching
+// efficiency): those three are packing/scheduling heuristics, not machine
+// configuration, so a job is offered as compatible here even if it differs
+// on them. A plain comparable struct - build one from a job's already-loaded
+// fields and compare with ==.
+type CompatibilityKey struct {
+	Material      string
+	NozzleLeft    string
+	NozzleRight   string
+	QualityMM     string
+	MachineFamily string
+}
+
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.
 func ValidBatchStatusTarget(s string) bool { return batchStatusTargets[s] }
 
@@ -104,8 +151,19 @@ func ValidMachineStatus(s string) bool { return machineStatuses[s] }
 var statusPatchTargets = set(StatusQueued, StatusInProduction, StatusCompleted)
 
 var assemblyStatuses = set(AssemblyPending, AssemblyCompleted, AssemblyNotRequired)
+var finishingStatuses = set(FinishingPending, FinishingCompleted, FinishingNotRequired)
 var qcStatuses = set(QcPending, QcPassed, QcFailed)
 var packagingStatuses = set(PackagingPending, PackagingPackaged)
+
+// issueReasons is the Validation-stage taxonomy above, as a set. It exists so a
+// supervisor can PATCH the flag - most often clear it once the underlying
+// problem is fixed. Until this, issue_reason was write-once at creation and
+// absent from the PATCH allow-list, so a job flagged stl_missing stayed
+// excluded from batching forever even after its STL was uploaded.
+var issueReasons = set(
+	IssueSKUMissing, IssueNoApprovedDesign, IssueSTLMissing, IssueColourMissing,
+	IssueMaterialMissing, IssueProfileMissing, IssueFilamentOutOfStock,
+)
 
 var failureStages = set(FailureStagePrint, FailureStageQc)
 var failureReasons = set(
@@ -117,11 +175,31 @@ var failureReasons = set(
 // ValidStatusTarget reports whether s is a PATCH-settable primary status.
 func ValidStatusTarget(s string) bool { return statusPatchTargets[s] }
 
-// ValidAssemblyStatus / ValidQcStatus / ValidPackagingStatus validate a PATCH
-// sub-status value.
+// ValidAssemblyStatus / ValidFinishingStatus / ValidQcStatus /
+// ValidPackagingStatus validate a PATCH sub-status value.
 func ValidAssemblyStatus(s string) bool  { return assemblyStatuses[s] }
+func ValidFinishingStatus(s string) bool { return finishingStatuses[s] }
 func ValidQcStatus(s string) bool        { return qcStatuses[s] }
 func ValidPackagingStatus(s string) bool { return packagingStatuses[s] }
+
+// ScaleForQuantity rescales a per-run weight when only part of a run is being
+// reprinted: a job of 5 that reserved 250 g reprints 1 unit at 50 g. Returns
+// nil for a nil input (the field is genuinely unknown), and leaves the value
+// untouched when either quantity is non-positive or the quantities match, so
+// the common full-quantity case is exact rather than round-tripped through
+// floating point.
+func ScaleForQuantity(v *float64, from, to int32) *float64 {
+	if v == nil || from <= 0 || to <= 0 || from == to {
+		return v
+	}
+	scaled := *v * float64(to) / float64(from)
+	return &scaled
+}
+
+// ValidIssueReason validates a PATCH-settable issue reason, mirroring
+// ValidFailureReason. Clearing is expressed as JSON null by the caller, not as
+// an empty string here - an empty reason is not a valid one.
+func ValidIssueReason(s string) bool { return issueReasons[s] }
 
 // ValidFailureStage / ValidFailureReason validate a /fail request.
 func ValidFailureStage(s string) bool  { return failureStages[s] }
@@ -140,7 +218,8 @@ const (
 // move the primary status; the QC/packaging role uses the dedicated endpoints
 // and gets no PATCH fields at all.
 var allPatchFields = set(
-	"status", "assembly_status", "qc_status", "packaging_status", "batch_id", "priority", "held",
+	"status", "assembly_status", "finishing_status", "qc_status", "packaging_status",
+	"batch_id", "priority", "held", "issue_reason",
 )
 
 var patchFieldsByRole = map[string]map[string]bool{
@@ -266,29 +345,109 @@ func PersonalisationLog(c Confirms, required bool) []string {
 	return out
 }
 
-// numberDigits is how many random digits follow a generated identifier's
-// prefix (5, e.g. JOB-12345 / BATCH-12345).
-const numberDigits = 5
+// Pipeline stage: a coarse, computed-on-read display/filter label derived
+// from the 5 stored status columns plus held/issue_reason/batch state -
+// never stored (see PipelineStage). Ten values, not the "NEW..COMPLETED"
+// eleven originally proposed: COMPLETED is dropped since dispatch_orders
+// only tracks pending->dispatched with nothing further, so it and DISPATCHED
+// would be the same condition. FAILED is added - a job whose print or QC
+// failed needs a real bucket rather than silently misrepresenting it.
+const (
+	StageNew          = "NEW"
+	StageValidating   = "VALIDATING"
+	StageReady        = "READY"
+	StageWaitingBatch = "WAITING_BATCH"
+	StageReserved     = "RESERVED"
+	StageBatched      = "BATCHED"
+	StagePrinting     = "PRINTING"
+	StageQC           = "QC"
+	StagePacked       = "PACKED"
+	StageDispatched   = "DISPATCHED"
+	StageFailed       = "FAILED"
+)
 
-// numberBound is the exclusive upper bound for a numberDigits-digit number
-// (10^numberDigits) - rand.Int draws from [0, numberBound).
-var numberBound = new(big.Int).Exp(big.NewInt(10), big.NewInt(numberDigits), nil)
-
-// NewJobNumber returns a job identifier of the form JOB-12345 (a random
-// 5-digit number, zero-padded).
-func NewJobNumber() (string, error) { return newNumber("JOB-") }
-
-// NewBatchNumber returns a batch identifier of the form BATCH-12345 (a
-// random 5-digit number, zero-padded) - same shape as NewJobNumber.
-func NewBatchNumber() (string, error) { return newNumber("BATCH-") }
-
-func newNumber(prefix string) (string, error) {
-	n, err := rand.Int(rand.Reader, numberBound)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%0*d", prefix, numberDigits, n.Int64()), nil
+// PipelineStageInput is everything PipelineStage needs about one job and
+// (when batched) its batch - resolved by the caller (httpapi), since this
+// package stays DB-free by design.
+type PipelineStageInput struct {
+	Status, AssemblyStatus, FinishingStatus, QcStatus, PackagingStatus, PersonalisationStatus string
+	Held                                                                                      bool
+	IssueReason                                                                               *string
+	// BatchStatus is nil when the job is unbatched, else one of
+	// BatchPendingApproval/BatchOpen/BatchInProgress/BatchCompleted.
+	BatchStatus *string
+	// Dispatched is true when the job's order has a dispatched (not merely
+	// created) dispatch_orders row - best-effort, resolved by the caller.
+	Dispatched bool
 }
+
+// PipelineStage derives a single display/filter label for a job's position
+// in the pipeline, first-match-wins:
+//
+//  1. Failed: status == failed (the print itself failed - a separate
+//     reprint job, not this row, continues the pipeline) or
+//     qc_status == failed (same: a reprint was already queued).
+//  2. Batched (BatchStatus != nil and not yet completed): pending_approval
+//     -> RESERVED (a bed slot is tentatively held, not yet approved),
+//     open -> BATCHED (approved, filament reserved, queued),
+//     in_progress -> PRINTING. A completed batch falls through to the
+//     post-print rules below, as if unbatched - by the time a batch reaches
+//     'completed', Phase A guarantees every one of its jobs' own status is
+//     already 'completed' too.
+//  3. status == completed - NOTE this means the print finished, not that
+//     the whole job is done; assembly/QC/packaging/dispatch all happen
+//     after this value, gated on the sub-status fields below:
+//     qc_status != passed, or packaging_status != packaged -> QC
+//     (packaging isn't a distinct bucket in this 10-value list - a job
+//     that passed QC but isn't packaged yet still reads as QC);
+//     packaging_status == packaged -> PACKED, or DISPATCHED if the order
+//     has actually shipped.
+//  4. Unbatched, not yet printed: issue_reason set -> VALIDATING (blocked
+//     on a design/SKU/file problem), personalisation_status == pending ->
+//     NEW (blocked on a human), held -> READY (cleared, but paused),
+//     otherwise -> WAITING_BATCH (eligible, just hasn't been picked up
+//     yet).
+func PipelineStage(in PipelineStageInput) string {
+	if in.Status == StatusFailed || in.QcStatus == QcFailed {
+		return StageFailed
+	}
+	if in.BatchStatus != nil && *in.BatchStatus != BatchCompleted {
+		switch *in.BatchStatus {
+		case BatchPendingApproval:
+			return StageReserved
+		case BatchOpen:
+			return StageBatched
+		case BatchInProgress:
+			return StagePrinting
+		}
+	}
+	if in.Status == StatusCompleted {
+		if in.QcStatus != QcPassed || in.PackagingStatus != PackagingPackaged {
+			return StageQC
+		}
+		if in.Dispatched {
+			return StageDispatched
+		}
+		return StagePacked
+	}
+	if in.IssueReason != nil {
+		return StageValidating
+	}
+	if in.PersonalisationStatus == PersonalisationPending {
+		return StageNew
+	}
+	if in.Held {
+		return StageReady
+	}
+	return StageWaitingBatch
+}
+
+// Job and batch numbers are minted by a Postgres sequence, not here - see
+// NextJobNumber / NextBatchNumber in internal/db/queries and migration 0033.
+// They used to be 5 random digits generated in this package, which made this a
+// pure function pretending to a uniqueness guarantee it structurally could not
+// provide: a 100k space, no unique index, and a collision probability that grew
+// with the table. Uniqueness belongs where it can actually be enforced.
 
 func nonEmpty(s *string) bool { return s != nil && strings.TrimSpace(*s) != "" }
 

@@ -26,6 +26,61 @@ func smallJob(id, material string) PlanJob {
 	}
 }
 
+// TestKeyForIsOnlyTheHardBoundary pins the compatibility boundary at nozzle,
+// quality and material - and nothing else.
+//
+// This deliberately reverses an earlier test that asserted support and infill
+// DID discriminate. That test was right for its time: those fields were in the
+// key, so it locked them in. The product decision changed - the boundary is
+// what physically prevents two parts sharing a plate, and everything else is a
+// preference that belongs in scoreBatch. Each extra key field silently halved
+// the pool a bed could draw from, and beds already cannot reach the 80%
+// utilisation target.
+//
+// Support and infill are still real slicing constraints; they are handled by
+// slicing the plate conservatively (see plateSliceSpecFor), not by refusing to
+// batch. Machine family is handled by assignMachineForBatch refusing to guess.
+func TestKeyForIsOnlyTheHardBoundary(t *testing.T) {
+	base := smallJob("a", "PLA")
+	base.SupportUsed = false
+	base.InfillPct = 15
+	base.Priority = 5
+	base.MachineFamily = "H2C"
+	due := time.Now().Add(48 * time.Hour)
+	base.DueDate = &due
+
+	// Every one of these differs from base on an axis that used to split the
+	// bucket. All of them must now group together.
+	sameBucket := map[string]func(PlanJob) PlanJob{
+		"support required": func(j PlanJob) PlanJob { j.SupportUsed = true; return j },
+		"different infill": func(j PlanJob) PlanJob { j.InfillPct = 40; return j },
+		"urgent priority":  func(j PlanJob) PlanJob { j.Priority = 1; return j },
+		"due much later": func(j PlanJob) PlanJob {
+			later := time.Now().Add(30 * 24 * time.Hour)
+			j.DueDate = &later
+			return j
+		},
+		"no due date at all": func(j PlanJob) PlanJob { j.DueDate = nil; return j },
+	}
+	for name, mutate := range sameBucket {
+		if keyFor(base) != keyFor(mutate(base)) {
+			t.Errorf("%s: must share a compatibility bucket - it is a scoring preference, not a physical boundary", name)
+		}
+	}
+
+	// The three that genuinely prevent sharing a plate.
+	differentBucket := map[string]func(PlanJob) PlanJob{
+		"different material": func(j PlanJob) PlanJob { j.Material = "PA-CF"; return j },
+		"different nozzle":   func(j PlanJob) PlanJob { j.NozzleLeft = "0.6"; return j },
+		"different quality":  func(j PlanJob) PlanJob { j.QualityMM = "0.28"; return j },
+	}
+	for name, mutate := range differentBucket {
+		if keyFor(base) == keyFor(mutate(base)) {
+			t.Errorf("%s: must NOT share a compatibility bucket - the bed is physically set up for one of these", name)
+		}
+	}
+}
+
 func TestPlanNoFootprintIsUnbatchable(t *testing.T) {
 	j := smallJob("a", "PLA")
 	j.Footprint = bedpack.UnitFootprint{}
@@ -58,16 +113,47 @@ func TestPlanDifferentMaterialSplits(t *testing.T) {
 	}
 }
 
-func TestPlanDueDateClusteringSplits(t *testing.T) {
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	far := base.Add(10 * 24 * time.Hour)
+// TestPlanFarApartDueDatesStillShareABed reverses TestPlanDueDateClusteringSplits.
+//
+// Due dates used to hard-split every compatibility group on a 3-day window, so
+// these two jobs got a bed each and both beds sat at 5% utilisation. Urgency is
+// a score term now (dueUrgencyScore) and a lock condition (DueSoonWindow), which
+// prioritises the urgent job without spending a whole plate on it.
+func TestPlanFarApartDueDatesStillShareABed(t *testing.T) {
+	soon := testNow.Add(12 * time.Hour)
+	far := testNow.Add(30 * 24 * time.Hour)
 	a := smallJob("a", "PLA")
-	a.DueDate = &base
+	a.DueDate = &soon
 	b := smallJob("b", "PLA")
 	b.DueDate = &far
+
 	batches, _, _ := Plan([]PlanJob{a, b}, testNow, alwaysBatchGate)
-	if len(batches) != 2 {
-		t.Errorf("batches = %d, want 2 (due dates 10 days apart)", len(batches))
+	if len(batches) != 1 {
+		t.Fatalf("batches = %d, want 1 - a due date is a preference, not a wall", len(batches))
+	}
+	if batches[0].UnitsPerBed != 2 {
+		t.Errorf("units per bed = %d, want 2", batches[0].UnitsPerBed)
+	}
+}
+
+// TestDueUrgencyRanksTheSoonerBatchHigher is the other half: the preference
+// still has to be expressed, just through the score rather than the grouping.
+func TestDueUrgencyRanksTheSoonerBatchHigher(t *testing.T) {
+	soon := testNow.Add(6 * time.Hour)
+	far := testNow.Add(30 * 24 * time.Hour)
+
+	urgent := smallJob("u", "PLA")
+	urgent.DueDate = &soon
+	relaxed := smallJob("r", "PLA")
+	relaxed.DueDate = &far
+
+	sc := scoreCtx{now: testNow, gate: BatchGate{MaxWait: 4 * time.Hour}}
+	urgentBatch := PlannedBatch{Jobs: []PlanJob{urgent}, BedUtilisationPercent: 50}
+	relaxedBatch := PlannedBatch{Jobs: []PlanJob{relaxed}, BedUtilisationPercent: 50}
+
+	if scoreBatch(urgentBatch, sc) <= scoreBatch(relaxedBatch, sc) {
+		t.Errorf("a batch due in 6h (%v) must score above an identical one due in 30 days (%v)",
+			scoreBatch(urgentBatch, sc), scoreBatch(relaxedBatch, sc))
 	}
 }
 
@@ -82,8 +168,8 @@ func TestPlanOversizedJobIsUnbatchable(t *testing.T) {
 	if len(batches) != 0 || len(unb) != 1 {
 		t.Fatalf("batches=%d unbatchable=%d, want 0/1", len(batches), len(unb))
 	}
-	if unb[0].Reason != "Exceeds the print bed's capacity even on its own." {
-		t.Errorf("reason = %q", unb[0].Reason)
+	if unb[0].Reason != ReasonOversized {
+		t.Errorf("reason = %q, want ReasonOversized", unb[0].Reason)
 	}
 }
 
@@ -206,22 +292,32 @@ func TestGroupingColourUnionOverCapStaysSeparate(t *testing.T) {
 	}
 }
 
-func TestGroupingPriorityTierSplits(t *testing.T) {
+// TestUrgentAndRoutineShareABed reverses TestGroupingPriorityTierSplits.
+//
+// priorityTier used to be part of groupKey, so an urgent job could never share
+// a plate with a routine one - which is backwards. Priority decides what gets
+// attention first, not what can physically print together, and splitting on it
+// meant an urgent job burned a whole bed at 5% utilisation while a compatible
+// routine job waited for its own. Priority is a score term (priorityScore) and
+// an unconditional lock override in shouldCreateBatch; neither needs a wall.
+func TestUrgentAndRoutineShareABed(t *testing.T) {
 	urgent := smallJob("a", "PLA")
 	urgent.Priority = urgentPriority
 	normal := smallJob("b", "PLA")
 	normal.Priority = urgentPriority + 5
+
 	batches, _, _ := Plan([]PlanJob{urgent, normal}, testNow, alwaysBatchGate)
-	if len(batches) != 2 {
-		t.Errorf("batches = %d, want 2 (urgent jobs never share a bucket with routine ones)", len(batches))
+	if len(batches) != 1 {
+		t.Fatalf("batches = %d, want 1 - priority ranks work, it does not partition beds", len(batches))
+	}
+	if batches[0].UnitsPerBed != 2 {
+		t.Errorf("units per bed = %d, want 2", batches[0].UnitsPerBed)
 	}
 }
 
 func TestLocalSearchNeverRegressesGreedyPartition(t *testing.T) {
-	// Same priority tier throughout (so grouping keeps all four jobs in one
-	// cluster - priority tier is itself a grouping key, tested separately
-	// above) but varied footprints/priorities within that tier, so the
-	// strategies can genuinely disagree on the best split. bestPartition's
+	// Varied footprints and priorities, all in one compatibility bucket, so
+	// the strategies can genuinely disagree on the best split. bestPartition's
 	// chosen (post-local-search) partition must never score worse than any
 	// single strategy's own untouched greedy result.
 	mkJob := func(id string, x, y float64, priority int) PlanJob {
@@ -238,10 +334,10 @@ func TestLocalSearchNeverRegressesGreedyPartition(t *testing.T) {
 	if len(unb) != 0 {
 		t.Fatalf("unexpected unbatchable: %+v", unb)
 	}
-	got := partitionScore(batches)
+	got := partitionScore(batches, testScoreCtx())
 	for _, strategy := range packingStrategies {
 		naive, _ := packJobs(orderJobs(jobs, strategy), strategy, DefaultNester)
-		if naiveScore := partitionScore(naive); got < naiveScore {
+		if naiveScore := partitionScore(naive, testScoreCtx()); got < naiveScore {
 			t.Errorf("optimizer score %.2f worse than plain %q strategy %.2f", got, strategy, naiveScore)
 		}
 	}
@@ -737,8 +833,8 @@ func TestScoreBatchRewardsSameCustomerCohesion(t *testing.T) {
 	scattered := PlannedBatch{BedUtilisationPercent: 80, Jobs: []PlanJob{
 		{ID: "a", ShopifyCustomerID: &cust}, {ID: "b", ShopifyCustomerID: &other},
 	}}
-	if scoreBatch(cohesive) <= scoreBatch(scattered) {
-		t.Errorf("cohesive score %v should exceed scattered score %v", scoreBatch(cohesive), scoreBatch(scattered))
+	if scoreBatch(cohesive, testScoreCtx()) <= scoreBatch(scattered, testScoreCtx()) {
+		t.Errorf("cohesive score %v should exceed scattered score %v", scoreBatch(cohesive, testScoreCtx()), scoreBatch(scattered, testScoreCtx()))
 	}
 }
 
@@ -756,7 +852,7 @@ func TestScoreBatchUtilisationDominatesCohesion(t *testing.T) {
 		{ID: "a", ShopifyCustomerID: &cust}, {ID: "b", ShopifyCustomerID: &cust},
 		{ID: "c", ShopifyCustomerID: &cust}, {ID: "d", ShopifyCustomerID: &cust}, {ID: "e", ShopifyCustomerID: &cust},
 	}}
-	if scoreBatch(highUtilNoCustomer) <= scoreBatch(lowUtilAllSameCustomer) {
+	if scoreBatch(highUtilNoCustomer, testScoreCtx()) <= scoreBatch(lowUtilAllSameCustomer, testScoreCtx()) {
 		t.Errorf("a poorly-utilised, highly cohesive batch must not outscore a well-utilised one")
 	}
 }
@@ -819,4 +915,148 @@ func jobIDSet(jobs []PlanJob) map[string]bool {
 		out[j.ID] = true
 	}
 	return out
+}
+
+// testScoreCtx is the scoring context for tests that only care about one term
+// (cohesion, utilisation). MaxWait is set so waitingScore has a denominator;
+// fixtures with a zero CreatedAt contribute nothing to it either way.
+func testScoreCtx() scoreCtx {
+	return scoreCtx{now: time.Now(), gate: BatchGate{MaxWait: 4 * time.Hour}}
+}
+
+// TestScoreBalancesUtilisationAgainstPrintTime is the spec's own example: a
+// 96%-full 7-hour plate versus an 86%-full 3-hour one. Always chasing
+// utilisation picks the first and hurts throughput; the score has to be able
+// to prefer the second.
+func TestScoreBalancesUtilisationAgainstPrintTime(t *testing.T) {
+	sc := scoreCtx{now: testNow, gate: BatchGate{MaxWait: 4 * time.Hour}}
+	mins := func(m int) *int { return &m }
+
+	fullSlow := PlannedBatch{
+		Jobs: []PlanJob{smallJob("a", "PLA")}, BedUtilisationPercent: 96,
+		TotalPrintTimeMinutes: mins(7 * 60),
+	}
+	leanFast := PlannedBatch{
+		Jobs: []PlanJob{smallJob("b", "PLA")}, BedUtilisationPercent: 86,
+		TotalPrintTimeMinutes: mins(3 * 60),
+	}
+
+	if scoreBatch(leanFast, sc) <= scoreBatch(fullSlow, sc) {
+		t.Errorf("86%%/3h (%v) should beat 96%%/7h (%v): utilisation is the goal, not the only goal",
+			scoreBatch(leanFast, sc), scoreBatch(fullSlow, sc))
+	}
+}
+
+// TestPrintTimePenaltyIsBounded is the regression lock on the term's scale.
+//
+// The penalty used to be `rawMinutes * 0.10`, so it grew without limit: a
+// 10-hour plate scored -60 against a maximum of +50 from utilisation, and a
+// real measured plate time (plate slicing produces figures around 1000 minutes)
+// drove the score so far negative that a nearly-empty bed outranked a full one.
+// Normalising caps the term at its weight, which is the point of a weight.
+func TestPrintTimePenaltyIsBounded(t *testing.T) {
+	sc := scoreCtx{now: testNow, gate: BatchGate{MaxWait: 4 * time.Hour}}
+	mins := func(m int) *int { return &m }
+
+	full := PlannedBatch{
+		Jobs: []PlanJob{smallJob("a", "PLA")}, BedUtilisationPercent: 95,
+		TotalPrintTimeMinutes: mins(1032), // a real measured plate
+	}
+	nearlyEmpty := PlannedBatch{
+		Jobs: []PlanJob{smallJob("b", "PLA")}, BedUtilisationPercent: 5,
+		TotalPrintTimeMinutes: mins(30),
+	}
+
+	if scoreBatch(full, sc) <= scoreBatch(nearlyEmpty, sc) {
+		t.Errorf("a 95%% bed taking 1032 min (%v) must still beat a 5%% bed taking 30 min (%v); the time term has escaped its weight again",
+			scoreBatch(full, sc), scoreBatch(nearlyEmpty, sc))
+	}
+
+	// And the term itself must stay inside 0-100 however long the plate.
+	for _, m := range []int{0, 60, referencePlateMinutes, 10 * referencePlateMinutes} {
+		got := printTimeScore(PlannedBatch{TotalPrintTimeMinutes: mins(m)})
+		if got < 0 || got > 100 {
+			t.Errorf("printTimeScore(%d min) = %v, want within 0-100", m, got)
+		}
+	}
+	if got := printTimeScore(PlannedBatch{}); got != 0 {
+		t.Errorf("printTimeScore with no estimate = %v, want 0 (unknown is not evidence either way)", got)
+	}
+}
+
+// TestWaitingScoreStopsStarvation: a job that is neither urgent nor due soon
+// must still climb the ranking the longer it waits, or a steady stream of
+// fuller beds keeps it queued forever.
+func TestWaitingScoreStopsStarvation(t *testing.T) {
+	gate := BatchGate{MaxWait: 4 * time.Hour}
+	sc := scoreCtx{now: testNow, gate: gate}
+
+	fresh := smallJob("fresh", "PLA")
+	fresh.CreatedAt = testNow.Add(-time.Minute)
+	stale := smallJob("stale", "PLA")
+	stale.CreatedAt = testNow.Add(-3 * time.Hour)
+
+	freshBatch := PlannedBatch{Jobs: []PlanJob{fresh}, BedUtilisationPercent: 40}
+	staleBatch := PlannedBatch{Jobs: []PlanJob{stale}, BedUtilisationPercent: 40}
+
+	if scoreBatch(staleBatch, sc) <= scoreBatch(freshBatch, sc) {
+		t.Errorf("a 3-hour-old batch (%v) must outrank an identical fresh one (%v)",
+			scoreBatch(staleBatch, sc), scoreBatch(freshBatch, sc))
+	}
+	if got := waitingScore([]PlanJob{stale}, testNow, 0); got != 0 {
+		t.Errorf("waitingScore with no MaxWait = %v, want 0 (no denominator)", got)
+	}
+}
+
+// TestIdleMachineCreatesUnderTargetBatch covers BatchGate.IdleMachines: with a
+// printer free and the compatible pool exhausted, holding the bed back buys
+// nothing and costs machine time.
+func TestIdleMachineCreatesUnderTargetBatch(t *testing.T) {
+	// One small job: ~2.4% of the bed, far below target, and no other override
+	// applies (routine priority, no due date, just created, no aging window).
+	job := smallJob("a", "PLA")
+	job.Priority = 5
+	job.CreatedAt = testNow
+
+	held := BatchGate{MaxWait: 4 * time.Hour, IdleMachines: 0}
+	if batches, _, heldOut := Plan([]PlanJob{job}, testNow, held); len(batches) != 0 || len(heldOut) != 1 {
+		t.Fatalf("with no idle machine: batches=%d held=%d, want 0/1", len(batches), len(heldOut))
+	}
+
+	free := BatchGate{MaxWait: 4 * time.Hour, IdleMachines: 1}
+	batches, _, heldOut := Plan([]PlanJob{job}, testNow, free)
+	if len(batches) != 1 || len(heldOut) != 0 {
+		t.Fatalf("with an idle machine: batches=%d held=%d, want 1/0", len(batches), len(heldOut))
+	}
+}
+
+// TestIdleOverrideIsBoundedByIdleMachineCount is the other half of the rule.
+//
+// Idle capacity is finite. Releasing every thin partition because SOME printer
+// is free converts the whole backlog into single-job beds, and a created batch
+// never returns to the pool - so those beds can never be consolidated later.
+// Exactly as many as there are free printers get released; the rest keep
+// accumulating compatible volume, which is what holding them back is for.
+func TestIdleOverrideIsBoundedByIdleMachineCount(t *testing.T) {
+	// Six jobs that cannot share a bed (each a different material, so each is
+	// its own compatibility group) and none of which qualifies for any other
+	// override: routine priority, no due date, just created.
+	materials := []string{"PLA", "PETG", "ABS", "ASA", "TPU", "PC"}
+	jobs := make([]PlanJob, 0, len(materials))
+	for i, m := range materials {
+		j := smallJob(string(rune('a'+i)), m)
+		j.Priority = 5
+		j.CreatedAt = testNow
+		jobs = append(jobs, j)
+	}
+
+	gate := BatchGate{MaxWait: 4 * time.Hour, IdleMachines: 2}
+	batches, _, heldOut := Plan(jobs, testNow, gate)
+
+	if len(batches) != 2 {
+		t.Errorf("created %d batches with 2 idle machines, want 2 - the override must not empty the whole backlog onto thin beds", len(batches))
+	}
+	if len(heldOut) != len(materials)-2 {
+		t.Errorf("held %d partitions, want %d - the remainder should keep waiting for compatible volume", len(heldOut), len(materials)-2)
+	}
 }

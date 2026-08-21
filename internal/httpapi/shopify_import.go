@@ -1,90 +1,45 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
-	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
-	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// maxWebhookBytes caps a webhook body so a malicious sender cannot exhaust memory.
-const maxWebhookBytes = 2 << 20 // 2 MiB
-
-func (s *Server) registerWebhooks(r *gin.Engine) {
-	g := r.Group("/webhooks/shopify")
-	// Authenticated by the request HMAC, not a user token.
-	g.POST("/orders-paid", s.ordersPaidWebhook)
-	g.POST("/orders-create", s.ordersCreateWebhook)
-}
-
-// ordersPaidWebhook receives Shopify's orders/paid callback: fires once an
-// order's financial_status becomes "paid".
-func (s *Server) ordersPaidWebhook(c *gin.Context) {
-	s.upsertOrderFromWebhook(c, "paid")
-}
-
-// ordersCreateWebhook receives Shopify's orders/create callback: fires for
-// every new order regardless of payment state, so a COD order - which may sit
-// at financial_status "pending" indefinitely - shows up immediately instead of
-// only if it is ever marked paid.
-func (s *Server) ordersCreateWebhook(c *gin.Context) {
-	s.upsertOrderFromWebhook(c, "pending")
-}
-
-// upsertOrderFromWebhook is shared by orders-paid and orders-create: both verify
-// the body HMAC, resolve the store, and upsert the order (idempotent on replay -
-// whichever of the two fires second just refreshes financial_status/total_price).
-// fallbackStatus is used only when Shopify's payload omits financial_status.
-func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
-	if s.cfg.ShopifyClientSecret == "" {
-		detail(c, http.StatusServiceUnavailable, "The Shopify integration is not configured.")
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxWebhookBytes))
-	if err != nil {
-		detail(c, http.StatusBadRequest, "Could not read the webhook body.")
-		return
-	}
-	if !shopify.VerifyWebhookHMAC(body, c.GetHeader("X-Shopify-Hmac-SHA256"), s.cfg.ShopifyClientSecret) {
-		detail(c, http.StatusUnauthorized, "Invalid webhook signature.")
-		return
-	}
-	shopDomain := c.GetHeader("X-Shopify-Shop-Domain")
-	ctx := c.Request.Context()
-	conn, err := s.store.Q.GetActiveConnectionByDomain(ctx, shopDomain)
-	if err != nil {
-		detail(c, http.StatusNotFound, "No active connection for that store.")
-		return
-	}
-
-	var payload shopifyOrderPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		detail(c, http.StatusBadRequest, "The webhook payload is invalid.")
-		return
-	}
+// importShopifyOrder upserts one order and rebuilds its line items from
+// scratch (so a repeated sync never accumulates duplicates - Shopify's
+// payload doesn't carry a product image, so product_image_url is left null
+// for real orders), then - if the production queue is wired up - schedules
+// job creation in the same transaction, so nothing commits while silently
+// failing to schedule it. Every order enters Tensor through here, and the
+// only thing that calls it is a pull from Shopify's API
+// (fetchAndImportShopifyOrders): the on-demand "Sync from Shopify" button and
+// the one-time catch-up right after a store connects. There is deliberately
+// no webhook path - orders arrive when someone asks for them, never on
+// Shopify's schedule. connID is nullable: a sync sourced from a brand's
+// already-connected brand_connections row (see connections.go's
+// syncShopifyOrders) has no shopify_connections row to reference.
+func (s *Server) importShopifyOrder(
+	ctx context.Context, connID *uuid.UUID, payload shopifyOrderPayload, fallbackStatus string,
+) (gen.Order, error) {
 	items := mapShopifyLineItems(payload.LineItems)
 	lineItemsJSON, err := json.Marshal(items)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not encode the order's line items.")
-		return
+		return gen.Order{}, err
 	}
 
-	connID := conn.ID
 	var order gen.Order
 	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
 		var err error
 		order, err = q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
-			ID: uuid.New(), ShopConnectionID: &connID, ShopifyOrderID: payload.ID,
+			ID: uuid.New(), ShopConnectionID: connID, ShopifyOrderID: payload.ID,
 			OrderNumber: payload.Name, CustomerName: payload.customerName(),
 			ShopifyCustomerID: payload.customerID(), CustomerEmail: payload.customerEmail(),
 			CustomerPhone:   payload.customerPhone(),
@@ -96,9 +51,6 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 			return err
 		}
 
-		// Rebuild this order's product rows from scratch so a webhook replay never
-		// accumulates duplicates. Shopify's order webhook doesn't carry a product
-		// image, so product_image_url is left null for real orders.
 		if err := q.DeleteLineItemsForOrder(ctx, order.ID); err != nil {
 			return err
 		}
@@ -113,10 +65,6 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 			}
 		}
 
-		// Stage 2 handoff: schedule job creation in the same transaction as the
-		// order/line-items write, so sync never commits while silently failing to
-		// schedule it. Skipped (not failed) when the production queue isn't wired
-		// up - order sync still works standalone, same as EnablePipeline.
 		if s.jobEnqueuer != nil {
 			if err := s.jobEnqueuer.EnqueueTx(ctx, tx, production.CreateJobsArgs{OrderID: order.ID}); err != nil {
 				return err
@@ -124,12 +72,7 @@ func (s *Server) upsertOrderFromWebhook(c *gin.Context, fallbackStatus string) {
 		}
 		return nil
 	})
-	if err != nil {
-		obs.FromContext(ctx).Error("shopify order webhook import failed", "error", err)
-		detail(c, http.StatusInternalServerError, "Could not import the order.")
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return order, err
 }
 
 // --- Shopify order payload + line-item mapping --------------------------------

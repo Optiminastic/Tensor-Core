@@ -25,7 +25,7 @@ type SliceOutput struct {
 	Gcode3mfPath   string
 }
 
-// RunSlice slices stlPath with the resolved H2S profiles into outdir. It enables
+// RunSlice slices stlPath with the caller's resolved profiles into outdir. It enables
 // auto-support and applies the infill override, mirroring the Python invocation.
 // It fails with a clear reason when the slicer crashes or exports no G-code,
 // rather than letting the caller trip over a missing file.
@@ -62,6 +62,13 @@ func RunSlice(
 	out, runErr := cmd.CombinedOutput()
 	if runCtx.Err() == context.DeadlineExceeded {
 		return SliceOutput{}, fmt.Errorf("slice timed out after %s", timeout)
+	}
+	// A cancelled parent (River's job timeout, or a worker shutdown) kills the
+	// subprocess before it can write anything. Reporting that honestly matters:
+	// falling through to the os.Stat check below would blame the slicer for
+	// "producing no result.json" when nothing was ever given the chance to run.
+	if err := runCtx.Err(); err != nil {
+		return SliceOutput{}, fmt.Errorf("slice aborted before completing: %w", err)
 	}
 
 	resultPath := filepath.Join(outdir, resultName)

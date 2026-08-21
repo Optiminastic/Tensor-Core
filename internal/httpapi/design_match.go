@@ -29,7 +29,7 @@ func (s *Server) matchDesignForSKU(ctx context.Context, sku *string) production.
 		return production.MatchResult{Reason: production.IssueNoApprovedDesign}
 	}
 
-	fileID, ok := s.getOrCreateFileAssetForDesign(ctx, d)
+	fileID, bboxX, bboxY, bboxZ, ok := s.getOrCreateFileAssetForDesign(ctx, d)
 	if !ok {
 		return production.MatchResult{Reason: production.IssueSTLMissing}
 	}
@@ -37,12 +37,17 @@ func (s *Server) matchDesignForSKU(ctx context.Context, sku *string) production.
 	facts := &production.DesignFacts{
 		DesignID: d.ID, Material: d.Material, Colours: colourSetOf(d.Colour), PrintFileID: fileID,
 		QualityMM: slicing.LayerHeightMM(d.Quality),
+		BboxXMM:   bboxX, BboxYMM: bboxY, BboxZMM: bboxZ,
 	}
 
 	if m, err := s.store.Q.GetLatestMetricsForDesign(ctx, d.ID); err == nil {
 		minutes := int(m.PrintTimeHr * 60)
 		grams := m.FilamentG
 		facts.PrintTimeMin, facts.FilamentGrams = &minutes, &grams
+		facts.SupportWeightG, facts.PurgeWeightG = &m.SupportG, &m.PurgeG
+		colourCount := int(m.ColourChanges)
+		facts.ColourCount = &colourCount
+		facts.SupportUsed, facts.InfillPct = &m.SupportUsed, &m.InfillDensityPct
 	}
 
 	if d.MachineID != nil {
@@ -82,32 +87,36 @@ func flowPercent(flow string) float64 {
 // getOrCreateFileAssetForDesign resolves the file_assets row for a design's
 // STL, downloading it and computing its bounding box on first use (an
 // approved design is never re-created after upload, so the design's own
-// stl_key is a stable cache key across jobs). Returns ok=false when the
-// object can't be read or its bbox can't be measured.
-func (s *Server) getOrCreateFileAssetForDesign(ctx context.Context, d gen.GetDesignBySKURow) (*uuid.UUID, bool) {
+// stl_key is a stable cache key across jobs). Also surfaces the bbox it just
+// measured or found cached, so matchDesignForSKU doesn't need a second
+// lookup to snapshot it onto the job. Returns ok=false when the object can't
+// be read or its bbox can't be measured.
+func (s *Server) getOrCreateFileAssetForDesign(
+	ctx context.Context, d gen.GetDesignBySKURow,
+) (fileID *uuid.UUID, bboxX, bboxY, bboxZ *float64, ok bool) {
 	if existing, err := s.store.Q.GetFileAssetByStorageKey(ctx, d.StlKey); err == nil {
 		id := existing.ID
-		return &id, true
+		return &id, db.NumFloatPtr(existing.BboxXMm), db.NumFloatPtr(existing.BboxYMm), db.NumFloatPtr(existing.BboxZMm), true
 	}
 	if s.storage == nil {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	ext := filepath.Ext(d.StlKey)
 	tmp, err := os.CreateTemp("", "tensor-design-*"+ext)
 	if err != nil {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if err := s.storage.Download(ctx, d.StlKey, tmpPath); err != nil {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 	bx, by, bz := modelBBox(tmpPath, ext)
 	if bx == nil || by == nil || bz == nil {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
 
 	row, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
@@ -116,9 +125,9 @@ func (s *Server) getOrCreateFileAssetForDesign(ctx context.Context, d gen.GetDes
 		BboxXMm: bx, BboxYMm: by, BboxZMm: bz,
 	})
 	if err != nil {
-		return nil, false
+		return nil, nil, nil, nil, false
 	}
-	return &row.ID, true
+	return &row.ID, bx, by, bz, true
 }
 
 func fileSize(path string) int64 {

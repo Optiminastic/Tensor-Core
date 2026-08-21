@@ -56,7 +56,9 @@ internal/
              production pipeline: orders.go, production_jobs.go, production_qc.go
              (assembly/qc/packaging), files.go, batches.go, filament.go,
              machines_ops.go, dispatch.go, shopify_oauth.go (store connect),
-             webhooks.go (orders/paid import) (+ production_helpers.go); guarded by
+             shopify_import.go (order import - pull-only, no webhooks: every
+             order arrives via the on-demand sync in connections.go or the
+             post-connect catch-up in shopify_backfill.go) (+ production_helpers.go); guarded by
              production/order/batch/filament/machine/qc/packaging/assembly/dispatch/integration permissions
   db/
     migrations/  goose SQL (0001 baseline, idempotent, never touches Better Auth tables)
@@ -87,7 +89,7 @@ Authentication (who you are) belongs to Better Auth in the frontend. **This serv
 - **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, guarded at the router level. No secret configured means 503, not open.
 - Add a new permission to `AllPermissions` and the relevant `roleGrants` entry, then re-run the seed. `ADMIN` is the whole catalog by construction.
 
-Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`. The catalog holds 36 permissions across 6 roles (79 grants). Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions) - those tests are the spec, do not relax them.
+Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`. The catalog holds 38 permissions across 6 roles (84 grants). Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions) - those tests are the spec, do not relax them.
 
 ### Contract with the frontend
 Every route, method, JSON shape, status code, and error `detail` string must stay identical - the frontend validates responses with Zod. Domain responses are snake_case; `permissionsVersion` and `adminExists` are camelCase. POST-create returns 201; revoke/bootstrap/accept return 204.

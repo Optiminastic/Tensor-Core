@@ -11,8 +11,369 @@ import (
 	"github.com/google/uuid"
 )
 
-const insertAssemblyCheck = `-- name: InsertAssemblyCheck :one
+const advanceJobAssembly = `-- name: AdvanceJobAssembly :one
 
+UPDATE production_jobs SET assembly_status = $1, updated_at = now()
+WHERE id = $2 AND status = 'completed' AND assembly_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+`
+
+type AdvanceJobAssemblyParams struct {
+	AssemblyStatus string
+	ID             uuid.UUID
+}
+
+// The guarded station transitions. Each folds the prior-stage check INTO the
+// UPDATE's WHERE clause, so check-and-act is one statement and cannot race:
+// a second concurrent (or double-clicked) call matches no row and comes back
+// as pgx.ErrNoRows, which the handler turns into a 409. This is the same shape
+// ApproveBatch uses, and the reason it survives a lost race.
+// Zero rows means "already left this station", never "does not exist" - the
+// handler pre-reads for the 404.
+func (q *Queries) AdvanceJobAssembly(ctx context.Context, arg AdvanceJobAssemblyParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, advanceJobAssembly, arg.AssemblyStatus, arg.ID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const advanceJobFinishing = `-- name: AdvanceJobFinishing :one
+UPDATE production_jobs SET finishing_status = $1, updated_at = now()
+WHERE id = $2 AND status = 'completed'
+  AND assembly_status <> 'pending' AND finishing_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+`
+
+type AdvanceJobFinishingParams struct {
+	FinishingStatus string
+	ID              uuid.UUID
+}
+
+func (q *Queries) AdvanceJobFinishing(ctx context.Context, arg AdvanceJobFinishingParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, advanceJobFinishing, arg.FinishingStatus, arg.ID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const advanceJobPackaging = `-- name: AdvanceJobPackaging :one
+UPDATE production_jobs SET packaging_status = $1, updated_at = now()
+WHERE id = $2 AND qc_status = 'passed' AND packaging_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+`
+
+type AdvanceJobPackagingParams struct {
+	PackagingStatus string
+	ID              uuid.UUID
+}
+
+func (q *Queries) AdvanceJobPackaging(ctx context.Context, arg AdvanceJobPackagingParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, advanceJobPackaging, arg.PackagingStatus, arg.ID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const advanceJobQc = `-- name: AdvanceJobQc :one
+UPDATE production_jobs SET qc_status = $1, updated_at = now()
+WHERE id = $2 AND status = 'completed'
+  AND assembly_status <> 'pending' AND finishing_status <> 'pending' AND qc_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+`
+
+type AdvanceJobQcParams struct {
+	QcStatus string
+	ID       uuid.UUID
+}
+
+func (q *Queries) AdvanceJobQc(ctx context.Context, arg AdvanceJobQcParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, advanceJobQc, arg.QcStatus, arg.ID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertAssemblyCheck = `-- name: InsertAssemblyCheck :one
 INSERT INTO production_job_assembly_checks (
     id, job_id, parts_combined, hardware_attached, addons_attached, fit_check_ok,
     photo_file_id, notes, assembled_by
@@ -36,9 +397,6 @@ type InsertAssemblyCheckParams struct {
 	AssembledBy      string
 }
 
-// Station records: assembly, QC, packaging. Assembly and QC are append-only;
-// packaging is one row per job (re-packaging updates it). All boolean/text, so the
-// queries return the model types directly.
 func (q *Queries) InsertAssemblyCheck(ctx context.Context, arg InsertAssemblyCheckParams) (ProductionJobAssemblyCheck, error) {
 	row := q.db.QueryRow(ctx, insertAssemblyCheck,
 		arg.ID,
@@ -63,6 +421,62 @@ func (q *Queries) InsertAssemblyCheck(ctx context.Context, arg InsertAssemblyChe
 		&i.Notes,
 		&i.AssembledBy,
 		&i.AssembledAt,
+	)
+	return i, err
+}
+
+const insertFinishingCheck = `-- name: InsertFinishingCheck :one
+
+INSERT INTO production_job_finishing_checks (
+    id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok,
+    photo_file_id, notes, finished_by
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7,
+    $8, $9
+)
+RETURNING id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok, photo_file_id, notes, finished_by, finished_at
+`
+
+type InsertFinishingCheckParams struct {
+	ID              uuid.UUID
+	JobID           uuid.UUID
+	SupportsRemoved bool
+	Sanded          bool
+	SeamsCleaned    bool
+	SurfaceFinishOk bool
+	PhotoFileID     *uuid.UUID
+	Notes           *string
+	FinishedBy      string
+}
+
+// Station records: assembly, finishing, QC, packaging. Assembly, finishing and
+// QC are append-only; packaging is one row per job (re-packaging updates it).
+// All boolean/text, so the queries return the model types directly.
+func (q *Queries) InsertFinishingCheck(ctx context.Context, arg InsertFinishingCheckParams) (ProductionJobFinishingCheck, error) {
+	row := q.db.QueryRow(ctx, insertFinishingCheck,
+		arg.ID,
+		arg.JobID,
+		arg.SupportsRemoved,
+		arg.Sanded,
+		arg.SeamsCleaned,
+		arg.SurfaceFinishOk,
+		arg.PhotoFileID,
+		arg.Notes,
+		arg.FinishedBy,
+	)
+	var i ProductionJobFinishingCheck
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.SupportsRemoved,
+		&i.Sanded,
+		&i.SeamsCleaned,
+		&i.SurfaceFinishOk,
+		&i.PhotoFileID,
+		&i.Notes,
+		&i.FinishedBy,
+		&i.FinishedAt,
 	)
 	return i, err
 }

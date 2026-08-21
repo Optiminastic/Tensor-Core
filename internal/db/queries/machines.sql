@@ -69,9 +69,96 @@ ORDER BY m.machine_id;
 -- Batches already open/in_progress on this fleet machine's linked profile,
 -- oldest first (FCFS) - both the scheduler's load calculation and the
 -- GET /machine-fleet/:id/queue endpoint.
+-- Order is the order these will actually print, so it is also the order the
+-- machine's queue is shown in and the order startNextBatch picks from.
+--
+-- This used to be plain created_at, which quietly threw away every scheduling
+-- decision made upstream: a batch full of urgent, due-today work queued behind
+-- a routine one simply because the routine one was planned an hour earlier. All
+-- the priority and due-date weighting in batch scoring stopped mattering the
+-- moment the batch reached a machine.
+--
+-- Priority and due date live on the jobs, not the batch, so both are taken from
+-- the bed's most pressing job - a plate prints as one unit and inherits the
+-- tightest deadline on it.
+--
+-- in_progress sorts first unconditionally. That batch is physically on the bed;
+-- its position is not a scheduling decision any more and re-ordering it would
+-- only misreport what the machine is doing.
+SELECT b.*
+FROM batches b
+JOIN machines m ON m.machine_profile_id = b.machine_id
+LEFT JOIN LATERAL (
+    SELECT min(j.priority) AS min_priority, min(j.due_date) AS earliest_due
+    FROM production_jobs j
+    WHERE j.batch_id = b.id
+) urgency ON true
+WHERE m.id = sqlc.arg('fleet_machine_id')
+  AND b.status IN ('open', 'in_progress')
+ORDER BY (b.status = 'in_progress') DESC,
+         urgency.min_priority ASC NULLS LAST,
+         urgency.earliest_due ASC NULLS LAST,
+         b.created_at ASC, b.id ASC;
+
+-- name: ListAllBatchesForFleetMachine :many
+-- Every batch on this fleet machine's linked profile, newest first, whatever
+-- its status - what the machine's own Kanban board renders.
+--
+-- Deliberately separate from ListQueuedBatchesForFleetMachine rather than a
+-- widening of it. That query means "work still outstanding on this machine",
+-- and two callers depend on exactly that meaning: the scheduler's load
+-- calculation (queuedBatchLoad, which sums remaining print time to rank
+-- machines) and computeLiveFilaments. Including completed batches there would
+-- make every machine look permanently overloaded.
+--
+-- The board, by contrast, has Draft and Completed columns that were
+-- structurally always empty, because its feed could only ever return 'open'
+-- and 'in_progress'. LIMIT keeps a machine with a long history from returning
+-- everything it has ever printed.
 SELECT b.*
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
 WHERE m.id = sqlc.arg('fleet_machine_id')
-  AND b.status IN ('open', 'in_progress')
-ORDER BY b.created_at ASC, b.id ASC;
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT sqlc.arg('row_limit');
+
+-- name: UpsertFleetMachineFromSource :one
+-- Creates or refreshes a physical unit discovered from BambuBuddy, keyed on
+-- machine_id (the printer's serial number, which is stable across renames).
+--
+-- Deliberately narrow: identity and liveness only. current_batch_id,
+-- print_started_at, batch_total_time_minutes and total_waste_grams are Tensor's
+-- own scheduling state and are NOT touched here - the printer is the authority
+-- on what it is doing, but Tensor is the authority on what it was asked to do,
+-- and a sync that overwrote both would lose the link between a running print
+-- and the batch it belongs to.
+INSERT INTO machines (
+    id, machine_id, name, image_url, status, filaments, current_layer, total_layers
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('machine_id'), sqlc.arg('name'), sqlc.narg('image_url'),
+    sqlc.arg('status'), sqlc.arg('filaments'), sqlc.narg('current_layer'), sqlc.narg('total_layers')
+)
+ON CONFLICT (machine_id) DO UPDATE SET
+    name          = EXCLUDED.name,
+    status        = EXCLUDED.status,
+    filaments     = EXCLUDED.filaments,
+    current_layer = EXCLUDED.current_layer,
+    total_layers  = EXCLUDED.total_layers,
+    updated_at    = now()
+RETURNING *;
+
+-- name: ListFleetMachineCodes :many
+-- Every physical unit's machine_id, for reconciling Tensor's fleet against the
+-- set BambuBuddy reports.
+SELECT id, machine_id FROM machines ORDER BY machine_id;
+
+-- name: DeleteFleetMachinesNotIn :exec
+-- Removes fleet units whose machine_id is not in the given list - the printers
+-- BambuBuddy no longer has.
+--
+-- Guarded on having no live print: a machine mid-print is not deleted even if
+-- it vanished from BambuBuddy, because that would orphan the batch it is
+-- running. Such a unit is left for a human to resolve.
+DELETE FROM machines
+WHERE machine_id <> ALL(sqlc.arg('keep_codes')::text[])
+  AND current_batch_id IS NULL;

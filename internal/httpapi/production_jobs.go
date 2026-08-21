@@ -29,6 +29,7 @@ type productionJobResponse struct {
 	Quantity                   int32      `json:"quantity"`
 	Status                     string     `json:"status"`
 	AssemblyStatus             string     `json:"assembly_status"`
+	FinishingStatus            string     `json:"finishing_status"`
 	QcStatus                   string     `json:"qc_status"`
 	PackagingStatus            string     `json:"packaging_status"`
 	ShopifyOrderID             *int64     `json:"shopify_order_id"`
@@ -71,6 +72,20 @@ type productionJobResponse struct {
 	QualityMm                  *float64   `json:"quality_mm"`
 	MachineFamily              *string    `json:"machine_family"`
 	IssueReason                *string    `json:"issue_reason"`
+	// Geometry/slice snapshot taken from the matched design at creation time
+	// (see 0030_job_geometry_snapshot.sql). BboxXMm/YMm/ZMm and ColourCount
+	// are per-unit facts; SupportWeightG/PurgeWeightG are already scaled to
+	// this job's quantity, matching FilamentGramsRequired's convention.
+	BboxXMm        *float64 `json:"bbox_x_mm"`
+	BboxYMm        *float64 `json:"bbox_y_mm"`
+	BboxZMm        *float64 `json:"bbox_z_mm"`
+	SupportWeightG *float64 `json:"support_weight_g"`
+	PurgeWeightG   *float64 `json:"purge_weight_g"`
+	ColourCount    *int32   `json:"colour_count"`
+	// PipelineStage is a coarse, computed (never stored) label for where this
+	// job sits end to end - see production.PipelineStage's doc comment for
+	// exactly how it's derived and its two documented simplifications.
+	PipelineStage string `json:"pipeline_stage"`
 	// PersonalisationLog explains what's ready/still pending and why - a
 	// checklist derived from the six confirm booleans above, nil when
 	// personalisation isn't required for this job at all.
@@ -93,16 +108,27 @@ type splitProgressResponse struct {
 	RemainingQuantity int64 `json:"remaining_quantity"`
 }
 
-func productionJobDTO(j gen.ProductionJob) productionJobResponse {
+// productionJobDTO builds the API shape for one job. batchStatus/dispatched
+// are the two bits of cross-table state PipelineStage needs beyond the job
+// row itself - resolved by the caller (singleJobDTO for one job,
+// productionJobsDTO's bulk lookups for a list), never re-queried here.
+func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool) productionJobResponse {
 	confirms := production.Confirms{
 		Name: j.NameConfirmed, Photo: j.PhotoConfirmed, Font: j.FontConfirmed,
 		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
 	}
 	required := j.PersonalisationStatus != production.PersonalisationNotRequired
+	stage := production.PipelineStage(production.PipelineStageInput{
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
+		QcStatus:        j.QcStatus,
+		PackagingStatus: j.PackagingStatus, PersonalisationStatus: j.PersonalisationStatus,
+		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
+	})
 	return productionJobResponse{
 		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
-		Status: j.Status, AssemblyStatus: j.AssemblyStatus, QcStatus: j.QcStatus,
+		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
+		QcStatus:        j.QcStatus,
 		PackagingStatus: j.PackagingStatus, ShopifyOrderID: j.ShopifyOrderID,
 		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
@@ -120,9 +146,90 @@ func productionJobDTO(j gen.ProductionJob) productionJobResponse {
 		LeftNozzleMm: db.NumFloatPtr(j.LeftNozzleMm), RightNozzleMm: db.NumFloatPtr(j.RightNozzleMm),
 		FlowPct: db.NumFloatPtr(j.FlowPct), QualityMm: db.NumFloatPtr(j.QualityMm),
 		MachineFamily: j.MachineFamily, IssueReason: j.IssueReason,
+		BboxXMm: db.NumFloatPtr(j.BboxXMm), BboxYMm: db.NumFloatPtr(j.BboxYMm), BboxZMm: db.NumFloatPtr(j.BboxZMm),
+		SupportWeightG: db.NumFloatPtr(j.SupportWeightG), PurgeWeightG: db.NumFloatPtr(j.PurgeWeightG),
+		ColourCount:        j.ColourCount,
+		PipelineStage:      stage,
 		PersonalisationLog: production.PersonalisationLog(confirms, required),
 		CreatedAt:          db.Time(j.CreatedAt), UpdatedAt: db.Time(j.UpdatedAt),
 	}
+}
+
+// singleJobDTO is productionJobDTO for the single-job endpoints: it resolves
+// the job's batch status and order dispatch state itself, best-effort - a
+// lookup failure degrades to the unbatched/not-dispatched branch rather than
+// failing the response, matching attachPlateBbox's convention elsewhere in
+// this package.
+func (s *Server) singleJobDTO(ctx context.Context, j gen.ProductionJob) productionJobResponse {
+	var batchStatus *string
+	if j.BatchID != nil {
+		if b, err := s.store.Q.GetBatchByID(ctx, *j.BatchID); err == nil {
+			batchStatus = &b.Status
+		}
+	}
+	var dispatched bool
+	if j.OrderID != nil {
+		if ids, err := s.store.Q.ListDispatchedOrderIDs(ctx, []uuid.UUID{*j.OrderID}); err == nil && len(ids) > 0 {
+			dispatched = true
+		}
+	}
+	return productionJobDTO(j, batchStatus, dispatched)
+}
+
+// productionJobsDTO is productionJobDTO for a list of jobs: two bulk lookups
+// (not one per row) resolve every job's batch status and order dispatch
+// state at once, keyed by the distinct batch/order ids actually present in
+// rows - a lookup failure degrades the same way as singleJobDTO, per job.
+func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob) []productionJobResponse {
+	batchIDs := dedupeIDs(rows, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+	orderIDs := dedupeIDs(rows, func(j gen.ProductionJob) *uuid.UUID { return j.OrderID })
+
+	batchStatusByID := map[uuid.UUID]string{}
+	if len(batchIDs) > 0 {
+		if statuses, err := s.store.Q.ListBatchStatusesForIDs(ctx, batchIDs); err == nil {
+			for _, b := range statuses {
+				batchStatusByID[b.ID] = b.Status
+			}
+		}
+	}
+	dispatchedOrderIDs := map[uuid.UUID]bool{}
+	if len(orderIDs) > 0 {
+		if ids, err := s.store.Q.ListDispatchedOrderIDs(ctx, orderIDs); err == nil {
+			for _, id := range ids {
+				dispatchedOrderIDs[id] = true
+			}
+		}
+	}
+
+	out := make([]productionJobResponse, 0, len(rows))
+	for _, j := range rows {
+		var batchStatus *string
+		if j.BatchID != nil {
+			if status, ok := batchStatusByID[*j.BatchID]; ok {
+				batchStatus = &status
+			}
+		}
+		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
+		out = append(out, productionJobDTO(j, batchStatus, dispatched))
+	}
+	return out
+}
+
+// dedupeIDs collects the distinct non-nil ids get extracts from rows - turns
+// a job list's scattered batch_id/order_id pointers into the small
+// deduplicated slices ListBatchStatusesForIDs/ListDispatchedOrderIDs need.
+func dedupeIDs(rows []gen.ProductionJob, get func(gen.ProductionJob) *uuid.UUID) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	var out []uuid.UUID
+	for _, j := range rows {
+		id := get(j)
+		if id == nil || seen[*id] {
+			continue
+		}
+		seen[*id] = true
+		out = append(out, *id)
+	}
+	return out
 }
 
 func (s *Server) registerProductionJobs(r *gin.Engine) {
@@ -138,11 +245,33 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.POST("/:id/fail", s.guards.RequirePermission(auth.ProductionFail.Key()), s.failProductionJob)
 	g.POST("/:id/assembly", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.submitAssembly)
 	g.POST("/:id/assembly/skip", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.skipAssembly)
+	g.POST("/:id/finishing", s.guards.RequirePermission(auth.FinishingSubmit.Key()), s.submitFinishing)
+	g.POST("/:id/finishing/skip", s.guards.RequirePermission(auth.FinishingSubmit.Key()), s.skipFinishing)
 	g.POST("/:id/qc", s.guards.RequirePermission(auth.QcSubmit.Key()), s.submitQc)
 	g.POST("/:id/packaging", s.guards.RequirePermission(auth.PackagingSubmit.Key()), s.submitPackaging)
 }
 
 // --- list / get ---------------------------------------------------------------
+
+// filterByPipelineStage keeps only the responses matching stage, in place -
+// a Go-side filter (not a SQL WHERE) since pipeline_stage is computed, not a
+// column: a SQL CASE would have to duplicate PipelineStage's branching logic
+// across two languages, which drifts. On the paginated endpoint this means a
+// page can come back short (even empty) with more matching rows past the
+// cursor, since the DB's LIMIT is applied before this filter runs - callers
+// polling this filter must keep following next_cursor, not stop on a short page.
+func filterByPipelineStage(jobs []productionJobResponse, stage string) []productionJobResponse {
+	if stage == "" {
+		return jobs
+	}
+	out := make([]productionJobResponse, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PipelineStage == stage {
+			out = append(out, j)
+		}
+	}
+	return out
+}
 
 func (s *Server) listProductionJobs(c *gin.Context) {
 	page, ok := parsePageParams(c)
@@ -151,8 +280,10 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	}
 	statusFilter := nilIfEmpty(c.Query("status"))
 	assemblyFilter := nilIfEmpty(c.Query("assembly_status"))
+	finishingFilter := nilIfEmpty(c.Query("finishing_status"))
 	qcFilter := nilIfEmpty(c.Query("qc_status"))
 	packagingFilter := nilIfEmpty(c.Query("packaging_status"))
+	stageFilter := c.Query("pipeline_stage")
 	ctx := c.Request.Context()
 
 	orderFilter, ok := queryUUID(c, "order_id")
@@ -166,19 +297,21 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 
 	if !page.paginate {
 		rows, err := s.store.Q.ListProductionJobs(ctx, gen.ListProductionJobsParams{
-			Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+			Status: statusFilter, AssemblyStatus: assemblyFilter, FinishingStatus: finishingFilter,
+			QcStatus:        qcFilter,
 			PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
 			return
 		}
-		c.JSON(http.StatusOK, productionJobsDTO(rows))
+		c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
 		return
 	}
 
 	rows, err := s.store.Q.ListProductionJobsPage(ctx, gen.ListProductionJobsPageParams{
-		Status: statusFilter, AssemblyStatus: assemblyFilter, QcStatus: qcFilter,
+		Status: statusFilter, AssemblyStatus: assemblyFilter, FinishingStatus: finishingFilter,
+		QcStatus:        qcFilter,
 		PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
 	})
@@ -189,15 +322,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	if n := len(rows); n > 0 {
 		setNextCursor(c, n, page.limit, db.Time(rows[n-1].CreatedAt), rows[n-1].ID)
 	}
-	c.JSON(http.StatusOK, productionJobsDTO(rows))
-}
-
-func productionJobsDTO(rows []gen.ProductionJob) []productionJobResponse {
-	out := make([]productionJobResponse, 0, len(rows))
-	for _, j := range rows {
-		out = append(out, productionJobDTO(j))
-	}
-	return out
+	c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
 }
 
 func (s *Server) getProductionJob(c *gin.Context) {
@@ -211,7 +336,7 @@ func (s *Server) getProductionJob(c *gin.Context) {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
 	}
-	dto := productionJobDTO(j)
+	dto := s.singleJobDTO(ctx, j)
 	// One cheap indexed lookup on a single-resource detail page (not a list
 	// endpoint, so no N+1 risk) - only surfaced when the group is actually
 	// bigger than this job alone, which is a no-op for the overwhelming
@@ -265,7 +390,7 @@ func (s *Server) createProductionJob(c *gin.Context) {
 		customerName = order.CustomerName
 	}
 
-	jobNumber, err := production.NewJobNumber()
+	jobNumber, err := s.store.Q.NextJobNumber(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not generate a job number.")
 		return
@@ -282,7 +407,7 @@ func (s *Server) createProductionJob(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not create the production job.")
 		return
 	}
-	c.JSON(http.StatusCreated, productionJobDTO(job))
+	c.JSON(http.StatusCreated, s.singleJobDTO(ctx, job))
 }
 
 // --- from-order ---------------------------------------------------------------
@@ -297,7 +422,8 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	jobs, err := s.CreateJobsForOrder(c.Request.Context(), orderID)
+	ctx := c.Request.Context()
+	jobs, err := s.CreateJobsForOrder(ctx, orderID)
 	if err != nil {
 		switch {
 		case errors.Is(err, errJobsAlreadyCreated):
@@ -309,11 +435,7 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		}
 		return
 	}
-	out := make([]productionJobResponse, 0, len(jobs))
-	for _, j := range jobs {
-		out = append(out, productionJobDTO(j))
-	}
-	c.JSON(http.StatusCreated, out)
+	c.JSON(http.StatusCreated, s.productionJobsDTO(ctx, jobs))
 }
 
 // CreateJobsForOrder is the Job Creation Worker's core (Stage 2 + Stage 3
@@ -327,6 +449,9 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	if err != nil {
 		return nil, fmt.Errorf("load order: %w", err)
 	}
+	// A fast path only: it skips buildJobsForOrder's per-line design lookups on
+	// a replay. The authoritative check is the locked one inside the
+	// transaction below - this one races by construction.
 	existing, err := s.store.Q.CountJobsForOrder(ctx, &orderID)
 	if err != nil {
 		return nil, fmt.Errorf("check existing jobs: %w", err)
@@ -346,15 +471,45 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 
 	var created []gen.ProductionJob
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		// Lock, then re-count. Both are needed: the lock serialises concurrent
+		// runs for this order (a re-sync enqueues a second job, and the manual
+		// backfill endpoint can race either), and the re-count is what the
+		// loser of that race sees. Under READ COMMITTED an unlocked count
+		// cannot see the winner's uncommitted inserts.
+		if err := q.LockOrderForJobCreation(ctx, orderID.String()); err != nil {
+			return err
+		}
+		locked, err := q.CountJobsForOrder(ctx, &orderID)
+		if err != nil {
+			return err
+		}
+		if locked > 0 {
+			return errJobsAlreadyCreated
+		}
 		for _, p := range params {
 			job, err := q.InsertProductionJob(ctx, p)
 			if err != nil {
 				return err
 			}
+			if err := recordJobEvent(ctx, q, jobEvent{
+				JobID: job.ID, EventType: production.EventJobCreated, ActorID: systemActor,
+				Metadata: map[string]any{"order_id": orderID.String()},
+			}); err != nil {
+				return err
+			}
 			created = append(created, job)
 		}
-		return nil
+		// Clearing here is what makes POST /production-jobs/from-order/:id the
+		// retry mechanism for a discarded import - no separate retry route.
+		// A no-op on an order that never failed.
+		return q.ClearOrderJobCreationFailure(ctx, orderID)
 	})
+	// Returned unwrapped: the 409 mapping in createJobsFromOrder and the
+	// worker's success-ack both match on this sentinel, and it is not an
+	// insert failure.
+	if errors.Is(err, errJobsAlreadyCreated) {
+		return nil, errJobsAlreadyCreated
+	}
 	if err != nil {
 		return nil, fmt.Errorf("insert jobs: %w", err)
 	}
@@ -375,7 +530,7 @@ func (s *Server) buildJobsForOrder(
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
 	for _, li := range items {
-		jobNumber, err := production.NewJobNumber()
+		jobNumber, err := s.store.Q.NextJobNumber(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -413,6 +568,16 @@ func (s *Server) buildJobsForOrder(
 	return out, nil
 }
 
+// defaultUnitPrintMinutes derives a per-unit print time from the bounding box
+// already snapshotted onto the job. Zero when there is no usable box, which the
+// caller treats as "still no estimate" rather than "zero minutes".
+func defaultUnitPrintMinutes(p *gen.InsertProductionJobParams) int32 {
+	if p.BboxXMm == nil || p.BboxYMm == nil || p.BboxZMm == nil {
+		return 0
+	}
+	return int32(production.DefaultPrintTimeMinutes(*p.BboxXMm, *p.BboxYMm, *p.BboxZMm))
+}
+
 // applyMatch overlays a matched design's print facts onto a job's insert
 // params, or records why nothing was matched.
 func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, quantity int32) {
@@ -440,8 +605,63 @@ func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, 
 		v := *d.FilamentGrams * float64(quantity)
 		p.FilamentGramsRequired = &v
 	}
+	// Geometry/slice snapshot (see 0030_job_geometry_snapshot.sql). Bbox and
+	// colour count are per-unit facts, not scaled. Support/purge weight scale
+	// by quantity, matching FilamentGramsRequired's whole-job-total
+	// convention above - same source metric, same reasoning.
+	p.BboxXMm, p.BboxYMm, p.BboxZMm = d.BboxXMM, d.BboxYMM, d.BboxZMM
+	p.ColourCount = intPtrToInt32(d.ColourCount)
+	if d.SupportWeightG != nil {
+		v := *d.SupportWeightG * float64(quantity)
+		p.SupportWeightG = &v
+	}
+	if d.PurgeWeightG != nil {
+		v := *d.PurgeWeightG * float64(quantity)
+		p.PurgeWeightG = &v
+	}
+	// Fix: these two columns already existed and are already read by the
+	// planner's compatibility grouping (groupKey), but were never populated
+	// here - every job had the same false/0 value on both axes.
+	p.SupportUsed, p.InfillPct = d.SupportUsed, d.InfillPct
+	// Every job leaves here with a per-unit print time, even when its design
+	// has never been sliced.
+	//
+	// The design catalogue is the proper source (GetLatestMetricsForDesign
+	// above), but most designs carry no metrics yet, and a job with no estimate
+	// is not merely imprecise - it is invisible to scheduling. batchTimeFromJobs
+	// returns nothing for a whole batch if a single job on it lacks a time, so
+	// one unmeasured job strips the estimate from every job beside it and the
+	// machine scheduler then ranks that bed as free work.
+	//
+	// Derived from the bounding box rather than a flat constant so parts at
+	// least order correctly against each other; a constant reproduces the
+	// FAKE_SLICE failure where every design took the same 25 minutes. Replaced
+	// by the real plate slice once the batch is committed.
+	if p.EstimatedPrintTimeMinutes == nil {
+		if minutes := defaultUnitPrintMinutes(p); minutes > 0 {
+			p.EstimatedPrintTimeMinutes = &minutes
+		}
+	}
 	if p.PrintFileID == nil {
 		reason := production.IssueSTLMissing
+		p.IssueReason = &reason
+	}
+	// A design with no printer profile (designs.machine_id is null, or its
+	// profile row would not load) yields a job with no machine family and no
+	// nozzle. Such a job is not merely under-specified, it is unprintable:
+	// batchMachineFamily refuses to guess a family for a bed, so any batch made
+	// only of these is created with machine_id null, and
+	// ListApprovableDraftsForMachine - which selects a machine's drafts by
+	// machine_id - can never see it. The batch sits in Draft for ever while the
+	// printers stand idle, which is exactly what was observed: 68 queued jobs
+	// across five Drafts that no machine could ever pick up.
+	//
+	// Flagging it keeps it out of ListBatchableJobs (issue_reason IS NULL) and
+	// puts it in front of a human on the issues board, which is the same
+	// contract stl_missing above already follows: never drop the job, never let
+	// a job that cannot print reach batching.
+	if p.MachineFamily == nil {
+		reason := production.IssueProfileMissing
 		p.IssueReason = &reason
 	}
 }
@@ -490,7 +710,7 @@ func (s *Server) patchProductionJob(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not update the production job.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	c.JSON(http.StatusOK, s.singleJobDTO(c.Request.Context(), job))
 }
 
 // applyJobPatch validates and copies the provided PATCH fields into params.
@@ -510,6 +730,9 @@ func applyJobPatch(c *gin.Context, raw map[string]json.RawMessage, params *gen.U
 		}
 		params.Status = &status
 	}
+	if !patchEnum(c, raw, "finishing_status", production.ValidFinishingStatus, func(v string) { params.FinishingStatus = &v }) {
+		return false
+	}
 	if !patchEnum(c, raw, "assembly_status", production.ValidAssemblyStatus, func(v string) { params.AssemblyStatus = &v }) {
 		return false
 	}
@@ -517,6 +740,27 @@ func applyJobPatch(c *gin.Context, raw map[string]json.RawMessage, params *gen.U
 		return false
 	}
 	if !patchEnum(c, raw, "packaging_status", production.ValidPackagingStatus, func(v string) { params.PackagingStatus = &v }) {
+		return false
+	}
+	// issue_reason takes patchField[*string] rather than patchEnum because the
+	// point of exposing it is clearing it: only a *string decodes JSON null,
+	// and patchEnum is string-only. Empty string clears too, matching
+	// UpdateDesignSku's existing frontend contract.
+	if !patchField(c, raw, "issue_reason",
+		func(v *string) string {
+			if v == nil || *v == "" || production.ValidIssueReason(*v) {
+				return ""
+			}
+			return "That issue_reason is not valid."
+		},
+		func(v *string) {
+			params.SetIssueReason = true
+			if v != nil && *v == "" {
+				v = nil
+			}
+			params.IssueReason = v
+		},
+	) {
 		return false
 	}
 	if v, ok := raw["priority"]; ok {
@@ -646,7 +890,7 @@ func (s *Server) validatePersonalisation(c *gin.Context) {
 	if status == production.PersonalisationValidated {
 		s.triggerBatchPlanIfThresholdMet(ctx)
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, job))
 }
 
 // --- print file ---------------------------------------------------------------
@@ -686,7 +930,13 @@ func (s *Server) setPrintFile(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not set the print file.")
 		return
 	}
-	c.JSON(http.StatusOK, productionJobDTO(job))
+	// The upload may have cleared an stl_missing flag, which is precisely the
+	// event that makes a job batchable - without this it would wait for the
+	// periodic tick.
+	if job.IssueReason == nil {
+		s.triggerBatchPlanIfThresholdMet(ctx)
+	}
+	c.JSON(http.StatusOK, s.singleJobDTO(ctx, job))
 }
 
 // --- fail ---------------------------------------------------------------------
@@ -712,114 +962,26 @@ func (s *Server) failProductionJob(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if !production.ValidFailureReason(req.Reason) {
-		detail(c, http.StatusUnprocessableEntity, "That failure reason is not valid.")
-		return
-	}
-	if req.FilamentWastedGrams != nil && *req.FilamentWastedGrams < 0 {
-		detail(c, http.StatusUnprocessableEntity, "Filament wasted cannot be negative.")
-		return
-	}
-	if req.TimeWastedMinutes != nil && *req.TimeWastedMinutes < 0 {
-		detail(c, http.StatusUnprocessableEntity, "Time wasted cannot be negative.")
-		return
-	}
 	ctx := c.Request.Context()
 
-	job, err := s.store.Q.GetProductionJobByID(ctx, id)
+	failed, reprint, err := s.FailProductionJob(ctx, id, FailJobInput{
+		Reason: req.Reason, Notes: req.Notes,
+		FilamentWastedGrams: req.FilamentWastedGrams, TimeWastedMinutes: req.TimeWastedMinutes,
+	}, currentUserID(c))
 	if err != nil {
-		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
+		writeStatusError(c, err, "Could not fail the production job.")
 		return
 	}
-	if job.Status != production.StatusInProduction {
-		detail(c, http.StatusConflict, "Only a job that is in production can be failed.")
-		return
-	}
-
-	reprintParams := cloneForReprint(job)
-	var failed, reprint gen.ProductionJob
-	err = s.store.InTx(ctx, func(q *gen.Queries) error {
-		var err error
-		failed, err = q.SetProductionJobStatus(ctx, gen.SetProductionJobStatusParams{
-			ID: id, Status: production.StatusFailed,
-		})
-		if err != nil {
-			return err
-		}
-		if _, err := q.InsertProductionJobFailure(ctx, gen.InsertProductionJobFailureParams{
-			ID: uuid.New(), JobID: id, Stage: production.FailureStagePrint, Reason: req.Reason,
-			Notes: req.Notes, FilamentWastedGrams: req.FilamentWastedGrams,
-			TimeWastedMinutes: req.TimeWastedMinutes, CreatedBy: currentUserID(c),
-		}); err != nil {
-			return err
-		}
-		// Decrement the wasted filament from stock, split across the job's
-		// colours (best-effort per bucket, no-op if untracked) - the same fix
-		// as the colour-blind shortage check this batch approval used to have.
-		if req.FilamentWastedGrams != nil {
-			waste := make(map[filamentKey]float64)
-			filamentSplit(waste, job.Material, decodeColours(job.Colours), *req.FilamentWastedGrams)
-			if err := s.adjustFilamentByColour(ctx, q, waste, -1); err != nil {
-				return err
-			}
-		}
-		reprint, err = q.InsertProductionJob(ctx, reprintParams)
-		return err
+	c.JSON(http.StatusOK, failJobResponse{
+		FailedJob: s.singleJobDTO(ctx, failed), ReprintJob: s.singleJobDTO(ctx, reprint),
 	})
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not fail the production job.")
-		return
-	}
-	// A fresh urgent reprint just entered the queue - worth a replan
-	// regardless of how much else is currently queued, unlike the
-	// threshold-gated per-job triggers (see triggerBatchPlan's doc comment).
-	s.triggerBatchPlan(ctx)
-	c.JSON(http.StatusOK, failJobResponse{FailedJob: productionJobDTO(failed), ReprintJob: productionJobDTO(reprint)})
 }
 
-// cloneForReprint builds the insert params for a fresh queued reprint of a failed
-// job. It carries the print facts and personalisation, resets the lifecycle
-// sub-states to their defaults, leaves the job unbatched, and links back to the
-// source via reprint_of_job_id. Priority is always forced to urgent - a
-// reprint represents an already-late order and must jump the queue ahead of
-// routine jobs regardless of what priority the original job had.
-func cloneForReprint(src gen.ProductionJob) gen.InsertProductionJobParams {
-	jobNumber, _ := production.NewJobNumber()
-	priority := src.Priority
-	if priority > production.UrgentPriority {
-		priority = production.UrgentPriority
-	}
-	return gen.InsertProductionJobParams{
-		ID: uuid.New(), JobNumber: jobNumber,
-		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,
-		ShopifyCustomerID: src.ShopifyCustomerID, CustomerName: src.CustomerName,
-		Description: src.Description, Quantity: src.Quantity,
-		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
-		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-		Sku: src.Sku, ProductName: src.ProductName, Material: src.Material, Colour: src.Colour,
-		NozzleProfile: src.NozzleProfile, FilamentGramsRequired: db.NumFloatPtr(src.FilamentGramsRequired),
-		PrintFileID: src.PrintFileID, EstimatedPrintTimeMinutes: src.EstimatedPrintTimeMinutes,
-		DueDate: src.DueDate, Priority: priority,
-		PersonalisationName: src.PersonalisationName, PersonalisationFont: src.PersonalisationFont,
-		PersonalisationColour: src.PersonalisationColour, PersonalisationVariant: src.PersonalisationVariant,
-		PersonalisationStatus: src.PersonalisationStatus,
-		NameConfirmed:         src.NameConfirmed, PhotoConfirmed: src.PhotoConfirmed, FontConfirmed: src.FontConfirmed,
-		ColourConfirmed: src.ColourConfirmed, VariantConfirmed: src.VariantConfirmed,
-		CustomerApprovalReceived:   src.CustomerApprovalReceived,
-		PersonalisationPhotoFileID: src.PersonalisationPhotoFileID,
-		ReprintOfJobID:             ptr(src.ID),
-	}
-}
-
-// splitProductionJob builds the insert params for a fragment peeled off src's
-// quantity because the whole amount didn't fit on one bed (see
-// AutoCreateBatches/production.packJobs's splitJobToFit). Unlike
-// cloneForReprint this carries every grouping/compatibility fact and the
-// original priority/due date unchanged - it's the same physical product,
-// just fewer units, not a failure - and links back via split_of_job_id
-// instead of reprint_of_job_id.
-func splitProductionJob(src gen.ProductionJob, quantity int32) gen.InsertProductionJobParams {
-	jobNumber, _ := production.NewJobNumber()
+// splitProductionJob builds a fragment of src carrying `quantity` units. The
+// job number is passed in rather than minted here: it now comes from a database
+// sequence (NextJobNumber), so it needs the caller's queries handle - and the
+// caller is already inside the transaction the fragment is inserted in.
+func splitProductionJob(src gen.ProductionJob, quantity int32, jobNumber string) gen.InsertProductionJobParams {
 	return gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber,
 		OrderID: src.OrderID, ShopifyOrderID: src.ShopifyOrderID,
@@ -847,6 +1009,15 @@ func splitProductionJob(src gen.ProductionJob, quantity int32) gen.InsertProduct
 		FlowPct:                    db.NumFloatPtr(src.FlowPct),
 		QualityMm:                  db.NumFloatPtr(src.QualityMm),
 		MachineFamily:              src.MachineFamily,
+		// A fragment is the same physical product, just fewer units - copied
+		// as-is, same convention as FilamentGramsRequired above (not
+		// re-scaled to the fragment's smaller quantity).
+		BboxXMm:        db.NumFloatPtr(src.BboxXMm),
+		BboxYMm:        db.NumFloatPtr(src.BboxYMm),
+		BboxZMm:        db.NumFloatPtr(src.BboxZMm),
+		SupportWeightG: db.NumFloatPtr(src.SupportWeightG),
+		PurgeWeightG:   db.NumFloatPtr(src.PurgeWeightG),
+		ColourCount:    src.ColourCount,
 	}
 }
 

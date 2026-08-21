@@ -11,6 +11,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
 // A brand can connect to these external ad and commerce platforms. The actual
@@ -60,6 +61,7 @@ func (s *Server) registerConnections(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.BrandRead.Key()), s.listConnections)
 	g.PUT("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.upsertConnection)
 	g.DELETE("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.deleteConnection)
+	g.POST("/shopify/sync", s.guards.RequirePermission(auth.BrandManage.Key()), s.syncShopifyOrders)
 }
 
 // providerParam validates the {provider} path segment against the fixed set.
@@ -164,4 +166,34 @@ func (s *Server) deleteConnection(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// syncShopifyOrders imports the brand's most recent Shopify orders, using the
+// access token already stored on this brand's Shopify connection (the same one
+// the frontend's OAuth flow wrote via PUT .../connections/shopify) - no
+// separate order-import OAuth grant required. This is the only ongoing way
+// orders enter Tensor: it runs when someone presses "Sync from Shopify", never
+// on a schedule and never from a Shopify webhook. Re-running it is safe - each
+// order upserts by shopify_order_id.
+func (s *Server) syncShopifyOrders(c *gin.Context) {
+	slug, ok := brandSlugParam(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	conn, err := s.store.Q.GetConnectionWithToken(ctx, gen.GetConnectionWithTokenParams{
+		BrandSlug: slug, Provider: shopifyProvider,
+	})
+	shop, token, connected := shopifyCredentials(conn, err)
+	if !connected {
+		detail(c, http.StatusConflict, "This brand's Shopify isn't connected yet.")
+		return
+	}
+	imported, err := s.fetchAndImportShopifyOrders(ctx, nil, shop, token)
+	if err != nil {
+		obs.FromContext(ctx).Error("shopify order sync failed", "brand", slug, "shop", shop, "error", err)
+		detail(c, http.StatusBadGateway, "Could not fetch orders from Shopify.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"imported": imported})
 }

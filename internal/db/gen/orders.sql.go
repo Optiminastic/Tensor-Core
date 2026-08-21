@@ -12,11 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearOrderJobCreationFailure = `-- name: ClearOrderJobCreationFailure :exec
+UPDATE orders
+SET job_creation_error = NULL, job_creation_failed_at = NULL, updated_at = now()
+WHERE id = $1 AND job_creation_error IS NOT NULL
+`
+
+// Clears the marker once jobs are successfully created, which makes the
+// existing POST /production-jobs/from-order/:order_id the retry mechanism - no
+// separate retry endpoint needed. Guarded so a healthy order is never touched.
+func (q *Queries) ClearOrderJobCreationFailure(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearOrderJobCreationFailure, id)
+	return err
+}
+
 const getOrderByID = `-- name: GetOrderByID :one
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders WHERE id = $1
 `
 
@@ -39,6 +54,8 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.Status,
 		&i.Source,
 		&i.ImportedAt,
+		&i.JobCreationError,
+		&i.JobCreationFailedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -61,7 +78,8 @@ INSERT INTO orders (
 RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name,
           shopify_customer_id, customer_email, customer_phone,
           financial_status, total_price, currency, line_items,
-          status, source, imported_at, created_at, updated_at
+          status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 `
 
 type InsertOrderParams struct {
@@ -120,6 +138,8 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.Status,
 		&i.Source,
 		&i.ImportedAt,
+		&i.JobCreationError,
+		&i.JobCreationFailedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -130,7 +150,8 @@ const listOrders = `-- name: ListOrders :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders
 WHERE $1::text IS NULL OR source = $1
 ORDER BY imported_at DESC, id DESC
@@ -162,6 +183,8 @@ func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, erro
 			&i.Status,
 			&i.Source,
 			&i.ImportedAt,
+			&i.JobCreationError,
+			&i.JobCreationFailedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -179,7 +202,8 @@ const listOrdersPage = `-- name: ListOrdersPage :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders
 WHERE (
     $1::timestamptz IS NULL
@@ -229,6 +253,8 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 			&i.Status,
 			&i.Source,
 			&i.ImportedAt,
+			&i.JobCreationError,
+			&i.JobCreationFailedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -240,6 +266,82 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const listOrdersWithoutJobs = `-- name: ListOrdersWithoutJobs :many
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
+       shopify_customer_id, customer_email, customer_phone,
+       financial_status, total_price, currency, line_items,
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
+FROM orders o
+WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+  AND ($1::text IS NULL OR source = $1)
+ORDER BY imported_at DESC, id DESC
+`
+
+// The operator backstop, covering what the marker column cannot: an order whose
+// River job was never enqueued at all (jobEnqueuer nil), and one whose
+// line_items were empty so the worker "succeeded" with zero jobs. The column
+// records why the worker gave up; this finds orders it never reached. Both are
+// needed - they cover disjoint failure modes.
+func (q *Queries) ListOrdersWithoutJobs(ctx context.Context, source *string) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listOrdersWithoutJobs, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Order{}
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.ShopConnectionID,
+			&i.ShopifyOrderID,
+			&i.OrderNumber,
+			&i.CustomerName,
+			&i.ShopifyCustomerID,
+			&i.CustomerEmail,
+			&i.CustomerPhone,
+			&i.FinancialStatus,
+			&i.TotalPrice,
+			&i.Currency,
+			&i.LineItems,
+			&i.Status,
+			&i.Source,
+			&i.ImportedAt,
+			&i.JobCreationError,
+			&i.JobCreationFailedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markOrderJobCreationFailed = `-- name: MarkOrderJobCreationFailed :exec
+UPDATE orders
+SET job_creation_error = $1, job_creation_failed_at = now(), updated_at = now()
+WHERE id = $2
+`
+
+type MarkOrderJobCreationFailedParams struct {
+	Reason *string
+	ID     uuid.UUID
+}
+
+// Records why job creation gave up on this order. Written only after River's
+// final attempt - before that the job is still going to be retried and an error
+// would be noise.
+func (q *Queries) MarkOrderJobCreationFailed(ctx context.Context, arg MarkOrderJobCreationFailedParams) error {
+	_, err := q.db.Exec(ctx, markOrderJobCreationFailed, arg.Reason, arg.ID)
+	return err
 }
 
 const upsertPaidOrder = `-- name: UpsertPaidOrder :one
@@ -258,7 +360,7 @@ ON CONFLICT (shopify_order_id) DO UPDATE SET
     financial_status = EXCLUDED.financial_status,
     total_price      = EXCLUDED.total_price,
     updated_at       = now()
-RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, created_at, updated_at
+RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, created_at, updated_at
 `
 
 type UpsertPaidOrderParams struct {
@@ -313,6 +415,8 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		&i.Status,
 		&i.Source,
 		&i.ImportedAt,
+		&i.JobCreationError,
+		&i.JobCreationFailedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

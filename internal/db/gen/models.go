@@ -26,6 +26,13 @@ type Batch struct {
 	BedUtilizationPercent       pgtype.Numeric
 	PackingStrategy             *string
 	FilamentReserved            bool
+	PlateSlicedAt               pgtype.Timestamptz
+	PlateSliceError             *string
+	TotalLayers                 *int32
+	SupportGrams                pgtype.Numeric
+	PurgeGrams                  pgtype.Numeric
+	ColourChanges               *int32
+	FilamentByColour            []byte
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 }
@@ -204,23 +211,25 @@ type MaterialProfile struct {
 }
 
 type Order struct {
-	ID                uuid.UUID
-	ShopConnectionID  *uuid.UUID
-	ShopifyOrderID    int64
-	OrderNumber       string
-	CustomerName      *string
-	ShopifyCustomerID *int64
-	CustomerEmail     *string
-	CustomerPhone     *string
-	FinancialStatus   string
-	TotalPrice        pgtype.Numeric
-	Currency          string
-	LineItems         []byte
-	Status            string
-	Source            string
-	ImportedAt        pgtype.Timestamptz
-	CreatedAt         pgtype.Timestamptz
-	UpdatedAt         pgtype.Timestamptz
+	ID                  uuid.UUID
+	ShopConnectionID    *uuid.UUID
+	ShopifyOrderID      int64
+	OrderNumber         string
+	CustomerName        *string
+	ShopifyCustomerID   *int64
+	CustomerEmail       *string
+	CustomerPhone       *string
+	FinancialStatus     string
+	TotalPrice          pgtype.Numeric
+	Currency            string
+	LineItems           []byte
+	Status              string
+	Source              string
+	ImportedAt          pgtype.Timestamptz
+	JobCreationError    *string
+	JobCreationFailedAt pgtype.Timestamptz
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
 }
 
 type OrderLineItem struct {
@@ -253,6 +262,7 @@ type ProductionJob struct {
 	Quantity                   int32
 	Status                     string
 	AssemblyStatus             string
+	FinishingStatus            string
 	QcStatus                   string
 	PackagingStatus            string
 	ShopifyOrderID             *int64
@@ -295,6 +305,12 @@ type ProductionJob struct {
 	QualityMm                  pgtype.Numeric
 	MachineFamily              *string
 	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
 	CreatedAt                  pgtype.Timestamptz
 	UpdatedAt                  pgtype.Timestamptz
 }
@@ -312,6 +328,21 @@ type ProductionJobAssemblyCheck struct {
 	AssembledAt      pgtype.Timestamptz
 }
 
+type ProductionJobEvent struct {
+	ID           uuid.UUID
+	JobID        uuid.UUID
+	Seq          int64
+	EventType    string
+	Stage        *string
+	Reason       *string
+	Comment      *string
+	ActorID      string
+	BatchID      *uuid.UUID
+	RelatedJobID *uuid.UUID
+	Metadata     []byte
+	CreatedAt    pgtype.Timestamptz
+}
+
 type ProductionJobFailure struct {
 	ID                  uuid.UUID
 	JobID               uuid.UUID
@@ -322,6 +353,19 @@ type ProductionJobFailure struct {
 	TimeWastedMinutes   *int32
 	CreatedBy           string
 	CreatedAt           pgtype.Timestamptz
+}
+
+type ProductionJobFinishingCheck struct {
+	ID              uuid.UUID
+	JobID           uuid.UUID
+	SupportsRemoved bool
+	Sanded          bool
+	SeamsCleaned    bool
+	SurfaceFinishOk bool
+	PhotoFileID     *uuid.UUID
+	Notes           *string
+	FinishedBy      string
+	FinishedAt      pgtype.Timestamptz
 }
 
 type ProductionJobPackagingDetail struct {

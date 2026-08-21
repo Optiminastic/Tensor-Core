@@ -1,6 +1,17 @@
--- Station records: assembly, QC, packaging. Assembly and QC are append-only;
--- packaging is one row per job (re-packaging updates it). All boolean/text, so the
--- queries return the model types directly.
+-- Station records: assembly, finishing, QC, packaging. Assembly, finishing and
+-- QC are append-only; packaging is one row per job (re-packaging updates it).
+-- All boolean/text, so the queries return the model types directly.
+
+-- name: InsertFinishingCheck :one
+INSERT INTO production_job_finishing_checks (
+    id, job_id, supports_removed, sanded, seams_cleaned, surface_finish_ok,
+    photo_file_id, notes, finished_by
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('job_id'), sqlc.arg('supports_removed'), sqlc.arg('sanded'),
+    sqlc.arg('seams_cleaned'), sqlc.arg('surface_finish_ok'), sqlc.narg('photo_file_id'),
+    sqlc.narg('notes'), sqlc.arg('finished_by')
+)
+RETURNING *;
 
 -- name: InsertAssemblyCheck :one
 INSERT INTO production_job_assembly_checks (
@@ -47,3 +58,73 @@ ON CONFLICT (job_id) DO UPDATE SET
     packed_by         = EXCLUDED.packed_by,
     packed_at         = now()
 RETURNING *;
+
+-- The guarded station transitions. Each folds the prior-stage check INTO the
+-- UPDATE's WHERE clause, so check-and-act is one statement and cannot race:
+-- a second concurrent (or double-clicked) call matches no row and comes back
+-- as pgx.ErrNoRows, which the handler turns into a 409. This is the same shape
+-- ApproveBatch uses, and the reason it survives a lost race.
+-- Zero rows means "already left this station", never "does not exist" - the
+-- handler pre-reads for the 404.
+
+-- name: AdvanceJobAssembly :one
+UPDATE production_jobs SET assembly_status = sqlc.arg('assembly_status'), updated_at = now()
+WHERE id = sqlc.arg('id') AND status = 'completed' AND assembly_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+
+-- name: AdvanceJobFinishing :one
+UPDATE production_jobs SET finishing_status = sqlc.arg('finishing_status'), updated_at = now()
+WHERE id = sqlc.arg('id') AND status = 'completed'
+  AND assembly_status <> 'pending' AND finishing_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+
+-- name: AdvanceJobQc :one
+UPDATE production_jobs SET qc_status = sqlc.arg('qc_status'), updated_at = now()
+WHERE id = sqlc.arg('id') AND status = 'completed'
+  AND assembly_status <> 'pending' AND finishing_status <> 'pending' AND qc_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+
+-- name: AdvanceJobPackaging :one
+UPDATE production_jobs SET packaging_status = sqlc.arg('packaging_status'), updated_at = now()
+WHERE id = sqlc.arg('id') AND qc_status = 'passed' AND packaging_status = 'pending'
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          nozzle_profile, filament_grams_required, print_file_id,
+          estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+          personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+          photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+          personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+          personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;

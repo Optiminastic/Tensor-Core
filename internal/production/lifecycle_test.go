@@ -1,38 +1,10 @@
 package production
 
 import (
-	"regexp"
 	"testing"
 )
 
 func strptr(s string) *string { return &s }
-
-var jobNumberPattern = regexp.MustCompile(`^JOB-\d{5}$`)
-var batchNumberPattern = regexp.MustCompile(`^BATCH-\d{5}$`)
-
-func TestNewJobNumberFormat(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		n, err := NewJobNumber()
-		if err != nil {
-			t.Fatalf("NewJobNumber: %v", err)
-		}
-		if !jobNumberPattern.MatchString(n) {
-			t.Fatalf("job number %q does not match JOB-##### (5 digits)", n)
-		}
-	}
-}
-
-func TestNewBatchNumberFormat(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		n, err := NewBatchNumber()
-		if err != nil {
-			t.Fatalf("NewBatchNumber: %v", err)
-		}
-		if !batchNumberPattern.MatchString(n) {
-			t.Fatalf("batch number %q does not match BATCH-##### (5 digits)", n)
-		}
-	}
-}
 
 func TestAutoValidateNotRequired(t *testing.T) {
 	status, c := AutoValidatePersonalisation(LineItem{PersonalisationRequired: false})
@@ -122,6 +94,33 @@ func TestAllowedPatchFieldsByRole(t *testing.T) {
 	}
 }
 
+func TestCompatibilityKeyEquality(t *testing.T) {
+	base := CompatibilityKey{
+		Material: "PLA", NozzleLeft: "0.4", NozzleRight: "", QualityMM: "0.2", MachineFamily: "H2C",
+	}
+	same := base
+	if same != base {
+		t.Error("identical keys should be equal")
+	}
+
+	tests := []struct {
+		name  string
+		other CompatibilityKey
+	}{
+		{"different material", CompatibilityKey{Material: "PETG", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
+		{"different left nozzle", CompatibilityKey{Material: "PLA", NozzleLeft: "0.6", QualityMM: "0.2", MachineFamily: "H2C"}},
+		{"different quality", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.12", MachineFamily: "H2C"}},
+		{"different machine family", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2S"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if base == tc.other {
+				t.Errorf("keys should differ: %+v vs %+v", base, tc.other)
+			}
+		})
+	}
+}
+
 func TestStatusPatchTargetExcludesFailed(t *testing.T) {
 	if ValidStatusTarget(StatusFailed) {
 		t.Error("PATCH must not be able to set status=failed")
@@ -142,5 +141,139 @@ func TestFailureReasonValidation(t *testing.T) {
 	}
 	if !ValidFailureStage(FailureStagePrint) || ValidFailureStage("shipping") {
 		t.Error("failure stage validation is wrong")
+	}
+}
+
+func TestPipelineStage(t *testing.T) {
+	pendingApproval, open, inProgress, completed := BatchPendingApproval, BatchOpen, BatchInProgress, BatchCompleted
+
+	tests := []struct {
+		name string
+		in   PipelineStageInput
+		want string
+	}{
+		{
+			"unbatched, personalisation pending -> NEW",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationPending},
+			StageNew,
+		},
+		{
+			"unbatched, issue reason set -> VALIDATING",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, IssueReason: strptr(IssueSTLMissing)},
+			StageValidating,
+		},
+		{
+			"unbatched, held -> READY",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, Held: true},
+			StageReady,
+		},
+		{
+			"unbatched, clean and unheld -> WAITING_BATCH",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired},
+			StageWaitingBatch,
+		},
+		{
+			"batch pending_approval -> RESERVED",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &pendingApproval},
+			StageReserved,
+		},
+		{
+			"batch open -> BATCHED",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &open},
+			StageBatched,
+		},
+		{
+			"batch in_progress -> PRINTING",
+			PipelineStageInput{Status: StatusQueued, PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &inProgress},
+			StagePrinting,
+		},
+		{
+			"batch completed, job still qc pending -> falls through to QC, not RESERVED/BATCHED",
+			PipelineStageInput{
+				Status: StatusCompleted, QcStatus: QcPending, PackagingStatus: PackagingPending,
+				PersonalisationStatus: PersonalisationNotRequired, BatchStatus: &completed,
+			},
+			StageQC,
+		},
+		{
+			"printed, qc pending -> QC",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPending, PackagingStatus: PackagingPending},
+			StageQC,
+		},
+		{
+			"printed, qc passed but not yet packaged -> still QC (no distinct awaiting-packaging bucket)",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPending},
+			StageQC,
+		},
+		{
+			"printed, qc passed, packaged, not dispatched -> PACKED",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPackaged},
+			StagePacked,
+		},
+		{
+			"printed, qc passed, packaged, dispatched -> DISPATCHED",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcPassed, PackagingStatus: PackagingPackaged, Dispatched: true},
+			StageDispatched,
+		},
+		{
+			"print failed -> FAILED, regardless of batch state",
+			PipelineStageInput{Status: StatusFailed, BatchStatus: &open},
+			StageFailed,
+		},
+		{
+			"qc failed -> FAILED, even though status is completed",
+			PipelineStageInput{Status: StatusCompleted, QcStatus: QcFailed, PackagingStatus: PackagingPending},
+			StageFailed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PipelineStage(tc.in); got != tc.want {
+				t.Errorf("PipelineStage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidIssueReason guards the taxonomy the PATCH allow-list now exposes.
+// issue_reason used to be write-once at creation and absent from the allow-list
+// entirely, so a job flagged stl_missing stayed out of ListBatchableJobs
+// forever - even after someone uploaded the missing STL.
+func TestValidIssueReason(t *testing.T) {
+	for _, reason := range []string{
+		IssueSKUMissing, IssueNoApprovedDesign, IssueSTLMissing,
+		IssueColourMissing, IssueMaterialMissing, IssueProfileMissing,
+		IssueFilamentOutOfStock,
+	} {
+		if !ValidIssueReason(reason) {
+			t.Errorf("ValidIssueReason(%q) = false, want true", reason)
+		}
+	}
+	for _, reason := range []string{"", "banana", "sku missing", "STL_MISSING", "warping"} {
+		if ValidIssueReason(reason) {
+			t.Errorf("ValidIssueReason(%q) = true, want false", reason)
+		}
+	}
+	// "warping" is a failure reason, not an issue reason - the two taxonomies
+	// are deliberately separate and must not leak into each other.
+	if ValidIssueReason("warping") || !ValidFailureReason("warping") {
+		t.Error("the failure and issue taxonomies have been conflated")
+	}
+}
+
+// TestIssueReasonIsPatchableBySupervisorsOnly pins who may clear the flag.
+// Clearing it is a judgement about whether the underlying problem is actually
+// fixed, so it sits with the roles that can already reassign batch_id - not
+// with the operator or the packaging/QC station.
+func TestIssueReasonIsPatchableBySupervisorsOnly(t *testing.T) {
+	for _, role := range []string{roleAdmin, roleProjectLead} {
+		if !AllowedPatchFields([]string{role})["issue_reason"] {
+			t.Errorf("%s cannot patch issue_reason, but should", role)
+		}
+	}
+	for _, role := range []string{roleOperator, rolePackagingQc} {
+		if AllowedPatchFields([]string{role})["issue_reason"] {
+			t.Errorf("%s can patch issue_reason, but should not", role)
+		}
 	}
 }

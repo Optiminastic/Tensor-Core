@@ -75,40 +75,44 @@ func VerifyWebhookHMAC(body []byte, headerB64, secret string) bool {
 }
 
 // statePayload is the signed OAuth state carried through the redirect: the shop it
-// was issued for, a nonce, and an expiry.
+// was issued for, which brand's Integrations page started the flow (so the
+// callback can send the browser back to where it came from - shopify_connections
+// itself has no brand association, this is UX-only), a nonce, and an expiry.
 type statePayload struct {
 	Shop  string `json:"shop"`
+	Brand string `json:"brand"`
 	Nonce string `json:"nonce"`
 	Exp   int64  `json:"exp"`
 }
 
 // SignState returns an opaque, HMAC-signed state token binding the flow to a shop
-// until expiresAt. nonce should be random per authorize call.
-func SignState(shop, nonce, secret string, expiresAt time.Time) string {
-	payload, _ := json.Marshal(statePayload{Shop: shop, Nonce: nonce, Exp: expiresAt.Unix()})
+// and the brand that initiated it, until expiresAt. nonce should be random per
+// authorize call.
+func SignState(shop, brand, nonce, secret string, expiresAt time.Time) string {
+	payload, _ := json.Marshal(statePayload{Shop: shop, Brand: brand, Nonce: nonce, Exp: expiresAt.Unix()})
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	return body + "." + signStateBody(body, secret)
 }
 
-// VerifyState checks a state token's signature and expiry and returns the shop it
-// was issued for.
-func VerifyState(token, secret string, now time.Time) (string, bool) {
+// VerifyState checks a state token's signature and expiry and returns the shop
+// and brand it was issued for.
+func VerifyState(token, secret string, now time.Time) (shop, brand string, ok bool) {
 	body, sig, found := strings.Cut(token, ".")
 	if !found || !hmac.Equal([]byte(sig), []byte(signStateBody(body, secret))) {
-		return "", false
+		return "", "", false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var p statePayload
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", false
+		return "", "", false
 	}
 	if now.Unix() > p.Exp {
-		return "", false
+		return "", "", false
 	}
-	return p.Shop, true
+	return p.Shop, p.Brand, true
 }
 
 func signStateBody(body, secret string) string {

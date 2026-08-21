@@ -80,6 +80,11 @@ func main() {
 	river.AddWorker(workers, slicing.NewSliceWorker(
 		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, orientOpts, logger, cfg.FakeSlice,
 	))
+	// Same queue, same Bambu install, different question: SliceArgs costs one
+	// design, SliceBatchArgs measures one merged bed (see batch_queue.go).
+	river.AddWorker(workers, slicing.NewBatchSliceWorker(
+		store, objects, cfg.BambuRoot, sliceTimeout, logger, cfg.FakeSlice,
+	))
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
 		Queues:  map[string]river.QueueConfig{slicing.QueueName: {MaxWorkers: concurrency}},

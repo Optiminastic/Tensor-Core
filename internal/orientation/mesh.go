@@ -20,6 +20,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -195,16 +196,48 @@ func parseVertex(fields []string) (Vec3, error) {
 }
 
 // --- 3MF -------------------------------------------------------------------
-// A 3MF is a zip whose 3D/3dmodel.model is XML holding one or more meshes. We
-// read every object's mesh and merge the triangles. Component/build transforms
-// are not applied (v1): a single-part 3MF, the common print case, needs none.
+// A 3MF is a zip whose 3D/3dmodel.model is XML describing the build.
+//
+// The naive reading - "collect every object's mesh from 3dmodel.model" - works
+// only for the simplest exports. Every slicer in real use (Bambu Studio,
+// PrusaSlicer, Orca) writes the PRODUCTION EXTENSION instead:
+//
+//	3D/3dmodel.model      <object id="2"><components>
+//	                        <component p:path="/3D/Objects/object_1.model"
+//	                                   objectid="1" transform="..."/>
+//	3D/Objects/object_1.model   <- the actual vertices and triangles live here
+//
+// The root file then holds no triangles at all, so the naive reader returns
+// "3MF contained no triangles" for a perfectly valid model. Measured against a
+// real folder of Bambu exports, 5 of 11 failed outright and a sixth reported a
+// vase as 4.7mm tall because only a fragment was read.
+//
+// So: follow component references into other parts of the archive, and apply
+// the transforms. Both matter for a bounding box - a component can be rotated
+// or scaled, and a model whose parts are placed by transform is the wrong size
+// without them.
 
 type xml3MFModel struct {
 	Objects []xml3MFObject `xml:"resources>object"`
+	Items   []xml3MFItem   `xml:"build>item"`
 }
 type xml3MFObject struct {
-	Vertices  []xml3MFVertex   `xml:"mesh>vertices>vertex"`
-	Triangles []xml3MFTriangle `xml:"mesh>triangles>triangle"`
+	ID         int               `xml:"id,attr"`
+	Vertices   []xml3MFVertex    `xml:"mesh>vertices>vertex"`
+	Triangles  []xml3MFTriangle  `xml:"mesh>triangles>triangle"`
+	Components []xml3MFComponent `xml:"components>component"`
+}
+type xml3MFComponent struct {
+	ObjectID int `xml:"objectid,attr"`
+	// Path is the production extension's p:path. Empty means "an object in
+	// this same part". Go matches attributes on local name, so the p: prefix
+	// needs no namespace handling here.
+	Path      string `xml:"path,attr"`
+	Transform string `xml:"transform,attr"`
+}
+type xml3MFItem struct {
+	ObjectID  int    `xml:"objectid,attr"`
+	Transform string `xml:"transform,attr"`
 }
 type xml3MFVertex struct {
 	X float64 `xml:"x,attr"`
@@ -217,51 +250,309 @@ type xml3MFTriangle struct {
 	V3 int `xml:"v3,attr"`
 }
 
+// affine is 3MF's 4x3 transform, as the 12 numbers the format writes them in.
+//
+// 3MF uses row-vector convention: a point is [x y z 1] multiplied on the LEFT
+// by the matrix, so the last three numbers are the translation and the first
+// nine are column-major within each row. Getting this transposed silently
+// produces a plausible-but-wrong box for anything rotated, which is exactly the
+// kind of error that survives review - hence spelling it out.
+type affine struct {
+	m   [12]float64
+	set bool
+}
+
+func (a affine) apply(v Vec3) Vec3 {
+	if !a.set {
+		return v
+	}
+	return Vec3{
+		X: v.X*a.m[0] + v.Y*a.m[3] + v.Z*a.m[6] + a.m[9],
+		Y: v.X*a.m[1] + v.Y*a.m[4] + v.Z*a.m[7] + a.m[10],
+		Z: v.X*a.m[2] + v.Y*a.m[5] + v.Z*a.m[8] + a.m[11],
+	}
+}
+
+// mul composes two transforms: outer applied after inner.
+func (a affine) mul(inner affine) affine {
+	if !a.set {
+		return inner
+	}
+	if !inner.set {
+		return a
+	}
+	var out affine
+	out.set = true
+	for row := range 3 {
+		for col := range 3 {
+			out.m[row*3+col] = inner.m[row*3]*a.m[col] +
+				inner.m[row*3+1]*a.m[3+col] +
+				inner.m[row*3+2]*a.m[6+col]
+		}
+	}
+	t := a.apply(Vec3{X: inner.m[9], Y: inner.m[10], Z: inner.m[11]})
+	out.m[9], out.m[10], out.m[11] = t.X, t.Y, t.Z
+	return out
+}
+
+// parseAffine reads 3MF's 12-number transform attribute. An absent or
+// malformed value yields the identity rather than an error: a transform we
+// cannot read is far better treated as "no transform" than as a reason to
+// reject an otherwise-valid model.
+func parseAffine(s string) affine {
+	if strings.TrimSpace(s) == "" {
+		return affine{}
+	}
+	fields := strings.Fields(s)
+	if len(fields) != 12 {
+		return affine{}
+	}
+	var a affine
+	for i, f := range fields {
+		v, err := strconv.ParseFloat(f, 64)
+		if err != nil {
+			return affine{}
+		}
+		a.m[i] = v
+	}
+	a.set = true
+	return a
+}
+
 // max3MFModelBytes bounds the decompressed model XML read from a 3MF archive, so
 // a crafted archive (a zip bomb) cannot exhaust memory.
 const max3MFModelBytes = 512 << 20 // 512 MiB
 
-// Load3MF opens the 3MF archive at path and parses its model mesh(es).
+// rootModelPart is where a 3MF's build always starts.
+const rootModelPart = "3d/3dmodel.model"
+
+// max3MFComponentDepth bounds component recursion. A 3MF may legally nest
+// components, and a malformed or hostile one may reference itself; depth plus
+// the visited set below make either terminate.
+const max3MFComponentDepth = 16
+
+// max3MFTriangles caps how much geometry one archive may contribute. These
+// files reach tens of millions of triangles for a detailed model, and the
+// bounding box - the only thing callers need here - is fully determined long
+// before that.
+const max3MFTriangles = 20_000_000
+
+// archive3MF is one opened 3MF and its parsed model parts, so a part shared by
+// several components is read once rather than per reference.
+type archive3MF struct {
+	files  map[string]*zip.File
+	parsed map[string]*xml3MFModel
+}
+
+// Load3MF opens the 3MF archive at path and returns its build as one mesh,
+// following component references into other parts of the archive and applying
+// build/component transforms.
 func Load3MF(path string) (Mesh, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return Mesh{}, err
 	}
 	defer func() { _ = zr.Close() }()
-	for _, f := range zr.File {
-		if strings.EqualFold(filepath.ToSlash(f.Name), "3D/3dmodel.model") {
-			rc, err := f.Open()
-			if err != nil {
-				return Mesh{}, err
-			}
-			defer func() { _ = rc.Close() }()
-			return parse3MFModel(io.LimitReader(rc, max3MFModelBytes))
-		}
-	}
-	return Mesh{}, errors.New("orientation: 3MF has no 3D/3dmodel.model")
-}
 
-func parse3MFModel(r io.Reader) (Mesh, error) {
-	var model xml3MFModel
-	if err := xml.NewDecoder(r).Decode(&model); err != nil {
+	a := &archive3MF{
+		files:  make(map[string]*zip.File, len(zr.File)),
+		parsed: map[string]*xml3MFModel{},
+	}
+	for _, f := range zr.File {
+		a.files[normalisePart(f.Name)] = f
+	}
+
+	root, err := a.part(rootModelPart)
+	if err != nil {
 		return Mesh{}, err
 	}
-	tris := make([]Triangle, 0, 256)
-	for _, obj := range model.Objects {
-		for _, t := range obj.Triangles {
-			if !validIndices(t, len(obj.Vertices)) {
-				continue
-			}
-			v0 := vertexToVec(obj.Vertices[t.V1])
-			v1 := vertexToVec(obj.Vertices[t.V2])
-			v2 := vertexToVec(obj.Vertices[t.V3])
-			tris = append(tris, newTriangle(v0, v1, v2))
+
+	var tris []Triangle
+	// The build section is the authoritative list of what is actually on the
+	// plate. Falling back to "every object in the root part" covers exports
+	// that omit it, and preserves the behaviour simple single-mesh 3MFs had.
+	if len(root.Items) > 0 {
+		for _, item := range root.Items {
+			tris = a.collect(tris, rootModelPart, item.ObjectID, parseAffine(item.Transform), 0, map[string]bool{})
+		}
+	} else {
+		for _, obj := range root.Objects {
+			tris = a.collect(tris, rootModelPart, obj.ID, affine{}, 0, map[string]bool{})
 		}
 	}
+
 	if len(tris) == 0 {
 		return Mesh{}, errors.New("orientation: 3MF contained no triangles")
 	}
 	return buildMesh(tris), nil
+}
+
+// ItemBounds is the axis-aligned extent of one build item.
+type ItemBounds struct {
+	Min, Max Vec3
+}
+
+// Size is the item's X/Y/Z extent in the file's units (millimetres for every
+// slicer-written 3MF seen in practice).
+func (b ItemBounds) Size() (x, y, z float64) {
+	return b.Max.X - b.Min.X, b.Max.Y - b.Min.Y, b.Max.Z - b.Min.Z
+}
+
+// Load3MFItems returns the bounds of each build item separately, rather than
+// the single merged box Load3MF gives.
+//
+// The distinction matters when a 3MF is a slicer PROJECT rather than a single
+// model. Bambu Studio exports the whole plate: a file with four squid figures
+// arranged side by side measures 428mm across as one box, which fits no bed and
+// describes no product. Each build item is one printable unit, and that is what
+// a catalogue entry should be measured as.
+//
+// Bounds only, not meshes: a detailed plate runs to millions of triangles per
+// item and callers asking this question want dimensions, not geometry.
+func Load3MFItems(path string) ([]ItemBounds, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = zr.Close() }()
+
+	a := &archive3MF{
+		files:  make(map[string]*zip.File, len(zr.File)),
+		parsed: map[string]*xml3MFModel{},
+	}
+	for _, f := range zr.File {
+		a.files[normalisePart(f.Name)] = f
+	}
+	root, err := a.part(rootModelPart)
+	if err != nil {
+		return nil, err
+	}
+
+	type ref struct {
+		id int
+		at affine
+	}
+	var refs []ref
+	if len(root.Items) > 0 {
+		for _, it := range root.Items {
+			refs = append(refs, ref{id: it.ObjectID, at: parseAffine(it.Transform)})
+		}
+	} else {
+		for _, obj := range root.Objects {
+			refs = append(refs, ref{id: obj.ID})
+		}
+	}
+
+	out := make([]ItemBounds, 0, len(refs))
+	for _, r := range refs {
+		tris := a.collect(nil, rootModelPart, r.id, r.at, 0, map[string]bool{})
+		if len(tris) == 0 {
+			continue
+		}
+		m := buildMesh(tris)
+		out = append(out, ItemBounds{Min: m.Min, Max: m.Max})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("orientation: 3MF contained no triangles")
+	}
+	return out, nil
+}
+
+// part reads and caches one .model part of the archive.
+func (a *archive3MF) part(name string) (*xml3MFModel, error) {
+	name = normalisePart(name)
+	if m, ok := a.parsed[name]; ok {
+		return m, nil
+	}
+	f, ok := a.files[name]
+	if !ok {
+		return nil, fmt.Errorf("orientation: 3MF has no %s", name)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+
+	var model xml3MFModel
+	if err := xml.NewDecoder(io.LimitReader(rc, max3MFModelBytes)).Decode(&model); err != nil {
+		return nil, err
+	}
+	a.parsed[name] = &model
+	return &model, nil
+}
+
+// collect appends the triangles of one object - its own mesh plus everything
+// its components reference - transformed into the caller's space.
+//
+// Best-effort by design: a component pointing at a missing part, or a cycle, is
+// skipped rather than failing the whole read. A partial box beats no box, and
+// the caller can still see the model.
+func (a *archive3MF) collect(
+	tris []Triangle, partName string, objectID int, at affine, depth int, visiting map[string]bool,
+) []Triangle {
+	if depth > max3MFComponentDepth || len(tris) >= max3MFTriangles {
+		return tris
+	}
+	partName = normalisePart(partName)
+	key := fmt.Sprintf("%s#%d", partName, objectID)
+	if visiting[key] {
+		return tris // cycle
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+
+	model, err := a.part(partName)
+	if err != nil {
+		return tris
+	}
+	obj := findObject(model, objectID)
+	if obj == nil {
+		return tris
+	}
+
+	for _, t := range obj.Triangles {
+		if !validIndices(t, len(obj.Vertices)) {
+			continue
+		}
+		tris = append(tris, newTriangle(
+			at.apply(vertexToVec(obj.Vertices[t.V1])),
+			at.apply(vertexToVec(obj.Vertices[t.V2])),
+			at.apply(vertexToVec(obj.Vertices[t.V3])),
+		))
+		if len(tris) >= max3MFTriangles {
+			return tris
+		}
+	}
+
+	for _, c := range obj.Components {
+		child := partName
+		if c.Path != "" {
+			child = c.Path
+		}
+		tris = a.collect(tris, child, c.ObjectID, at.mul(parseAffine(c.Transform)), depth+1, visiting)
+	}
+	return tris
+}
+
+// findObject locates an object by id, falling back to positional order for
+// exports that omit the id attribute on a single-object part.
+func findObject(model *xml3MFModel, id int) *xml3MFObject {
+	for i := range model.Objects {
+		if model.Objects[i].ID == id {
+			return &model.Objects[i]
+		}
+	}
+	if len(model.Objects) == 1 && model.Objects[0].ID == 0 {
+		return &model.Objects[0]
+	}
+	return nil
+}
+
+// normalisePart makes archive paths comparable: 3MF references are absolute
+// ("/3D/Objects/x.model") while zip entries are not, and case varies by writer.
+func normalisePart(name string) string {
+	return strings.ToLower(strings.TrimPrefix(filepath.ToSlash(name), "/"))
 }
 
 func validIndices(t xml3MFTriangle, n int) bool {

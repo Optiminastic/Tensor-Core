@@ -1,18 +1,43 @@
 package slicing
 
 // Maps a design's answers to Bambu Studio system profiles. Ported from the
-// Python worker's profiles.py, then moved from the H2S single-nozzle
-// workaround to the shop's real Bambu H2C (dual-nozzle) presets once the
-// design form started capturing per-nozzle diameter/flow directly (see
-// internal/httpapi/design_machine_link.go).
+// Python worker's profiles.py.
 //
-// Headless CLI slicing on a real multi-extruder H2C is still unconfirmed
-// (Bambu's CLI has historically refused to map a filament to an extruder on a
-// multi-extruder machine - see Optiminastic/Tensor#3) - machineProfile and the
-// preset names below are the shop's real BBL H2C system-profile names as
-// captured from Bambu Studio's own UI, but headless resolution against them
-// has not yet been verified end-to-end (needs a Linux box with the Bambu
-// Studio AppImage extracted at BAMBU_ROOT; this environment can't run it).
+// # Why H2S and not the shop's H2C
+//
+// This briefly pointed at the shop's real Bambu H2C (dual-nozzle) presets,
+// under the name "Bambu Lab H2C 0.4 & 0.4 nozzles". Slicing every design in
+// the Dockerised worker (sliceworker.Dockerfile) proved that wrong twice over:
+//
+//  1. That name is Bambu Studio's *UI display* label. No such file is bundled
+//     - the machine profiles are named "Bambu Lab H2C 0.4 nozzle.json" - so
+//     ResolveProfiles failed with "missing machine profile" before Bambu was
+//     ever invoked. Every real slice failed; only FAKE_SLICE hid it.
+//
+//  2. Fixing the name only got as far as the next wall. The H2C is genuinely
+//     multi-extruder (nozzle_diameter ["0.4","0.4"]), and its CLI refuses to
+//     assign a filament to an extruder headless:
+//
+//     plate 1 : some filaments can not be mapped under auto mode for
+//     multi extruder printer / return -66
+//
+//     That is Optiminastic/Tensor#3, now confirmed rather than suspected.
+//     --estimate-mode (rejected: wants a machine switch, not a bare model),
+//     --load-filament-ids, --filament-map, --filament-map-mode Manual and
+//     passing one filament per extruder were all tried; every one fails the
+//     same way.
+//
+// So slicing runs against the H2S - the H2C's own single-extruder sibling:
+// same printer generation, same 0.4 nozzle, same bed, and a complete set of
+// presets for all seven qualities and both materials. It slices cleanly
+// headless. A single-extruder estimate for a part that will print on one
+// nozzle anyway is a real measurement, not a proxy from a different class of
+// machine - but a genuinely two-material print would be estimated as if it
+// were run in one material, so a multi-material design's time and filament
+// split are NOT trustworthy until the H2C CLI can map extruders.
+//
+// Switching back is deliberately a two-line change: set machineProfile and
+// presetSuffix, and re-run one real slice to confirm the CLI cooperates.
 
 import (
 	"fmt"
@@ -21,20 +46,27 @@ import (
 	"strings"
 )
 
-const machineProfile = "Bambu Lab H2C 0.4 & 0.4 nozzles"
+const (
+	machineProfile = "Bambu Lab H2S 0.4 nozzle"
+	// presetSuffix is the "@BBL <model>" tail every process and filament
+	// preset name carries. It must match machineProfile's printer model:
+	// Bambu resolves a process/filament preset against the loaded machine,
+	// and a mismatched pair is not a supported combination.
+	presetSuffix = "@BBL H2S"
+)
 
-// quality -> process preset (layer height / speed profile). Keys match the
-// design form's quality dropdown exactly (internal/httpapi/designs.go's
-// validQualities) - the display labels are the literal BBL H2C system preset
-// names shown in Bambu Studio.
+// quality -> process preset (layer height / speed profile), without the
+// machine suffix. Keys match the design form's quality dropdown exactly
+// (internal/httpapi/designs.go's validQualities); the values are the literal
+// system preset names shown in Bambu Studio.
 var qualityProcess = map[string]string{
-	"0.08-high":     "0.08mm High Quality @BBL H2C",
-	"0.12-high":     "0.12mm High Quality @BBL H2C",
-	"0.16-high":     "0.16mm High Quality @BBL H2C",
-	"0.16-standard": "0.16mm Standard @BBL H2C",
-	"0.20-high":     "0.20mm High Quality @BBL H2C",
-	"0.20-standard": "0.20mm Standard @BBL H2C",
-	"0.24-standard": "0.24mm Standard @BBL H2C",
+	"0.08-high":     "0.08mm High Quality",
+	"0.12-high":     "0.12mm High Quality",
+	"0.16-high":     "0.16mm High Quality",
+	"0.16-standard": "0.16mm Standard",
+	"0.20-high":     "0.20mm High Quality",
+	"0.20-standard": "0.20mm Standard",
+	"0.24-standard": "0.24mm Standard",
 }
 
 type filamentProfile struct {
@@ -43,12 +75,43 @@ type filamentProfile struct {
 }
 
 // materialFilament keys match the design form's material dropdown exactly
-// (internal/httpapi/designs.go's validMaterials). PA-CF's density is an
-// approximate industry-typical figure for carbon-fibre-filled nylon, not a
-// measured value - refine once real slicing produces one.
+// (internal/httpapi/designs.go's validMaterials); names carry no machine
+// suffix (see presetName). PA-CF's density is an approximate industry-typical
+// figure for carbon-fibre-filled nylon, not a measured value - refine once
+// real slicing produces one.
 var materialFilament = map[string]filamentProfile{
-	"PLA Basics": {"Bambu PLA Basic @BBL H2C", 1.24},
-	"PA-CF":      {"Bambu PA-CF @BBL H2C", 1.19},
+	"PLA Basics": {"Bambu PLA Basic", 1.24},
+	"PA-CF":      {"Bambu PA-CF", 1.19},
+}
+
+// presetName qualifies a bare preset name with the machine suffix, e.g.
+// "0.20mm Standard" -> "0.20mm Standard @BBL H2S".
+func presetName(base string) string { return base + " " + presetSuffix }
+
+// qualityAliases map the shorthand quality values older designs were created
+// with onto today's explicit layer-height keys.
+//
+// The design form once offered "draft"/"standard"/"fine" without a layer
+// height; it now asks for the height directly. Designs created under the old
+// form still carry the old value, and without this they fail to slice at all
+// ("unknown quality: standard") - which in practice meant their batches never
+// got a measured print time and could never be committed to a machine. Mapping
+// them to the nearest current preset is better than refusing to slice work that
+// is otherwise perfectly printable.
+var qualityAliases = map[string]string{
+	"draft":    "0.24-standard",
+	"standard": "0.20-standard",
+	"fine":     "0.16-high",
+	"high":     "0.12-high",
+}
+
+// canonicalQuality resolves a design's quality answer to a key qualityProcess
+// knows, translating a legacy shorthand if that is what it is.
+func canonicalQuality(quality string) string {
+	if canonical, ok := qualityAliases[quality]; ok {
+		return canonical
+	}
+	return quality
 }
 
 // AvailableFilament is one entry in the machine-admin profile-options catalog.
@@ -65,7 +128,7 @@ type AvailableFilament struct {
 func AvailableFilaments() []AvailableFilament {
 	out := make([]AvailableFilament, 0, len(materialFilament))
 	for material, f := range materialFilament {
-		out = append(out, AvailableFilament{Material: material, FilamentPreset: f.name, Density: f.density})
+		out = append(out, AvailableFilament{Material: material, FilamentPreset: presetName(f.name), Density: f.density})
 	}
 	return out
 }
@@ -95,7 +158,7 @@ func AvailableLayerHeights() []float64 {
 // its numeric layer height, for snapshotting onto a matched job. Nil for an
 // unrecognised quality.
 func LayerHeightMM(quality string) *float64 {
-	mm, ok := qualityLayerHeightMM[strings.ToLower(quality)]
+	mm, ok := qualityLayerHeightMM[canonicalQuality(strings.ToLower(quality))]
 	if !ok {
 		return nil
 	}
@@ -110,13 +173,13 @@ type ResolvedProfiles struct {
 	DensityGCm3  float64
 }
 
-// ResolveProfiles maps (material, quality) to bundled Bambu H2S profiles under
+// ResolveProfiles maps (material, quality) to the bundled Bambu profiles under
 // bambuRoot/resources/profiles/BBL. Errors when a profile is unsupported/missing.
 func ResolveProfiles(bambuRoot, material, quality string) (ResolvedProfiles, error) {
 	material = strings.TrimSpace(material)
 	quality = strings.ToLower(strings.TrimSpace(quality))
 
-	process, ok := qualityProcess[quality]
+	process, ok := qualityProcess[canonicalQuality(quality)]
 	if !ok {
 		return ResolvedProfiles{}, fmt.Errorf("unknown quality: %s", quality)
 	}
@@ -129,11 +192,11 @@ func ResolveProfiles(bambuRoot, material, quality string) (ResolvedProfiles, err
 	if err != nil {
 		return ResolvedProfiles{}, err
 	}
-	processPath, err := bblProfile(bambuRoot, "process", process)
+	processPath, err := bblProfile(bambuRoot, "process", presetName(process))
 	if err != nil {
 		return ResolvedProfiles{}, err
 	}
-	filamentPath, err := bblProfile(bambuRoot, "filament", filament.name)
+	filamentPath, err := bblProfile(bambuRoot, "filament", presetName(filament.name))
 	if err != nil {
 		return ResolvedProfiles{}, err
 	}

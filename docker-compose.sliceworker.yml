@@ -1,0 +1,40 @@
+# The slice worker: the Go River worker plus a real Bambu Studio install.
+#
+#   docker compose -f docker-compose.sliceworker.yml up --build
+#
+# It needs no ports - it consumes River "slice" jobs from Postgres and reads
+# and writes object storage. Scale it with `--scale sliceworker=N`; River hands
+# each job to exactly one worker.
+#
+# Configuration comes from env/local.env, the same file cmd/sliceworker loads
+# when run on the host, with two overrides below. That file is gitignored and
+# excluded from the build context by .dockerignore - it is mounted at run time,
+# never baked into the image.
+
+services:
+  sliceworker:
+    build:
+      context: .
+      dockerfile: sliceworker.Dockerfile
+    image: tensor-slice-worker
+    env_file:
+      - env/local.env
+    environment:
+      # The whole point of running in this image. env/local.env sets
+      # FAKE_SLICE=true because a Windows host cannot run Bambu Studio; here it
+      # can, so fabricated metrics would be a waste of a working slicer.
+      FAKE_SLICE: "false"
+      # Where sliceworker.Dockerfile extracts the AppImage.
+      BAMBU_ROOT: /opt/bambu/squashfs-root
+      # env/local.env points DATABASE_URL at Neon and S3_* at real AWS, both
+      # reachable from inside the container. Point either at a service on the
+      # host instead and it must be host.docker.internal, not localhost -
+      # localhost inside a container is the container.
+    restart: unless-stopped
+    # Slicing is CPU-bound and SLICE_CONCURRENCY (default 2) runs that many at
+    # once. Uncapped, a burst of batches can starve everything else on the box.
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G

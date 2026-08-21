@@ -26,6 +26,20 @@ const (
 	defaultInfillPct = 15.0
 )
 
+// sliceOverhead is the headroom River's job timeout gets on top of the
+// configured slice deadline. RunSlice's own context.WithTimeout covers only the
+// Bambu subprocess; downloading the STL, the orientation analysis, parsing
+// result.json and the plate gcode, and uploading the merged gcode all happen
+// outside it.
+//
+// This is deliberately derived from SLICE_TIMEOUT_SECONDS rather than
+// separately configured. Without any Timeout() at all, River applied its own
+// 1-minute default and cancelled the job long before the configured 300s could
+// fire - so a slow slice died as context.Canceled and surfaced as the
+// nonsensical "slicer produced no result.json". An independent env var set
+// below SLICE_TIMEOUT_SECONDS would silently restore exactly that bug.
+const sliceOverhead = 3 * time.Minute
+
 // SliceWorker slices one design per job. It holds only immutable dependencies, so
 // River can run SliceConcurrency copies of Work concurrently.
 type SliceWorker struct {
@@ -59,6 +73,14 @@ func NewSliceWorker(
 	}
 }
 
+// Timeout gives River a deadline that sits outside RunSlice's own, so the
+// configured slice timeout is the one that actually fires. Returning zero here
+// (which is what embedding river.WorkerDefaults does) means River falls back to
+// its 1-minute JobTimeoutDefault - see sliceOverhead.
+func (w *SliceWorker) Timeout(*river.Job[SliceArgs]) time.Duration {
+	return w.sliceTimeout + sliceOverhead
+}
+
 // Work runs one slice job. Any returned error tells River to retry with backoff;
 // on the final attempt we also mark the domain job and design failed so a design
 // never sits stuck in "slicing". A nil return closes the job and prices the design.
@@ -67,7 +89,9 @@ func (w *SliceWorker) Work(ctx context.Context, job *river.Job[SliceArgs]) error
 	w.logger.Info("slice start", "job", args.JobID, "design", args.DesignID, "attempt", job.Attempt)
 
 	if err := MarkSlicing(ctx, w.store, args.DesignID); err != nil {
-		return fmt.Errorf("mark slicing: %w", err)
+		wrapped := fmt.Errorf("mark slicing: %w", err)
+		w.failIfFinalAttempt(ctx, job, wrapped)
+		return wrapped
 	}
 
 	var metrics PerUnitMetrics
@@ -81,19 +105,36 @@ func (w *SliceWorker) Work(ctx context.Context, job *river.Job[SliceArgs]) error
 	}
 	if err != nil {
 		w.logger.Error("slice failed", "job", args.JobID, "attempt", job.Attempt, "error", err)
-		// River discards the job after the final attempt; mirror that in our own
-		// records so the design shows as failed to the user.
-		if job.Attempt >= job.MaxAttempts {
-			FailJob(ctx, w.store, args.JobID, err.Error())
-		}
+		w.failIfFinalAttempt(ctx, job, err)
 		return err
 	}
 
 	if err := ProcessSliceResult(ctx, w.store, args.JobID, args.DesignID, args.BrandSlug, metrics); err != nil {
-		return fmt.Errorf("process slice result: %w", err)
+		wrapped := fmt.Errorf("process slice result: %w", err)
+		w.failIfFinalAttempt(ctx, job, wrapped)
+		return wrapped
 	}
 	w.logger.Info("slice done", "job", args.JobID, "design", args.DesignID)
 	return nil
+}
+
+// failIfFinalAttempt mirrors River's discard rule in our own records. On the
+// last attempt a returned error means the job is gone for good, so the slice job
+// and its design must be marked failed - nothing else ever moves them, and a
+// design left in "slicing" stays there forever.
+//
+// Every terminal path calls this. Previously only the slice-error path did, so a
+// MarkSlicing or ProcessSliceResult failure discarded the job silently. The
+// error is logged rather than returned: the caller is already returning the real
+// failure, and this bookkeeping must not mask it.
+func (w *SliceWorker) failIfFinalAttempt(ctx context.Context, job *river.Job[SliceArgs], cause error) {
+	if job.Attempt < job.MaxAttempts {
+		return
+	}
+	if err := FailJob(ctx, w.store, job.Args.JobID, cause.Error()); err != nil {
+		w.logger.Error("could not mark the slice job failed",
+			"job", job.Args.JobID, "design", job.Args.DesignID, "error", err)
+	}
 }
 
 // slice performs the STL-in, per-unit-metrics-out pipeline for one job. It works

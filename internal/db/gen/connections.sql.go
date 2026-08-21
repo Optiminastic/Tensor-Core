@@ -95,6 +95,23 @@ func (q *Queries) GetConnectionWithToken(ctx context.Context, arg GetConnectionW
 	return i, err
 }
 
+const getShopifyConnectionByDomain = `-- name: GetShopifyConnectionByDomain :one
+SELECT id FROM brand_connections
+WHERE provider = 'shopify' AND status = 'connected' AND lower(external_account_id) = lower($1)
+LIMIT 1
+`
+
+// GetShopifyConnectionByDomain lets the inbound order webhooks (webhooks.go)
+// accept a store connected only via the brand-level Shopify OAuth flow
+// (brand_connections), not just the dedicated shopify_connections one - a
+// webhook has no brand_slug to key off, only the shop domain Shopify sends.
+func (q *Queries) GetShopifyConnectionByDomain(ctx context.Context, domain string) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getShopifyConnectionByDomain, domain)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const listConnectionsForBrand = `-- name: ListConnectionsForBrand :many
 
 SELECT id, brand_slug, provider, status, external_account_id,

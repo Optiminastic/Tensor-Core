@@ -92,6 +92,29 @@ func (g *Guards) RequirePermission(key string) gin.HandlerFunc {
 	}
 }
 
+// HasPermission is RequirePermission for a route whose required permission is
+// not known until the body is parsed - raising a station issue needs
+// assembly:submit, finishing:submit or qc:submit depending on the stage, which
+// a router-level middleware cannot see.
+//
+// It aborts with the same 401/403 and the same detail strings as
+// RequirePermission, and returns false when it has done so, so a caller can
+// simply `if !g.HasPermission(c, key) { return }`. Still a permission check,
+// never a role check.
+func (g *Guards) HasPermission(c *gin.Context, key string) bool {
+	user, ok := UserFrom(c)
+	if !ok {
+		c.Header("WWW-Authenticate", "Bearer")
+		abortDetail(c, http.StatusUnauthorized, "Missing bearer token")
+		return false
+	}
+	if !user.Has(key) {
+		abortDetail(c, http.StatusForbidden, "Missing required permission: "+key)
+		return false
+	}
+	return true
+}
+
 // RequireInternalSecret guards the service-to-service endpoints with a
 // constant-time secret compare. An unconfigured secret fails closed with 503.
 func (g *Guards) RequireInternalSecret() gin.HandlerFunc {

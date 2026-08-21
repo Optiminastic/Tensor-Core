@@ -3,7 +3,6 @@ package production
 import (
 	"math"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
@@ -18,9 +17,16 @@ import (
 // the best-SCORING way to split one compatible bucket into batches, not just
 // the first one that fits.
 
-// similarDueDateWindow is how far two jobs' due dates may drift before they fall
-// into separate batches.
-const similarDueDateWindow = 3 * 24 * time.Hour
+// dueUrgencyHorizon is how far ahead a due date still earns urgency in the
+// batch score: at or past due scores 100, this far out scores 0, linear in
+// between.
+//
+// This was similarDueDateWindow, a HARD partition that kept jobs whose due
+// dates differed by more than this off the same bed entirely - so a job due
+// Friday could not share a plate with one due the following Tuesday even when
+// both fitted and the bed was half empty. Expressing the same preference as a
+// score costs no bed space and says the same thing.
+const dueUrgencyHorizon = 3 * 24 * time.Hour
 
 // urgentPriority is the priority value marking a same-day/urgent job (matches
 // the "1" the user specified: FCFS by default, "1" for same-day).
@@ -87,6 +93,11 @@ type PlanJob struct {
 	CreatedAt         time.Time
 	FilamentGrams     float64
 	Footprint         bedpack.UnitFootprint
+	// InDraft marks a job that is already sitting in a pending_approval batch.
+	// The planning window always keeps these (see selectWindow): dropping one
+	// would stop the run reproducing that Draft's job set, dissolving a batch
+	// an operator can already see purely because the backlog grew.
+	InDraft bool
 }
 
 // PlannedBatch is a proposed batch: its jobs, the placement result, and the
@@ -136,6 +147,39 @@ type BatchGate struct {
 	// MaxWait's unconditional override takes over. Should be less than
 	// TargetBedUtilisationPercent for aging to have any effect.
 	AgingFloorPercent float64
+
+	// IdleMachines is how many printers are sitting idle and able to take
+	// work right now. A partition under target is created anyway when this is
+	// non-zero, because by the time shouldCreateBatch sees it fillBed has
+	// already exhausted every compatible job in the group - so waiting cannot
+	// improve this bed with anything that currently exists, and an idle
+	// machine is capacity being thrown away for a fuller bed that may never
+	// arrive.
+	//
+	// This is the condition that unsticks a floor where 80% is not reachable:
+	// measured against the real packer the ceiling is ~69% for parts up to
+	// 100mm and ~74% up to 150mm, so without it batches wait out MaxWait -
+	// four hours by default - while printers stand still.
+	IdleMachines int
+
+	// IdleWaitWindow is how long a thin bed may be held back while a printer
+	// is free, in the hope that a short wait produces a fuller plate.
+	//
+	// This is the "wait or print?" decision. Releasing every thin partition
+	// the instant a machine frees up converts a backlog into single-job beds,
+	// because a created batch never returns to the pool to be consolidated.
+	// Waiting indefinitely is worse - it leaves capacity idle for a plate that
+	// may never arrive. So the wait is bounded: once a bed's oldest job has
+	// waited this long, or the bed is already reasonably full, it goes.
+	//
+	// Zero disables the wait entirely and restores the previous behaviour
+	// (idle machine means print now), which is what the zero-value
+	// BatchGate{} used by existing callers and tests gets.
+	IdleWaitWindow time.Duration
+
+	// HorizonJobs caps how many jobs of one compatibility group a single run
+	// considers - see selectWindow. Zero uses DefaultHorizonJobs.
+	HorizonJobs int
 }
 
 // Nester places print units onto a bed and reports what fit vs what didn't -
@@ -170,57 +214,152 @@ func Plan(jobs []PlanJob, now time.Time, gate BatchGate) (batches []PlannedBatch
 // algorithm-agnostic and unaffected by which Nester is passed - only Stage
 // 2/3 (candidate building + nesting, both inside bestPartition) consult it.
 func PlanWithNester(jobs []PlanJob, now time.Time, gate BatchGate, nest Nester) (batches []PlannedBatch, unbatchable []Unbatchable, held []PlannedBatch) {
+	batches, unbatchable, held, _ = PlanWithReasons(jobs, now, gate, nest)
+	return batches, unbatchable, held
+}
+
+// PlanWithReasons is PlanWithNester plus the fourth outcome: jobs this run did
+// not reach, each with the reason it was left out.
+//
+// Split from PlanWithNester rather than folded into it so every existing caller
+// and test keeps its signature. The extra return exists because a bounded
+// planning window (see selectWindow) means a perfectly batchable job can now be
+// left out of a run for no fault of its own, and a job that silently vanishes
+// from scheduling is indistinguishable from one the planner has lost.
+func PlanWithReasons(jobs []PlanJob, now time.Time, gate BatchGate, nest Nester) (
+	batches []PlannedBatch, unbatchable []Unbatchable, held []PlannedBatch, deferred []Unbatchable,
+) {
 	measurable := make([]PlanJob, 0, len(jobs))
 	for _, j := range jobs {
 		if j.Footprint.XMM <= 0 || j.Footprint.YMM <= 0 {
 			unbatchable = append(unbatchable, Unbatchable{
-				JobID: j.ID, JobNumber: j.JobNumber,
-				Reason: "No print file with measurable STL dimensions uploaded yet.",
+				JobID: j.ID, JobNumber: j.JobNumber, Reason: ReasonNoFootprint,
 			})
 			continue
 		}
 		measurable = append(measurable, j)
 	}
 
+	// One pass per compatibility group. Due dates used to sub-partition each
+	// group again on a 3-day window, so a job due Friday could not share a bed
+	// with one due the following Tuesday even when both fitted and the bed was
+	// half empty. Urgency is a scoring term and a lock condition now (see
+	// scoreBatch's dueUrgency and shouldCreateBatch), which expresses the same
+	// intent without costing bed space.
+	// idleBudget is how many more under-target partitions the idle-machine rule
+	// may release this run. It is a budget rather than a flag because idle
+	// capacity is finite: with three printers free and forty thin partitions
+	// available, releasing all forty does not use the capacity any better - it
+	// just converts the whole backlog into single-job beds that can never be
+	// consolidated, because a created batch never returns to the pool.
+	//
+	// Releasing exactly as many as there are free machines fills every idle
+	// printer now and leaves the rest to keep accumulating compatible volume,
+	// which is the entire point of holding a partition back.
+	idleBudget := gate.IdleMachines
+
 	for _, group := range groupByKey(measurable) {
-		for _, cluster := range dueDateClusters(group) {
-			planned, unb := bestPartition(cluster, nest)
-			unbatchable = append(unbatchable, unb...)
-			for _, p := range planned {
-				if shouldCreateBatch(p, now, gate) {
-					batches = append(batches, p)
-				} else {
-					held = append(held, p)
-				}
+		// Bounded window first: the packing search is superlinear in group
+		// size, so an unbounded group is what turns a growing backlog into a
+		// planner that never finishes. See selectWindow for how the window is
+		// chosen and why Draft members are always in it.
+		window, out := selectWindow(group, now, gate)
+		deferred = append(deferred, deferredFor(out, ReasonOutsideWindow)...)
+
+		planned, unb := bestPartition(window, now, gate, nest)
+		unbatchable = append(unbatchable, unb...)
+		for _, p := range planned {
+			create, usedIdle := shouldCreateBatch(p, now, gate, idleBudget)
+			if usedIdle {
+				idleBudget--
 			}
+			if create {
+				batches = append(batches, p)
+				continue
+			}
+			held = append(held, p)
+			deferred = append(deferred, deferredFor(p.Jobs, holdReason(p, now, gate))...)
 		}
 	}
-	return batches, unbatchable, held
+	return batches, unbatchable, held, deferred
 }
 
 // shouldCreateBatch reports whether a partition should become a real batch
 // now rather than stay held waiting for more compatible volume.
-func shouldCreateBatch(b PlannedBatch, now time.Time, gate BatchGate) bool {
+// shouldCreateBatch reports whether a partition becomes a real batch now, and
+// whether it consumed one of the run's idle-machine allowances (see Plan's
+// idleBudget - the caller decrements on a true second return).
+func shouldCreateBatch(b PlannedBatch, now time.Time, gate BatchGate, idleBudget int) (create, usedIdle bool) {
 	if b.BedUtilisationPercent >= TargetBedUtilisationPercent {
-		return true
+		return true, false
 	}
+	// Every unconditional override is checked BEFORE the idle-machine budget,
+	// so a batch that would ship anyway never spends an allowance meant for a
+	// partition that has no other reason to go.
 	for _, j := range b.Jobs {
 		if j.Priority <= urgentPriority {
-			return true
+			return true, false
 		}
 		if j.DueDate != nil && !j.DueDate.After(now.Add(gate.DueSoonWindow)) {
-			return true
+			return true, false
 		}
 		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) >= gate.MaxWait {
-			return true
+			return true, false
 		}
 	}
 	if wait := longestJobWait(b.Jobs, now); wait > 0 {
 		if b.BedUtilisationPercent >= effectiveUtilisationThreshold(wait, gate) {
-			return true
+			return true, false
 		}
 	}
-	return false
+	// Last: a printer is free. Holding the bed back costs machine time; sending
+	// it costs the chance of a fuller plate. Decide rather than assume - see
+	// worthWaitingForFuller. Bounded by how many printers are actually free.
+	if idleBudget > 0 {
+		if worthWaitingForFuller(b, now, gate) {
+			return false, false
+		}
+		return true, true
+	}
+	return false, false
+}
+
+// worthWaitingForFuller answers "wait, or print?" for a thin bed while a
+// printer stands idle.
+//
+// By the time this runs, fillBed has already pulled in every compatible job in
+// the window, so waiting cannot improve this bed with anything that exists
+// right now - only with something that has not arrived yet. That makes the
+// question a bet, and the answer has to be bounded on both sides: print
+// everything the moment a machine frees up and a backlog becomes a run of
+// single-job beds that can never be consolidated, because a created batch never
+// returns to the pool; wait for the perfect plate and the machine idles for
+// work that may never come.
+//
+// So the wait is short and expires. It ends when either:
+//   - the bed is already at or above the aging floor, i.e. respectable enough
+//     that a marginal improvement is not worth idle machine time, or
+//   - its oldest job has already waited out IdleWaitWindow.
+//
+// IdleWaitWindow of zero disables waiting entirely, which is the behaviour
+// every existing caller and test gets from a zero-value BatchGate.
+func worthWaitingForFuller(b PlannedBatch, now time.Time, gate BatchGate) bool {
+	if gate.IdleWaitWindow <= 0 {
+		return false
+	}
+	if gate.AgingFloorPercent > 0 && b.BedUtilisationPercent >= gate.AgingFloorPercent {
+		return false
+	}
+	return longestJobWait(b.Jobs, now) < gate.IdleWaitWindow
+}
+
+// holdReason names why a packed partition was not created, so its jobs can be
+// reported individually rather than vanishing from the board.
+func holdReason(b PlannedBatch, now time.Time, gate BatchGate) string {
+	if gate.IdleMachines > 0 && worthWaitingForFuller(b, now, gate) {
+		return ReasonWaitingForBetterBatch
+	}
+	return ReasonWaitingForCompatible
 }
 
 // longestJobWait is how long the longest-queued job in the batch has been
@@ -260,42 +399,41 @@ func effectiveUtilisationThreshold(wait time.Duration, gate BatchGate) float64 {
 	return TargetBedUtilisationPercent - (TargetBedUtilisationPercent-gate.AgingFloorPercent)*t
 }
 
-// groupKey is the compatibility bucket a job falls into: everything here must
-// be identical for jobs to share a bed given today's raw-geometry STL merge.
-// Colour is deliberately NOT part of this key - unlike nozzle/material/quality,
-// two jobs of different colours can physically share a bed (different AMS
-// slots), so colour compatibility is instead checked live while packing, up
-// to maxGroupColours combined per bed (see withinColourCap).
+// groupKey is the hard compatibility boundary: the nozzle, quality and
+// material a bed is physically set up for. Two jobs that agree on all of it
+// are candidates for the same plate; two that differ on any of it can never
+// share one.
+//
+// Everything else is a preference, not a wall, and belongs in scoreBatch or
+// the lock gate instead. This key used to carry five more fields, and each one
+// silently halved the pool a bed could draw from:
+//
+//   - priorityTier: an urgent job could never share a bed with a routine one,
+//     which is backwards - priority decides what gets attention first, not
+//     what can physically print together. It is a score term (priorityScore).
+//   - infillBucket, supportUsed: slicing-process settings, not bed
+//     compatibility. A mixed-infill bed is legitimate; it just has to be
+//     sliced conservatively - see plateSliceSpecFor.
+//   - machineFamily: implied by nozzle and material today, because the fleet
+//     is one family and bedpack has one bed size. THE DAY A SECOND BED SIZE
+//     JOINS THE FLEET THIS MUST COME BACK, because two families' plates are
+//     not interchangeable. Until then assignMachineForBatch refuses to guess
+//     for a batch whose jobs span families.
+//
+// Colour was already correctly absent: two colours can share a bed via
+// different AMS slots, so it is a live cap while packing (maxGroupColours,
+// withinColourCap) plus a changeover cost in the score.
 type groupKey struct {
-	material      string
-	nozzleLeft    string
-	nozzleRight   string
-	qualityMM     string
-	machineFamily string
-	supportUsed   string
-	infillBucket  string
-	priorityTier  string
-}
-
-// infillBucketFor rounds infill% to the nearest 5% so near-identical designs
-// still group together instead of fragmenting on noise.
-func infillBucketFor(pct float64) string {
-	return strconv.Itoa(int(math.Round(pct/5) * 5))
-}
-
-func priorityTierFor(priority int) string {
-	if priority <= urgentPriority {
-		return "urgent"
-	}
-	return "normal"
+	material    string
+	nozzleLeft  string
+	nozzleRight string
+	qualityMM   string
 }
 
 func keyFor(j PlanJob) groupKey {
 	return groupKey{
-		material: j.Material, nozzleLeft: j.NozzleLeft, nozzleRight: j.NozzleRight,
-		qualityMM: j.QualityMM, machineFamily: j.MachineFamily,
-		supportUsed:  strconv.FormatBool(j.SupportUsed),
-		infillBucket: infillBucketFor(j.InfillPct), priorityTier: priorityTierFor(j.Priority),
+		material: j.Material, nozzleLeft: j.NozzleLeft,
+		nozzleRight: j.NozzleRight, qualityMM: j.QualityMM,
 	}
 }
 
@@ -324,19 +462,7 @@ func groupByKey(jobs []PlanJob) [][]PlanJob {
 		if a.nozzleRight != b.nozzleRight {
 			return a.nozzleRight < b.nozzleRight
 		}
-		if a.qualityMM != b.qualityMM {
-			return a.qualityMM < b.qualityMM
-		}
-		if a.machineFamily != b.machineFamily {
-			return a.machineFamily < b.machineFamily
-		}
-		if a.supportUsed != b.supportUsed {
-			return a.supportUsed < b.supportUsed
-		}
-		if a.infillBucket != b.infillBucket {
-			return a.infillBucket < b.infillBucket
-		}
-		return a.priorityTier < b.priorityTier
+		return a.qualityMM < b.qualityMM
 	})
 	out := make([][]PlanJob, 0, len(order))
 	for _, k := range order {
@@ -345,65 +471,24 @@ func groupByKey(jobs []PlanJob) [][]PlanJob {
 	return out
 }
 
-// dueDateClusters splits a group into runs whose due dates stay within the window
-// of the run's first job. A change between "has a due date" and "has none" also
-// starts a new run.
-func dueDateClusters(jobs []PlanJob) [][]PlanJob {
-	var clusters [][]PlanJob
-	var current []PlanJob
-	var anchor *time.Time
-
-	for _, j := range jobs {
-		if len(current) == 0 {
-			current = []PlanJob{j}
-			anchor = j.DueDate
-			continue
-		}
-		if sameCluster(anchor, j.DueDate) {
-			current = append(current, j)
-			continue
-		}
-		clusters = append(clusters, current)
-		current = []PlanJob{j}
-		anchor = j.DueDate
-	}
-	if len(current) > 0 {
-		clusters = append(clusters, current)
-	}
-	return clusters
-}
-
-func sameCluster(anchor, due *time.Time) bool {
-	if (anchor == nil) != (due == nil) {
-		return false
-	}
-	if anchor == nil {
-		return true
-	}
-	diff := anchor.Sub(*due)
-	if diff < 0 {
-		diff = -diff
-	}
-	return diff <= similarDueDateWindow
-}
-
 // bestPartition tries each ordering strategy over a cluster (Stage 5: the
 // Batch Optimizer's first pass), keeps the highest-total-score partition, then
 // runs a bounded local search over it to find combinations a single greedy
 // pass would miss. Jobs too big for the bed on their own are the same under
 // every strategy, so they are reported once.
-func bestPartition(cluster []PlanJob, nest Nester) ([]PlannedBatch, []Unbatchable) {
+func bestPartition(cluster []PlanJob, now time.Time, gate BatchGate, nest Nester) ([]PlannedBatch, []Unbatchable) {
+	sc := scoreCtx{now: now, gate: gate}
 	var best []PlannedBatch
 	var bestUnb []Unbatchable
 	bestScore := math.Inf(-1)
 
 	for _, strategy := range packingStrategies {
 		batches, unb := packJobs(orderJobs(cluster, strategy), strategy, nest)
-		if score := partitionScore(batches); score > bestScore {
+		if score := partitionScore(batches, sc); score > bestScore {
 			best, bestUnb, bestScore = batches, unb, score
 		}
 	}
-	return localSearch(best, nest), bestUnb
+	return localSearch(best, sc, nest), bestUnb
 }
 
 // orderJobs returns the cluster in the given strategy's order (a copy).
@@ -466,7 +551,7 @@ func packJobs(jobs []PlanJob, strategy string, nest Nester) ([]PlannedBatch, []U
 			if !ok {
 				unb = append(unb, Unbatchable{
 					JobID: head.ID, JobNumber: head.JobNumber,
-					Reason: "Exceeds the print bed's capacity even on its own.",
+					Reason: ReasonOversized,
 				})
 				remaining = remaining[1:]
 				continue
@@ -646,24 +731,217 @@ func batchTimeFields(jobs []PlanJob) (*int, *float64) {
 	return &total, eff
 }
 
-// scoreBatch weights bed utilisation, urgency, print time, colour-change
-// cost, and same-customer cohesion into the single number the optimizer
-// maximises. Utilisation and priority are both 0-100 scales so their weights
-// are directly comparable; print time, colour count, and cohesion are all
-// small raw-count adjustments on the same 0.05 scale as each other - bounded
-// by how many jobs actually fit on one bed, so cohesion can only ever act as
-// a tie-breaker between similarly-utilised partitions, never outweigh a
+// scoreCtx is what a score needs beyond the batch itself: the clock, and the
+// windows that make "due soon" and "waited long enough" mean anything. Passed
+// explicitly rather than held as package state so scoring stays pure and a
+// test can score the same batch at two different instants.
+type scoreCtx struct {
+	now  time.Time
+	gate BatchGate
+}
+
+// referencePlateMinutes is the print time a batch is penalised against: a
+// plate at or above this scores the full time penalty, one at zero scores
+// none. Twelve hours is roughly a full overnight plate on this fleet.
+//
+// A reference is what makes the term safe. It used to be `minutes * 0.10` on
+// RAW minutes, so a 400-minute plate scored -40 against a maximum of +50 from
+// utilisation - print time quietly outweighed everything the optimizer was
+// supposed to be balancing, and the effect grew without bound as plates got
+// longer. Normalising caps its influence at its weight, which is the whole
+// point of having weights.
+const referencePlateMinutes = 12 * 60
+
+// referenceThroughput is the utilisation-per-machine-hour a batch must reach to
+// score the full throughput term. 40 points/hour is a bed half full in 75
+// minutes, or nearly full in two and a half - brisk for this fleet without
+// being unreachable, so the term discriminates across the range real plates
+// actually occupy instead of saturating.
+const referenceThroughput = 40.0
+
+// ScoreWeights are the multipliers scoreBatch applies to its normalised terms.
+// Gathered into one struct so the trade-offs are visible together and tunable
+// in one place, rather than as literals scattered through an expression.
+//
+// Every term feeding these is normalised to 0-100 first, which is what makes
+// the weights comparable at all: on raw values the biggest-unit term silently
+// wins regardless of intent, which is exactly how print time (raw minutes) came
+// to outweigh everything before it was normalised.
+type ScoreWeights struct {
+	Utilisation  float64 // fill the bed
+	Throughput   float64 // utilisation delivered per machine-hour
+	Priority     float64 // urgent work first
+	DueUrgency   float64 // due-soon work first
+	Waiting      float64 // nothing starves
+	PrintTime    float64 // subtracted: a fuller bed is not worth an unreasonable one
+	ColourChange float64 // subtracted: fewer AMS changeovers
+	Cohesion     float64 // one customer's units ship together
+}
+
+// DefaultScoreWeights is the tuning in use.
+//
+// Utilisation and print time are set against each other deliberately, and the
+// ratio settles a specific case: a 96%-full 7-hour plate versus an 86%-full
+// 3-hour one. The fuller plate looks better and is worse - it delivers 13.7
+// utilisation-points per machine-hour against the leaner plate's 28.7. At these
+// weights the 3-hour plate wins, which TestScoreBalancesUtilisationAgainstPrintTime
+// locks in. Raising Utilisation (or lowering PrintTime/Throughput) reverses it
+// and quietly trades throughput for a better-looking number.
+//
+// Throughput is deliberately a modest term, not a replacement for utilisation.
+// It expresses the same preference the utilisation/print-time pair already
+// encodes, stated directly - so the ranking degrades gracefully rather than
+// flipping on a metric that goes to infinity as print time approaches zero.
+//
+// Waiting carries less weight than the others because it is not the mechanism
+// that prevents starvation - BatchGate.MaxWait is, unconditionally, in
+// shouldCreateBatch. This term only tilts the ranking on the way there.
+//
+// The two raw-count terms (colours, cohesion) stay small and unnormalised on
+// purpose: both are bounded by how many jobs fit on one bed, so they act as
+// tie-breakers between similarly-scoring partitions and can never outweigh a
 // meaningful utilisation difference.
-func scoreBatch(b PlannedBatch) float64 {
-	minutes := 0.0
-	if b.TotalPrintTimeMinutes != nil {
-		minutes = float64(*b.TotalPrintTimeMinutes)
+var DefaultScoreWeights = ScoreWeights{
+	Utilisation:  0.34,
+	Throughput:   0.10,
+	Priority:     0.20,
+	DueUrgency:   0.15,
+	Waiting:      0.10,
+	PrintTime:    0.13,
+	ColourChange: 0.05,
+	Cohesion:     0.05,
+}
+
+// throughputScore is how much bed utilisation a batch delivers per machine-hour,
+// normalised 0-100 against referenceThroughput.
+//
+// This is the "good bed utilisation is not the same thing as good production
+// efficiency" term. A 96%/7h plate and an 86%/3h plate are within ten
+// utilisation points of each other and nowhere near within ten points of equal
+// value: the second frees the machine four hours sooner for a fraction of the
+// fill.
+//
+// Zero when the print time is unknown or non-positive rather than infinite -
+// an unestimated batch must not score as infinitely efficient and displace
+// every measured one.
+func throughputScore(b PlannedBatch) float64 {
+	if b.TotalPrintTimeMinutes == nil || *b.TotalPrintTimeMinutes <= 0 {
+		return 0
 	}
-	return b.BedUtilisationPercent*0.5 +
-		priorityScore(b.Jobs)*0.3 -
-		minutes*0.10 -
-		float64(colourChangeCount(b))*0.05 +
-		float64(customerCohesionCount(b))*0.05
+	perHour := b.BedUtilisationPercent / (float64(*b.TotalPrintTimeMinutes) / 60)
+	if s := perHour / referenceThroughput * 100; s < 100 {
+		return s
+	}
+	return 100
+}
+
+// scoreBatch is the single number the optimizer maximises - a weighted sum of
+// normalised terms. See ScoreWeights/DefaultScoreWeights for what each term is
+// worth and why.
+func scoreBatch(b PlannedBatch, sc scoreCtx) float64 {
+	w := DefaultScoreWeights
+	return b.BedUtilisationPercent*w.Utilisation +
+		throughputScore(b)*w.Throughput +
+		priorityScore(b.Jobs)*w.Priority +
+		dueUrgencyScore(b.Jobs, sc.now)*w.DueUrgency +
+		waitingScore(b.Jobs, sc.now, sc.gate.MaxWait)*w.Waiting -
+		printTimeScore(b)*w.PrintTime -
+		float64(colourChangeCount(b))*w.ColourChange +
+		float64(customerCohesionCount(b))*w.Cohesion
+}
+
+// EvaluateBatch builds a PlannedBatch from a fixed set of jobs, packing and
+// measuring it exactly as the planner would one of its own proposals. ok is
+// false when the set does not physically fit a single bed.
+//
+// This exists so an existing Draft can be scored on precisely the same terms as
+// the proposal that would replace it. Comparing a stored batch row's utilisation
+// against a freshly-scored candidate would compare two different measurements
+// and make the stability threshold meaningless.
+func EvaluateBatch(jobs []PlanJob) (PlannedBatch, bool) {
+	if len(jobs) == 0 {
+		return PlannedBatch{}, false
+	}
+	var units []bedpack.UnitFootprint
+	for _, j := range jobs {
+		units = append(units, unitsFor(j)...)
+	}
+	if _, rejected := DefaultNester(units); len(rejected) > 0 {
+		return PlannedBatch{}, false
+	}
+	return finalise(jobs, units, strategyFCFS, DefaultNester), true
+}
+
+// ScorePlan is partitionScore for callers outside this package: the summed
+// quality of a whole set of batches, on the same scale scoreBatch uses.
+//
+// Exported so the orchestrator can compare a freshly-planned partition against
+// the Drafts already on the floor and decide whether the improvement is worth
+// churning them - see the plan-stability check in AutoCreateBatches. Comparing
+// through the planner's own scoring rather than a separate rule of thumb is the
+// point: "better" has to mean the same thing to both.
+func ScorePlan(batches []PlannedBatch, now time.Time, gate BatchGate) float64 {
+	return partitionScore(batches, scoreCtx{now: now, gate: gate})
+}
+
+// dueUrgencyScore is how pressing the most urgent due date on the bed is, 0-100:
+// 100 at or past due, 0 at dueUrgencyHorizon or beyond, linear between. A batch
+// whose jobs all have no due date scores 0 - absent is not urgent.
+func dueUrgencyScore(jobs []PlanJob, now time.Time) float64 {
+	worst := 0.0
+	for _, j := range jobs {
+		if j.DueDate == nil {
+			continue
+		}
+		until := j.DueDate.Sub(now)
+		switch {
+		case until <= 0:
+			return 100
+		case until >= dueUrgencyHorizon:
+			continue
+		}
+		if s := (1 - float64(until)/float64(dueUrgencyHorizon)) * 100; s > worst {
+			worst = s
+		}
+	}
+	return worst
+}
+
+// waitingScore is how long the longest-queued job on the bed has waited, as a
+// fraction of MaxWait, 0-100. This is what stops a job that is neither urgent
+// nor due soon from starving behind fuller beds forever: its score climbs the
+// longer it sits, until MaxWait's unconditional override in shouldCreateBatch
+// takes over regardless. Zero when MaxWait is unset.
+func waitingScore(jobs []PlanJob, now time.Time, maxWait time.Duration) float64 {
+	if maxWait <= 0 {
+		return 0
+	}
+	longest := longestJobWait(jobs, now)
+	if longest <= 0 {
+		return 0
+	}
+	if longest >= maxWait {
+		return 100
+	}
+	return float64(longest) / float64(maxWait) * 100
+}
+
+// printTimeScore is the batch's print time as a 0-100 penalty against
+// referencePlateMinutes. A batch with no estimate scores 0 rather than being
+// treated as instant or infinite: an unknown time is not evidence either way,
+// and the utilisation and urgency terms still rank it.
+func printTimeScore(b PlannedBatch) float64 {
+	if b.TotalPrintTimeMinutes == nil {
+		return 0
+	}
+	minutes := float64(*b.TotalPrintTimeMinutes)
+	if minutes <= 0 {
+		return 0
+	}
+	if minutes >= referencePlateMinutes {
+		return 100
+	}
+	return minutes / referencePlateMinutes * 100
 }
 
 // customerCohesionCount is how many jobs in the batch are "redundant" with
@@ -690,10 +968,10 @@ func customerCohesionCount(b PlannedBatch) int {
 	return len(b.Jobs) - buckets
 }
 
-func partitionScore(batches []PlannedBatch) float64 {
+func partitionScore(batches []PlannedBatch, sc scoreCtx) float64 {
 	var total float64
 	for _, b := range batches {
-		total += scoreBatch(b)
+		total += scoreBatch(b, sc)
 	}
 	return total
 }
@@ -734,7 +1012,7 @@ const maxLocalSearchIterations = 50
 // A+B+D=90% instead of settling for whichever greedy strategy found A+B=60%
 // first - bestPartition's strategy loop alone cannot discover it, since no
 // single fixed ordering produces that grouping.
-func localSearch(batches []PlannedBatch, nest Nester) []PlannedBatch {
+func localSearch(batches []PlannedBatch, sc scoreCtx, nest Nester) []PlannedBatch {
 	if len(batches) < 2 {
 		return batches
 	}
@@ -743,7 +1021,7 @@ func localSearch(batches []PlannedBatch, nest Nester) []PlannedBatch {
 		improved := false
 		for i := 0; i < len(out); i++ {
 			for j := i + 1; j < len(out); j++ {
-				if swapBest(out, i, j, nest) {
+				if swapBest(out, i, j, sc, nest) {
 					improved = true
 				}
 			}
@@ -758,8 +1036,8 @@ func localSearch(batches []PlannedBatch, nest Nester) []PlannedBatch {
 // swapBest tries every single-job exchange between out[i] and out[j], applying
 // the first one that improves their combined score while both batches still
 // pack onto a bed. Reports whether it made a swap.
-func swapBest(out []PlannedBatch, i, j int, nest Nester) bool {
-	baseScore := scoreBatch(out[i]) + scoreBatch(out[j])
+func swapBest(out []PlannedBatch, i, j int, sc scoreCtx, nest Nester) bool {
+	baseScore := scoreBatch(out[i], sc) + scoreBatch(out[j], sc)
 	for a := range out[i].Jobs {
 		for b := range out[j].Jobs {
 			candA := replaceJob(out[i].Jobs, a, out[j].Jobs[b])
@@ -776,7 +1054,7 @@ func swapBest(out []PlannedBatch, i, j int, nest Nester) bool {
 			}
 			newA := finalise(candA, unitsA, out[i].PackingStrategy, nest)
 			newB := finalise(candB, unitsB, out[j].PackingStrategy, nest)
-			if scoreBatch(newA)+scoreBatch(newB) > baseScore {
+			if scoreBatch(newA, sc)+scoreBatch(newB, sc) > baseScore {
 				out[i], out[j] = newA, newB
 				return true
 			}

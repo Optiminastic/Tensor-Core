@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -40,6 +42,19 @@ type Server struct {
 	// creation (Stage 2 never fires), matching how the design pipeline degrades.
 	jobEnqueuer   *production.JobCreationEnqueuer
 	batchEnqueuer *production.BatchPlanEnqueuer
+
+	// lastPlannedPool is the signature of the job pool the last completed
+	// batch plan ran over, so an unchanged pool can be skipped. See
+	// AutoCreateBatches. Guarded by its mutex because the periodic tick and an
+	// event trigger can both reach the planner.
+	// bambu is the client for the local BambuBuddy service that holds the MQTT
+	// connection to each physical printer. Always non-nil; Configured() reports
+	// whether it has anywhere to call, so an install with no printers simply
+	// never syncs rather than erroring every cycle.
+	bambu *bambubuddy.Client
+
+	planMu          sync.Mutex
+	lastPlannedPool string
 }
 
 // NewServer wires the HTTP layer. logger may be nil, in which case the request
@@ -55,6 +70,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		logger:  logger,
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
 		secrets: box,
+		bambu:   bambubuddy.New(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey),
 	}
 }
 
@@ -103,8 +119,9 @@ func (s *Server) Router() *gin.Engine {
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)
+	s.registerJobEvents(r)
+	s.registerJobIssues(r)
 	s.registerShopify(r)
-	s.registerWebhooks(r)
 	s.registerInternal(r)
 
 	return r
@@ -147,4 +164,15 @@ func (s *Server) cors() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// EnableSliceEnqueuer attaches the slice-job enqueuer on its own, for a
+// process that builds its River client after EnablePipeline has already run.
+//
+// cmd/productionworker is exactly that case: it needs object storage wired
+// early (EnablePipeline) but cannot pass an enqueuer until its client exists,
+// and it is the process that creates batches - so without this the plate-slice
+// job is never queued and every batch keeps its estimated time.
+func (s *Server) EnableSliceEnqueuer(enqueuer *slicing.Enqueuer) {
+	s.enqueuer = enqueuer
 }

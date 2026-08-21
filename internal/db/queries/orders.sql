@@ -19,7 +19,8 @@ INSERT INTO orders (
 RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name,
           shopify_customer_id, customer_email, customer_phone,
           financial_status, total_price, currency, line_items,
-          status, source, imported_at, created_at, updated_at;
+          status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at;
 
 -- name: UpsertPaidOrder :one
 -- Idempotent import from the orders/paid webhook: keyed on shopify_order_id, a
@@ -46,7 +47,8 @@ RETURNING *;
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders WHERE id = $1;
 
 -- name: ListOrders :many
@@ -54,7 +56,8 @@ FROM orders WHERE id = $1;
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders
 WHERE sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source')
 ORDER BY imported_at DESC, id DESC;
@@ -65,7 +68,8 @@ ORDER BY imported_at DESC, id DESC;
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
        shopify_customer_id, customer_email, customer_phone,
        financial_status, total_price, currency, line_items,
-       status, source, imported_at, created_at, updated_at
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
 FROM orders
 WHERE (
     sqlc.narg('cursor_imported_at')::timestamptz IS NULL
@@ -74,3 +78,35 @@ WHERE (
 AND (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
 ORDER BY imported_at DESC, id DESC
 LIMIT sqlc.arg('page_limit');
+
+-- name: MarkOrderJobCreationFailed :exec
+-- Records why job creation gave up on this order. Written only after River's
+-- final attempt - before that the job is still going to be retried and an error
+-- would be noise.
+UPDATE orders
+SET job_creation_error = sqlc.arg('reason'), job_creation_failed_at = now(), updated_at = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ClearOrderJobCreationFailure :exec
+-- Clears the marker once jobs are successfully created, which makes the
+-- existing POST /production-jobs/from-order/:order_id the retry mechanism - no
+-- separate retry endpoint needed. Guarded so a healthy order is never touched.
+UPDATE orders
+SET job_creation_error = NULL, job_creation_failed_at = NULL, updated_at = now()
+WHERE id = sqlc.arg('id') AND job_creation_error IS NOT NULL;
+
+-- name: ListOrdersWithoutJobs :many
+-- The operator backstop, covering what the marker column cannot: an order whose
+-- River job was never enqueued at all (jobEnqueuer nil), and one whose
+-- line_items were empty so the worker "succeeded" with zero jobs. The column
+-- records why the worker gave up; this finds orders it never reached. Both are
+-- needed - they cover disjoint failure modes.
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
+       shopify_customer_id, customer_email, customer_phone,
+       financial_status, total_price, currency, line_items,
+       status, source, imported_at, job_creation_error, job_creation_failed_at,
+       created_at, updated_at
+FROM orders o
+WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+  AND (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
+ORDER BY imported_at DESC, id DESC;

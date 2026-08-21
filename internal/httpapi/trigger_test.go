@@ -32,6 +32,16 @@ func testServerWithBatchQueue(t *testing.T, store *db.Store, guards *auth.Guards
 		Environment: "development", AuthAudience: "tensor-core",
 		CORSOrigins:           []string{"http://localhost:3001"},
 		BatchPlanJobThreshold: threshold, BatchPlanDebounceSeconds: 5,
+		// The machine-scheduler weights, matching config.go's defaults. These
+		// were absent, so every weight was zero and EffectiveFreeAt degenerated
+		// to raw free time - which made TestIntegrationAssignMachinePrefersMaterialMatch
+		// pass on BestMachine's first-wins tie-break rather than on the material
+		// preference it claims to test.
+		MachineMaterialMatchBonusMinutes:    30,
+		MachineColourMatchBonusMinutes:      15,
+		MachineMaterialChangePenaltyMinutes: 45,
+		MachineQueueLengthPenaltyMinutes:    10,
+		MachineHealthBonusMinutes:           10,
 	}
 	s := NewServer(cfg, store, guards, nil)
 	s.EnableProductionQueue(
@@ -58,9 +68,9 @@ func countPlanBatchesJobs(t *testing.T, store *db.Store) int {
 // trigger threshold, not real design matching.
 func seedBatchableJob(t *testing.T, store *db.Store) {
 	t.Helper()
-	jobNumber, err := production.NewJobNumber()
+	jobNumber, err := store.Q.NextJobNumber(context.Background())
 	if err != nil {
-		t.Fatalf("new job number: %v", err)
+		t.Fatalf("next job number: %v", err)
 	}
 	if _, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber, Description: "Test job", Quantity: 1,
@@ -183,16 +193,72 @@ func TestIntegrationAssignMachinePrefersMaterialMatch(t *testing.T) {
 	profileA := seedFleetMachineWithProfile(t, store, "H2C-A", "H2C", "online")
 	profileB := seedFleetMachineWithProfile(t, store, "H2C-B", "H2C", "online")
 
-	// Machine A already has an open (queued) batch of PLA jobs; Machine B
+	// Machine A already has a SHORT open (queued) batch of PLA jobs; Machine B
 	// has nothing. Both are otherwise equally free (raw FreeAt now).
+	//
+	// The queued batch's 10-minute print time is load-bearing and deliberately
+	// well under the 30-minute material-match bonus: the claim under test is
+	// that a small changeover saving beats a small queue, not that it beats an
+	// arbitrarily large one. It used to be left NULL, which queuedBatchLoad
+	// silently SKIPPED - so machine A looked completely empty and the test
+	// passed without ever exercising the trade-off it describes. Preferring a
+	// machine with hours of queued work just to save one changeover would be
+	// wrong, and is what the skip made invisible.
 	loadedBatchID := seedDraftBatch(t, store, "BATCH-LOADED", production.BatchOpen, &profileA, "H2C")
-	if _, err := store.Pool.Exec(ctx, `UPDATE production_jobs SET material = 'PLA' WHERE batch_id = $1`, loadedBatchID); err != nil {
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE production_jobs SET material = 'PLA' WHERE batch_id = $1`, loadedBatchID); err != nil {
 		t.Fatalf("set material: %v", err)
 	}
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE batches SET total_print_time_minutes = 10 WHERE id = $1`, loadedBatchID); err != nil {
+		t.Fatalf("set queued batch print time: %v", err)
+	}
 
-	best := s.assignMachineForBatch(ctx, "H2C", "PLA", nil)
+	best := s.assignMachineForBatch(ctx, "H2C", "PLA", nil, inRunLoad{})
 	if best == nil || *best != profileA {
 		t.Errorf("assignMachineForBatch(PLA) = %v, want %s (the PLA-loaded machine, despite its small queue-length penalty), not the empty %s",
 			best, profileA, profileB)
 	}
+}
+
+// TestIntegrationJobCreationWorkerTriggersReplan pins the wiring bug in
+// cmd/productionworker: it built a Server but never called
+// EnableProductionQueue, so s.batchEnqueuer was nil,
+// triggerBatchPlanIfThresholdMet hit its nil guard and returned silently, and
+// job creation in that process never prompted a replan. Batching still worked
+// via the periodic tick, so nothing looked broken - it was just up to
+// BatchPlanIntervalMinutes late.
+//
+// The pair matters: the second case proves the first is actually exercising
+// the enqueuer rather than passing for some unrelated reason.
+func TestIntegrationJobCreationWorkerTriggersReplan(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	guards := auth.NewGuards(minter.verifier, "")
+
+	t.Run("with the queue wired", func(t *testing.T) {
+		s := testServerWithBatchQueue(t, store, guards, 1)
+		seedBatchableJob(t, store)
+
+		before := countPlanBatchesJobs(t, store)
+		s.triggerBatchPlanIfThresholdMet(context.Background())
+		if after := countPlanBatchesJobs(t, store); after != before+1 {
+			t.Errorf("plan_batches jobs = %d, want %d - the threshold trigger did not enqueue", after, before+1)
+		}
+	})
+
+	t.Run("without the queue wired", func(t *testing.T) {
+		s := NewServer(config.Settings{
+			Environment: "development", AuthAudience: "tensor-core",
+			BatchPlanJobThreshold: 1,
+		}, store, guards, nil)
+		seedBatchableJob(t, store)
+
+		before := countPlanBatchesJobs(t, store)
+		s.triggerBatchPlanIfThresholdMet(context.Background())
+		if after := countPlanBatchesJobs(t, store); after != before {
+			t.Errorf("plan_batches jobs = %d, want %d - a nil enqueuer must be a silent no-op, not a panic or an insert", after, before)
+		}
+	})
 }

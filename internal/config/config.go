@@ -115,6 +115,55 @@ type Settings struct {
 	BatchPlanJobThreshold    int
 	BatchPlanDebounceSeconds int
 
+	// BatchReplanMinImprovementPercent is how much better a new plan must be,
+	// as a percentage of the current Drafts' combined score, before those
+	// Drafts are dissolved and rebuilt.
+	//
+	// Without a floor here the planner churns: it re-plans every couple of
+	// minutes, and any reshuffle scoring even 0.01 better destroys every Draft
+	// and mints new ones. Batch numbers change under the operator, cached
+	// preview plates are rebuilt, and the board rewrites itself for no
+	// production benefit.
+	//
+	// The threshold applies only when the new plan batches no more work than
+	// the current one. A plan that places a job nothing was placing before is
+	// real progress and always applies, however small its score delta.
+	BatchReplanMinImprovementPercent float64
+
+	// BatchHorizonJobs caps how many jobs of one compatibility group a single
+	// planning run considers (production.BatchGate.HorizonJobs). The packing
+	// search is superlinear in group size, so an unbounded group is what turns
+	// a growing backlog into a planner that never finishes. Zero uses
+	// production.DefaultHorizonJobs.
+	BatchHorizonJobs int
+
+	// BambuBuddy is the local service holding the MQTT connection to each
+	// physical printer. With BambuBuddyURL unset, Tensor's fleet is whatever
+	// is in the machines table and nothing syncs - which is the correct
+	// behaviour for an environment with no printers attached.
+	//
+	// The API key is a credential: it belongs in the environment, never in the
+	// repository, and it is never logged or returned on any response.
+	BambuBuddyURL    string
+	BambuBuddyAPIKey string
+
+	// BatchIdleWaitMinutes is how long a thin bed may be held back while a
+	// printer is free, hoping a short wait produces a fuller plate
+	// (production.BatchGate.IdleWaitWindow). Zero disables the wait: an idle
+	// machine then takes the best available bed immediately.
+	BatchIdleWaitMinutes float64
+	// River cancels a job's context at its own JobTimeoutDefault (1 minute)
+	// unless the worker overrides Timeout(). Neither of these has a natural
+	// inner deadline to derive one from, the way the slice worker derives its
+	// from SLICE_TIMEOUT_SECONDS, so they are configured directly.
+	//
+	// A replan's cost scales with the backlog: it lists every batchable job,
+	// runs the multi-strategy pack search, then for each created batch
+	// downloads its jobs' print files, merges the meshes and uploads the plate.
+	// Twenty batches of sixteen jobs is minutes, not seconds.
+	BatchPlanTimeoutMinutes   int
+	JobCreationTimeoutMinutes int
+
 	// Machine selection weighted scoring (production.MachineScoreWeights, see
 	// machine_scheduler.go/scheduler.go): minutes-equivalent adjustments to a
 	// candidate machine's raw free time - already-loaded material/colour
@@ -126,7 +175,16 @@ type Settings struct {
 	MachineColourMatchBonusMinutes      float64
 	MachineMaterialChangePenaltyMinutes float64
 	MachineQueueLengthPenaltyMinutes    float64
-	MachineHealthBonusMinutes           float64
+	// MachineDraftLoadFraction is how much of a machine's Draft minutes count
+	// towards its apparent load when choosing where a batch goes. Below 1
+	// because Draft work is not owed yet; above 0 because a machine already
+	// holding eight hours of proposals is a worse home for a ninth.
+	MachineDraftLoadFraction float64
+	// Idle recency only ever separates otherwise-equal candidates, so a tie
+	// does not always resolve to the same machine.
+	MachineIdleRecencyBonusMinutes  float64
+	MachineIdleRecencyWindowMinutes float64
+	MachineHealthBonusMinutes       float64
 
 	// Orientation analysis (advisory least-support recommendation): the
 	// self-support overhang limit in degrees, and a cap on mesh triangles scored
@@ -209,12 +267,23 @@ func Load() Settings {
 
 		BatchPlanIntervalMinutes: intEnvOr("BATCH_PLAN_INTERVAL_MINUTES", 7),
 		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
-		BatchPlanDebounceSeconds: intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+
+		BatchPlanTimeoutMinutes:          intEnvOr("BATCH_PLAN_TIMEOUT_MINUTES", 15),
+		JobCreationTimeoutMinutes:        intEnvOr("JOB_CREATION_TIMEOUT_MINUTES", 5),
+		BatchPlanDebounceSeconds:         intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
+		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),
+		BatchHorizonJobs:                 intEnvOr("BATCH_HORIZON_JOBS", 250),
+		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
+		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
+		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
 		MachineMaterialChangePenaltyMinutes: floatEnvOr("MACHINE_MATERIAL_CHANGE_PENALTY_MINUTES", 45),
 		MachineQueueLengthPenaltyMinutes:    floatEnvOr("MACHINE_QUEUE_LENGTH_PENALTY_MINUTES", 10),
+		MachineDraftLoadFraction:            floatEnvOr("MACHINE_DRAFT_LOAD_FRACTION", 0.5),
+		MachineIdleRecencyBonusMinutes:      floatEnvOr("MACHINE_IDLE_RECENCY_BONUS_MINUTES", 5),
+		MachineIdleRecencyWindowMinutes:     floatEnvOr("MACHINE_IDLE_RECENCY_WINDOW_MINUTES", 60),
 		MachineHealthBonusMinutes:           floatEnvOr("MACHINE_HEALTH_BONUS_MINUTES", 10),
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),

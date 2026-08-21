@@ -1,21 +1,26 @@
-// Command seedreal is a one-off dev-data tool: it uploads real STL/3MF files
-// from a local folder as approved designs (sliced via the running FAKE_SLICE
-// worker, not fabricated here), clears the old placeholder dummy orders, then
-// generates realistic orders referencing the real designs' SKUs and runs the
-// real pipeline (job creation, batching) so the whole order -> job -> batch
-// -> machine flow can be exercised end to end with real geometry.
+// Command seedreal imports real model files from a local folder as approved
+// designs and generates realistic orders against them, then runs the real
+// pipeline (job creation, batching) so the whole order -> job -> batch ->
+// machine flow can be exercised with real geometry.
 //
-// Not part of cmd/seed's idempotent bootstrap - this is explicit, ad-hoc
-// test-data generation tied to a specific local folder and a specific brand,
-// not something every developer/environment needs. Safe to re-run: old seed
-// orders are cleared first, and re-running just creates a fresh 20 orders
-// against whatever designs exist.
+// It bypasses nothing. Designs are priced through slicing.ProcessSliceResult -
+// the same function the slice worker calls - jobs are created through
+// Server.CreateJobsForOrder, and batches through Server.AutoCreateBatches.
+// The only thing invented is the orders themselves, which stand in for Shopify.
+//
+// Safe to re-run: designs are keyed by a SKU derived from the filename, so
+// importing the same folder twice reuses the existing products rather than
+// duplicating them. Orders are additive; pass -reset to clear previous seed
+// orders (and only those) first.
+//
+//	go run ./cmd/seedreal -dir "C:\path\to\models" -orders 35
 package main
 
 import (
 	"context"
+	"flag"
 	"log"
-	"time"
+	"strings"
 
 	"github.com/joho/godotenv"
 
@@ -27,13 +32,23 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
-const (
-	brandSlug = "my-store"
-	stlDir    = `C:\Users\optiminastic\Desktop\stl_files`
-	createdBy = "seed-script"
-)
+const createdBy = "seed-script"
+
+// brandSlug is the brand every seeded design and order belongs to. It was a
+// hardcoded "my-store" constant, which silently assumed a brand that need not
+// exist - brands are user-created, so on a fresh database that assumption is
+// simply wrong. It is a flag now, checked against the database before anything
+// is written.
+var brandSlug = "my-store"
 
 func main() {
+	dir := flag.String("dir", `C:\Users\optiminastic\Desktop\3mf file`, "folder of .3mf/.stl model files to import")
+	orderCount := flag.Int("orders", 35, "how many orders to generate")
+	reset := flag.Bool("reset", false, "delete previous seed orders and their jobs first (designs are kept)")
+	brand := flag.String("brand", brandSlug, "slug of the brand to seed designs and orders into")
+	flag.Parse()
+	brandSlug = strings.ToLower(strings.TrimSpace(*brand))
+
 	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
 	if cfg.DatabaseURL == "" {
@@ -63,40 +78,58 @@ func main() {
 	server := httpapi.NewServer(cfg, store, guards, logger)
 	server.EnablePipeline(objects, nil)
 
-	machineID, err := findH2CProfile(ctx, store)
+	var brandExists bool
+	if err := store.Pool.QueryRow(ctx,
+		`SELECT exists(SELECT 1 FROM brands WHERE slug = $1)`, brandSlug).Scan(&brandExists); err != nil {
+		log.Fatalf("check brand: %v", err)
+	}
+	if !brandExists {
+		rows, err := store.Pool.Query(ctx, `SELECT slug FROM brands ORDER BY slug`)
+		if err != nil {
+			log.Fatalf("brand %q does not exist (and listing brands failed: %v)", brandSlug, err)
+		}
+		defer rows.Close()
+		var known []string
+		for rows.Next() {
+			var slug string
+			if err := rows.Scan(&slug); err != nil {
+				log.Fatal(err)
+			}
+			known = append(known, slug)
+		}
+		log.Fatalf("brand %q does not exist; existing brands: %s", brandSlug, strings.Join(known, ", "))
+	}
+	log.Printf("seeding into brand %q", brandSlug)
+
+	profiles, err := machineProfiles(ctx, store)
 	if err != nil {
-		log.Fatalf("find H2C machine profile (run `go run ./cmd/seed` first): %v", err)
+		log.Fatalf("find machine profiles: %v", err)
+	}
+	log.Printf("using %d machine profile(s)", len(profiles))
+
+	if *reset {
+		if err := resetSeedOrders(ctx, store); err != nil {
+			log.Fatalf("reset previous seed orders: %v", err)
+		}
+		log.Println("cleared previous seed orders and their jobs (designs kept)")
 	}
 
-	if err := resetSeedData(ctx, store); err != nil {
-		log.Fatalf("reset previous seed data: %v", err)
-	}
-	log.Println("cleared previous seed run's jobs, batches, orders, and designs")
-
-	files, err := stlFiles(stlDir)
+	files, err := modelFiles(*dir)
 	if err != nil {
-		log.Fatalf("list model files in %s: %v", stlDir, err)
+		log.Fatalf("list model files in %s: %v", *dir, err)
 	}
-	log.Printf("found %d model files in %s", len(files), stlDir)
+	log.Printf("found %d model files in %s", len(files), *dir)
 
-	designs, err := createDesigns(ctx, store, objects, files, machineID)
+	designs, err := createDesigns(ctx, store, objects, files, profiles)
 	if err != nil {
 		log.Fatalf("create designs: %v", err)
 	}
-	log.Printf("created %d designs, queued for slicing (FAKE_SLICE worker must be running)", len(designs))
-
-	priced, err := waitForSlicing(ctx, store, designs, 3*time.Minute)
-	if err != nil {
-		log.Fatalf("wait for slicing: %v", err)
+	log.Printf("%d approved designs available", len(designs))
+	if len(designs) == 0 {
+		log.Fatal("no usable designs; nothing to order")
 	}
-	log.Printf("%d/%d designs sliced successfully", len(priced), len(designs))
 
-	if err := approveDesigns(ctx, store, priced); err != nil {
-		log.Fatalf("approve designs: %v", err)
-	}
-	log.Printf("approved %d designs with SKUs assigned", len(priced))
-
-	orderIDs, err := seedRealOrders(ctx, store, priced)
+	orderIDs, err := seedRealOrders(ctx, store, designs, *orderCount)
 	if err != nil {
 		log.Fatalf("seed orders: %v", err)
 	}
@@ -120,9 +153,9 @@ func main() {
 	log.Printf("created %d batches, %d jobs unbatchable, %d partitions held below target",
 		len(created), len(unbatchable), len(held))
 	for _, u := range unbatchable {
-		log.Printf("  unbatchable: job %s (%s): %s", u.JobID, u.JobNumber, u.Reason)
+		log.Printf("  unbatchable: %s - %s", u.JobNumber, u.Reason)
 	}
 	for _, h := range held {
-		log.Printf("  held: %d jobs at %.2f%% utilisation", len(h.Jobs), h.BedUtilisationPercent)
+		log.Printf("  held: %d jobs at %.1f%% utilisation", len(h.Jobs), h.BedUtilisationPercent)
 	}
 }

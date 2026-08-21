@@ -30,8 +30,13 @@ type orderResponse struct {
 	// dummy one - what the frontend's live/dummy toggle filters on.
 	Source     string    `json:"source"`
 	ImportedAt time.Time `json:"imported_at"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// Set only when the create_jobs_from_order River job exhausted its
+	// attempts: what went wrong, and when it was recorded. Null on a healthy
+	// order. Retrying via POST /production-jobs/from-order/:id clears both.
+	JobCreationError    *string    `json:"job_creation_error"`
+	JobCreationFailedAt *time.Time `json:"job_creation_failed_at"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 // orderProductResponse is one product within an order, from order_line_items -
@@ -60,8 +65,11 @@ func orderDTO(o gen.Order) orderResponse {
 		CustomerEmail: o.CustomerEmail, CustomerPhone: o.CustomerPhone,
 		FinancialStatus: o.FinancialStatus,
 		TotalPrice:      db.NumFloat(o.TotalPrice), Currency: o.Currency, Status: o.Status,
-		Source:     o.Source,
-		ImportedAt: db.Time(o.ImportedAt), CreatedAt: db.Time(o.CreatedAt), UpdatedAt: db.Time(o.UpdatedAt),
+		Source:              o.Source,
+		ImportedAt:          db.Time(o.ImportedAt),
+		JobCreationError:    o.JobCreationError,
+		JobCreationFailedAt: db.TimePtr(o.JobCreationFailedAt),
+		CreatedAt:           db.Time(o.CreatedAt), UpdatedAt: db.Time(o.UpdatedAt),
 	}
 }
 
@@ -101,6 +109,25 @@ func (s *Server) listOrders(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	source := orderSource(c)
+
+	// ?has_jobs=false lists orders that produced no production jobs at all -
+	// the operator's view of imports that silently went nowhere. A query
+	// parameter rather than its own route: Gin cannot register a static
+	// /orders/without-jobs alongside the existing /orders/:id wildcard, it
+	// panics at startup.
+	if c.Query("has_jobs") == "false" {
+		rows, err := s.store.Q.ListOrdersWithoutJobs(ctx, source)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list orders.")
+			return
+		}
+		out := make([]orderResponse, 0, len(rows))
+		for _, o := range rows {
+			out = append(out, orderDTO(o))
+		}
+		c.JSON(http.StatusOK, out)
+		return
+	}
 
 	if !page.paginate {
 		rows, err := s.store.Q.ListOrders(ctx, source)

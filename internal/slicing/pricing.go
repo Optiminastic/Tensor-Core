@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -37,8 +38,8 @@ func (m PerUnitMetrics) toSlicerMetrics() pricing.SlicerMetrics {
 	}
 }
 
-func (m PerUnitMetrics) toInsertParams(jobID uuid.UUID) gen.InsertSliceMetricsParams {
-	return gen.InsertSliceMetricsParams{
+func (m PerUnitMetrics) toInsertParams(jobID uuid.UUID) gen.UpsertSliceMetricsParams {
+	return gen.UpsertSliceMetricsParams{
 		JobID: jobID, PrintTimeHr: m.PrintTimeHr, EffectiveMachineTimeHr: m.EffectiveMachineTimeHr,
 		FilamentG: m.FilamentG, PurgeG: m.PurgeG, SupportG: m.SupportG,
 		ColourChanges: int32(m.ColourChanges), ElectricityKwh: m.ElectricityKwh,
@@ -63,9 +64,10 @@ func orientationJSON(rec *orientation.Recommendation) []byte {
 	return b
 }
 
-// MarkSlicing flips a design to "slicing" when the worker picks up its job.
+// MarkSlicing flips a design to "slicing" when the worker picks up its job. It
+// refuses to demote an already-priced design - see MarkDesignSlicing.
 func MarkSlicing(ctx context.Context, store *db.Store, designID uuid.UUID) error {
-	return store.Q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designSlicing, ID: designID})
+	return store.Q.MarkDesignSlicing(ctx, designID)
 }
 
 // ProcessSliceResult persists the metrics, closes the slice job, and prices the
@@ -78,7 +80,7 @@ func ProcessSliceResult(
 	ctx context.Context, store *db.Store, jobID, designID uuid.UUID, brandSlug string, m PerUnitMetrics,
 ) error {
 	return store.InTx(ctx, func(q *gen.Queries) error {
-		if err := q.InsertSliceMetrics(ctx, m.toInsertParams(jobID)); err != nil {
+		if err := q.UpsertSliceMetrics(ctx, m.toInsertParams(jobID)); err != nil {
 			return err
 		}
 		if err := q.UpdateSliceJobStatus(ctx, gen.UpdateSliceJobStatusParams{
@@ -90,22 +92,38 @@ func ProcessSliceResult(
 	})
 }
 
-// FailJob marks a job failed with a reason and drops its design to "failed", so a
-// design never sits stuck when the slice cannot proceed. Best effort, but the two
-// writes run in one transaction so a design is never left failed-job / active-design.
-func FailJob(ctx context.Context, store *db.Store, jobID uuid.UUID, reason string) {
+// failJobTimeout bounds the detached write below. Short: this runs on a path
+// that has already failed, and blocking a worker slot on it helps nobody.
+const failJobTimeout = 10 * time.Second
+
+// FailJob marks a job failed with a reason and drops its design to "failed", so
+// a design never sits stuck when the slice cannot proceed. The two writes run in
+// one transaction so a design is never left failed-job / active-design.
+//
+// It runs on a context detached from the caller's. The commonest reason to be
+// here at all is that the job context was cancelled - River's job timeout - and
+// a cancelled context cannot commit anything, so the previous
+// `_ = store.InTx(ctx, ...)` silently did nothing on exactly the path it existed
+// for. WithoutCancel keeps the request-scoped values (logger, request id) while
+// dropping the deadline. The error is returned rather than swallowed: a design
+// stuck in "slicing" is a support ticket, not something to find out about from
+// a missing row.
+func FailJob(ctx context.Context, store *db.Store, jobID uuid.UUID, reason string) error {
+	failCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failJobTimeout)
+	defer cancel()
+
 	msg := reason
-	_ = store.InTx(ctx, func(q *gen.Queries) error {
-		if err := q.UpdateSliceJobStatus(ctx, gen.UpdateSliceJobStatusParams{
+	return store.InTx(failCtx, func(q *gen.Queries) error {
+		if err := q.UpdateSliceJobStatus(failCtx, gen.UpdateSliceJobStatusParams{
 			Status: jobFailed, Error: &msg, ID: jobID,
 		}); err != nil {
 			return err
 		}
-		job, err := q.GetSliceJobByID(ctx, jobID)
+		job, err := q.GetSliceJobByID(failCtx, jobID)
 		if err != nil {
 			return err
 		}
-		return q.UpdateDesignStatus(ctx, gen.UpdateDesignStatusParams{Status: designFailed, ID: job.DesignID})
+		return q.UpdateDesignStatus(failCtx, gen.UpdateDesignStatusParams{Status: designFailed, ID: job.DesignID})
 	})
 }
 

@@ -12,7 +12,8 @@ INSERT INTO production_jobs (
     font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
     personalisation_notes, personalisation_photo_file_id, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
     colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-    quality_mm, machine_family, issue_reason
+    quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+    support_weight_g, purge_weight_g, colour_count
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('job_number'), sqlc.narg('order_id'), sqlc.narg('batch_id'),
     sqlc.arg('description'), sqlc.arg('quantity'), sqlc.arg('status'), sqlc.arg('assembly_status'),
@@ -29,10 +30,12 @@ INSERT INTO production_jobs (
     sqlc.arg('colours'), sqlc.narg('support_used'), sqlc.narg('infill_pct')::float8,
     sqlc.narg('left_nozzle_mm')::float8, sqlc.narg('right_nozzle_mm')::float8,
     sqlc.narg('flow_pct')::float8, sqlc.narg('quality_mm')::float8, sqlc.narg('machine_family'),
-    sqlc.narg('issue_reason')
+    sqlc.narg('issue_reason'), sqlc.narg('bbox_x_mm')::float8, sqlc.narg('bbox_y_mm')::float8,
+    sqlc.narg('bbox_z_mm')::float8, sqlc.narg('support_weight_g')::float8,
+    sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -40,11 +43,12 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -52,14 +56,15 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs WHERE id = $1;
 
 -- name: ListProductionJobs :many
--- Full list, newest first, with optional status / assembly_status / qc_status /
+-- Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
 -- packaging_status filters (null = any).
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -67,10 +72,12 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
+  AND (sqlc.narg('finishing_status')::text IS NULL OR finishing_status = sqlc.narg('finishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -80,7 +87,7 @@ ORDER BY created_at DESC, id DESC;
 -- name: ListProductionJobsPage :many
 -- Keyset page over (created_at, id) with the same optional filters.
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-       qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
        nozzle_profile, filament_grams_required, print_file_id,
        estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
        personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -88,10 +95,12 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
+  AND (sqlc.narg('finishing_status')::text IS NULL OR finishing_status = sqlc.narg('finishing_status')::text)
   AND (sqlc.narg('qc_status')::text IS NULL OR qc_status = sqlc.narg('qc_status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
@@ -108,19 +117,22 @@ SELECT count(*) FROM production_jobs WHERE order_id = $1;
 
 -- name: UpdateProductionJobFields :one
 -- Applies the role-gated PATCH fields. Each null arg leaves its column unchanged;
--- batch_id uses a set-flag so it can be cleared to NULL explicitly.
+-- batch_id and issue_reason use a set-flag so they can be cleared to NULL
+-- explicitly - COALESCE cannot express "set this to NULL", only "leave it".
 UPDATE production_jobs SET
     status           = COALESCE(sqlc.narg('status'), status),
     assembly_status  = COALESCE(sqlc.narg('assembly_status'), assembly_status),
+    finishing_status = COALESCE(sqlc.narg('finishing_status'), finishing_status),
     qc_status        = COALESCE(sqlc.narg('qc_status'), qc_status),
     packaging_status = COALESCE(sqlc.narg('packaging_status'), packaging_status),
     priority         = COALESCE(sqlc.narg('priority'), priority),
     held             = COALESCE(sqlc.narg('held'), held),
     batch_id         = CASE WHEN sqlc.arg('set_batch_id')::bool THEN sqlc.narg('batch_id') ELSE batch_id END,
+    issue_reason     = CASE WHEN sqlc.arg('set_issue_reason')::bool THEN sqlc.narg('issue_reason') ELSE issue_reason END,
     updated_at       = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -128,7 +140,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ValidateProductionJobPersonalisation :one
 UPDATE production_jobs SET
@@ -146,7 +159,7 @@ UPDATE production_jobs SET
     updated_at                    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -154,13 +167,23 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobPrintFile :one
-UPDATE production_jobs SET print_file_id = sqlc.arg('print_file_id'), updated_at = now()
+-- Clears issue_reason only when it is exactly 'stl_missing' - the flag this
+-- upload is the direct remedy for (see applyMatch). Leaving it set would keep
+-- the job out of ListBatchableJobs after an operator did the one thing that
+-- fixes it. Any other reason survives untouched: an STL upload does not fix
+-- colour_missing or filament_out_of_stock, and blanket-clearing would push a
+-- genuinely unvalidated job into batching.
+UPDATE production_jobs SET
+    print_file_id = sqlc.arg('print_file_id'),
+    issue_reason  = CASE WHEN issue_reason = 'stl_missing' THEN NULL ELSE issue_reason END,
+    updated_at    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -168,13 +191,14 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobStatus :one
 UPDATE production_jobs SET status = sqlc.arg('status'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -182,7 +206,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ListBatchableJobs :many
 -- Unbatched, queued jobs whose personalisation is resolved and which cleared
@@ -192,12 +217,21 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 -- been peeled off into split_of_job_id rows across earlier batches - it stays
 -- around at quantity 0 purely as the split group's root for progress
 -- tracking (see GetSplitJobProgress), never as something left to batch.
+--
+-- held = false belongs here for the same reason issue_reason does. A hold is an
+-- operator saying "not this one, not yet", and it used to be enforced only at
+-- ApproveBatchFor - by which point the held job had already been planned onto a
+-- bed, so its hold blocked approval of every unrelated job planned beside it,
+-- and the planner rebuilt that same doomed bed every cycle. Keeping it out of
+-- the pool means the rest of the bed batches normally. The approval check stays
+-- as defence in depth, for a job held after its batch was planned.
 SELECT * FROM production_jobs
 WHERE batch_id IS NULL
   AND status = 'queued'
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
+  AND held = false
 ORDER BY created_at ASC, id ASC;
 
 -- name: CountBatchableJobs :one
@@ -210,17 +244,73 @@ WHERE batch_id IS NULL
   AND status = 'queued'
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
-  AND issue_reason IS NULL;
+  AND issue_reason IS NULL
+  AND held = false;
 
 -- name: ListJobsForBatch :many
 SELECT * FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC;
+
+-- name: ListUnassignedCompatibleJobs :many
+-- Unassigned jobs sharing a reference job's physical/slicing-profile
+-- signature (material, both nozzle diameters, quality, machine family) -
+-- "same machine configuration" for manually adding a job to an existing
+-- Draft batch (see production.CompatibilityKey). Eligibility bar mirrors
+-- ListBatchableJobs (queued, no issue) plus the compatibility filter. IS NOT
+-- DISTINCT FROM (not =) so a null-vs-null field (e.g. a single-nozzle job's
+-- unused right nozzle) still counts as matching, same as the planner's own
+-- grouping key treats it.
+SELECT * FROM production_jobs
+WHERE batch_id IS NULL
+  AND status = 'queued'
+  AND quantity > 0
+  AND personalisation_status IN ('validated', 'not_required')
+  AND issue_reason IS NULL
+  AND held = false
+  AND material IS NOT DISTINCT FROM sqlc.narg('material')::text
+  AND left_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('left_nozzle_mm')::float8
+  AND right_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('right_nozzle_mm')::float8
+  AND quality_mm::float8 IS NOT DISTINCT FROM sqlc.narg('quality_mm')::float8
+  AND machine_family IS NOT DISTINCT FROM sqlc.narg('machine_family')::text
+ORDER BY created_at ASC, id ASC;
+
+-- name: RemoveJobFromBatch :one
+-- Detaches one job from its batch (Draft-only editing - enforced by the
+-- caller checking the batch's status before calling this). Scoped to
+-- batch_id = $2 as a safety check so a stale/wrong batch id in the request
+-- can't silently detach a job from a different batch than the URL named.
+-- Zero rows back (pgx.ErrNoRows) means the job isn't actually on that batch.
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE id = sqlc.arg('id') AND batch_id = sqlc.arg('batch_id')
+RETURNING *;
 
 -- name: CountJobsInBatch :one
 SELECT count(*) FROM production_jobs WHERE batch_id = $1;
 
 -- name: AssignJobsToBatch :exec
+-- Puts jobs on a batch. A job may only be moved if it is unassigned or still
+-- sitting in a Draft; one that belongs to an approved, printing or completed
+-- batch is left exactly where it is.
+--
+-- That guard is not theoretical. The planner reads its pool, plans, and only
+-- then writes - and a human can approve a Draft in that window. The dissolve
+-- step correctly refuses to touch the newly-approved batch, but without this
+-- the plan built moments earlier would still reassign its jobs onto a fresh
+-- Draft, stealing the contents of a plate whose filament is already reserved
+-- and which a machine is about to print.
 UPDATE production_jobs SET batch_id = sqlc.arg('batch_id'), updated_at = now()
-WHERE id = ANY(sqlc.arg('job_ids')::uuid[]);
+WHERE id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval'));
+
+-- name: CompleteProductionJobsForBatch :execrows
+-- Auto-completes every non-terminal job on a batch that just finished
+-- printing. A job already 'failed' is excluded on purpose: the bed as a
+-- whole finished, but this job's own print did not succeed (its reprint
+-- was already queued via /fail) - force-completing it would erase that
+-- failure and let a bad print slip into assembly/QC as if it passed.
+UPDATE production_jobs
+SET status = 'completed', updated_at = now()
+WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
 
 -- name: DecrementProductionJobQuantity :one
 -- Shrinks a job's remaining quantity by delta after some of it was peeled
@@ -231,7 +321,7 @@ WHERE id = ANY(sqlc.arg('job_ids')::uuid[]);
 UPDATE production_jobs SET quantity = quantity - sqlc.arg('delta'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
-          qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+          finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
           estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
           personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
@@ -239,7 +329,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, created_at, updated_at;
+          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetSplitJobProgress :one
 -- Total ordered vs completed quantity across a split job's whole group (the
@@ -270,3 +361,98 @@ INSERT INTO production_job_failures (
 RETURNING id, job_id, stage, reason, notes,
           filament_wasted_grams, time_wasted_minutes,
           created_by, created_at;
+
+-- name: CountJobsNotPackagedForOrder :one
+-- Order-level dispatch readiness: how many of an order's products are not yet
+-- packed. A failed job is excluded - its reprint is the row that still has to
+-- get there, and counting both would make the order permanently unready.
+SELECT count(*) FROM production_jobs
+WHERE order_id = sqlc.arg('order_id')
+  AND status <> 'failed'
+  AND packaging_status <> 'packaged';
+
+-- name: CountJobsForOrderTotal :one
+SELECT count(*) FROM production_jobs
+WHERE order_id = sqlc.arg('order_id') AND status <> 'failed';
+
+-- name: LockOrderForJobCreation :exec
+-- Serialises job creation for one order across processes, for the rest of the
+-- caller's transaction.
+--
+-- Necessary because CountJobsForOrder cannot see a concurrent transaction's
+-- uncommitted inserts under READ COMMITTED (which is what InTx/InTxWith use):
+-- two create_jobs_from_order runs for the same order would both count zero and
+-- both insert. That is not hypothetical - importShopifyOrder enqueues a job on
+-- every re-sync of the same order, and the manual backfill endpoint can race
+-- either of them.
+--
+-- A unique constraint cannot do this job instead: an order may legitimately
+-- contain the same SKU twice with different personalisation, so (order_id, sku)
+-- is not unique and there is no natural key without inventing a line-item index.
+--
+-- Keyed on the order id alone, so different orders never block each other. The
+-- second argument namespaces the key against any future advisory-lock user.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg('order_id')::text, 8021));
+
+-- name: NextJobNumber :one
+-- Mints the next job number from a sequence. Replaces production.NewJobNumber's
+-- 5 random digits, which had a 100k space, no unique index, and therefore a
+-- collision probability that grew with the table - a pure function pretending
+-- to a uniqueness guarantee it structurally could not provide. Sequence gaps on
+-- a rolled-back transaction are harmless.
+SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_number;
+
+-- name: ListReplannableJobs :many
+-- Everything the batch planner may reconsider on a run: jobs not yet on a bed,
+-- PLUS jobs currently sitting in a Draft (pending_approval) batch.
+--
+-- The second half is what makes batching a loop instead of a one-shot. With
+-- only `batch_id IS NULL` - which is what ListBatchableJobs gives, and all the
+-- planner ever saw - a job was frozen into whatever bed it first landed on, so
+-- a Draft that formed at 40% utilisation stayed at 40% forever no matter how
+-- much compatible work arrived afterwards.
+--
+-- A Draft is a proposal, not a commitment: no filament is reserved (that
+-- happens at approval) and no plate is promised, so its jobs are free to be
+-- re-planned. Approved batches and beyond are deliberately absent - their
+-- jobs have left 'queued' anyway, so the status filter excludes them twice
+-- over.
+SELECT j.* FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
+WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+  AND j.status = 'queued'
+  AND j.quantity > 0
+  AND j.personalisation_status IN ('validated', 'not_required')
+  AND j.issue_reason IS NULL
+  AND j.held = false
+ORDER BY j.created_at ASC, j.id ASC;
+
+-- name: UnassignJobsFromBatches :exec
+-- Detaches jobs from the given batches so they can be re-planned. Guarded on
+-- the batch still being a Draft, so a batch approved between the planner
+-- reading the pool and writing its result keeps every one of its jobs.
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE batch_id = ANY(sqlc.arg('batch_ids')::uuid[])
+  AND batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval');
+
+-- name: ListExcludedQueuedJobs :many
+-- Queued, unbatched jobs the planner will NOT see, and the facts needed to say
+-- why. The exact complement of ListBatchableJobs' eligibility bar, over the
+-- same queued/quantity base.
+--
+-- Without this a held or unvalidated job simply is not in any planner output:
+-- it is not batched, not held below target, not unbatchable, not deferred -
+-- it is absent, and absent looks identical to lost. Reporting the exclusion is
+-- what makes "why is this job not on a bed?" answerable for every job rather
+-- than only the ones planning happened to reach.
+SELECT id, job_number, held, personalisation_status, issue_reason
+FROM production_jobs
+WHERE batch_id IS NULL
+  AND status = 'queued'
+  AND quantity > 0
+  AND (
+    held = true
+    OR personalisation_status NOT IN ('validated', 'not_required')
+    OR issue_reason IS NOT NULL
+  )
+ORDER BY created_at ASC, id ASC;
