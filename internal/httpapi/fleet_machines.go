@@ -139,6 +139,7 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	g.POST("/sync", s.guards.RequirePermission(auth.MachineManage.Key()), s.syncFleetMachines)
 	s.registerFleetMachineLive(g)
 	s.registerFleetMachineUpload(g)
+	s.registerFleetMachineCamera(g)
 	s.registerFleetMachineWrites(g)
 }
 
