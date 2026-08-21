@@ -147,6 +147,35 @@ type Settings struct {
 	BambuBuddyURL    string
 	BambuBuddyAPIKey string
 
+	// Caching for the two BambuBuddy reads on hot paths, now that live status
+	// is polled rather than fetched once per page load. Without these, upstream
+	// load scales with the number of open tabs (see internal/httpapi/bambu_cache.go).
+	//
+	// Freshness the operator sees is the poll interval PLUS the status TTL, so
+	// 5s against a 10s poll is at worst 15s behind the printer. The printer
+	// index is far more stable - it only changes when a printer is added or
+	// removed in BambuBuddy, and a manual Sync writes through it anyway.
+	//
+	// Either set to 0 disables that cache, which is what makes a before/after
+	// measurement a config flip rather than a code change.
+	BambuStatusTTL       time.Duration
+	BambuPrinterIndexTTL time.Duration
+	// BambuErrorTTL bounds how long an upstream failure is remembered. An
+	// unreachable printer costs a full client timeout, and without negative
+	// caching every poll from every viewer pays it again.
+	BambuErrorTTL time.Duration
+
+	// FleetSyncIntervalSeconds drives the periodic refresh that keeps the
+	// machines table honest without anyone pressing Sync. It is deliberately
+	// slower than the UI poll: this exists for durable scheduling state (the
+	// planner reads these rows), while display freshness comes from the live
+	// endpoint. 0 disables the schedule.
+	FleetSyncIntervalSeconds int
+	// FleetSyncTimeoutMinutes overrides River's 1-minute default: a refresh is
+	// 1 + N SEQUENTIAL calls, each with its own 10s client timeout, so an
+	// unreachable fleet of six exceeds the default before it finishes.
+	FleetSyncTimeoutMinutes int
+
 	// BatchIdleWaitMinutes is how long a thin bed may be held back while a
 	// printer is free, hoping a short wait produces a fuller plate
 	// (production.BatchGate.IdleWaitWindow). Zero disables the wait: an idle
@@ -276,6 +305,11 @@ func Load() Settings {
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
 		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
+		BambuStatusTTL:                   secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
+		BambuPrinterIndexTTL:             secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
+		BambuErrorTTL:                    secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
+		FleetSyncIntervalSeconds:         intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
+		FleetSyncTimeoutMinutes:          intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),

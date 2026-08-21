@@ -29,6 +29,32 @@ import (
 
 const stopTimeout = 30 * time.Second
 
+// periodicJobs assembles the scheduled work this process owns.
+//
+// The two entries differ in RunOnStart, and deliberately so. A replan on every
+// deploy would be wasted work against an unchanged backlog. A fleet refresh on
+// every deploy is the opposite: a fresh deployment's machines table is empty
+// until something populates it, which is exactly the "Machine Management shows
+// nothing" state operators hit. Refreshing is cheap and idempotent, and
+// UniqueOpts bounds a restart loop.
+func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*river.PeriodicJob {
+	jobs := []*river.PeriodicJob{
+		river.NewPeriodicJob(
+			river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
+			production.PeriodicBatchPlanConstructor(debounce),
+			&river.PeriodicJobOpts{RunOnStart: false},
+		),
+	}
+	if fleetSync <= 0 {
+		return jobs // FLEET_SYNC_INTERVAL_SECONDS=0 opts out entirely
+	}
+	return append(jobs, river.NewPeriodicJob(
+		river.PeriodicInterval(fleetSync),
+		production.PeriodicFleetSyncConstructor(fleetSync),
+		&river.PeriodicJobOpts{RunOnStart: true},
+	))
+}
+
 func main() {
 	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
@@ -76,11 +102,22 @@ func main() {
 	river.AddWorker(workers, httpapi.NewJobCreationWorker(server, logger))
 	river.AddWorker(workers, httpapi.NewBatchPlanWorker(server, logger))
 
+	fleetSyncInterval := time.Duration(cfg.FleetSyncIntervalSeconds) * time.Second
+	if fleetSyncInterval > 0 {
+		river.AddWorker(workers, httpapi.NewFleetSyncWorker(
+			server, logger, time.Duration(cfg.FleetSyncTimeoutMinutes)*time.Minute,
+		))
+	}
+
 	debounce := time.Duration(cfg.BatchPlanDebounceSeconds) * time.Second
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
 			production.JobCreationQueueName: {MaxWorkers: concurrency},
 			production.BatchPlanQueueName:   {MaxWorkers: 1},
+			// Its own queue, and one at a time: a refresh waits on a printer
+			// host that may be asleep, and must never hold the single
+			// batch-plan slot while it does.
+			production.FleetSyncQueueName: {MaxWorkers: 1},
 		},
 		Workers: workers,
 		Logger:  logger,
@@ -91,13 +128,7 @@ func main() {
 		// shouldn't itself force an immediate replan. Shares Enqueue's
 		// debounce so a tick landing close to an event trigger collapses
 		// into one run instead of firing twice.
-		PeriodicJobs: []*river.PeriodicJob{
-			river.NewPeriodicJob(
-				river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
-				production.PeriodicBatchPlanConstructor(debounce),
-				&river.PeriodicJobOpts{RunOnStart: false},
-			),
-		},
+		PeriodicJobs: periodicJobs(cfg, debounce, fleetSyncInterval),
 	})
 	if err != nil {
 		log.Fatalf("build river client: %v", err)
