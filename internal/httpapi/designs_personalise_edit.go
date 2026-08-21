@@ -32,6 +32,10 @@ type personalisationSpec struct {
 	DepthMM     float64 `json:"depth_mm"`
 	OffsetXMM   float64 `json:"offset_x_mm"`
 	OffsetYMM   float64 `json:"offset_y_mm"`
+	OffsetZMM   float64 `json:"offset_z_mm"`
+	NormalX     float64 `json:"normal_x"`
+	NormalY     float64 `json:"normal_y"`
+	NormalZ     float64 `json:"normal_z"`
 	RotationDeg float64 `json:"rotation_deg"`
 	Colour      string  `json:"colour"`
 }
@@ -61,6 +65,10 @@ func (p personalisationSpec) normalise() personalisationSpec {
 	out.DepthMM = clampFloat(out.DepthMM, minPersonaliseDepthMM, maxPersonaliseDepthMM)
 	out.OffsetXMM = clampFloat(p.OffsetXMM, -maxPersonaliseOffset, maxPersonaliseOffset)
 	out.OffsetYMM = clampFloat(p.OffsetYMM, -maxPersonaliseOffset, maxPersonaliseOffset)
+	out.OffsetZMM = clampFloat(p.OffsetZMM, -maxPersonaliseOffset, maxPersonaliseOffset)
+	// Normals are kept as sent; placeText normalises them (and treats a zero vector
+	// as "no surface placement", falling back to the top face).
+	out.NormalX, out.NormalY, out.NormalZ = p.NormalX, p.NormalY, p.NormalZ
 	out.RotationDeg = normaliseAngle(p.RotationDeg)
 	out.Colour = strings.TrimSpace(p.Colour)
 	return out
@@ -226,7 +234,11 @@ func (s *Server) bakePersonalisation(
 
 	pKey, err := s.ensurePersonalisedModel(ctx, d.StlKey, personalise.Spec{
 		Text: spec.Text, Font: spec.Font, Style: spec.Style, SizeMM: spec.SizeMM, DepthMM: spec.DepthMM,
-	}, textPlacement{OffsetXMM: spec.OffsetXMM, OffsetYMM: spec.OffsetYMM, RotationDeg: spec.RotationDeg})
+	}, textPlacement{
+		OffsetXMM: spec.OffsetXMM, OffsetYMM: spec.OffsetYMM, OffsetZMM: spec.OffsetZMM,
+		NormalX: spec.NormalX, NormalY: spec.NormalY, NormalZ: spec.NormalZ,
+		RotationDeg: spec.RotationDeg,
+	})
 	if err != nil {
 		detail(c, http.StatusUnprocessableEntity, "Could not render the personalised model. Check the name and try again.")
 		return "", nil, false

@@ -62,3 +62,32 @@ RETURNING *;
 UPDATE batches SET preview_file_id = sqlc.arg('preview_file_id'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: MarkBatchSlicing :exec
+-- Claims the plate slice for a batch, so a retry or a duplicate trigger can tell
+-- "already running" from "never started".
+UPDATE batches SET
+    slice_status = 'running',
+    slice_error  = NULL,
+    updated_at   = now()
+WHERE id = sqlc.arg('id');
+
+-- name: SetBatchGcode :one
+-- Records the sliced plate: the object key a printer can actually consume.
+UPDATE batches SET
+    gcode_key    = sqlc.arg('gcode_key'),
+    sliced_at    = now(),
+    slice_status = 'done',
+    slice_error  = NULL,
+    updated_at   = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: FailBatchSlice :exec
+-- Records why a plate slice failed, so the batch shows a reason instead of just
+-- never gaining a gcode_key.
+UPDATE batches SET
+    slice_status = 'failed',
+    slice_error  = sqlc.arg('slice_error'),
+    updated_at   = now()
+WHERE id = sqlc.arg('id');

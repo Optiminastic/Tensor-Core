@@ -3,12 +3,19 @@ package slicing
 // Maps a design's answers to Bambu Studio system profiles. Ported from the Python
 // worker's profiles.py.
 //
-// The shop runs a Bambu H2C (dual-nozzle), which cannot slice headless (Bambu's
-// CLI refuses to map a filament to an extruder on a multi-extruder machine). We
-// slice single-colour designs on the H2S profile - the single-nozzle member of
+// The shop runs a Bambu H2C (dual-nozzle), which cannot be sliced headless from
+// presets: Bambu's CLI refuses to map a filament to an extruder on a
+// multi-extruder machine and stops at return_code -66. Costing sidesteps that by
+// slicing single-colour designs on the H2S profile - the single-nozzle member of
 // the same H2 platform (identical speed/flow) - which gives H2-accurate time and
-// slices cleanly. See Optiminastic/Tensor#3 and the memory note. To switch to real
-// H2C later, change machineProfile and the @BBL suffixes below.
+// slices cleanly. See Optiminastic/Tensor#3 and the memory note.
+//
+// Printing cannot use that substitution: a .gcode.3mf carries the printer it was
+// sliced for, so an H2S file is the wrong artefact to send to an H2C. The plate
+// path therefore slices from a real H2C project template instead - see
+// project3mf.go. Moving costing onto the same template would make quotes truly
+// H2C-accurate, but it changes every existing price, so it is a deliberate
+// decision rather than a cleanup.
 
 import (
 	"fmt"
@@ -43,6 +50,11 @@ type ResolvedProfiles struct {
 	ProcessPath  string
 	FilamentPath string
 	DensityGCm3  float64
+	// Family and NozzleMM identify the physical machine, which is what selects a
+	// project template for multi-extruder slicing (see project3mf.go). Both are
+	// zero on the legacy fixed-profile path, which has no machine behind it.
+	Family   string
+	NozzleMM float64
 }
 
 // ResolveProfiles maps (material, quality) to bundled Bambu H2S profiles under
@@ -107,6 +119,7 @@ func ResolveMachineProfiles(
 	return ResolvedProfiles{
 		MachinePath: machinePath, ProcessPath: processPath,
 		FilamentPath: filamentPath, DensityGCm3: density,
+		Family: family, NozzleMM: nozzleMM,
 	}, nil
 }
 

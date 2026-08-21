@@ -195,6 +195,10 @@ func (s *Server) registerDesigns(r *gin.Engine) {
 	id.DELETE("/parts/:partId", s.guards.RequirePermission(auth.DesignDelete.Key()), s.deleteDesignPart)
 	id.GET("/model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModel)
 	id.GET("/model-lite", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadModelLite)
+	// Print-ready variants: the baked (name-merged) STL and the least-support
+	// orientation of the base STL.
+	id.GET("/personalised-model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisedModel)
+	id.GET("/oriented-model", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadOrientedModel)
 	id.GET("/personalise-preview", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonalisePreview)
 	id.GET("/personalise-text", s.guards.RequirePermission(auth.DesignRead.Key()), s.downloadPersonaliseText)
 	id.PATCH("/personalisation", s.guards.RequirePermission(auth.DesignUpdate.Key()), s.setDesignPersonalisation)

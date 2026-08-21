@@ -195,16 +195,27 @@ func parseVertex(fields []string) (Vec3, error) {
 }
 
 // --- 3MF -------------------------------------------------------------------
-// A 3MF is a zip whose 3D/3dmodel.model is XML holding one or more meshes. We
-// read every object's mesh and merge the triangles. Component/build transforms
-// are not applied (v1): a single-part 3MF, the common print case, needs none.
+// A 3MF is a zip whose 3D/3dmodel.model is XML holding one or more meshes. An
+// object may carry its mesh inline, or reference it through the 3MF "production
+// extension": a <component p:path="/3D/Objects/object_N.model"> pointing at a
+// separate model part in the same archive. This is how Bambu Studio / MakerWorld
+// project files are laid out - the root model is just references and the geometry
+// lives in 3D/Objects/*.model. We follow those references so such files read as
+// real geometry, not "no triangles". Component/build transforms are not applied
+// (v1): a single-part model, the common print case, needs none.
 
 type xml3MFModel struct {
 	Objects []xml3MFObject `xml:"resources>object"`
 }
 type xml3MFObject struct {
-	Vertices  []xml3MFVertex   `xml:"mesh>vertices>vertex"`
-	Triangles []xml3MFTriangle `xml:"mesh>triangles>triangle"`
+	Vertices   []xml3MFVertex    `xml:"mesh>vertices>vertex"`
+	Triangles  []xml3MFTriangle  `xml:"mesh>triangles>triangle"`
+	Components []xml3MFComponent `xml:"components>component"`
+}
+type xml3MFComponent struct {
+	// Path is the p:path attribute (production extension). encoding/xml matches
+	// the local name "path" regardless of the "p:" namespace prefix.
+	Path string `xml:"path,attr"`
 }
 type xml3MFVertex struct {
 	X float64 `xml:"x,attr"`
@@ -221,32 +232,64 @@ type xml3MFTriangle struct {
 // a crafted archive (a zip bomb) cannot exhaust memory.
 const max3MFModelBytes = 512 << 20 // 512 MiB
 
-// Load3MF opens the 3MF archive at path and parses its model mesh(es).
+// Load3MF opens the 3MF archive at path and parses its model mesh, following any
+// production-extension component references into the archive's other model parts.
 func Load3MF(path string) (Mesh, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return Mesh{}, err
 	}
 	defer func() { _ = zr.Close() }()
-	for _, f := range zr.File {
-		if strings.EqualFold(filepath.ToSlash(f.Name), "3D/3dmodel.model") {
-			rc, err := f.Open()
-			if err != nil {
-				return Mesh{}, err
-			}
-			defer func() { _ = rc.Close() }()
-			return parse3MFModel(io.LimitReader(rc, max3MFModelBytes))
-		}
-	}
-	return Mesh{}, errors.New("orientation: 3MF has no 3D/3dmodel.model")
-}
 
-func parse3MFModel(r io.Reader) (Mesh, error) {
-	var model xml3MFModel
-	if err := xml.NewDecoder(r).Decode(&model); err != nil {
+	entries := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
+		entries[normEntryName(f.Name)] = f
+	}
+	root, ok := entries["3d/3dmodel.model"]
+	if !ok {
+		return Mesh{}, errors.New("orientation: 3MF has no 3D/3dmodel.model")
+	}
+
+	var tris []Triangle
+	visited := make(map[string]bool)
+	if err := collect3MFTriangles(entries, root, visited, &tris); err != nil {
 		return Mesh{}, err
 	}
-	tris := make([]Triangle, 0, 256)
+	if len(tris) == 0 {
+		return Mesh{}, errors.New("orientation: 3MF contained no triangles")
+	}
+	return buildMesh(tris), nil
+}
+
+// normEntryName lowercases a zip/component name and strips any leading slash, so
+// an archive entry ("3D/Objects/object_2.model") and a component path
+// ("/3D/Objects/object_2.model") resolve to the same map key.
+func normEntryName(name string) string {
+	return strings.TrimPrefix(strings.ToLower(filepath.ToSlash(name)), "/")
+}
+
+// collect3MFTriangles appends every triangle reachable from one model part: each
+// object's inline mesh, plus the meshes of the parts its components reference.
+// visited guards against reference cycles and double-counting a shared part.
+func collect3MFTriangles(
+	entries map[string]*zip.File, f *zip.File, visited map[string]bool, tris *[]Triangle,
+) error {
+	name := normEntryName(f.Name)
+	if visited[name] {
+		return nil
+	}
+	visited[name] = true
+
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rc.Close() }()
+
+	var model xml3MFModel
+	if err := xml.NewDecoder(io.LimitReader(rc, max3MFModelBytes)).Decode(&model); err != nil {
+		return err
+	}
 	for _, obj := range model.Objects {
 		for _, t := range obj.Triangles {
 			if !validIndices(t, len(obj.Vertices)) {
@@ -255,13 +298,19 @@ func parse3MFModel(r io.Reader) (Mesh, error) {
 			v0 := vertexToVec(obj.Vertices[t.V1])
 			v1 := vertexToVec(obj.Vertices[t.V2])
 			v2 := vertexToVec(obj.Vertices[t.V3])
-			tris = append(tris, newTriangle(v0, v1, v2))
+			*tris = append(*tris, newTriangle(v0, v1, v2))
+		}
+		for _, comp := range obj.Components {
+			target, ok := entries[normEntryName(comp.Path)]
+			if !ok {
+				continue
+			}
+			if err := collect3MFTriangles(entries, target, visited, tris); err != nil {
+				return err
+			}
 		}
 	}
-	if len(tris) == 0 {
-		return Mesh{}, errors.New("orientation: 3MF contained no triangles")
-	}
-	return buildMesh(tris), nil
+	return nil
 }
 
 func validIndices(t xml3MFTriangle, n int) bool {

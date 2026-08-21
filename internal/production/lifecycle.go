@@ -234,19 +234,33 @@ func AutoValidatePersonalisation(li LineItem) (string, Confirms) {
 	return StatusFor(c), c
 }
 
+// shortIDBytes is the width of the operator-facing job and batch numbers: short
+// enough to read aloud on the shop floor. Neither column is unique-indexed, so a
+// repeat is a cosmetic clash, not a failure.
+const shortIDBytes = 3
+
+// partUIDBytes is deliberately much wider. A part uid is the stable, never-reused
+// identity of a physical part and is UNIQUE-indexed
+// (assembly_group_parts_uid_key), so a repeat is a failed insert during order
+// intake, not a cosmetic clash. At 3 bytes (24 bits) the birthday bound puts the
+// odds of a collision at roughly 50% within only ~5,000 parts - reachable in
+// normal operation. 8 bytes (64 bits) pushes it far beyond any realistic count.
+const partUIDBytes = 8
+
 // NewJobNumber returns a job identifier of the form JOB-XXXXXX (6 uppercase hex).
-func NewJobNumber() (string, error) { return newNumber("JOB-") }
+func NewJobNumber() (string, error) { return newNumber("JOB-", shortIDBytes) }
 
 // NewBatchNumber returns a batch identifier of the form BATCH-XXXXXX.
-func NewBatchNumber() (string, error) { return newNumber("BATCH-") }
+func NewBatchNumber() (string, error) { return newNumber("BATCH-", shortIDBytes) }
 
 // NewPartUID returns a stable, system-minted identifier for one product part slot,
-// of the form PART-XXXXXX. It is minted once when the slot is created and carried
-// across reprints, so a part stays trackable through every reprint attempt.
-func NewPartUID() (string, error) { return newNumber("PART-") }
+// of the form PART- plus 16 uppercase hex. It is minted once when the slot is
+// created and carried across reprints, so a part stays trackable through every
+// reprint attempt - which is exactly why it must not collide.
+func NewPartUID() (string, error) { return newNumber("PART-", partUIDBytes) }
 
-func newNumber(prefix string) (string, error) {
-	b := make([]byte, 3)
+func newNumber(prefix string, n int) (string, error) {
+	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}

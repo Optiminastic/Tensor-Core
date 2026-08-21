@@ -17,6 +17,9 @@ import (
 const (
 	exportName = "out.gcode.3mf"
 	resultName = "result.json"
+	// plateProjectName is the project assembled from a machine's settings
+	// template for a template-driven plate slice.
+	plateProjectName = "plate-project.3mf"
 )
 
 // SliceOutput is the pair of files a successful slice leaves in outdir.
@@ -64,6 +67,71 @@ func RunSlice(
 		args = append(args, stlPath)
 	}
 
+	return runBambu(ctx, args, outdir, timeout)
+}
+
+// RunPlateSlice slices an already-packed batch plate: one merged STL whose parts
+// bedpack has positioned. It differs from RunSlice in exactly three ways, all
+// load-bearing (verified against Bambu Studio on a real merged plate):
+//
+//   - --orient 0. Auto-orient is free to rotate the model to minimise supports.
+//     On a plate that would rotate the whole packed layout as a rigid body, which
+//     can lay a bed of parts on its side. The layout is already decided.
+//   - one copy. The plate already contains every unit, so the units_per_bed
+//     repetition RunSlice does would print the whole bed N times.
+//   - a project template for machines that have one, in place of presets. This
+//     is what makes a multi-extruder machine sliceable at all; see below.
+//
+// --arrange stays ON, and that is not optional: bedpack packs from the bed origin,
+// and slicing those raw coordinates fails with "Found G-code outside of the
+// printable area" (return_code -104) because the skirt falls off the edge.
+// Arrange only translates the merged mesh rigidly, so the packing survives.
+func RunPlateSlice(
+	ctx context.Context, bambuRoot string, profiles ResolvedProfiles,
+	stlPath string, infillPct float64, settings SliceSettings,
+	outdir string, timeout time.Duration,
+) (SliceOutput, error) {
+	enableSupport := 0
+	if settings.SupportEnabled() {
+		enableSupport = 1
+	}
+	appRun := filepath.Join(bambuRoot, "AppRun")
+	args := []string{
+		"-a", appRun,
+		"--arrange", "1",
+		"--orient", "0",
+		"--slice", "0",
+		fmt.Sprintf("--enable-support=%d", enableSupport),
+		fmt.Sprintf("--sparse-infill-density=%g%%", infillPct),
+		"--outputdir", outdir,
+		"--export-3mf", exportName,
+	}
+	args = append(args, settings.Flags()...)
+
+	// A multi-extruder machine cannot be driven by presets alone: its
+	// filament-to-nozzle map exists only inside a project file, and without one
+	// the slicer stops at return_code -66. Inject the plate into the machine's
+	// settings template and slice that. See project3mf.go.
+	input := stlPath
+	if HasPlateTemplate(profiles.Family, profiles.NozzleMM) {
+		input = filepath.Join(outdir, plateProjectName)
+		if err := BuildPlateProject(profiles.Family, profiles.NozzleMM, stlPath, input); err != nil {
+			return SliceOutput{}, fmt.Errorf("build plate project: %w", err)
+		}
+	} else {
+		args = append(args,
+			"--load-settings", profiles.MachinePath+";"+profiles.ProcessPath,
+			"--load-filaments", profiles.FilamentPath,
+		)
+	}
+	args = append(args, input)
+
+	return runBambu(ctx, args, outdir, timeout)
+}
+
+// runBambu executes the slicer and turns its output into a SliceOutput. Shared by
+// the design and plate paths so both report failures the same way.
+func runBambu(ctx context.Context, args []string, outdir string, timeout time.Duration) (SliceOutput, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "xvfb-run", args...)

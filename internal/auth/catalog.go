@@ -86,6 +86,11 @@ var (
 	BatchRead   = PermissionSpec{"batch", "read", "View print batches"}
 	BatchManage = PermissionSpec{"batch", "manage", "Create, plan and approve print batches"}
 
+	// PrintDispatch sends a sliced plate to a printer. Deliberately separate from
+	// batch:manage: approving a batch is a planning act, while dispatching commits
+	// a physical machine and real filament.
+	PrintDispatch = PermissionSpec{"print", "dispatch", "Send a sliced batch to a printer"}
+
 	DispatchRead   = PermissionSpec{"dispatch", "read", "View dispatch orders"}
 	DispatchManage = PermissionSpec{"dispatch", "manage", "Create and mark dispatch orders"}
 
@@ -113,7 +118,7 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (38 permissions).
+// AllPermissions is the full catalog in seed order (39 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
 	DesignContent,
@@ -123,6 +128,7 @@ var AllPermissions = []PermissionSpec{
 	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 	OrderRead,
 	BatchRead, BatchManage,
+	PrintDispatch,
 	DispatchRead, DispatchManage,
 	QcSubmit, AssemblySubmit, PackagingSubmit,
 	MachineRead, MachineManage,
@@ -153,7 +159,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		// Runs the whole production pipeline.
 		OrderRead,
 		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
-		BatchRead, BatchManage,
+		BatchRead, BatchManage, PrintDispatch,
 		DispatchRead, DispatchManage,
 		QcSubmit, AssemblySubmit, PackagingSubmit,
 		MachineRead, MachineManage,
@@ -173,7 +179,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		DesignRead,
 		OrderRead,
 		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit,
-		BatchRead, BatchManage,
+		BatchRead, BatchManage, PrintDispatch,
 		MachineRead, MachineManage,
 		FilamentRead, FilamentManage,
 	},

@@ -19,6 +19,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -85,6 +86,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("build river client: %v", err)
 	}
+
+	// Production pipeline: the same insert-only client also enqueues order-arrived
+	// and batch-replan jobs (one client can insert any registered Kind), consumed
+	// by cmd/productionworker. This is what makes an imported order create its own
+	// jobs instead of waiting for an operator.
+	server.EnableProductionPipeline(
+		production.NewJobCreationEnqueuer(riverClient, cfg.Queue(production.JobCreationQueueName)),
+		production.NewBatchPlanEnqueuer(riverClient, cfg.BatchPlanDebounce, cfg.Queue(production.BatchPlanQueueName)),
+		production.NewDispatchEnqueuer(riverClient, cfg.Queue(production.DispatchQueueName)),
+	)
 	if objects, err := storage.New(ctx, storage.Config{
 		Endpoint:   cfg.MinIOEndpoint,
 		Region:     cfg.MinIORegion,
@@ -97,7 +108,7 @@ func main() {
 	}); err != nil {
 		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
 	} else {
-		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient))
+		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient, cfg.Queue(slicing.QueueName)))
 		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.MinIOEndpoint)
 	}
 

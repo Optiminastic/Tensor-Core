@@ -97,6 +97,45 @@ func RotateZTriangles(tris []orientation.Triangle, deg float64) []orientation.Tr
 	return out
 }
 
+// ScaleTrianglesXY scales every vertex's X and Y by s about the origin, leaving Z
+// (the extrusion depth) unchanged. The origin-built extruded text is centred in XY,
+// so this resizes the glyphs to a target height without touching their thickness. A
+// positive scale preserves winding. The input is not mutated.
+func ScaleTrianglesXY(tris []orientation.Triangle, s float64) []orientation.Triangle {
+	scale := func(v vec) vec { return vec{X: v.X * s, Y: v.Y * s, Z: v.Z} }
+	out := make([]orientation.Triangle, len(tris))
+	for i, t := range tris {
+		out[i] = t
+		out[i].V0 = scale(t.V0)
+		out[i].V1 = scale(t.V1)
+		out[i].V2 = scale(t.V2)
+	}
+	return out
+}
+
+// OrientTriangles rotates every vertex so the mesh's local axes map onto the given
+// world axes: local +X -> ax, +Y -> ay, +Z -> az. The axes must be an orthonormal
+// right-handed basis (a proper rotation), so winding - and thus outward normals -
+// is preserved. Used to lay the origin-built extruded text onto a surface, tilting
+// its extrude axis (+Z) to the surface normal. The input is not mutated.
+func OrientTriangles(tris []orientation.Triangle, ax, ay, az orientation.Vec3) []orientation.Triangle {
+	rot := func(v vec) vec {
+		return vec{
+			X: ax.X*v.X + ay.X*v.Y + az.X*v.Z,
+			Y: ax.Y*v.X + ay.Y*v.Y + az.Y*v.Z,
+			Z: ax.Z*v.X + ay.Z*v.Y + az.Z*v.Z,
+		}
+	}
+	out := make([]orientation.Triangle, len(tris))
+	for i, t := range tris {
+		out[i] = t
+		out[i].V0 = rot(t.V0)
+		out[i].V1 = rot(t.V1)
+		out[i].V2 = rot(t.V2)
+	}
+	return out
+}
+
 // toTriples copies a triangle slice into mutable vertex triples.
 func toTriples(tris []orientation.Triangle) [][3]vec {
 	out := make([][3]vec, len(tris))

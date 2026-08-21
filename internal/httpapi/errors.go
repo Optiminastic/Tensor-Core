@@ -57,6 +57,41 @@ func dbError(c *gin.Context, err error, notFoundMsg, genericMsg string) {
 	detail(c, http.StatusInternalServerError, genericMsg)
 }
 
+// httpErr carries the status and client-facing message for a failure that
+// happened below the handler. It lets one service method serve both an HTTP
+// handler and a background worker: the handler renders status+msg unchanged,
+// the worker matches cause with errors.Is and ignores the rest.
+//
+// msg is never derived from cause, so an internal string can never reach a
+// client.
+type httpErr struct {
+	status int
+	msg    string
+	cause  error
+}
+
+func (e *httpErr) Error() string { return e.msg }
+
+// Unwrap exposes the sentinel (if any) to errors.Is/errors.As.
+func (e *httpErr) Unwrap() error { return e.cause }
+
+// respondErr renders err when it is an *httpErr, preserving the exact status
+// and detail string the route contract promises. Anything else is logged with
+// the request id and rendered as a 500 with fallbackMsg, so an unmapped error
+// is never leaked verbatim.
+func respondErr(c *gin.Context, err error, fallbackMsg string) {
+	var he *httpErr
+	if errors.As(err, &he) {
+		detail(c, he.status, he.msg)
+		return
+	}
+	obs.FromContext(c.Request.Context()).Error("service error",
+		"error", err,
+		"route", c.FullPath(),
+	)
+	detail(c, http.StatusInternalServerError, fallbackMsg)
+}
+
 // maxJSONBodyBytes caps JSON request bodies so a malicious or buggy client
 // cannot exhaust memory with an unbounded payload. It is intentionally generous
 // for config/pricing JSON; the multipart design upload has its own separate,

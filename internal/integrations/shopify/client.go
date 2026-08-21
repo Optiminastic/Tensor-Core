@@ -71,6 +71,36 @@ type Client struct {
 	// baseURL overrides the scheme+host (tests point it at an httptest server).
 	// Empty means the real https://<shop> endpoint.
 	baseURL string
+	// recorder, when set, receives one Call per physical Admin API request for
+	// the activity log. Nil means no logging.
+	recorder Recorder
+}
+
+// Call describes one physical Admin API request, handed to the Recorder.
+type Call struct {
+	Shop       string
+	Method     string
+	Operation  string
+	Scope      string
+	StatusCode int
+	OK         bool
+	Err        error
+	Latency    time.Duration
+}
+
+// Recorder receives one Call per physical Admin API request. Implementations
+// must be non-blocking and must never fail the caller: logging is best-effort.
+type Recorder interface {
+	RecordCall(ctx context.Context, call Call)
+}
+
+// SetRecorder attaches an activity-log recorder. Call once at startup.
+func (c *Client) SetRecorder(r Recorder) { c.recorder = r }
+
+func (c *Client) record(ctx context.Context, call Call) {
+	if c.recorder != nil {
+		c.recorder.RecordCall(ctx, call)
+	}
 }
 
 // New builds a client for the given Admin API version (e.g. "2024-10") with the
@@ -538,41 +568,58 @@ func (c *Client) do(ctx context.Context, shop, token, query string, variables ma
 	}
 	endpoint := fmt.Sprintf("%s/admin/api/%s/graphql.json", base, c.apiVersion)
 
+	op := operationName(query)
+	scope := scopeForOperation(op)
 	return retry.Do(ctx, retryPolicy, func(ctx context.Context) error {
-		return c.doOnce(ctx, endpoint, token, body, out)
+		return c.doOnce(ctx, endpoint, token, shop, op, scope, body, out)
 	})
 }
 
 // doOnce performs a single GraphQL request. A 429 becomes a retryable APIError
 // carrying the server's Retry-After; every other failure is terminal.
-func (c *Client) doOnce(ctx context.Context, endpoint, token string, body []byte, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
+func (c *Client) doOnce(ctx context.Context, endpoint, token, shop, op, scope string, body []byte, out any) (err error) {
+	start := time.Now()
+	status := 0
+	defer func() {
+		c.record(ctx, Call{
+			Shop: shop, Method: http.MethodPost, Operation: op, Scope: scope,
+			StatusCode: status, OK: err == nil, Err: err, Latency: time.Since(start),
+		})
+	}()
+
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if reqErr != nil {
+		err = reqErr
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Shopify-Access-Token", token)
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return &APIError{msg: fmt.Sprintf("could not reach Shopify: %v", err), err: err}
+	resp, doErr := c.http.Do(req)
+	if doErr != nil {
+		err = &APIError{msg: fmt.Sprintf("could not reach Shopify: %v", doErr), err: doErr}
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	status = resp.StatusCode
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return &APIError{
+		err = &APIError{
 			msg:        "Shopify is rate limiting requests; please retry shortly",
 			err:        ErrRateLimited,
 			retryable:  true,
 			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
+		return err
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return apiErr("Shopify rejected the access token (check the token and the app's write_products scope)")
+		err = apiErr("Shopify rejected the access token (check the token and the app's write_products scope)")
+		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiErr("Shopify request failed (%d)", resp.StatusCode)
+		err = apiErr("Shopify request failed (%d)", resp.StatusCode)
+		return err
 	}
 
 	// Decode into a shape that carries both top-level errors and the data.
@@ -581,15 +628,18 @@ func (c *Client) doOnce(ctx context.Context, endpoint, token string, body []byte
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	raw, err := readAll(resp)
-	if err != nil {
-		return apiErr("could not read Shopify response: %v", err)
+	raw, readErr := readAll(resp)
+	if readErr != nil {
+		err = apiErr("could not read Shopify response: %v", readErr)
+		return err
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && len(envelope.Errors) > 0 {
-		return apiErr("Shopify GraphQL error: %s", envelope.Errors[0].Message)
+	if e := json.Unmarshal(raw, &envelope); e == nil && len(envelope.Errors) > 0 {
+		err = apiErr("Shopify GraphQL error: %s", envelope.Errors[0].Message)
+		return err
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return apiErr("could not decode Shopify response: %v", err)
+	if e := json.Unmarshal(raw, out); e != nil {
+		err = apiErr("could not decode Shopify response: %v", e)
+		return err
 	}
 	return nil
 }

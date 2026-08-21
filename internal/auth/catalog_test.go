@@ -9,8 +9,8 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 38 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 38 each", len(admin), len(AllPermissions))
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 39 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 39 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -119,14 +119,16 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 38 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 13 (operator)
-	// + 4 (packaging_qc) + 3 (marketing head) = 95. Admin gained design:content;
+	// 39 (admin) + 6 (designer) + 29 (project lead) + 3 (marketer) + 14 (operator)
+	// + 4 (packaging_qc) + 3 (marketing head) = 98. Project lead and operator each
+	// gained print:dispatch (sending a sliced batch to a printer); admin gains
+	// every permission by construction. Admin also gained design:content;
 	// marketing head is brand:read + design:read + design:content.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 95 {
-		t.Fatalf("total grants = %d, want 95", total)
+	if total != 98 {
+		t.Fatalf("total grants = %d, want 98", total)
 	}
 }

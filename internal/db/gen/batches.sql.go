@@ -27,7 +27,7 @@ UPDATE batches SET
     status                          = 'open',
     updated_at                      = now()
 WHERE id = $10
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at
 `
 
 type ApproveBatchParams struct {
@@ -75,14 +75,38 @@ func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Bat
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
+const failBatchSlice = `-- name: FailBatchSlice :exec
+UPDATE batches SET
+    slice_status = 'failed',
+    slice_error  = $1,
+    updated_at   = now()
+WHERE id = $2
+`
+
+type FailBatchSliceParams struct {
+	SliceError *string
+	ID         uuid.UUID
+}
+
+// Records why a plate slice failed, so the batch shows a reason instead of just
+// never gaining a gcode_key.
+func (q *Queries) FailBatchSlice(ctx context.Context, arg FailBatchSliceParams) error {
+	_, err := q.db.Exec(ctx, failBatchSlice, arg.SliceError, arg.ID)
+	return err
+}
+
 const getBatchByID = `-- name: GetBatchByID :one
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches WHERE id = $1
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at FROM batches WHERE id = $1
 `
 
 func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error) {
@@ -104,6 +128,10 @@ func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error)
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -122,7 +150,7 @@ INSERT INTO batches (
     $8::float8, $9::float8,
     $10::float8, $11
 )
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at
 `
 
 type InsertBatchParams struct {
@@ -173,6 +201,10 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -180,7 +212,7 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 }
 
 const listBatches = `-- name: ListBatches :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
 `
 
 func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
@@ -208,6 +240,10 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 			&i.TotalFilamentGrams,
 			&i.BedUtilizationPercent,
 			&i.PackingStrategy,
+			&i.GcodeKey,
+			&i.SlicedAt,
+			&i.SliceStatus,
+			&i.SliceError,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -222,7 +258,7 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 }
 
 const listBatchesPage = `-- name: ListBatchesPage :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at FROM batches
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at FROM batches
 WHERE (
     $1::timestamptz IS NULL
     OR (created_at, id) < ($1::timestamptz, $2::uuid)
@@ -262,6 +298,10 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 			&i.TotalFilamentGrams,
 			&i.BedUtilizationPercent,
 			&i.PackingStrategy,
+			&i.GcodeKey,
+			&i.SlicedAt,
+			&i.SliceStatus,
+			&i.SliceError,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -275,10 +315,71 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 	return items, nil
 }
 
+const markBatchSlicing = `-- name: MarkBatchSlicing :exec
+UPDATE batches SET
+    slice_status = 'running',
+    slice_error  = NULL,
+    updated_at   = now()
+WHERE id = $1
+`
+
+// Claims the plate slice for a batch, so a retry or a duplicate trigger can tell
+// "already running" from "never started".
+func (q *Queries) MarkBatchSlicing(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markBatchSlicing, id)
+	return err
+}
+
+const setBatchGcode = `-- name: SetBatchGcode :one
+UPDATE batches SET
+    gcode_key    = $1,
+    sliced_at    = now(),
+    slice_status = 'done',
+    slice_error  = NULL,
+    updated_at   = now()
+WHERE id = $2
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at
+`
+
+type SetBatchGcodeParams struct {
+	GcodeKey *string
+	ID       uuid.UUID
+}
+
+// Records the sliced plate: the object key a printer can actually consume.
+func (q *Queries) SetBatchGcode(ctx context.Context, arg SetBatchGcodeParams) (Batch, error) {
+	row := q.db.QueryRow(ctx, setBatchGcode, arg.GcodeKey, arg.ID)
+	var i Batch
+	err := row.Scan(
+		&i.ID,
+		&i.BatchNumber,
+		&i.MachineID,
+		&i.Status,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.MaterialShortage,
+		&i.MergedFileID,
+		&i.PreviewFileID,
+		&i.UnitsPerBed,
+		&i.TotalPrintTimeMinutes,
+		&i.EffectiveTimePerUnitMinutes,
+		&i.TotalFilamentGrams,
+		&i.BedUtilizationPercent,
+		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const setBatchPreviewFile = `-- name: SetBatchPreviewFile :one
 UPDATE batches SET preview_file_id = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at
 `
 
 type SetBatchPreviewFileParams struct {
@@ -305,6 +406,10 @@ func (q *Queries) SetBatchPreviewFile(ctx context.Context, arg SetBatchPreviewFi
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -317,7 +422,7 @@ UPDATE batches SET
     machine_id = CASE WHEN $2::bool THEN $3 ELSE machine_id END,
     updated_at = now()
 WHERE id = $4
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, gcode_key, sliced_at, slice_status, slice_error, created_at, updated_at
 `
 
 type UpdateBatchParams struct {
@@ -352,6 +457,10 @@ func (q *Queries) UpdateBatch(ctx context.Context, arg UpdateBatchParams) (Batch
 		&i.TotalFilamentGrams,
 		&i.BedUtilizationPercent,
 		&i.PackingStrategy,
+		&i.GcodeKey,
+		&i.SlicedAt,
+		&i.SliceStatus,
+		&i.SliceError,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

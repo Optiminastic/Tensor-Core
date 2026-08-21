@@ -88,6 +88,81 @@ func write3MF(t *testing.T) string {
 	return path
 }
 
+// write3MFProductionExtension writes a 3MF laid out the way Bambu Studio /
+// MakerWorld project files are: the root 3D/3dmodel.model holds only a
+// <component p:path> reference, and the real cube mesh lives in a separate
+// 3D/Objects/object_1.model part. Load3MF must follow the reference.
+func write3MFProductionExtension(t *testing.T) string {
+	t.Helper()
+
+	var root bytes.Buffer
+	root.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	root.WriteString(`<model unit="millimeter" ` +
+		`xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" ` +
+		`xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" ` +
+		`requiredextensions="p">`)
+	root.WriteString(`<resources><object id="2" type="model"><components>`)
+	root.WriteString(`<component p:path="/3D/Objects/object_1.model" objectid="1"/>`)
+	root.WriteString(`</components></object></resources><build><item objectid="2"/></build></model>`)
+
+	var part bytes.Buffer
+	part.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
+	part.WriteString(`<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">`)
+	part.WriteString(`<resources><object id="1" type="model"><mesh><vertices>`)
+	for _, v := range cubeVerts {
+		fmt.Fprintf(&part, `<vertex x="%g" y="%g" z="%g"/>`, v.X, v.Y, v.Z)
+	}
+	part.WriteString(`</vertices><triangles>`)
+	for _, tr := range cubeTris {
+		fmt.Fprintf(&part, `<triangle v1="%d" v2="%d" v3="%d"/>`, tr[0], tr[1], tr[2])
+	}
+	part.WriteString(`</triangles></mesh></object></resources></model>`)
+
+	path := filepath.Join(t.TempDir(), "cube-prod.3mf")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create 3mf: %v", err)
+	}
+	defer f.Close()
+	zw := zip.NewWriter(f)
+	for name, body := range map[string][]byte{
+		"3D/3dmodel.model":          root.Bytes(),
+		"3D/Objects/object_1.model": part.Bytes(),
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip entry %s: %v", name, err)
+		}
+		if _, err := w.Write(body); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return path
+}
+
+// A production-extension 3MF (mesh in a referenced part, not inline) must load
+// the same geometry as its STL twin - the MakerWorld/Bambu project case that
+// previously read as "no triangles".
+func TestLoad3MF_FollowsComponentReferences(t *testing.T) {
+	stl, err := LoadSTL(binarySTL(cubeTriangleCoords()))
+	if err != nil {
+		t.Fatalf("LoadSTL: %v", err)
+	}
+	tmf, err := Load3MF(write3MFProductionExtension(t))
+	if err != nil {
+		t.Fatalf("Load3MF: %v", err)
+	}
+	if len(tmf.Triangles) != len(stl.Triangles) {
+		t.Fatalf("triangle counts differ: stl=%d 3mf=%d", len(stl.Triangles), len(tmf.Triangles))
+	}
+	if stl.Min != tmf.Min || stl.Max != tmf.Max {
+		t.Fatalf("bbox differ: stl %v..%v vs 3mf %v..%v", stl.Min, stl.Max, tmf.Min, tmf.Max)
+	}
+}
+
 func TestLoadBinarySTL_Cube(t *testing.T) {
 	m, err := LoadSTL(binarySTL(cubeTriangleCoords()))
 	if err != nil {

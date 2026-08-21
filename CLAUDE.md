@@ -25,11 +25,15 @@ internal/
     round.go        Python-compatible round-half-to-even + formatting
   slicing/   the slice pipeline (Go, replaces the Python worker):
     profiles.go  material/quality -> Bambu H2S profile paths + filament density
-    bambu.go     RunSlice: Bambu Studio headless under xvfb (subprocess)
+    bambu.go     RunSlice / RunPlateSlice: Bambu Studio headless under xvfb (subprocess)
+    project3mf.go BuildPlateProject: inject a plate mesh into a machine's settings
+                 template, the only way to slice a multi-extruder machine headless
+    templates/   per-machine settings projects (h2c-0.4.3mf) + derive_template.py
     gcode.go     parse result.json + slice_info + plate gcode -> SliceMetrics (+ gcode_test.go)
     metrics.go   ToPerUnit: whole-plate SliceMetrics -> per-unit PerUnitMetrics
-    queue.go     River SliceArgs + Enqueuer (transactional InsertTx) + insert-only client
+    queue.go     River SliceArgs + PlateSliceArgs + Enqueuer (transactional InsertTx)
     worker.go    SliceWorker: river.Worker[SliceArgs] - the STL-in, priced-design-out job
+    plate_worker.go PlateSliceWorker: batch plate -> gcode/batches/<id>.gcode.3mf
     pricing.go   ProcessSliceResult / priceDesign / FailJob (slice -> price, ctx+store only)
   orientation/ least-support resting-orientation recommender from mesh geometry (pure):
     mesh.go      Vec3 math + STL (binary/ASCII) and 3MF (zip+xml) loaders -> Mesh
@@ -88,6 +92,36 @@ internal/
 - Validate all external input at the HTTP boundary (Gin binding tags + explicit business checks).
 - Regenerate sqlc after editing `internal/db/queries` or `schema.sql`; `schema.sql` and the goose baseline must describe the same tables (the integration tests catch drift).
 
+## Slicing a multi-extruder machine
+
+Bambu Studio's CLI cannot slice for a dual-nozzle machine (the shop's H2C) when the
+filament-to-nozzle map is passed as flags.
+It stops at `return_code -66`, and no flag spelling works: `--filament-map`,
+`--filament-map-mode`, `--load-filament-ids` and `--load-defaultfila` were all tried.
+
+The reason is that the map is not a project setting.
+It lives on the **plate**, in `Metadata/model_settings.config`, as `filament_maps` and
+`filament_map_mode`, so the only way to give it to the CLI is inside a project file.
+
+So each multi-extruder machine gets a template in `internal/slicing/templates/`: a project
+Bambu Studio itself wrote, stripped to its settings, with a placeholder mesh.
+`BuildPlateProject` swaps that placeholder for the packed plate and leaves every other part
+of the package byte-identical; `RunPlateSlice` uses it whenever `HasPlateTemplate` matches.
+
+Rules when touching this:
+
+- **Never hand-author a template.** Produce it from a real project with
+  `templates/derive_template.py`. Two hand-stripped attempts both failed to parse
+  (`return_code -6`).
+- **Only ever replace `3D/Objects/object_1.model`.** Everything else, especially every
+  `.rels` relationship, is load-bearing. Deleting the relationship that points at the mesh
+  gives an empty plate and `return_code -50`.
+- **Meshes are centred on the origin**, and the build item transform lifts them onto the
+  bed by half the object height. An off-centre mesh reads as outside the print volume.
+- Costing still slices designs on the **H2S** profile (see `profiles.go`). That is fine for
+  a quote and wrong for a print, because a `.gcode.3mf` carries the printer it was sliced
+  for. Do not "fix" the plate path by substituting H2S.
+
 ## Multi-part products
 
 A product stays one design and one SKU, but a design may declare named **parts** (its recipe): body, lid, two legs. A design with no parts is a single-part product and behaves exactly as before - the whole feature is additive and legacy-safe.
@@ -112,7 +146,7 @@ Authentication (who you are) belongs to Better Auth in the frontend. **This serv
 - **`/internal/*` is service-to-service only.** Shared secret, constant-time compare, guarded at the router level. No secret configured means 503, not open.
 - Add a new permission to `AllPermissions` and the relevant `roleGrants` entry, then re-run the seed. `ADMIN` is the whole catalog by construction.
 
-Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`, `MARKETING_HEAD`. The catalog holds 38 permissions across 7 roles (95 grants). `MARKETING_HEAD` writes product marketing copy only (`brand:read`, `design:read`, `design:content`) - it cannot approve, price or publish. Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions; Marketing-Head writes copy only) - those tests are the spec, do not relax them.
+Roles: `ADMIN`, `DESIGNER`, `PROJECT_LEAD`, `PERFORMANCE_MARKETER`, `OPERATOR`, `PACKAGING_QC`, `MARKETING_HEAD`. The catalog holds 39 permissions across 7 roles (98 grants). `MARKETING_HEAD` writes product marketing copy only (`brand:read`, `design:read`, `design:content`) - it cannot approve, price or publish. Separation of duties is asserted in `internal/auth/catalog_test.go` (e.g. Operator and Packaging-QC must never see cost assumptions; Marketing-Head writes copy only) - those tests are the spec, do not relax them.
 
 ### Contract with the frontend
 Every route, method, JSON shape, status code, and error `detail` string must stay identical - the frontend validates responses with Zod. Domain responses are snake_case; `permissionsVersion` and `adminExists` are camelCase. POST-create returns 201; revoke/bootstrap/accept return 204.

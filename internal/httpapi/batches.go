@@ -11,14 +11,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/production"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
 )
 
 type batchResponse struct {
@@ -37,9 +40,16 @@ type batchResponse struct {
 	TotalFilamentGrams          *float64   `json:"total_filament_grams"`
 	BedUtilizationPercent       *float64   `json:"bed_utilization_percent"`
 	PackingStrategy             *string    `json:"packing_strategy"`
-	CreatedAt                   time.Time  `json:"created_at"`
-	UpdatedAt                   time.Time  `json:"updated_at"`
-	JobsCount                   *int64     `json:"jobs_count,omitempty"`
+	// The sliced plate. merged_file_id above is only the STL; this is the file a
+	// printer can consume. Null until the plate slice completes, and slice_error
+	// tells "the slice failed" apart from "not sliced yet".
+	GcodeKey    *string    `json:"gcode_key"`
+	SlicedAt    *time.Time `json:"sliced_at"`
+	SliceStatus *string    `json:"slice_status"`
+	SliceError  *string    `json:"slice_error"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	JobsCount   *int64     `json:"jobs_count,omitempty"`
 }
 
 func batchDTO(b gen.Batch) batchResponse {
@@ -50,7 +60,10 @@ func batchDTO(b gen.Batch) batchResponse {
 		PreviewFileID: uuidPtrStr(b.PreviewFileID), UnitsPerBed: b.UnitsPerBed,
 		TotalPrintTimeMinutes: b.TotalPrintTimeMinutes, EffectiveTimePerUnitMinutes: db.NumFloatPtr(b.EffectiveTimePerUnitMinutes),
 		TotalFilamentGrams: db.NumFloatPtr(b.TotalFilamentGrams), BedUtilizationPercent: db.NumFloatPtr(b.BedUtilizationPercent),
-		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
+		PackingStrategy: b.PackingStrategy,
+		GcodeKey:        b.GcodeKey, SlicedAt: db.TimePtr(b.SlicedAt),
+		SliceStatus: b.SliceStatus, SliceError: b.SliceError,
+		CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
 	}
 }
 
@@ -64,6 +77,8 @@ func (s *Server) registerBatches(r *gin.Engine) {
 	g.PATCH("/:id", s.guards.RequirePermission(auth.BatchManage.Key()), s.patchBatch)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.BatchRead.Key()), s.previewBatch)
 	g.POST("/:id/approve", s.guards.RequirePermission(auth.BatchManage.Key()), s.approveBatch)
+	g.POST("/:id/dispatch", s.guards.RequirePermission(auth.PrintDispatch.Key()), s.dispatchBatch)
+	g.GET("/:id/dispatches", s.guards.RequirePermission(auth.BatchRead.Key()), s.listBatchDispatches)
 }
 
 func (s *Server) listBatches(c *gin.Context) {
@@ -204,19 +219,49 @@ type autoCreateResponse struct {
 }
 
 func (s *Server) autoCreateBatches(c *gin.Context) {
+	created, unbatchable, err := s.AutoCreateBatches(c.Request.Context())
+	if err != nil {
+		respondErr(c, err, "Could not create the batches.")
+		return
+	}
+	c.JSON(http.StatusOK, autoCreateResponse{Created: created, Unbatchable: unbatchable})
+}
+
+// triggerBatchPlan schedules a debounced replan of everything batchable.
+//
+// Best-effort by design: a batch is not created transactionally with whatever
+// just made a job batchable, so a failure here is logged rather than propagated
+// - the caller's own work still succeeded, and the next trigger (or the periodic
+// tick in cmd/productionworker) reconsiders the same jobs anyway.
+//
+// The debounce lives in production.BatchPlanEnqueuer, so a burst of orders
+// landing together collapses into a single replan instead of one per order.
+func (s *Server) triggerBatchPlan(ctx context.Context) {
+	if s.batchEnqueuer == nil {
+		return // Automation not wired up; batching stays operator-driven.
+	}
+	if err := s.batchEnqueuer.Enqueue(ctx); err != nil {
+		obs.FromContext(ctx).Error("could not schedule batch replan", "error", err)
+	}
+}
+
+// AutoCreateBatches replans every currently batchable job into batches. It is the
+// shared body of the HTTP route and the River batch-plan worker, so a scheduled
+// replan and an operator pressing Auto-create produce the same batches.
+//
+// Errors carry their own status and client-facing message via *httpErr, so the
+// route's response strings are unchanged by the extraction.
+func (s *Server) AutoCreateBatches(ctx context.Context) ([]batchResponse, []production.Unbatchable, error) {
 	// No storage needed here: footprints come from the file_assets bbox in the DB.
 	// Merging the plate STL (which needs storage) happens at preview/approve.
-	ctx := c.Request.Context()
 	jobs, err := s.store.Q.ListBatchableJobs(ctx)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read batchable jobs.")
-		return
+		return nil, nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not read batchable jobs.", cause: err}
 	}
 
 	planJobs, err := s.planJobsFor(ctx, jobs)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the jobs' print files.")
-		return
+		return nil, nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not read the jobs' print files.", cause: err}
 	}
 	planned, unbatchable := production.Plan(planJobs)
 
@@ -250,10 +295,9 @@ func (s *Server) autoCreateBatches(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not create the batches.")
-		return
+		return nil, nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not create the batches.", cause: err}
 	}
-	c.JSON(http.StatusOK, autoCreateResponse{Created: created, Unbatchable: unbatchable})
+	return created, unbatchable, nil
 }
 
 func (s *Server) previewBatch(c *gin.Context) {
@@ -360,12 +404,36 @@ func (s *Server) approveBatch(c *gin.Context) {
 	filament := sumFilament(jobs)
 	material := batchMaterialFromJobs(jobs)
 	approvedBy := currentUserID(c)
-	b, err := s.store.Q.ApproveBatch(ctx, gen.ApproveBatchParams{
-		ID: id, MachineID: &machineID, ApprovedBy: &approvedBy, MergedFileID: &mergedID,
-		MaterialShortage: !s.filamentAvailable(ctx, s.store.Q, material, filament),
-		UnitsPerBed:      int32ptr(plate.unitsPerBed), TotalPrintTimeMinutes: total,
-		EffectiveTimePerUnitMinutes: eff, TotalFilamentGrams: &filament,
-		BedUtilizationPercent: &plate.utilisation,
+	// Approve the batch and schedule its plate slice in ONE transaction. The
+	// merged STL is not printable; the sliced plate is. Committing them together
+	// means an approved batch is always on its way to having a printable file,
+	// and a rollback leaves neither.
+	var b gen.Batch
+	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		var err error
+		b, err = q.ApproveBatch(ctx, gen.ApproveBatchParams{
+			ID: id, MachineID: &machineID, ApprovedBy: &approvedBy, MergedFileID: &mergedID,
+			MaterialShortage: !s.filamentAvailable(ctx, q, material, filament),
+			UnitsPerBed:      int32ptr(plate.unitsPerBed), TotalPrintTimeMinutes: total,
+			EffectiveTimePerUnitMinutes: eff, TotalFilamentGrams: &filament,
+			BedUtilizationPercent: &plate.utilisation,
+		})
+		if err != nil {
+			return err
+		}
+		if s.enqueuer == nil {
+			return nil // Slice pipeline not enabled; the batch still approves.
+		}
+		return s.enqueuer.EnqueuePlateTx(ctx, tx, slicing.PlateSliceArgs{
+			BatchID: id,
+			// The key storePlate just wrote the merged plate to.
+			StlKey:   fmt.Sprintf("batches/%s/plate.stl", id),
+			Material: derefStr(material),
+			Quality:  defaultPlateQuality,
+			// Always set: approval requires a machine, so the slice resolves that
+			// machine's own profiles rather than the legacy fixed ones.
+			MachineID: &machineID,
+		})
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not approve the batch.")
@@ -382,11 +450,6 @@ type plateResult struct {
 	utilisation float64
 }
 
-type httpErr struct {
-	status int
-	msg    string
-}
-
 // buildMergedPlate resolves each job's print-file footprint, packs the units onto
 // one bed, downloads and merges the source models, and returns the plate STL. It
 // yields a 409 when a job lacks a measurable print file or the batch overflows the
@@ -401,15 +464,15 @@ func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob,
 	var units []bedpack.UnitFootprint
 	for _, j := range jobs {
 		if j.PrintFileID == nil {
-			return plateResult{}, &httpErr{http.StatusConflict, fmt.Sprintf("Job %s has no print file selected.", j.JobNumber)}
+			return plateResult{}, &httpErr{status: http.StatusConflict, msg: fmt.Sprintf("Job %s has no print file selected.", j.JobNumber)}
 		}
 		file, err := s.store.Q.GetFileAsset(ctx, *j.PrintFileID)
 		if err != nil {
-			return plateResult{}, &httpErr{http.StatusConflict, fmt.Sprintf("Job %s references a missing print file.", j.JobNumber)}
+			return plateResult{}, &httpErr{status: http.StatusConflict, msg: fmt.Sprintf("Job %s references a missing print file.", j.JobNumber)}
 		}
 		bx, by, bz := db.NumFloatPtr(file.BboxXMm), db.NumFloatPtr(file.BboxYMm), db.NumFloatPtr(file.BboxZMm)
 		if bx == nil || by == nil || bz == nil {
-			return plateResult{}, &httpErr{http.StatusConflict, fmt.Sprintf("Job %s has no measurable model dimensions.", j.JobNumber)}
+			return plateResult{}, &httpErr{status: http.StatusConflict, msg: fmt.Sprintf("Job %s has no measurable model dimensions.", j.JobNumber)}
 		}
 		box := bedpack.UnitFootprint{RefID: j.ID.String(), XMM: *bx, YMM: *by, ZMM: *bz}
 		items = append(items, resolved{job: j, file: file, box: box})
@@ -420,7 +483,7 @@ func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob,
 
 	placements, rejected := bedpack.Pack(units)
 	if len(rejected) > 0 {
-		return plateResult{}, &httpErr{http.StatusConflict, "The batch's jobs do not fit on a single bed."}
+		return plateResult{}, &httpErr{status: http.StatusConflict, msg: "The batch's jobs do not fit on a single bed."}
 	}
 
 	// Download and parse each distinct print file once.
@@ -448,18 +511,18 @@ func (s *Server) loadModelMesh(ctx context.Context, file gen.FileAsset) (orienta
 	ext := filepath.Ext(file.Filename)
 	tmp, err := os.CreateTemp("", "tensor-merge-*"+ext)
 	if err != nil {
-		return orientation.Mesh{}, &httpErr{http.StatusInternalServerError, "Could not buffer a model file."}
+		return orientation.Mesh{}, &httpErr{status: http.StatusInternalServerError, msg: "Could not buffer a model file."}
 	}
 	tmpPath := tmp.Name()
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmpPath) }()
 
 	if err := s.storage.Download(ctx, file.StorageKey, tmpPath); err != nil {
-		return orientation.Mesh{}, &httpErr{http.StatusConflict, fmt.Sprintf("Could not read the model %q from storage.", file.Filename)}
+		return orientation.Mesh{}, &httpErr{status: http.StatusConflict, msg: fmt.Sprintf("Could not read the model %q from storage.", file.Filename)}
 	}
 	mesh, err := orientation.LoadModel(tmpPath, ext)
 	if err != nil {
-		return orientation.Mesh{}, &httpErr{http.StatusConflict, fmt.Sprintf("The model %q could not be merged.", file.Filename)}
+		return orientation.Mesh{}, &httpErr{status: http.StatusConflict, msg: fmt.Sprintf("The model %q could not be merged.", file.Filename)}
 	}
 	return mesh, nil
 }
@@ -517,6 +580,15 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 			}
 			if err == nil {
 				bx, by, bz := db.NumFloatPtr(file.BboxXMm), db.NumFloatPtr(file.BboxYMm), db.NumFloatPtr(file.BboxZMm)
+				// An unmeasured model makes this job permanently unbatchable, so
+				// measure it here rather than leaving the order stranded. A no-op
+				// once measured, and it re-reads only the file it just fixed.
+				if bx == nil || by == nil || bz == nil {
+					s.ensureFileMeasured(ctx, file.ID, file.StorageKey)
+					if repaired, rerr := s.store.Q.GetFileAsset(ctx, file.ID); rerr == nil {
+						bx, by, bz = db.NumFloatPtr(repaired.BboxXMm), db.NumFloatPtr(repaired.BboxYMm), db.NumFloatPtr(repaired.BboxZMm)
+					}
+				}
 				if bx != nil && by != nil && bz != nil {
 					box = bedpack.UnitFootprint{RefID: j.ID.String(), XMM: *bx, YMM: *by, ZMM: *bz}
 				}
@@ -604,4 +676,82 @@ func jobIDsOf(jobs []production.PlanJob) []uuid.UUID {
 		}
 	}
 	return ids
+}
+
+// defaultPlateQuality is the process preset a batch plate is sliced at. A batch
+// has no quality of its own (that lives on a design), and approval always sets a
+// machine, so this only matters for the legacy non-machine path.
+const defaultPlateQuality = "standard"
+
+// derefStr reads an optional string, yielding "" when unset.
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// dispatchBatch sends an already-sliced batch to its printer. The automatic path
+// does this on its own when the plate finishes slicing; this route is the manual
+// retry for when that failed, or when auto-print was off at the time.
+//
+// 202: the hand-off is queued, not completed - uploading to the shop LAN and
+// queueing on the printer happen in the worker.
+func (s *Server) dispatchBatch(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	if err := s.ScheduleDispatch(c.Request.Context(), id); err != nil {
+		respondErr(c, err, "Could not start the print.")
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "queued"})
+}
+
+// printDispatchResponse is the API shape of one hand-off to a printer.
+type printDispatchResponse struct {
+	ID              string     `json:"id"`
+	BatchID         string     `json:"batch_id"`
+	PrinterID       int32      `json:"printer_id"`
+	LibraryFileID   *int32     `json:"library_file_id"`
+	QueueItemID     *int32     `json:"queue_item_id"`
+	Status          string     `json:"status"`
+	Error           *string    `json:"error"`
+	FilamentWarning *string    `json:"filament_warning"`
+	DispatchedAt    *time.Time `json:"dispatched_at"`
+	StartedAt       *time.Time `json:"started_at"`
+	CompletedAt     *time.Time `json:"completed_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+func printDispatchDTO(d gen.PrintDispatch) printDispatchResponse {
+	return printDispatchResponse{
+		ID: d.ID.String(), BatchID: d.BatchID.String(), PrinterID: d.PrinterID,
+		LibraryFileID: d.LibraryFileID, QueueItemID: d.QueueItemID, Status: d.Status,
+		Error: d.Error, FilamentWarning: d.FilamentWarning,
+		DispatchedAt: db.TimePtr(d.DispatchedAt), StartedAt: db.TimePtr(d.StartedAt),
+		CompletedAt: db.TimePtr(d.CompletedAt),
+		CreatedAt:   db.Time(d.CreatedAt), UpdatedAt: db.Time(d.UpdatedAt),
+	}
+}
+
+// listBatchDispatches returns every hand-off attempted for a batch, newest first,
+// so a failed print and its retry both stay visible.
+func (s *Server) listBatchDispatches(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	rows, err := s.store.Q.ListPrintDispatchesForBatch(c.Request.Context(), id)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list the batch's prints.")
+		return
+	}
+	out := make([]printDispatchResponse, 0, len(rows))
+	for _, d := range rows {
+		out = append(out, printDispatchDTO(d))
+	}
+	c.JSON(http.StatusOK, out)
 }

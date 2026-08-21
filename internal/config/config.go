@@ -78,6 +78,22 @@ type Settings struct {
 	PrinterAvgPowerKW   float64
 	SliceConcurrency    int
 
+	// Production pipeline (cmd/productionworker). ProductionConcurrency is how
+	// many orders are turned into jobs at once. BatchPlanDebounce collapses a
+	// burst of triggers - a rush of orders landing together - into a single
+	// replan, and doubles as the period of the safety-net tick that reconsiders
+	// batchable jobs even if every event trigger were lost.
+	// RiverQueuePrefix namespaces the River queues this process enqueues to and
+	// consumes from. The dev database is shared between developers, so without a
+	// prefix every machine running the stack competes for the same queue and a
+	// colleague on an older build will claim and discard jobs it does not
+	// recognise. Empty (the default) keeps the original queue names.
+	RiverQueuePrefix string
+
+	ProductionConcurrency int
+	BatchPlanDebounce     time.Duration
+	BatchPlanInterval     time.Duration
+
 	// OpenSCADBin is the OpenSCAD executable used to render personalised text into
 	// printable geometry (the API's personalise-preview route). Absent/failed
 	// OpenSCAD just falls back to the plain model, so this is best-effort.
@@ -103,6 +119,26 @@ type Settings struct {
 	PublicBaseURL       string
 	FrontendURL         string
 	TokenEncryptionKey  string
+
+	// BamBuddy, the printer manager on the shop LAN. BaseURL is the instance root
+	// (no /api/v1 suffix); APIKey is a bb_-prefixed key that must carry the
+	// can_manage_library, can_queue, can_read_status and can_control_printer
+	// scopes - the last defaults to false when a key is created.
+	BambuddyBaseURL string
+	BambuddyAPIKey  string
+	BambuddyTimeout time.Duration
+	// BambuddyManualStart stages a print instead of starting it: the plate lands
+	// on the printer's queue and waits for a person. Defaults ON - an unattended
+	// print from a mis-mapped SKU wastes filament and machine time, and staging
+	// costs nothing but a tap.
+	BambuddyManualStart bool
+	// BambuddyAutoPrint is the kill switch. False stops Tensor pushing anything to
+	// BamBuddy at all, without unwinding any other automation.
+	BambuddyAutoPrint bool
+	// BambuddyPollInterval is how often Tensor asks BamBuddy how live prints are
+	// going. Polling (rather than an inbound webhook) is what keeps the shop LAN
+	// free of any public endpoint - see internal/httpapi/dispatch_sync.go.
+	BambuddyPollInterval time.Duration
 
 	// AI optimization advisor via OpenRouter (an OpenAI-compatible LLM gateway).
 	// The key is required to run the advisor; absent, the endpoint fails closed
@@ -173,6 +209,18 @@ func Load() Settings {
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
 		OpenSCADBin:         envOr("OPENSCAD_BIN", "openscad"),
 
+		RiverQueuePrefix:      os.Getenv("RIVER_QUEUE_PREFIX"),
+		ProductionConcurrency: intEnvOr("PRODUCTION_CONCURRENCY", 2),
+		BatchPlanDebounce:     secondsEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 30),
+		BatchPlanInterval:     secondsEnvOr("BATCH_PLAN_INTERVAL_SECONDS", 600),
+
+		BambuddyBaseURL:      os.Getenv("BAMBUDDY_BASE_URL"),
+		BambuddyAPIKey:       os.Getenv("BAMBUDDY_API_KEY"),
+		BambuddyTimeout:      secondsEnvOr("BAMBUDDY_TIMEOUT_SECONDS", 30),
+		BambuddyManualStart:  boolEnvOr("BAMBUDDY_MANUAL_START", true),
+		BambuddyAutoPrint:    boolEnvOr("BAMBUDDY_AUTOPRINT", true),
+		BambuddyPollInterval: secondsEnvOr("BAMBUDDY_POLL_SECONDS", 30),
+
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
 
@@ -215,6 +263,26 @@ func (s Settings) AdvisorConfigured() bool {
 func (s Settings) ShopifyImportConfigured() bool {
 	return s.ShopifyClientID != "" && s.ShopifyClientSecret != "" &&
 		s.PublicBaseURL != "" && s.TokenEncryptionKey != ""
+}
+
+// Queue namespaces a River queue name with RiverQueuePrefix. Enqueue and consume
+// sites must both go through this, or jobs land on a queue nothing is reading.
+func (s Settings) Queue(base string) string {
+	return s.RiverQueuePrefix + base
+}
+
+// BambuddyConfigured reports whether Tensor can reach BamBuddy. When false the
+// print-dispatch path fails closed rather than half-working: a batch still slices
+// and still shows its plate, it simply is not pushed to a printer.
+func (s Settings) BambuddyConfigured() bool {
+	return strings.TrimSpace(s.BambuddyBaseURL) != "" && strings.TrimSpace(s.BambuddyAPIKey) != ""
+}
+
+// AutoPrintEnabled reports whether a dispatch should actually be sent. It is
+// BambuddyConfigured plus the kill switch, so turning BAMBUDDY_AUTOPRINT off
+// stops every push without needing the credentials removed.
+func (s Settings) AutoPrintEnabled() bool {
+	return s.BambuddyConfigured() && s.BambuddyAutoPrint
 }
 
 // IsProduction reports whether the service is running outside development, where

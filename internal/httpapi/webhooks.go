@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
@@ -64,13 +65,33 @@ func (s *Server) ordersPaidWebhook(c *gin.Context) {
 	}
 
 	connID := conn.ID
-	if _, err := s.store.Q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
+	params := gen.UpsertPaidOrderParams{
 		ID: uuid.New(), ShopConnectionID: &connID, ShopifyOrderID: payload.ID,
 		OrderNumber: payload.Name, CustomerName: payload.customerName(),
 		FinancialStatus: defaultStr(payload.FinancialStatus, "paid"),
 		TotalPrice:      parsePrice(payload.TotalPrice), Currency: defaultStr(payload.Currency, "USD"),
 		LineItems: lineItemsJSON, Status: "queued",
-	}); err != nil {
+	}
+
+	// Import the order and schedule its job creation in ONE transaction, so
+	// "the order arrived" and "its jobs will be created" commit together. A
+	// rollback leaves neither, which is what stops an order from landing in the
+	// table with nothing ever scheduled to act on it.
+	//
+	// Replay-safe on both halves: UpsertPaidOrder is idempotent on the unique
+	// shopify_order_id, and the worker treats errJobsAlreadyCreated as success,
+	// so Shopify redelivering this webhook cannot duplicate jobs.
+	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		order, err := q.UpsertPaidOrder(ctx, params)
+		if err != nil {
+			return err
+		}
+		if s.jobEnqueuer == nil {
+			return nil // Automation not wired up: the order still imports.
+		}
+		return s.jobEnqueuer.EnqueueTx(ctx, tx, production.CreateJobsArgs{OrderID: order.ID})
+	})
+	if err != nil {
 		obs.FromContext(ctx).Error("orders/paid upsert failed", "error", err)
 		detail(c, http.StatusInternalServerError, "Could not import the order.")
 		return

@@ -94,3 +94,30 @@ func (q *Queries) InsertFileAsset(ctx context.Context, arg InsertFileAssetParams
 	)
 	return i, err
 }
+
+const updateFileAssetBBox = `-- name: UpdateFileAssetBBox :exec
+UPDATE file_assets SET
+    bbox_x_mm = $1::float8,
+    bbox_y_mm = $2::float8,
+    bbox_z_mm = $3::float8
+WHERE id = $4
+`
+
+type UpdateFileAssetBBoxParams struct {
+	BboxXMm *float64
+	BboxYMm *float64
+	BboxZMm *float64
+	ID      uuid.UUID
+}
+
+// Backfills a file asset's measured dimensions. Needed for template files minted
+// from a design's model, which are recorded without ever being measured.
+func (q *Queries) UpdateFileAssetBBox(ctx context.Context, arg UpdateFileAssetBBoxParams) error {
+	_, err := q.db.Exec(ctx, updateFileAssetBBox,
+		arg.BboxXMm,
+		arg.BboxYMm,
+		arg.BboxZMm,
+		arg.ID,
+	)
+	return err
+}

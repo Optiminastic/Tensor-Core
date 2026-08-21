@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -143,12 +144,17 @@ func (s *Server) downloadPersonalisePreview(c *gin.Context) {
 	s.streamObject(c, liteKey, name+"-personalised.stl")
 }
 
-// textPlacement is where the extruded name sits on the model: an in-plane XY nudge
-// from the model's centre and an in-plane rotation. The name is always raised onto
-// the model's top face in Z.
+// textPlacement is where the extruded name sits on the model: an XY nudge from the
+// model's centre, the surface point's height, the surface normal there, and an
+// in-plane twist. With a non-zero normal the name is embossed at the point and
+// tilted to face outward; with a zero normal it falls back to the top face.
 type textPlacement struct {
 	OffsetXMM   float64
 	OffsetYMM   float64
+	OffsetZMM   float64
+	NormalX     float64
+	NormalY     float64
+	NormalZ     float64
 	RotationDeg float64
 }
 
@@ -189,24 +195,106 @@ func (s *Server) ensurePersonalisedModel(
 		return "", err
 	}
 
-	// Spin the (origin-centred) text in place, then sit it centred on the model's
-	// top face plus the user's XY nudge. The extruded text rises from z=0, so
-	// lifting it to the top makes it raised.
-	spun := meshio.RotateZTriangles(textMesh.Triangles, place.RotationDeg)
-	cx := (base.Min.X+base.Max.X)/2 + place.OffsetXMM
-	cy := (base.Min.Y+base.Max.Y)/2 + place.OffsetYMM
-	placed := meshio.TranslateTriangles(spun, cx, cy, base.Max.Z)
+	placed := placeText(scaleTextToFit(textMesh, base, spec.SizeMM), base, place)
 	merged := meshio.ConcatBinarySTL("tensor-personalised", base.Triangles, placed)
 	return pKey, s.storage.Put(ctx, pKey, bytes.NewReader(merged), int64(len(merged)), "model/stl")
+}
+
+// scaleTextToFit resizes the origin-built extruded text so its height matches
+// sizeMM, then clamps it so it never exceeds a sensible fraction of the model's
+// footprint - so an over-large size can't produce a giant, spiky, overflowing
+// emboss. The extrusion depth (Z) is unchanged.
+func scaleTextToFit(text orientation.Mesh, base orientation.Mesh, sizeMM float64) []orientation.Triangle {
+	th := text.Max.Y - text.Min.Y
+	tw := text.Max.X - text.Min.X
+	if th < 1e-6 || sizeMM <= 0 {
+		return text.Triangles
+	}
+	// The two largest model extents span its biggest face; keep the text inside it.
+	ex := base.Max.X - base.Min.X
+	ey := base.Max.Y - base.Min.Y
+	ez := base.Max.Z - base.Min.Z
+	largest := math.Max(ex, math.Max(ey, ez))
+	smallest := math.Min(ex, math.Min(ey, ez))
+	second := ex + ey + ez - largest - smallest
+
+	scale := sizeMM / th // height -> sizeMM
+	if tw > 1e-6 {
+		scale = math.Min(scale, 0.8*largest/tw)
+	}
+	scale = math.Min(scale, 0.5*second/th)
+	return meshio.ScaleTrianglesXY(text.Triangles, scale)
+}
+
+// placeText positions the origin-built extruded text on the base model. With a
+// surface normal (a placement from the editor's click), it tilts the text to face
+// along that normal and sits it at the clicked point, embedding the base slightly
+// so the slicer fuses it into the surface as a raised emboss. With no normal
+// (designs personalised before surface placement, or the merged-preview path), it
+// keeps the original behaviour: spin about Z and raise onto the model's top face.
+func placeText(text []orientation.Triangle, base orientation.Mesh, place textPlacement) []orientation.Triangle {
+	cx := (base.Min.X + base.Max.X) / 2
+	cy := (base.Min.Y + base.Max.Y) / 2
+	nLen := math.Sqrt(place.NormalX*place.NormalX + place.NormalY*place.NormalY + place.NormalZ*place.NormalZ)
+	if nLen < 1e-6 {
+		spun := meshio.RotateZTriangles(text, place.RotationDeg)
+		return meshio.TranslateTriangles(spun, cx+place.OffsetXMM, cy+place.OffsetYMM, base.Max.Z)
+	}
+
+	// A right-handed basis (tangent, bitangent, normal), twisted in-plane by the
+	// rotation - matching the viewer's decal orientation so the print agrees with
+	// the preview. local +X -> ax, +Y -> ay, +Z -> the surface normal.
+	n := orientation.Vec3{X: place.NormalX / nLen, Y: place.NormalY / nLen, Z: place.NormalZ / nLen}
+	ref := orientation.Vec3{X: 0, Y: 0, Z: 1}
+	if math.Abs(n.Z) > 0.99 {
+		ref = orientation.Vec3{X: 0, Y: 1, Z: 0}
+	}
+	tangent := normaliseVec(crossVec(ref, n))
+	bitangent := normaliseVec(crossVec(n, tangent))
+	rad := place.RotationDeg * math.Pi / 180
+	cos, sin := math.Cos(rad), math.Sin(rad)
+	ax := addVec(scaleVec(tangent, cos), scaleVec(bitangent, sin))
+	ay := addVec(scaleVec(bitangent, cos), scaleVec(tangent, -sin))
+	oriented := meshio.OrientTriangles(text, ax, ay, n)
+
+	// The clicked point in the base-model frame: XY from the centred offsets, Z
+	// lifted off the model's min so the viewer's rest-on-zero frame lines up. Embed
+	// the base a little so the emboss overlaps the surface and fuses at slice time.
+	const embed = 0.6
+	px := cx + place.OffsetXMM - n.X*embed
+	py := cy + place.OffsetYMM - n.Y*embed
+	pz := base.Min.Z + place.OffsetZMM - n.Z*embed
+	return meshio.TranslateTriangles(oriented, px, py, pz)
+}
+
+func crossVec(a, b orientation.Vec3) orientation.Vec3 {
+	return orientation.Vec3{X: a.Y*b.Z - a.Z*b.Y, Y: a.Z*b.X - a.X*b.Z, Z: a.X*b.Y - a.Y*b.X}
+}
+
+func normaliseVec(v orientation.Vec3) orientation.Vec3 {
+	l := math.Sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
+	if l == 0 {
+		return v
+	}
+	return orientation.Vec3{X: v.X / l, Y: v.Y / l, Z: v.Z / l}
+}
+
+func addVec(a, b orientation.Vec3) orientation.Vec3 {
+	return orientation.Vec3{X: a.X + b.X, Y: a.Y + b.Y, Z: a.Z + b.Z}
+}
+
+func scaleVec(v orientation.Vec3, s float64) orientation.Vec3 {
+	return orientation.Vec3{X: v.X * s, Y: v.Y * s, Z: v.Z * s}
 }
 
 // personalisedKey is the deterministic cache key for one merged model: the source
 // key plus a short hash of the exact spec and placement, so identical requests hit
 // the cache and different names/placements never collide.
 func personalisedKey(srcKey string, spec personalise.Spec, place textPlacement) string {
-	sig := fmt.Sprintf("%s|%s|%s|%.3f|%.3f|%.3f|%.3f|%.3f",
+	sig := fmt.Sprintf("%s|%s|%s|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f",
 		spec.Text, spec.Font, spec.Style, spec.SizeMM, spec.DepthMM,
-		place.OffsetXMM, place.OffsetYMM, place.RotationDeg)
+		place.OffsetXMM, place.OffsetYMM, place.OffsetZMM,
+		place.NormalX, place.NormalY, place.NormalZ, place.RotationDeg)
 	sum := sha256.Sum256([]byte(sig))
 	return srcKey + ".p-" + hex.EncodeToString(sum[:8]) + ".stl"
 }

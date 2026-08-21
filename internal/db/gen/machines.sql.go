@@ -31,7 +31,7 @@ func (q *Queries) AdjustFleetMachineWaste(ctx context.Context, arg AdjustFleetMa
 }
 
 const getFleetMachine = `-- name: GetFleetMachine :one
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at FROM machines WHERE id = $1
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, bambuddy_printer_id, created_at, updated_at FROM machines WHERE id = $1
 `
 
 func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, error) {
@@ -50,6 +50,8 @@ func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, e
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.BambuddyPrinterID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -63,7 +65,7 @@ INSERT INTO machines (
     $1, $2, $3, $4,
     $5, $6
 )
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, bambuddy_printer_id, created_at, updated_at
 `
 
 type InsertFleetMachineParams struct {
@@ -98,6 +100,8 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.BambuddyPrinterID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -106,7 +110,7 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 
 const listFleetMachines = `-- name: ListFleetMachines :many
 
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at FROM machines ORDER BY machine_id
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, bambuddy_printer_id, created_at, updated_at FROM machines ORDER BY machine_id
 `
 
 // The physical printer fleet (table: machines), distinct from machine_profiles
@@ -135,6 +139,8 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 			&i.BatchTotalTimeMinutes,
 			&i.PrintStartedAt,
 			&i.TotalWasteGrams,
+			&i.MachineProfileID,
+			&i.BambuddyPrinterID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -153,7 +159,7 @@ UPDATE machines SET
     filaments  = $1,
     updated_at = now()
 WHERE id = $2
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, bambuddy_printer_id, created_at, updated_at
 `
 
 type UpdateFleetMachineFilamentsParams struct {
@@ -177,6 +183,8 @@ func (q *Queries) UpdateFleetMachineFilaments(ctx context.Context, arg UpdateFle
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.BambuddyPrinterID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -193,7 +201,7 @@ UPDATE machines SET
     print_started_at         = $6,
     updated_at                = now()
 WHERE id = $7
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, bambuddy_printer_id, created_at, updated_at
 `
 
 type UpdateFleetMachineStateParams struct {
@@ -234,6 +242,8 @@ func (q *Queries) UpdateFleetMachineState(ctx context.Context, arg UpdateFleetMa
 		&i.BatchTotalTimeMinutes,
 		&i.PrintStartedAt,
 		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.BambuddyPrinterID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

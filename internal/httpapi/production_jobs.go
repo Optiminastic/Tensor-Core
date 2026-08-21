@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -222,27 +224,52 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ctx := c.Request.Context()
+	created, err := s.CreateJobsForOrder(c.Request.Context(), orderID)
+	if err != nil {
+		respondErr(c, err, "Could not create the production jobs.")
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
 
+// errJobsAlreadyCreated marks the idempotent no-op: this order already has jobs.
+// The HTTP route renders it as a 409, while the job-creation worker treats it as
+// success - a webhook replay and an operator clicking Create Job must both land
+// on the same outcome rather than a retry loop.
+var errJobsAlreadyCreated = errors.New("production jobs already created for this order")
+
+// CreateJobsForOrder turns one order's line items into production jobs (and, for
+// multi-part products, the assembly groups and part slots). It is the shared body
+// of the HTTP route and the River job-creation worker, so an order automated from
+// a webhook and one created by hand produce identical rows.
+//
+// Every error carries its own status and client-facing message via *httpErr, so
+// extracting this out of the handler did not change a single response string.
+// Callers that do not speak HTTP match errJobsAlreadyCreated with errors.Is.
+func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]productionJobResponse, error) {
 	order, err := s.store.Q.GetOrderByID(ctx, orderID)
 	if err != nil {
-		dbError(c, err, "That order does not exist.", "Could not load the order.")
-		return
+		if isNoRows(err) {
+			return nil, &httpErr{status: http.StatusNotFound, msg: "That order does not exist.", cause: err}
+		}
+		obs.FromContext(ctx).Error("database error", "error", err, "order", orderID)
+		return nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not load the order.", cause: err}
 	}
 	existing, err := s.store.Q.CountJobsForOrder(ctx, &orderID)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not check the order's jobs.")
-		return
+		return nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not check the order's jobs.", cause: err}
 	}
 	if existing > 0 {
-		detail(c, http.StatusConflict, "Production jobs have already been created for this order.")
-		return
+		return nil, &httpErr{
+			status: http.StatusConflict,
+			msg:    "Production jobs have already been created for this order.",
+			cause:  errJobsAlreadyCreated,
+		}
 	}
 
 	var items []production.LineItem
 	if err := json.Unmarshal(order.LineItems, &items); err != nil {
-		detail(c, http.StatusInternalServerError, "The order's line items are corrupt.")
-		return
+		return nil, &httpErr{status: http.StatusInternalServerError, msg: "The order's line items are corrupt.", cause: err}
 	}
 
 	// Plan the jobs (and, for multi-part products, the assembly groups and part
@@ -251,8 +278,7 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 	// quantity and one job per part instance.
 	groups, jobs, err := s.planJobsForOrder(ctx, order, items)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not prepare the production jobs.")
-		return
+		return nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not prepare the production jobs.", cause: err}
 	}
 
 	created := make([]productionJobResponse, 0, len(jobs))
@@ -281,10 +307,13 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not create the production jobs.")
-		return
+		return nil, &httpErr{status: http.StatusInternalServerError, msg: "Could not create the production jobs.", cause: err}
 	}
-	c.JSON(http.StatusCreated, created)
+
+	// New jobs are new batchable work. Scheduled after the commit and
+	// best-effort: the jobs are already durable, and a replan is idempotent.
+	s.triggerBatchPlan(ctx)
+	return created, nil
 }
 
 // plannedJob is one job to insert, optionally linked to a product-unit part slot.

@@ -406,6 +406,12 @@ CREATE TABLE batches (
     total_filament_grams            numeric(10, 2),
     bed_utilization_percent         numeric(5, 2),
     packing_strategy                varchar(32),
+    -- The sliced plate (migration 0041): the printable artefact, as a bare object
+    -- key like slice_metrics.gcode_key. merged_file_id above is only the STL.
+    gcode_key                       text,
+    sliced_at                       timestamptz,
+    slice_status                    varchar(32),
+    slice_error                     text,
     created_at                      timestamptz NOT NULL DEFAULT now(),
     updated_at                      timestamptz NOT NULL DEFAULT now()
 );
@@ -444,11 +450,40 @@ CREATE TABLE machines (
     batch_total_time_minutes  integer,
     print_started_at          timestamptz,
     total_waste_grams         numeric(10, 2) NOT NULL DEFAULT 0,
+    -- Migration 0042: links a physical unit to the slicing config batches are
+    -- approved against, and to its printer in BamBuddy.
+    machine_profile_id        uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
+    bambuddy_printer_id       integer,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_machines_status ON machines (status);
 CREATE INDEX ix_machines_current_batch ON machines (current_batch_id);
+CREATE INDEX idx_machines_machine_profile_id ON machines (machine_profile_id);
+CREATE UNIQUE INDEX uq_machines_bambuddy_printer_id
+    ON machines (bambuddy_printer_id) WHERE bambuddy_printer_id IS NOT NULL;
+
+-- Tensor's record of handing a sliced plate to BamBuddy (migration 0042).
+CREATE TABLE print_dispatches (
+    id                  uuid PRIMARY KEY,
+    batch_id            uuid NOT NULL REFERENCES batches (id) ON DELETE CASCADE,
+    printer_id          integer NOT NULL,
+    library_file_id     integer,
+    queue_item_id       integer,
+    status              varchar(32) NOT NULL DEFAULT 'pending',
+    error               text,
+    filament_warning    text,
+    dispatched_at       timestamptz,
+    started_at          timestamptz,
+    completed_at        timestamptz,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_print_dispatches_batch ON print_dispatches (batch_id);
+CREATE INDEX ix_print_dispatches_open ON print_dispatches (status)
+    WHERE status IN ('pending', 'queued', 'printing');
+CREATE UNIQUE INDEX uq_print_dispatches_open_batch
+    ON print_dispatches (batch_id) WHERE status IN ('pending', 'queued', 'printing');
 
 CREATE TABLE production_job_assembly_checks (
     id                uuid PRIMARY KEY,
@@ -599,3 +634,19 @@ CREATE UNIQUE INDEX assembly_group_parts_slot_key
     ON assembly_group_parts (assembly_group_id, part_role, part_instance);
 CREATE INDEX ix_assembly_group_parts_group ON assembly_group_parts (assembly_group_id);
 CREATE INDEX ix_assembly_group_parts_job ON assembly_group_parts (job_id);
+
+CREATE TABLE shopify_api_calls (
+    id            uuid PRIMARY KEY,
+    shop_domain   varchar(255) NOT NULL,
+    brand_slug    varchar(255),
+    method        varchar(8)   NOT NULL,
+    operation     varchar(128) NOT NULL,
+    scope         varchar(64)  NOT NULL DEFAULT '',
+    status_code   integer      NOT NULL DEFAULT 0,
+    ok            boolean      NOT NULL DEFAULT false,
+    error_message text,
+    latency_ms    integer      NOT NULL DEFAULT 0,
+    created_at    timestamptz  NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_shopify_api_calls_created ON shopify_api_calls (created_at DESC, id DESC);
+CREATE INDEX ix_shopify_api_calls_shop ON shopify_api_calls (shop_domain, created_at DESC);

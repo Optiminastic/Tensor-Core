@@ -17,3 +17,12 @@ RETURNING id, filename, content_type, size_bytes, storage_key, is_template, uplo
 SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
        bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
 FROM file_assets WHERE id = $1;
+
+-- name: UpdateFileAssetBBox :exec
+-- Backfills a file asset's measured dimensions. Needed for template files minted
+-- from a design's model, which are recorded without ever being measured.
+UPDATE file_assets SET
+    bbox_x_mm = sqlc.narg('bbox_x_mm')::float8,
+    bbox_y_mm = sqlc.narg('bbox_y_mm')::float8,
+    bbox_z_mm = sqlc.narg('bbox_z_mm')::float8
+WHERE id = sqlc.arg('id');

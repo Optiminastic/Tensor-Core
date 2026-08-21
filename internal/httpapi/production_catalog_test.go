@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -19,8 +20,13 @@ import (
 // imported order's id.
 func importSkuOrder(t *testing.T, router http.Handler, store *db.Store, shopifyOrderID int, sku string) uuid.UUID {
 	t.Helper()
+	// The order number must be distinct per order: migration 0013 added a unique
+	// index on (shop_connection_id, order_number), and a real store never reuses
+	// one. A fixed "#T" made the second import collide on that index, which the
+	// upsert's ON CONFLICT (shopify_order_id) cannot absorb.
 	payload := map[string]any{
-		"id": shopifyOrderID, "name": "#T", "financial_status": "paid", "total_price": "999.00", "currency": "INR",
+		"id": shopifyOrderID, "name": fmt.Sprintf("#T%d", shopifyOrderID),
+		"financial_status": "paid", "total_price": "999.00", "currency": "INR",
 		"customer": map[string]any{"first_name": "Ada", "last_name": "L"},
 		"line_items": []map[string]any{
 			{"product_id": 900, "sku": sku, "name": "Moon Lamp", "quantity": 1},

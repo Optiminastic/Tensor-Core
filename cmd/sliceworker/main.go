@@ -20,6 +20,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/orientation"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -74,13 +75,30 @@ func main() {
 		OverhangThresholdDeg: cfg.OrientationOverhangDeg,
 		MaxTriangles:         cfg.OrientationMaxTriangles,
 	}
+	// The plate worker schedules the print once a plate exists. It needs an
+	// insert-only River client for that, built before the consuming client below.
+	dispatchClient, err := slicing.NewInsertOnlyClient(store.Pool)
+	if err != nil {
+		log.Fatalf("build river insert client: %v", err)
+	}
+	plateWorker := slicing.NewPlateSliceWorker(store, objects, cfg.BambuRoot, sliceTimeout, logger)
+	if cfg.BambuddyConfigured() {
+		plateWorker.EnableDispatch(production.NewDispatchEnqueuer(dispatchClient, cfg.Queue(production.DispatchQueueName)))
+		log.Printf("plate dispatch enabled (bambuddy=%s)", cfg.BambuddyBaseURL)
+	} else {
+		log.Print("plate dispatch disabled: BAMBUDDY_BASE_URL/BAMBUDDY_API_KEY not set")
+	}
+
 	workers := river.NewWorkers()
 	river.AddWorker(workers, slicing.NewSliceWorker(
 		store, objects, cfg.BambuRoot, sliceTimeout, cfg.PrinterAvgPowerKW, orientOpts, logger,
 	))
+	// Batch plates slice in this same process: both kinds drive Bambu Studio, and
+	// one process owning it keeps the concurrency cap meaningful.
+	river.AddWorker(workers, plateWorker)
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
-		Queues:  map[string]river.QueueConfig{slicing.QueueName: {MaxWorkers: concurrency}},
+		Queues:  map[string]river.QueueConfig{cfg.Queue(slicing.QueueName): {MaxWorkers: concurrency}},
 		Workers: workers,
 		Logger:  logger,
 	})

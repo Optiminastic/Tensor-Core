@@ -46,6 +46,10 @@ type Batch struct {
 	TotalFilamentGrams          pgtype.Numeric
 	BedUtilizationPercent       pgtype.Numeric
 	PackingStrategy             *string
+	GcodeKey                    *string
+	SlicedAt                    pgtype.Timestamptz
+	SliceStatus                 *string
+	SliceError                  *string
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 }
@@ -225,6 +229,8 @@ type Machine struct {
 	BatchTotalTimeMinutes *int32
 	PrintStartedAt        pgtype.Timestamptz
 	TotalWasteGrams       pgtype.Numeric
+	MachineProfileID      *uuid.UUID
+	BambuddyPrinterID     *int32
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 }
@@ -281,6 +287,22 @@ type Permission struct {
 	Description string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+}
+
+type PrintDispatch struct {
+	ID              uuid.UUID
+	BatchID         uuid.UUID
+	PrinterID       int32
+	LibraryFileID   *int32
+	QueueItemID     *int32
+	Status          string
+	Error           *string
+	FilamentWarning *string
+	DispatchedAt    pgtype.Timestamptz
+	StartedAt       pgtype.Timestamptz
+	CompletedAt     pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
 }
 
 type ProductionJob struct {
@@ -408,6 +430,20 @@ type RolePermission struct {
 	PermissionID uuid.UUID
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
+}
+
+type ShopifyApiCall struct {
+	ID           uuid.UUID
+	ShopDomain   string
+	BrandSlug    *string
+	Method       string
+	Operation    string
+	Scope        string
+	StatusCode   int32
+	Ok           bool
+	ErrorMessage *string
+	LatencyMs    int32
+	CreatedAt    pgtype.Timestamptz
 }
 
 type ShopifyConnection struct {

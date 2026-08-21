@@ -50,7 +50,8 @@ func setupStore(t *testing.T) *db.Store {
 		user_roles, role_permissions, permissions, roles, cost_assumption_sets,
 		material_profiles, machine_profiles,
 		orders, production_jobs, batches, filament_inventory, dispatch_orders,
-		file_assets, shopify_connections RESTART IDENTITY CASCADE`)
+		file_assets, shopify_connections, user_brands, machines, print_dispatches,
+		production_job_failures, river_job RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -64,8 +65,8 @@ func seedAll(t *testing.T, store *db.Store) {
 	if err != nil {
 		t.Fatalf("seed auth: %v", err)
 	}
-	if res.Permissions != 38 || res.Roles != 7 || res.Grants != 95 {
-		t.Fatalf("seed counts = %+v, want 38/7/95", res)
+	if res.Permissions != 39 || res.Roles != 7 || res.Grants != 98 {
+		t.Fatalf("seed counts = %+v, want 39/7/98", res)
 	}
 	seedGiftingBrand(t, store)
 }
@@ -98,6 +99,19 @@ func seedGiftingBrand(t *testing.T, store *db.Store) {
 	}); err != nil {
 		t.Fatalf("seed gifting brand: %v", err)
 	}
+
+	// Assign the fixture brand to the user every minted token speaks for.
+	//
+	// Brand scoping (migrations 0023/0024) made brand access an explicit
+	// user_brands grant: without a row here, canAccessBrand denies, listBrands
+	// returns nothing, and requireDesignBrandAccess answers 404 "That design does
+	// not exist" - so a permission test would be asserting against brand scoping
+	// rather than against the permission it means to check.
+	if err := store.Q.InsertUserBrand(ctx, gen.InsertUserBrandParams{
+		UserID: "usr_admin", BrandSlug: string(pricing.BrandGifting), AssignedBy: "system",
+	}); err != nil {
+		t.Fatalf("assign fixture brand: %v", err)
+	}
 }
 
 func TestIntegrationSeedAndAuthz(t *testing.T) {
@@ -107,7 +121,7 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 
 	// Re-seeding is idempotent.
 	res, err := auth.SyncAll(ctx, store)
-	if err != nil || res.Grants != 95 {
+	if err != nil || res.Grants != 98 {
 		t.Fatalf("re-seed: %+v err=%v", res, err)
 	}
 
@@ -126,8 +140,8 @@ func TestIntegrationSeedAndAuthz(t *testing.T) {
 	if len(authz.Roles) != 1 || authz.Roles[0] != auth.RoleAdmin {
 		t.Errorf("roles = %v, want [ADMIN]", authz.Roles)
 	}
-	if len(authz.Permissions) != 38 {
-		t.Errorf("permissions = %d, want 38", len(authz.Permissions))
+	if len(authz.Permissions) != 39 {
+		t.Errorf("permissions = %d, want 39", len(authz.Permissions))
 	}
 
 	// Unknown user resolves to empty, version 0.

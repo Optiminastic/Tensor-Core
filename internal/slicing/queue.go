@@ -56,16 +56,58 @@ func NewInsertOnlyClient(pool *pgxpool.Pool) (*river.Client[pgx.Tx], error) {
 // running any workers itself.
 type Enqueuer struct {
 	client *river.Client[pgx.Tx]
+	// queue is the resolved (possibly prefixed) queue name. It must match what
+	// the worker process consumes - see config.Settings.Queue.
+	queue string
 }
 
-// NewEnqueuer wraps an insert-only River client.
-func NewEnqueuer(client *river.Client[pgx.Tx]) *Enqueuer { return &Enqueuer{client: client} }
+// NewEnqueuer wraps an insert-only River client. queue is the resolved queue
+// name; empty falls back to the unprefixed default.
+func NewEnqueuer(client *river.Client[pgx.Tx], queue string) *Enqueuer {
+	if queue == "" {
+		queue = QueueName
+	}
+	return &Enqueuer{client: client, queue: queue}
+}
 
 // EnqueueTx inserts a slice job on the given transaction. Commit the tx to make
 // the job visible to workers; roll back and the job never existed - atomic enqueue.
 func (e *Enqueuer) EnqueueTx(ctx context.Context, tx pgx.Tx, args SliceArgs) error {
 	_, err := e.client.InsertTx(ctx, tx, args, &river.InsertOpts{
-		Queue:       QueueName,
+		Queue:       e.queue,
+		MaxAttempts: sliceMaxAttempts,
+	})
+	return err
+}
+
+// PlateSliceArgs is everything the worker needs to slice one batch's merged
+// plate. A separate Kind from SliceArgs rather than a mode flag on it: a plate
+// has no design, no brand and no pricing, so half of SliceArgs would be
+// meaningless here - and the two produce different artefacts (a printable plate
+// vs a priced design).
+type PlateSliceArgs struct {
+	BatchID uuid.UUID `json:"batch_id"`
+	// StlKey is the merged plate STL produced at approval (batches.merged_file_id).
+	StlKey string `json:"stl_key"`
+	// Material and Quality resolve the Bambu profiles, exactly as for a design.
+	Material  string        `json:"material"`
+	Quality   string        `json:"quality"`
+	InfillPct float64       `json:"infill_pct"`
+	Settings  SliceSettings `json:"settings"`
+	// MachineID drives machine-specific profiles (nil = the legacy fixed H2S 0.4).
+	MachineID      *uuid.UUID `json:"machine_id,omitempty"`
+	FilamentPreset string     `json:"filament_preset,omitempty"`
+}
+
+// Kind is River's stable job type name; it must not change once jobs exist.
+func (PlateSliceArgs) Kind() string { return "slice_plate" }
+
+// EnqueuePlateTx inserts a plate slice on the given transaction, so approving a
+// batch and scheduling its slice commit together. Routed to the same queue as
+// design slices: both need Bambu Studio, and one worker process owns it.
+func (e *Enqueuer) EnqueuePlateTx(ctx context.Context, tx pgx.Tx, args PlateSliceArgs) error {
+	_, err := e.client.InsertTx(ctx, tx, args, &river.InsertOpts{
+		Queue:       e.queue,
 		MaxAttempts: sliceMaxAttempts,
 	})
 	return err
