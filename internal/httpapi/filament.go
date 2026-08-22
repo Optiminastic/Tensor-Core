@@ -36,6 +36,9 @@ func (s *Server) registerFilament(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.FilamentRead.Key()), s.listFilament)
 	g.POST("", s.guards.RequirePermission(auth.FilamentManage.Key()), s.upsertFilament)
+	// Mirrors BambuBuddy's shelf into Tensor's per-material buckets. Manage,
+	// not read: it rewrites stock figures.
+	g.POST("/sync", s.guards.RequirePermission(auth.FilamentManage.Key()), s.syncFilamentInventory)
 }
 
 func (s *Server) listFilament(c *gin.Context) {
