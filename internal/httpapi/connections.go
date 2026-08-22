@@ -189,7 +189,7 @@ func (s *Server) syncShopifyOrders(c *gin.Context) {
 		detail(c, http.StatusConflict, "This brand's Shopify isn't connected yet.")
 		return
 	}
-	imported, err := s.fetchAndImportShopifyOrders(ctx, nil, shop, token)
+	imported, err := s.fetchAndImportShopifyOrders(ctx, nil, shop, token, s.cfg.ShopifySyncOrderCount)
 	if err != nil {
 		obs.FromContext(ctx).Error("shopify order sync failed", "brand", slug, "shop", shop, "error", err)
 		detail(c, http.StatusBadGateway, "Could not fetch orders from Shopify.")

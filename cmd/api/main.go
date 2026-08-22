@@ -109,6 +109,18 @@ func main() {
 		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.S3Endpoint)
 	}
 
+	// Keep the connected stores' orders flowing in without anyone pressing the
+	// button. Off unless SHOPIFY_SYNC_INTERVAL_MINUTES is set: an interval that
+	// is short relative to how long a sweep takes would just pile requests on
+	// Shopify, so the operator opts in with a number that suits their volume.
+	if cfg.ShopifySyncIntervalMinutes > 0 {
+		go runScheduledShopifySync(
+			ctx, server,
+			time.Duration(cfg.ShopifySyncIntervalMinutes)*time.Minute,
+			cfg.ShopifySyncOrderCount, cfg.ShopifyDeepSyncOrderCount, cfg.ShopifyDeepSyncEvery,
+		)
+	}
+
 	addr := ":" + cfg.Port
 	srv := &http.Server{
 		Addr:    addr,
@@ -134,5 +146,50 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
+	}
+}
+
+// runScheduledShopifySync sweeps every connected store until the process shuts
+// down. One sweep runs at a time - the next tick is handled only after the
+// previous sweep returns, so a slow import delays the next run rather than
+// overlapping with it and doubling the load on Shopify.
+//
+// Two depths. Routine sweeps refresh the newest orders, which is all a live
+// store needs to keep up. Every deepEvery-th sweep - and once at startup -
+// walks far enough back to cover the whole store, so a change to how orders
+// are read reaches the ones already imported and not just the ones that arrive
+// next. Both are idempotent: orders upsert by shopify_order_id.
+func runScheduledShopifySync(
+	ctx context.Context,
+	server *httpapi.Server,
+	every time.Duration,
+	routineCount, deepCount, deepEvery int,
+) {
+	sweep := func(limit int, depth string) {
+		imported, err := server.SyncAllShopifyOrders(ctx, limit)
+		if err != nil {
+			log.Printf("%s shopify sync failed: %v", depth, err)
+			return
+		}
+		log.Printf("%s shopify sync: imported %d order(s)", depth, imported)
+	}
+
+	// Catch up everything before settling into the routine cadence, so a
+	// restart is all it takes to backfill the store.
+	sweep(deepCount, "startup")
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for sweeps := 1; ; sweeps++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if deepEvery > 0 && sweeps%deepEvery == 0 {
+				sweep(deepCount, "deep")
+				continue
+			}
+			sweep(routineCount, "scheduled")
+		}
 	}
 }

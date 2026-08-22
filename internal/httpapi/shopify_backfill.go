@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 )
@@ -19,8 +20,8 @@ import (
 // connID is nullable). A per-order import failure is logged and skipped
 // rather than aborting the whole sync; only a failure to even list orders
 // from Shopify is returned to the caller.
-func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.UUID, shop, token string) (int, error) {
-	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0)
+func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.UUID, shop, token string, limit int) (int, error) {
+	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -36,6 +37,37 @@ func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.U
 	return imported, nil
 }
 
+// SyncAllShopifyOrders imports the latest orders for every brand that has a
+// Shopify store connected, and reports how many were imported in total. It is
+// the scheduled counterpart to the "Sync from Shopify" button: same import,
+// same upsert by shopify_order_id, so running both changes nothing but the
+// clock. One brand failing (an expired token, Shopify down) is logged and
+// skipped so the rest of the stores still sync.
+func (s *Server) SyncAllShopifyOrders(ctx context.Context, limit int) (int, error) {
+	brands, err := s.store.Q.ListBrands(ctx)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, brand := range brands {
+		conn, err := s.store.Q.GetConnectionWithToken(ctx, gen.GetConnectionWithTokenParams{
+			BrandSlug: brand.Slug, Provider: shopifyProvider,
+		})
+		shop, token, connected := shopifyCredentials(conn, err)
+		if !connected {
+			continue
+		}
+		imported, err := s.fetchAndImportShopifyOrders(ctx, nil, shop, token, limit)
+		if err != nil {
+			obs.FromContext(ctx).Warn("scheduled shopify sync: could not list orders",
+				"brand", brand.Slug, "shop", shop, "error", err)
+			continue
+		}
+		total += imported
+	}
+	return total, nil
+}
+
 // backfillShopifyOrders does a one-time catch-up import of the store's most
 // recently created orders right after it connects: webhooks only fire for
 // events from that point forward, they never replay history, so without this
@@ -44,7 +76,7 @@ func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.U
 // registered, so a failure here is logged and swallowed rather than failing
 // the OAuth callback; future orders keep flowing in regardless.
 func (s *Server) backfillShopifyOrders(ctx context.Context, connID *uuid.UUID, shop, token string) {
-	imported, err := s.fetchAndImportShopifyOrders(ctx, connID, shop, token)
+	imported, err := s.fetchAndImportShopifyOrders(ctx, connID, shop, token, s.cfg.ShopifyDeepSyncOrderCount)
 	if err != nil {
 		obs.FromContext(ctx).Warn("shopify order backfill: could not list orders", "shop", shop, "error", err)
 		return
@@ -69,7 +101,11 @@ func toOrderPayload(o shopify.OrderSummary) shopifyOrderPayload {
 	p.LineItems = make([]shopifyLineItem, 0, len(o.LineItems))
 	for _, li := range o.LineItems {
 		item := shopifyLineItem{
-			ProductID: li.ProductID, SKU: li.SKU, Name: li.Name, Title: li.Title, Quantity: li.Quantity,
+			ProductID: li.ProductID, SKU: li.SKU, Name: li.Name, Title: li.Title,
+			Quantity: li.Quantity, VariantTitle: li.VariantTitle,
+		}
+		for _, o := range li.VariantOptions {
+			item.VariantOptions = append(item.VariantOptions, shopifyLineProp{Name: o.Name, Value: o.Value})
 		}
 		for _, prop := range li.Properties {
 			item.Properties = append(item.Properties, shopifyLineProp{Name: prop.Name, Value: prop.Value})

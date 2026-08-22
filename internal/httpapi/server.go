@@ -15,6 +15,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/secretbox"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
@@ -53,6 +54,11 @@ type Server struct {
 	// never syncs rather than erroring every cycle.
 	bambu *bambubuddy.Client
 
+	// personalise renders a personalised model from a product's OpenSCAD
+	// template. Always non-nil; Available() reports whether OpenSCAD is
+	// actually installed.
+	personalise *personalise.Renderer
+
 	planMu          sync.Mutex
 	lastPlannedPool string
 }
@@ -71,6 +77,9 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
 		secrets: box,
 		bambu:   bambubuddy.New(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey),
+		personalise: personalise.NewRenderer(
+			cfg.OpenSCADBin, cfg.DesignAssetDir, cfg.PersonaliseLimit,
+		),
 	}
 }
 
@@ -113,6 +122,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerDesigns(r)
 	s.registerFiles(r)
 	s.registerOrders(r)
+	s.registerPersonalise(r)
 	s.registerProductionJobs(r)
 	s.registerBatches(r)
 	s.registerFilament(r)

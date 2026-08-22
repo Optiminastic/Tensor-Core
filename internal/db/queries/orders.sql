@@ -23,8 +23,10 @@ RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name,
        created_at, updated_at;
 
 -- name: UpsertPaidOrder :one
--- Idempotent import from the orders/paid webhook: keyed on shopify_order_id, a
--- replay only refreshes the mutable financial fields. source defaults to
+-- Idempotent import from the orders/paid webhook: keyed on shopify_order_id. A
+-- replay refreshes the mutable financial fields and the line items, so a
+-- re-sync picks up what the store changed and any fix to how properties are
+-- mapped - without it an order imported once keeps its first reading forever. source defaults to
 -- 'shopify_webhook', so a webhook-imported order is never mistaken for seed data.
 INSERT INTO orders (
     id, shop_connection_id, shopify_order_id, order_number, customer_name,
@@ -40,6 +42,7 @@ INSERT INTO orders (
 ON CONFLICT (shopify_order_id) DO UPDATE SET
     financial_status = EXCLUDED.financial_status,
     total_price      = EXCLUDED.total_price,
+    line_items       = EXCLUDED.line_items,
     updated_at       = now()
 RETURNING *;
 

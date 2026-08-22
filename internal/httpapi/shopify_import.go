@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -126,12 +128,16 @@ func (p shopifyOrderPayload) customerPhone() *string {
 }
 
 type shopifyLineItem struct {
-	ProductID  *int64            `json:"product_id"`
-	SKU        string            `json:"sku"`
-	Name       string            `json:"name"`
-	Title      string            `json:"title"`
-	Quantity   int               `json:"quantity"`
-	Properties []shopifyLineProp `json:"properties"`
+	ProductID *int64 `json:"product_id"`
+	SKU       string `json:"sku"`
+	Name      string `json:"name"`
+	Title     string `json:"title"`
+	Quantity  int    `json:"quantity"`
+	// What the customer chose from the product's own options - the filament
+	// colour among them. Shopify's REST webhook calls this variant_title.
+	VariantTitle   string            `json:"variant_title"`
+	VariantOptions []shopifyLineProp `json:"variant_options"`
+	Properties     []shopifyLineProp `json:"properties"`
 }
 
 type shopifyLineProp struct {
@@ -147,35 +153,184 @@ func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 	out := make([]production.LineItem, 0, len(items))
 	for _, li := range items {
 		props := lineProps(li.Properties)
-		name := prop(props, "personalisation_name", "custom_name", "name", "engraving_text")
-		font := prop(props, "personalisation_font", "font")
-		colour := prop(props, "personalisation_colour", "personalisation_color")
-		variant := prop(props, "personalisation_variant", "variant")
+		// The variant is a choice the customer made just as much as the text
+		// is, so it sits alongside it on the line - an operator reading the
+		// order sees "Colour: BABY PINK" without decoding the product title.
+		options := append(variantOptions(li), personalisationOptions(li.Properties)...)
+		// Exact keys first (a store that names its fields the documented way
+		// gets exactly what it asked for), then a substring match over whatever
+		// the store actually called them - "STEP 4-First Name-" is as much a
+		// name field as "personalisation_name" is.
+		name := firstNonNil(
+			prop(props, "personalisation_name", "custom_name", "name", "engraving_text"),
+			matchOption(options, "name"),
+		)
+		font := firstNonNil(prop(props, "personalisation_font", "font"), matchOption(options, "font"))
+		colour := firstNonNil(
+			prop(props, "personalisation_colour", "personalisation_color"),
+			matchOption(options, "colour", "color"),
+		)
+		variant := firstNonNil(
+			prop(props, "personalisation_variant", "variant"),
+			matchOption(options, "variant"),
+		)
 		photo := prop(props, "personalisation_photo_url", "photo_url", "uploaded_photo")
 
 		out = append(out, production.LineItem{
-			ProductID:                    productID(li),
-			SKU:                          nonEmptyPtr(li.SKU),
-			ProductName:                  firstNonEmpty(li.Name, li.Title, "Unknown product"),
-			Quantity:                     li.Quantity,
-			Unit:                         "pcs",
-			Material:                     prop(props, "material"),
-			Colour:                       prop(props, "colour", "color", "colour_profile"),
-			NozzleProfile:                prop(props, "nozzle_profile", "nozzle", "layer_profile", "print_profile"),
-			FilamentGrams:                propFloat(props, "filament_grams", "filament_weight"),
-			ModelFileURL:                 prop(props, "model_file_url", "print_file", "stl_file", "model file"),
-			PersonalisationName:          name,
-			PersonalisationFont:          font,
-			PersonalisationColour:        colour,
-			PersonalisationVariant:       variant,
-			PersonalisationPhotoURL:      photo,
-			PersonalisationRequired:      name != nil || font != nil || colour != nil || variant != nil || photo != nil,
+			ProductID:               productID(li),
+			SKU:                     nonEmptyPtr(li.SKU),
+			ProductName:             firstNonEmpty(li.Name, li.Title, "Unknown product"),
+			Quantity:                li.Quantity,
+			Unit:                    "pcs",
+			Material:                prop(props, "material"),
+			Colour:                  firstNonNil(variantColour(li), prop(props, "colour", "color", "colour_profile")),
+			NozzleProfile:           prop(props, "nozzle_profile", "nozzle", "layer_profile", "print_profile"),
+			FilamentGrams:           propFloat(props, "filament_grams", "filament_weight"),
+			ModelFileURL:            prop(props, "model_file_url", "print_file", "stl_file", "model file"),
+			PersonalisationName:     name,
+			PersonalisationFont:     font,
+			PersonalisationColour:   colour,
+			PersonalisationVariant:  variant,
+			PersonalisationPhotoURL: photo,
+			Options:                 options,
+			PersonalisationRequired: name != nil || font != nil || colour != nil ||
+				variant != nil || photo != nil || len(options) > 0,
 			PersonalisationPhotoRequired: photo != nil,
 			CustomerApprovalRequired:     propBool(props, "customer_approval_required"),
 			CustomerApprovalReceived:     propBool(props, "customer_approval_received"),
 		})
 	}
 	return out
+}
+
+// colourLabel matches the variant option a store uses for the filament colour.
+// It matches the word anywhere in the label because a storefront names its
+// options for the customer, not for us - this shop's read "STEP 1 - Colour".
+// Only variant options are tested, which are the product's own axes, so a
+// stray match is unlikely.
+var colourLabel = regexp.MustCompile(`(?i)colou?r`)
+
+// variantOptions turns the variant the customer bought into labelled options.
+// With product access these are Shopify's own named options; without it, the
+// variant title is kept whole rather than guessed apart, because splitting
+// "BABY PINK / NO LIGHT" on the slash cannot say which half is the colour.
+func variantOptions(li shopifyLineItem) []production.Option {
+	if len(li.VariantOptions) > 0 {
+		out := make([]production.Option, 0, len(li.VariantOptions))
+		for _, o := range li.VariantOptions {
+			name, value := strings.TrimSpace(o.Name), strings.TrimSpace(o.Value)
+			// Shopify names a single-option product's option "Title" and sets
+			// it to "Default Title" when the product has no real options.
+			if name == "" || value == "" || strings.EqualFold(value, "Default Title") {
+				continue
+			}
+			out = append(out, production.Option{Name: name, Value: value})
+		}
+		return out
+	}
+	if title := strings.TrimSpace(li.VariantTitle); title != "" && !strings.EqualFold(title, "Default Title") {
+		return []production.Option{{Name: "Variant", Value: title}}
+	}
+	return nil
+}
+
+// variantColour picks the filament colour out of the variant's named options.
+// Only an explicitly named colour option counts: loading the wrong filament
+// costs a print, so a guess is worse than leaving it for the operator.
+func variantColour(li shopifyLineItem) *string {
+	for _, o := range li.VariantOptions {
+		if colourLabel.MatchString(strings.TrimSpace(o.Name)) {
+			if value := strings.TrimSpace(o.Value); value != "" {
+				return &value
+			}
+		}
+	}
+	return nil
+}
+
+// gpoOptionsKey is the single property a Globo Product Options line carries
+// with every step the customer filled in, as one JSON object. Used only when
+// the individual step properties are missing, since they are the source the
+// merchant sees in Shopify admin.
+const gpoOptionsKey = "_gpo_options"
+
+// personalisationOptions returns what the customer actually typed, in the order
+// the storefront asked for it. Shopify's convention is that a leading
+// underscore marks an app's own bookkeeping property (_has_gpo,
+// _gpo_product_group, ...), which is noise to a print operator - those are
+// dropped, apart from the GPO blob used as a fallback.
+func personalisationOptions(props []shopifyLineProp) []production.Option {
+	out := make([]production.Option, 0, len(props))
+	for _, p := range props {
+		name, value := strings.TrimSpace(p.Name), strings.TrimSpace(p.Value)
+		if name == "" || value == "" || strings.HasPrefix(name, "_") {
+			continue
+		}
+		out = append(out, production.Option{Name: name, Value: value})
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return gpoFallbackOptions(props)
+}
+
+// gpoFallbackOptions unpacks the _gpo_options JSON blob. Its keys are sorted so
+// two imports of the same order produce the same line - Go map iteration order
+// is deliberately random, and an order's stored options should not churn.
+func gpoFallbackOptions(props []shopifyLineProp) []production.Option {
+	for _, p := range props {
+		if strings.TrimSpace(p.Name) != gpoOptionsKey {
+			continue
+		}
+		var fields map[string]string
+		if err := json.Unmarshal([]byte(p.Value), &fields); err != nil {
+			return nil
+		}
+		keys := make([]string, 0, len(fields))
+		for k := range fields {
+			if !strings.HasPrefix(k, "_") && strings.TrimSpace(fields[k]) != "" {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		out := make([]production.Option, 0, len(keys))
+		for _, k := range keys {
+			out = append(out, production.Option{Name: k, Value: strings.TrimSpace(fields[k])})
+		}
+		return out
+	}
+	return nil
+}
+
+// matchOption finds the options whose label contains any of the given words and
+// joins them, so a product that asks for two names ("First Name", "Second
+// Name") reaches the station as one field rather than losing the second.
+func matchOption(options []production.Option, words ...string) *string {
+	values := make([]string, 0, 2)
+	for _, o := range options {
+		label := strings.ToLower(o.Name)
+		for _, w := range words {
+			if strings.Contains(label, w) {
+				values = append(values, o.Value)
+				break
+			}
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	joined := strings.Join(values, " / ")
+	return &joined
+}
+
+// firstNonNil returns the first value that was actually found.
+func firstNonNil(values ...*string) *string {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }
 
 func lineProps(props []shopifyLineProp) map[string]string {

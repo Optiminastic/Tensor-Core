@@ -206,6 +206,30 @@ type Settings struct {
 	PublicBaseURL       string
 	FrontendURL         string
 	TokenEncryptionKey  string
+
+	// How many of the store's most recent orders one sync pulls, and how often
+	// the API process runs that sync on its own. Orders upsert by
+	// shopify_order_id, so a re-run only costs time. Interval 0 disables the
+	// scheduled sync entirely and leaves "Sync from Shopify" as the only path.
+	ShopifySyncOrderCount      int
+	ShopifySyncIntervalMinutes int
+
+	// A routine sweep only refreshes the newest orders, which is all a live
+	// store needs. A deep sweep walks far enough back to cover the whole
+	// store, so a fix to how orders are read reaches the ones already
+	// imported instead of only the ones that arrive next. It runs once at
+	// startup and then every ShopifyDeepSyncEvery sweeps.
+	ShopifyDeepSyncOrderCount int
+	ShopifyDeepSyncEvery      int
+
+	// Personalisation geometry. OpenSCAD renders a product's template into the
+	// customer's own model; DesignAssetDir is where the products' STL parts
+	// (hearts, frames) that a template imports live. With OpenSCAD absent the
+	// personalisation routes report "not configured" rather than failing per
+	// request - the rest of the pipeline is unaffected.
+	OpenSCADBin      string
+	DesignAssetDir   string
+	PersonaliseLimit time.Duration
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -297,6 +321,15 @@ func Load() Settings {
 		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
 		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
+
+		ShopifySyncOrderCount:      intEnvOr("SHOPIFY_SYNC_ORDER_COUNT", 50),
+		ShopifySyncIntervalMinutes: intEnvOr("SHOPIFY_SYNC_INTERVAL_MINUTES", 0),
+		ShopifyDeepSyncOrderCount:  intEnvOr("SHOPIFY_DEEP_SYNC_ORDER_COUNT", 2000),
+		ShopifyDeepSyncEvery:       intEnvOr("SHOPIFY_DEEP_SYNC_EVERY", 12),
+
+		OpenSCADBin:      envOr("OPENSCAD_BIN", "openscad"),
+		DesignAssetDir:   os.Getenv("DESIGN_ASSET_DIR"),
+		PersonaliseLimit: secondsEnvOr("PERSONALISE_TIMEOUT_SECONDS", 90),
 	}
 }
 

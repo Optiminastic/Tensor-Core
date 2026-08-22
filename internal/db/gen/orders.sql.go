@@ -359,6 +359,7 @@ INSERT INTO orders (
 ON CONFLICT (shopify_order_id) DO UPDATE SET
     financial_status = EXCLUDED.financial_status,
     total_price      = EXCLUDED.total_price,
+    line_items       = EXCLUDED.line_items,
     updated_at       = now()
 RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, created_at, updated_at
 `

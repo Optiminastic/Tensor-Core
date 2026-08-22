@@ -269,6 +269,20 @@ type LineItem struct {
 	PersonalisationPhotoURL      *string    `json:"personalisation_photo_url"`
 	CustomerApprovalRequired     bool       `json:"customer_approval_required"`
 	CustomerApprovalReceived     bool       `json:"customer_approval_received"`
+	// Every personalisation field the customer filled in, in the order the
+	// store asked for them. The typed fields above only cover the five facts
+	// the production stations check; a store's option app (Globo, Infinite
+	// Options, a theme's own form) names its fields whatever the product
+	// needs, so anything that does not fit a typed slot is kept here rather
+	// than dropped. Read-only: nothing downstream branches on it.
+	Options []Option `json:"options,omitempty"`
+}
+
+// Option is one customer-entered personalisation field on a line item - the
+// label the storefront showed and what the customer typed into it.
+type Option struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // Confirms is the set of personalisation confirmation booleans. A job is
