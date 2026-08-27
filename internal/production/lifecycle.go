@@ -269,7 +269,39 @@ type LineItem struct {
 	PersonalisationPhotoURL      *string    `json:"personalisation_photo_url"`
 	CustomerApprovalRequired     bool       `json:"customer_approval_required"`
 	CustomerApprovalReceived     bool       `json:"customer_approval_received"`
+	// Properties is every custom attribute Shopify sent for this line, kept
+	// verbatim and in order.
+	//
+	// The typed fields above are a mapping, and a mapping only knows the keys
+	// it was told about. A real store names them however its personaliser
+	// happens to - "STEP 4-First Name-:", "_gpo_addon_price" - and anything
+	// unrecognised used to be read from Shopify and then silently dropped,
+	// which is the worst outcome: the operator sees a blank where the customer
+	// typed their child's name, and nothing anywhere says it was discarded.
+	//
+	// So everything is kept. The typed fields stay the machine-readable path;
+	// this is the record of what was actually sent.
+	Properties []LineProp `json:"properties,omitempty"`
 }
+
+// LineProp is one Shopify line-item custom attribute, verbatim.
+//
+// A slice rather than a map: Shopify sends these in a deliberate order (the
+// "STEP 3 / STEP 4 / STEP 5" sequence a customer filled in), and a map would
+// throw that away along with any duplicate keys.
+type LineProp struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Hidden reports whether a property is Shopify plumbing rather than something
+// a person entered.
+//
+// Shopify's convention is a leading underscore for attributes hidden from the
+// storefront - "_has_gpo", "_gpo_product_group". They are worth storing, since
+// they explain how an order was built, but showing them beside a customer's
+// name treats bookkeeping as if it were the order.
+func (p LineProp) Hidden() bool { return strings.HasPrefix(p.Name, "_") }
 
 // Confirms is the set of personalisation confirmation booleans. A job is
 // validated only when every one is true (matching the source's six check fields).

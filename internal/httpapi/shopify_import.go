@@ -139,19 +139,47 @@ type shopifyLineProp struct {
 	Value string `json:"value"`
 }
 
-// mapShopifyLineItems turns Shopify line items into production line items, reading
-// the print facts and personalisation from each line's custom properties. The
-// mapping is a best guess at the property naming a store would use (documented in
-// print-queue-be); a real store's keys are adapted here in one place.
+// mapShopifyLineItems turns Shopify line items into production line items,
+// reading the print facts and personalisation from each line's custom
+// properties.
+//
+// Two things happen here, and the difference matters. Every property is kept
+// verbatim on LineItem.Properties - nothing a customer typed is ever discarded.
+// On top of that, the keys below are RECOGNISED into typed fields so the
+// pipeline can act on them (a job knows it needs personalisation, the operator
+// gets a name to engrave).
+//
+// The recognised list is necessarily a guess at how a given store names things,
+// and it will not cover every store. That used to mean unmatched personalisation
+// vanished; now an unrecognised key still reaches the operator as a property,
+// it just isn't machine-readable until its name is added here.
 func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 	out := make([]production.LineItem, 0, len(items))
 	for _, li := range items {
 		props := lineProps(li.Properties)
-		name := prop(props, "personalisation_name", "custom_name", "name", "engraving_text")
+		// The "step" spellings come from a real storefront personaliser, which
+		// numbers its questions: "STEP 4-First Name-:", "STEP 5-Second Name:".
+		// Matching is on a normalised key (see lineProps), so punctuation and
+		// spacing in the store's labels do not have to be reproduced exactly.
+		name := prop(props,
+			"personalisation_name", "custom_name", "name", "engraving_text",
+			"step 4 first name", "first name", "step 3")
+		second := prop(props, "step 5 second name", "second name")
 		font := prop(props, "personalisation_font", "font")
 		colour := prop(props, "personalisation_colour", "personalisation_color")
 		variant := prop(props, "personalisation_variant", "variant")
 		photo := prop(props, "personalisation_photo_url", "photo_url", "uploaded_photo")
+
+		// Two names on one plank is one engraving job, not two. Joined rather
+		// than dropped, because the second name is half of what the customer
+		// bought.
+		if second != nil {
+			joined := *second
+			if name != nil {
+				joined = *name + " & " + *second
+			}
+			name = &joined
+		}
 
 		out = append(out, production.LineItem{
 			ProductID:                    productID(li),
@@ -173,17 +201,79 @@ func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 			PersonalisationPhotoRequired: photo != nil,
 			CustomerApprovalRequired:     propBool(props, "customer_approval_required"),
 			CustomerApprovalReceived:     propBool(props, "customer_approval_received"),
+			Properties:                   keepProperties(li.Properties),
 		})
 	}
 	return out
 }
 
+// lineProps indexes properties for lookup, under both their exact lowercased
+// name and a normalised form.
+//
+// Normalising matters because storefront personalisers label questions for
+// humans, not for parsers: "STEP 4-First Name-:" and "STEP 4 First Name" are
+// the same question. Punctuation is reduced to single spaces so the recognised
+// list can be written readably instead of as a set of exact strings that break
+// when someone edits a label.
 func lineProps(props []shopifyLineProp) map[string]string {
-	m := make(map[string]string, len(props))
+	m := make(map[string]string, len(props)*2)
 	for _, p := range props {
-		m[strings.ToLower(strings.TrimSpace(p.Name))] = p.Value
+		exact := strings.ToLower(strings.TrimSpace(p.Name))
+		m[exact] = p.Value
+		if norm := normalisePropKey(exact); norm != "" && norm != exact {
+			// First spelling wins: an exact match should never be displaced by
+			// a normalised collision.
+			if _, taken := m[norm]; !taken {
+				m[norm] = p.Value
+			}
+		}
 	}
 	return m
+}
+
+// normalisePropKey reduces a human-facing label to lowercase words separated by
+// single spaces: "STEP 4-First Name-:" becomes "step 4 first name".
+//
+// It lowercases internally rather than trusting the caller to have done it.
+// An earlier version kept only a-z and silently DELETED uppercase letters, so
+// "STEP 6 - WhatsApp Number:" came out as "6 hats pp umber" - a mangling that
+// still looked like a plausible key and would have quietly failed to match.
+func normalisePropKey(key string) string {
+	var b strings.Builder
+	lastSpace := true
+	for _, r := range strings.ToLower(key) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastSpace = false
+		default:
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// keepProperties copies Shopify's attributes onto the line item unchanged.
+//
+// Order is preserved because the store's numbered steps are the order the
+// customer answered them in, and reading "STEP 5" above "STEP 3" would be
+// needlessly confusing for whoever fulfils the order.
+func keepProperties(props []shopifyLineProp) []production.LineProp {
+	if len(props) == 0 {
+		return nil
+	}
+	out := make([]production.LineProp, 0, len(props))
+	for _, p := range props {
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, production.LineProp{Name: name, Value: p.Value})
+	}
+	return out
 }
 
 func prop(props map[string]string, keys ...string) *string {
