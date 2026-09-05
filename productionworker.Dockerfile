@@ -26,6 +26,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # "re-render everything after a template or font change" can be run at all.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/rerender ./cmd/rerender
+# replate carries a finished re-render onto the beds: a merged plate is a
+# snapshot taken when the bed formed, so re-rendering the jobs behind it leaves
+# every bed still holding - and still printing - the old geometry until this runs.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/replate ./cmd/replate
 
 # --- Runtime stage -------------------------------------------------------------
 FROM debian:12-slim
@@ -46,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
+COPY --from=build /out/replate /usr/local/bin/replate
 
 # Unprivileged, matching the API and slice-worker images. OpenSCAD writes its
 # temporary .scad and .stl through a writable HOME.

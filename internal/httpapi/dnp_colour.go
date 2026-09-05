@@ -27,6 +27,13 @@ const BasePlateColour = "#FFFFFF"
 // Deliberately small: every entry is a colour seen in real orders and absent
 // from the shelf. It is a stopgap for stock going in and out, not a second
 // colour system to maintain - anything unrecognised still fails loudly.
+// The hexes below the first group are the values the filament sync itself
+// recorded from the AMS trays on an instance where BambuBuddy was reachable -
+// the same numbers the shelf would hold, not a guess at what "gold" looks like.
+// They are here because an unresolved colour is not a cosmetic failure:
+// renderColouredPlank falls back to a single UNCOLOURED model, so a shelf that
+// has never been synced silently produces plain planks. That is what happened
+// in production, where 103 of 141 planks built with no colour at all.
 var fallbackColours = map[string]string{
 	"white":     "#FFFFFF",
 	"red":       "#E4002B",
@@ -36,6 +43,16 @@ var fallbackColours = map[string]string{
 	"grey":      "#808080",
 	"gray":      "#808080",
 	"brown":     "#8B4513",
+
+	"black":    "#1A1A1A",
+	"blue":     "#1560BD",
+	"gold":     "#D4AF37",
+	"green":    "#2E9B3F",
+	"ivory":    "#FFFFF0",
+	"orange":   "#FF7518",
+	"purple":   "#7D3CB5",
+	"sky blue": "#87CEEB",
+	"yellow":   "#FFD400",
 }
 
 // errUnknownColour means the colour cannot be resolved to a swatch. The job is
