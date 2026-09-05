@@ -21,6 +21,11 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/productionworker ./cmd/productionworker
+# rerender ships beside the worker because it only ENQUEUES model_gen jobs -
+# the worker is what actually runs OpenSCAD, so this is the one host where
+# "re-render everything after a template or font change" can be run at all.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/rerender ./cmd/rerender
 
 # --- Runtime stage -------------------------------------------------------------
 FROM debian:12-slim
@@ -40,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
+COPY --from=build /out/rerender /usr/local/bin/rerender
 
 # Unprivileged, matching the API and slice-worker images. OpenSCAD writes its
 # temporary .scad and .stl through a writable HOME.
