@@ -24,7 +24,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/obs"
@@ -38,6 +37,9 @@ type SyncFilamentResult struct {
 	// Created and Updated are material/colour buckets, not spools.
 	Created int `json:"created"`
 	Updated int `json:"updated"`
+	// Removed counts buckets BambuBuddy no longer reports - materials that were
+	// in Tensor from an earlier source and are not on the shelf.
+	Removed int `json:"removed"`
 	// TotalGrams is the whole shelf, so "129.0kg" can be checked against
 	// BambuBuddy's own total without opening it.
 	TotalGrams float64 `json:"total_grams"`
@@ -47,7 +49,12 @@ type SyncFilamentResult struct {
 type filamentBucket struct {
 	material string
 	colour   string
-	grams    float64
+	// hex is the swatch BambuBuddy shows for this colour, e.g. "#1A1A1A".
+	// A colour NAME is what the planner keys on; the swatch is what an
+	// operator recognises on a shelf, and "Ivory" is not something anyone can
+	// picture from the word.
+	hex   string
+	grams float64
 }
 
 // SyncFilamentFromBambuBuddy replaces Tensor's stock figures with BambuBuddy's.
@@ -85,10 +92,55 @@ func (s *Server) SyncFilamentFromBambuBuddy(ctx context.Context) (SyncFilamentRe
 		}
 	}
 
+	// Reconcile: drop what the shelf no longer has. This is what stops rows
+	// from an older source lingering forever next to synced ones - a page
+	// showing "PA-CF" and "PLA Basics" beside BambuBuddy's PLA invites the
+	// reader to believe Tensor knows about filament that is not there.
+	//
+	// Only ever on this operator-initiated path, mirroring the fleet sync: a
+	// delete driven by a transient upstream blip is not a trade worth making,
+	// and "this material is gone" is a real decision rather than a refresh.
+	if removed, err := s.pruneFilamentNotIn(ctx, buckets); err != nil {
+		log.Warn("could not prune filament the shelf no longer has", "error", err)
+	} else {
+		out.Removed = removed
+	}
+
 	log.Info("filament synced from bambubuddy",
 		"spools", out.Spools, "created", out.Created, "updated", out.Updated,
-		"total_grams", out.TotalGrams)
+		"removed", out.Removed, "total_grams", out.TotalGrams)
 	return out, nil
+}
+
+// pruneFilamentNotIn removes rows for material/colour pairs not in buckets,
+// reporting how many went.
+//
+// Keys join material and colour with the ASCII unit separator, matching the
+// query - a character no material or colour name can contain.
+func (s *Server) pruneFilamentNotIn(ctx context.Context, buckets []filamentBucket) (int, error) {
+	// A sync that somehow saw nothing must not empty the shelf. An empty
+	// upstream is far more likely to be a fault than a genuinely bare rack.
+	if len(buckets) == 0 {
+		return 0, nil
+	}
+
+	keys := make([]string, 0, len(buckets))
+	for _, b := range buckets {
+		keys = append(keys, b.material+""+b.colour)
+	}
+
+	before, err := s.store.Q.ListFilamentKeys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.store.Q.DeleteFilamentNotIn(ctx, keys); err != nil {
+		return 0, err
+	}
+	after, err := s.store.Q.ListFilamentKeys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(before) - len(after), nil
 }
 
 // aggregateSpools sums spools into (material, colour) buckets.
@@ -109,9 +161,17 @@ func aggregateSpools(spools []bambubuddy.Spool) []filamentBucket {
 		key := material + "\x00" + colour
 		if existing, ok := totals[key]; ok {
 			existing.grams += sp.RemainingGrams()
+			if existing.hex == "" {
+				// Spools of one colour should agree on the swatch; if an early
+				// one lacked an rgba, a later one can still supply it.
+				existing.hex = hexColour(sp.RGBA)
+			}
 			continue
 		}
-		totals[key] = &filamentBucket{material: material, colour: colour, grams: sp.RemainingGrams()}
+		totals[key] = &filamentBucket{
+			material: material, colour: colour,
+			hex: hexColour(sp.RGBA), grams: sp.RemainingGrams(),
+		}
 	}
 
 	buckets := make([]filamentBucket, 0, len(totals))
@@ -129,6 +189,11 @@ func (s *Server) applyFilamentBucket(ctx context.Context, b filamentBucket) (boo
 		colour = &b.colour
 	}
 
+	var hex *string
+	if b.hex != "" {
+		hex = &b.hex
+	}
+
 	existing, err := s.store.Q.GetFilamentByMaterialColour(ctx, gen.GetFilamentByMaterialColourParams{
 		Material: b.material, Colour: colour,
 	})
@@ -137,7 +202,7 @@ func (s *Server) applyFilamentBucket(ctx context.Context, b filamentBucket) (boo
 			return false, err
 		}
 		_, err = s.store.Q.InsertFilament(ctx, gen.InsertFilamentParams{
-			ID: uuid.New(), Material: b.material, Colour: colour,
+			ID: uuid.New(), Material: b.material, Colour: colour, ColourHex: hex,
 			GramsAvailable: b.grams,
 			// A new row gets no reorder level. Inventing one would put a
 			// material straight into "low stock" on the strength of a guess;
@@ -150,11 +215,11 @@ func (s *Server) applyFilamentBucket(ctx context.Context, b filamentBucket) (boo
 		return true, nil
 	}
 
-	// The reorder level is Tensor's own setting and BambuBuddy knows nothing
-	// about it, so it is carried through untouched rather than reset.
-	_, err = s.store.Q.UpdateFilamentLevel(ctx, gen.UpdateFilamentLevelParams{
-		ID: existing.ID, GramsAvailable: b.grams,
-		ReorderLevelGrams: db.NumFloat(existing.ReorderLevelGrams),
+	// SetFilamentStockFromSource, not UpdateFilamentLevel: the latter is the
+	// operator's edit form, where the reorder level is the thing being changed.
+	// A sync must never reset a threshold somebody chose.
+	_, err = s.store.Q.SetFilamentStockFromSource(ctx, gen.SetFilamentStockFromSourceParams{
+		ID: existing.ID, GramsAvailable: b.grams, ColourHex: hex,
 	})
 	return false, err
 }

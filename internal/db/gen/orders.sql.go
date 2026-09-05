@@ -27,12 +27,7 @@ func (q *Queries) ClearOrderJobCreationFailure(ctx context.Context, id uuid.UUID
 }
 
 const getOrderByID = `-- name: GetOrderByID :one
-SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
-       shopify_customer_id, customer_email, customer_phone,
-       financial_status, total_price, currency, line_items,
-       status, source, imported_at, job_creation_error, job_creation_failed_at,
-       created_at, updated_at
-FROM orders WHERE id = $1
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders WHERE id = $1
 `
 
 func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error) {
@@ -56,6 +51,22 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.ImportedAt,
 		&i.JobCreationError,
 		&i.JobCreationFailedAt,
+		&i.PlacedAt,
+		&i.Note,
+		&i.Attributes,
+		&i.Tags,
+		&i.FulfillmentStatus,
+		&i.DeliveryStatus,
+		&i.ReturnStatus,
+		&i.SourceName,
+		&i.SubtotalPrice,
+		&i.TotalDiscounts,
+		&i.TotalShipping,
+		&i.TotalReceived,
+		&i.DiscountTitle,
+		&i.ShippingTitle,
+		&i.ShippingAddress,
+		&i.BillingAddress,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -75,11 +86,7 @@ INSERT INTO orders (
     $9, $10::float8, $11,
     $12, $13, $14
 )
-RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name,
-          shopify_customer_id, customer_email, customer_phone,
-          financial_status, total_price, currency, line_items,
-          status, source, imported_at, job_creation_error, job_creation_failed_at,
-       created_at, updated_at
+RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at
 `
 
 type InsertOrderParams struct {
@@ -140,6 +147,22 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.ImportedAt,
 		&i.JobCreationError,
 		&i.JobCreationFailedAt,
+		&i.PlacedAt,
+		&i.Note,
+		&i.Attributes,
+		&i.Tags,
+		&i.FulfillmentStatus,
+		&i.DeliveryStatus,
+		&i.ReturnStatus,
+		&i.SourceName,
+		&i.SubtotalPrice,
+		&i.TotalDiscounts,
+		&i.TotalShipping,
+		&i.TotalReceived,
+		&i.DiscountTitle,
+		&i.ShippingTitle,
+		&i.ShippingAddress,
+		&i.BillingAddress,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -147,17 +170,20 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 }
 
 const listOrders = `-- name: ListOrders :many
-SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
-       shopify_customer_id, customer_email, customer_phone,
-       financial_status, total_price, currency, line_items,
-       status, source, imported_at, job_creation_error, job_creation_failed_at,
-       created_at, updated_at
-FROM orders
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
 WHERE $1::text IS NULL OR source = $1
-ORDER BY imported_at DESC, id DESC
+ORDER BY COALESCE(placed_at, imported_at) DESC, id DESC
 `
 
 // A null source returns every order regardless of origin.
+// Newest ORDER first, not newest import.
+//
+// imported_at is when Tensor happened to fetch a row, which on a backfill is
+// the same second for hundreds of them - so it sorted by nothing at all and
+// the list read as shuffled: 114762, 114763, 114743, 114603. placed_at is the
+// customer's own date and is what "latest first" means to anyone reading it.
+// COALESCE keeps orders imported before placed_at existed in a sensible place
+// rather than dropping them to the bottom.
 func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, error) {
 	rows, err := q.db.Query(ctx, listOrders, source)
 	if err != nil {
@@ -185,6 +211,22 @@ func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, erro
 			&i.ImportedAt,
 			&i.JobCreationError,
 			&i.JobCreationFailedAt,
+			&i.PlacedAt,
+			&i.Note,
+			&i.Attributes,
+			&i.Tags,
+			&i.FulfillmentStatus,
+			&i.DeliveryStatus,
+			&i.ReturnStatus,
+			&i.SourceName,
+			&i.SubtotalPrice,
+			&i.TotalDiscounts,
+			&i.TotalShipping,
+			&i.TotalReceived,
+			&i.DiscountTitle,
+			&i.ShippingTitle,
+			&i.ShippingAddress,
+			&i.BillingAddress,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -199,12 +241,7 @@ func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, erro
 }
 
 const listOrdersPage = `-- name: ListOrdersPage :many
-SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
-       shopify_customer_id, customer_email, customer_phone,
-       financial_status, total_price, currency, line_items,
-       status, source, imported_at, job_creation_error, job_creation_failed_at,
-       created_at, updated_at
-FROM orders
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
 WHERE (
     $1::timestamptz IS NULL
     OR (imported_at, id) < ($1::timestamptz, $2::uuid)
@@ -255,6 +292,22 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 			&i.ImportedAt,
 			&i.JobCreationError,
 			&i.JobCreationFailedAt,
+			&i.PlacedAt,
+			&i.Note,
+			&i.Attributes,
+			&i.Tags,
+			&i.FulfillmentStatus,
+			&i.DeliveryStatus,
+			&i.ReturnStatus,
+			&i.SourceName,
+			&i.SubtotalPrice,
+			&i.TotalDiscounts,
+			&i.TotalShipping,
+			&i.TotalReceived,
+			&i.DiscountTitle,
+			&i.ShippingTitle,
+			&i.ShippingAddress,
+			&i.BillingAddress,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -269,12 +322,7 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 }
 
 const listOrdersWithoutJobs = `-- name: ListOrdersWithoutJobs :many
-SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name,
-       shopify_customer_id, customer_email, customer_phone,
-       financial_status, total_price, currency, line_items,
-       status, source, imported_at, job_creation_error, job_creation_failed_at,
-       created_at, updated_at
-FROM orders o
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders o
 WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
   AND ($1::text IS NULL OR source = $1)
 ORDER BY imported_at DESC, id DESC
@@ -312,6 +360,22 @@ func (q *Queries) ListOrdersWithoutJobs(ctx context.Context, source *string) ([]
 			&i.ImportedAt,
 			&i.JobCreationError,
 			&i.JobCreationFailedAt,
+			&i.PlacedAt,
+			&i.Note,
+			&i.Attributes,
+			&i.Tags,
+			&i.FulfillmentStatus,
+			&i.DeliveryStatus,
+			&i.ReturnStatus,
+			&i.SourceName,
+			&i.SubtotalPrice,
+			&i.TotalDiscounts,
+			&i.TotalShipping,
+			&i.TotalReceived,
+			&i.DiscountTitle,
+			&i.ShippingTitle,
+			&i.ShippingAddress,
+			&i.BillingAddress,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -348,19 +412,63 @@ const upsertPaidOrder = `-- name: UpsertPaidOrder :one
 INSERT INTO orders (
     id, shop_connection_id, shopify_order_id, order_number, customer_name,
     shopify_customer_id, customer_email, customer_phone,
-    financial_status, total_price, currency, line_items, status
+    financial_status, total_price, currency, line_items, status,
+    placed_at, note, attributes, tags, fulfillment_status, source_name,
+    delivery_status, return_status,
+    subtotal_price, total_discounts, total_shipping, total_received,
+    discount_title, shipping_title, shipping_address, billing_address
 ) VALUES (
     $1, $2, $3,
     $4, $5,
     $6, $7, $8,
     $9, $10::float8, $11,
-    $12, $13
+    $12, $13,
+    $14, $15, $16, $17,
+    $18, $19,
+    $20, $21,
+    $22::numeric, $23::numeric,
+    $24::numeric, $25::numeric,
+    $26, $27,
+    $28, $29
 )
 ON CONFLICT (shopify_order_id) DO UPDATE SET
     financial_status = EXCLUDED.financial_status,
     total_price      = EXCLUDED.total_price,
+    -- Refreshed too, so a re-sync repairs an order rather than only touching
+    -- its payment state. Shopify is the source of truth for what the customer
+    -- ordered, and Tensor never edits line_items after import - production
+    -- jobs are separate rows derived from it.
+    --
+    -- Without this, improving the import only ever helped orders that had not
+    -- arrived yet: every order already in the table kept whatever the mapper
+    -- of the day happened to understand, with no way to backfill short of
+    -- deleting and re-importing.
+    line_items       = EXCLUDED.line_items,
+    -- The whole Shopify picture is refreshed for the same reason line_items is:
+    -- Shopify owns these facts, Tensor never edits them, and an order already
+    -- in the table must be able to gain the detail a later import learned to
+    -- read. Pressing Sync is how an operator repairs an order.
+    placed_at          = EXCLUDED.placed_at,
+    note               = EXCLUDED.note,
+    attributes         = EXCLUDED.attributes,
+    tags               = EXCLUDED.tags,
+    fulfillment_status = EXCLUDED.fulfillment_status,
+    delivery_status    = EXCLUDED.delivery_status,
+    return_status      = EXCLUDED.return_status,
+    source_name        = EXCLUDED.source_name,
+    subtotal_price     = EXCLUDED.subtotal_price,
+    total_discounts    = EXCLUDED.total_discounts,
+    total_shipping     = EXCLUDED.total_shipping,
+    total_received     = EXCLUDED.total_received,
+    discount_title     = EXCLUDED.discount_title,
+    shipping_title     = EXCLUDED.shipping_title,
+    -- Address columns are only ever overwritten with something. Protected
+    -- customer data arrives null until Shopify grants access, and letting a
+    -- null flatten an address a previous sync captured would lose it.
+    shipping_address   = COALESCE(EXCLUDED.shipping_address, orders.shipping_address),
+    billing_address    = COALESCE(EXCLUDED.billing_address, orders.billing_address),
     updated_at       = now()
-RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, created_at, updated_at
+RETURNING id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at
 `
 
 type UpsertPaidOrderParams struct {
@@ -377,6 +485,22 @@ type UpsertPaidOrderParams struct {
 	Currency          string
 	LineItems         []byte
 	Status            string
+	PlacedAt          pgtype.Timestamptz
+	Note              *string
+	Attributes        []byte
+	Tags              []byte
+	FulfillmentStatus *string
+	SourceName        *string
+	DeliveryStatus    *string
+	ReturnStatus      *string
+	SubtotalPrice     pgtype.Numeric
+	TotalDiscounts    pgtype.Numeric
+	TotalShipping     pgtype.Numeric
+	TotalReceived     pgtype.Numeric
+	DiscountTitle     *string
+	ShippingTitle     *string
+	ShippingAddress   []byte
+	BillingAddress    []byte
 }
 
 // Idempotent import from the orders/paid webhook: keyed on shopify_order_id, a
@@ -397,6 +521,22 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		arg.Currency,
 		arg.LineItems,
 		arg.Status,
+		arg.PlacedAt,
+		arg.Note,
+		arg.Attributes,
+		arg.Tags,
+		arg.FulfillmentStatus,
+		arg.SourceName,
+		arg.DeliveryStatus,
+		arg.ReturnStatus,
+		arg.SubtotalPrice,
+		arg.TotalDiscounts,
+		arg.TotalShipping,
+		arg.TotalReceived,
+		arg.DiscountTitle,
+		arg.ShippingTitle,
+		arg.ShippingAddress,
+		arg.BillingAddress,
 	)
 	var i Order
 	err := row.Scan(
@@ -417,6 +557,22 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		&i.ImportedAt,
 		&i.JobCreationError,
 		&i.JobCreationFailedAt,
+		&i.PlacedAt,
+		&i.Note,
+		&i.Attributes,
+		&i.Tags,
+		&i.FulfillmentStatus,
+		&i.DeliveryStatus,
+		&i.ReturnStatus,
+		&i.SourceName,
+		&i.SubtotalPrice,
+		&i.TotalDiscounts,
+		&i.TotalShipping,
+		&i.TotalReceived,
+		&i.DiscountTitle,
+		&i.ShippingTitle,
+		&i.ShippingAddress,
+		&i.BillingAddress,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

@@ -21,11 +21,19 @@ import (
 // batch_total_time_minutes and print_started_at rather than stored, so it is
 // always accurate without anything having to tick it down.
 type fleetMachineResponse struct {
-	ID                    string          `json:"id"`
-	MachineID             string          `json:"machine_id"`
-	Name                  string          `json:"name"`
-	ImageURL              *string         `json:"image_url"`
-	Status                string          `json:"status"`
+	ID        string  `json:"id"`
+	MachineID string  `json:"machine_id"`
+	Name      string  `json:"name"`
+	ImageURL  *string `json:"image_url"`
+	Status    string  `json:"status"`
+	// StatusReason explains an "error" status and is null for every other one.
+	StatusReason *string `json:"status_reason"`
+	// What the unit is, as BambuBuddy reports it. Model matters beyond display:
+	// a plate sliced for one model cannot run on another.
+	Model                 *string         `json:"model"`
+	Location              *string         `json:"location"`
+	IPAddress             *string         `json:"ip_address"`
+	NozzleCount           *int32          `json:"nozzle_count"`
 	Filaments             json.RawMessage `json:"filaments"`
 	CurrentBatchID        *string         `json:"current_batch_id"`
 	CurrentLayer          *int32          `json:"current_layer"`
@@ -47,7 +55,10 @@ func (s *Server) fleetMachineDTO(ctx context.Context, m gen.Machine) fleetMachin
 	startedAt := db.TimePtr(m.PrintStartedAt)
 	return fleetMachineResponse{
 		ID: m.ID.String(), MachineID: m.MachineID, Name: m.Name, ImageURL: m.ImageUrl,
-		Status: m.Status, Filaments: s.computeLiveFilaments(ctx, m),
+		Status: m.Status, StatusReason: m.StatusReason,
+		Model: m.Model, Location: m.Location,
+		IPAddress: m.IpAddress, NozzleCount: m.NozzleCount,
+		Filaments:      s.computeLiveFilaments(ctx, m),
 		CurrentBatchID: currentBatchID, CurrentLayer: m.CurrentLayer, TotalLayers: m.TotalLayers,
 		BatchTotalTimeMinutes: m.BatchTotalTimeMinutes, PrintStartedAt: startedAt,
 		RemainingSeconds: remainingSeconds(m.BatchTotalTimeMinutes, startedAt),
@@ -141,6 +152,9 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	s.registerFleetMachineUpload(g)
 	s.registerFleetMachineCamera(g)
 	s.registerFleetMachineWrites(g)
+	// Not under /machine-fleet: the queue belongs to BambuBuddy and spans every
+	// printer, so it is not a sub-resource of any one machine.
+	s.registerPrintingQueue(r)
 }
 
 func (s *Server) listFleetMachines(c *gin.Context) {

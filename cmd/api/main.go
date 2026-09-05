@@ -19,9 +19,11 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
+	"github.com/Optiminastic/tensor-core/internal/workerset"
 )
 
 func main() {
@@ -93,7 +95,22 @@ func main() {
 		production.NewJobCreationEnqueuer(riverClient),
 		production.NewBatchPlanEnqueuer(riverClient, time.Duration(cfg.BatchPlanDebounceSeconds)*time.Second),
 	)
+	// Same client for the Shopify order pull. The API is where "Sync from
+	// Shopify" lands, and without this the button would 503 - it no longer
+	// imports on the request, having discovered that a five-second browser
+	// timeout cancelled the import halfway and lost thirty-five orders.
+	server.EnableOrderSync(production.NewOrderSyncEnqueuer(riverClient))
 
+	// The API enqueues renders (a manual retry from the jobs page) but never
+	// runs them; cmd/productionworker is where the OpenSCAD subprocess lives.
+	if cfg.OpenSCADBin != "" {
+		server.EnableModelGeneration(
+			personalise.NewRenderer(cfg.OpenSCADBin, cfg.OpenSCADAssetDir, 0),
+			production.NewModelGenEnqueuer(riverClient),
+		)
+	}
+
+	storageReady := false
 	if objects, err := storage.New(ctx, storage.Options{
 		Endpoint:           cfg.S3Endpoint,
 		AccessKey:          cfg.S3AccessKey,
@@ -106,7 +123,37 @@ func main() {
 		log.Printf("design pipeline disabled: object storage unavailable: %v", err)
 	} else {
 		server.EnablePipeline(objects, slicing.NewEnqueuer(riverClient))
+		storageReady = true
 		log.Printf("design pipeline enabled (storage=%s, queue=river)", cfg.S3Endpoint)
+	}
+
+	// The production pipeline, in this process: job creation, model rendering,
+	// batch planning, dispatch and the Shopify order pull.
+	//
+	// On by default, because "the backend is running" should mean the pipeline
+	// is running. It used to live only in cmd/productionworker, so starting the
+	// API alone gave you a system that imported orders, created jobs and then
+	// stopped - with nothing on screen to say why, because every stage was
+	// enqueued perfectly well and simply never consumed.
+	//
+	// Set RUN_PRODUCTION_WORKERS=false to run the API alone, which is what a
+	// deployment with a dedicated worker host wants; the enqueuers attached
+	// above keep working either way, so the API can still queue work for that
+	// host. Storage is a hard requirement: every job here reads or writes a
+	// model file.
+	var workers *workerset.Runner
+	switch {
+	case !cfg.RunProductionWorkers:
+		log.Printf("production pipeline not started here (RUN_PRODUCTION_WORKERS=false); " +
+			"run cmd/productionworker to consume the queues")
+	case !storageReady:
+		log.Printf("production pipeline not started: it needs object storage, which is unavailable")
+	default:
+		started, err := workerset.Start(ctx, server, store, cfg, logger)
+		if err != nil {
+			log.Fatalf("start production workers: %v", err)
+		}
+		workers = started
 	}
 
 	addr := ":" + cfg.Port
@@ -134,5 +181,10 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
+	}
+	// After the HTTP server, so a request that enqueues work still finds a
+	// running client; Stop drains what is already in flight.
+	if err := workers.Stop(shutdownCtx); err != nil {
+		log.Printf("production workers did not stop cleanly: %v", err)
 	}
 }

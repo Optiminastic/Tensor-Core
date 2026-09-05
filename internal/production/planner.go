@@ -195,6 +195,19 @@ type Nester func(units []bedpack.UnitFootprint) (placements []bedpack.Placement,
 // Nester, and what Plan uses.
 var DefaultNester Nester = bedpack.Pack
 
+// BedNester is a Nester that is told which bed it is packing.
+//
+// Separate from Nester rather than replacing it because the optimiser path has
+// one bed by construction (see groupKey's comment) while the colour path has
+// three - a P2S's, an A2L's and an H2C's - and packing a six-up A2L plate
+// against a P2S bed would silently drop two planks.
+type BedNester func(bedpack.Bed, []bedpack.UnitFootprint) ([]bedpack.Placement, []bedpack.UnitFootprint)
+
+// DefaultBedNester is the real packer: 2D, parts turned 90 degrees where that
+// fits more on. The single-column layout (bedpack.PackColumnOn) is what held
+// every bed to four planks whatever the machine, so it is no longer the default.
+var DefaultBedNester BedNester = bedpack.PackOn
+
 // Plan groups and packs jobs into batches using DefaultNester. See
 // PlanWithNester for the nesting-algorithm-injectable version and the full
 // behaviour description.
@@ -693,7 +706,32 @@ func unitsFor(j PlanJob) []bedpack.UnitFootprint {
 
 // finalise computes a batch's placements and snapshot metrics.
 func finalise(jobs []PlanJob, units []bedpack.UnitFootprint, strategy string, nest Nester) PlannedBatch {
-	placements, _ := nest(units)
+	return finaliseWith(jobs, units, strategy, bedpack.DefaultBed, func(units []bedpack.UnitFootprint) []bedpack.Placement {
+		placements, _ := nest(units)
+		return placements
+	})
+}
+
+// finaliseOn is finalise for a batch built on a named bed - the colour strategy,
+// where a bed is a P2S's or an H2C's and its utilisation only means anything
+// measured against that one.
+func finaliseOn(
+	bed bedpack.Bed, jobs []PlanJob, units []bedpack.UnitFootprint,
+	strategy string, nest BedNester,
+) PlannedBatch {
+	return finaliseWith(jobs, units, strategy, bed, func(units []bedpack.UnitFootprint) []bedpack.Placement {
+		placements, _ := nest(bed, units)
+		return placements
+	})
+}
+
+// finaliseWith is the shared body: pack, then fill in the metrics the
+// orchestrator commits.
+func finaliseWith(
+	jobs []PlanJob, units []bedpack.UnitFootprint, strategy string,
+	bed bedpack.Bed, pack func([]bedpack.UnitFootprint) []bedpack.Placement,
+) PlannedBatch {
+	placements := pack(units)
 	totalTime, effective := batchTimeFields(jobs)
 	var filament float64
 	for _, j := range jobs {
@@ -702,7 +740,7 @@ func finalise(jobs []PlanJob, units []bedpack.UnitFootprint, strategy string, ne
 	return PlannedBatch{
 		Jobs: jobs, Placements: placements, UnitsPerBed: len(units),
 		TotalPrintTimeMinutes: totalTime, EffectiveTimePerUnitMinutes: effective,
-		TotalFilamentGrams: filament, BedUtilisationPercent: bedpack.UtilisationPercent(units),
+		TotalFilamentGrams: filament, BedUtilisationPercent: bedpack.UtilisationPercentOn(bed, units),
 		PackingStrategy: strategy,
 	}
 }

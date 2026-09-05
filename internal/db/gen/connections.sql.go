@@ -112,6 +112,46 @@ func (q *Queries) GetShopifyConnectionByDomain(ctx context.Context, domain strin
 	return id, err
 }
 
+const listConnectedShopifyBrands = `-- name: ListConnectedShopifyBrands :many
+SELECT brand_slug, external_account_id, access_token
+FROM brand_connections
+WHERE provider = 'shopify'
+  AND status = 'connected'
+  AND access_token IS NOT NULL
+  AND external_account_id IS NOT NULL
+ORDER BY brand_slug
+`
+
+type ListConnectedShopifyBrandsRow struct {
+	BrandSlug         string
+	ExternalAccountID *string
+	AccessToken       *string
+}
+
+// Every brand with a usable Shopify connection, for the all-brands sync.
+//
+// Returns the token because the caller's next act is to pull orders with it;
+// like GetConnectionWithToken this must never reach a caller-facing endpoint.
+func (q *Queries) ListConnectedShopifyBrands(ctx context.Context) ([]ListConnectedShopifyBrandsRow, error) {
+	rows, err := q.db.Query(ctx, listConnectedShopifyBrands)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListConnectedShopifyBrandsRow{}
+	for rows.Next() {
+		var i ListConnectedShopifyBrandsRow
+		if err := rows.Scan(&i.BrandSlug, &i.ExternalAccountID, &i.AccessToken); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listConnectionsForBrand = `-- name: ListConnectionsForBrand :many
 
 SELECT id, brand_slug, provider, status, external_account_id,

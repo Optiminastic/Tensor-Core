@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -43,8 +44,18 @@ func seedOrder(t *testing.T, store *db.Store, shopifyID int64, items []map[strin
 	}
 	id := uuid.New()
 	if _, err := store.Q.InsertOrder(context.Background(), gen.InsertOrderParams{
-		ID: id, ShopifyOrderID: shopifyID, OrderNumber: "1001", FinancialStatus: "paid",
-		TotalPrice: 1499, Currency: "INR", LineItems: lineItems, Status: "queued", Source: "seed",
+		// Derived from the shopify id so every seeded order has its own number,
+		// as real ones do - a shared number collides on job_number, which is
+		// derived from it.
+		//
+		// Offset above firstProductionOrderNumber so seeded orders are inside
+		// the current production run. Without it every fixture order sits
+		// below the cutoff, ShouldCreateJobs excludes it, and tests that
+		// expect jobs get none.
+		ID: id, ShopifyOrderID: shopifyID,
+		OrderNumber:     fmt.Sprintf("T-%d", firstProductionOrderNumber+shopifyID),
+		FinancialStatus: "paid",
+		TotalPrice:      1499, Currency: "INR", LineItems: lineItems, Status: "queued", Source: "seed",
 	}); err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
@@ -237,7 +248,8 @@ func TestIntegrationJobCarriesOrderAndCustomerTraceability(t *testing.T) {
 	})
 	orderID := uuid.New()
 	if _, err := store.Q.InsertOrder(context.Background(), gen.InsertOrderParams{
-		ID: orderID, ShopifyOrderID: 5003, OrderNumber: "1003", FinancialStatus: "paid",
+		// Numbered inside the current production run - see ShouldCreateJobs.
+		ID: orderID, ShopifyOrderID: 5003, OrderNumber: "114603", FinancialStatus: "paid",
 		TotalPrice: 499, Currency: "INR", LineItems: items, Status: "queued", Source: "seed",
 		ShopifyCustomerID: &custID, CustomerName: &custName,
 	}); err != nil {

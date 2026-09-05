@@ -300,6 +300,26 @@ CREATE TABLE orders (
     -- healthy order; see migration 0034.
     job_creation_error     text,
     job_creation_failed_at timestamptz,
+    -- Shopify's own order page, mirrored - see migration 0061. Money is
+    -- nullable because an order imported before that migration does not know
+    -- these figures, and a zero would render as a confident wrong number.
+    placed_at           timestamptz,
+    note                text,
+    attributes          jsonb NOT NULL DEFAULT '[]',
+    tags                jsonb NOT NULL DEFAULT '[]',
+    fulfillment_status  varchar(32),
+    -- The carrier's view and the return state - see migration 0063.
+    delivery_status     varchar(32),
+    return_status       varchar(32),
+    source_name         varchar(64),
+    subtotal_price      numeric(10, 2),
+    total_discounts     numeric(10, 2),
+    total_shipping      numeric(10, 2),
+    total_received      numeric(10, 2),
+    discount_title      text,
+    shipping_title      text,
+    shipping_address    jsonb,
+    billing_address     jsonb,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
@@ -384,6 +404,12 @@ CREATE TABLE production_jobs (
     flow_pct                      numeric(6, 2),
     quality_mm                    numeric(4, 3),
     machine_family                varchar(16),
+    -- What the customer asked for, snapshotted at creation - see 0064.
+    variant_title                 varchar(255),
+    personalisation_properties    jsonb NOT NULL DEFAULT '[]',
+    -- Why a generated model could not be built - see migration 0065.
+    model_error                   text,
+    model_error_at                timestamptz,
     issue_reason                  varchar(32),
     -- Geometry/slice snapshot from the matched design at creation time (see
     -- 0030_job_geometry_snapshot.sql): bounding box from file_assets, and
@@ -448,6 +474,12 @@ CREATE TABLE batches (
     -- approximation rather than a measurement of this actual bed.
     plate_sliced_at                 timestamptz,
     plate_slice_error               text,
+    -- Why the batch never reached the printer, and when. Null on a batch that
+    -- either printed or was never sent (see 0044).
+    print_error                     text,
+    print_error_at                  timestamptz,
+    -- BambuBuddy's queue item id, so the batch can be followed after sending.
+    queue_item_id                   integer,
     -- What slicing the merged plate measured beyond time and total filament
     -- (see 0039). Plate-level figures, not sums of per-job estimates.
     total_layers                    integer,
@@ -456,7 +488,11 @@ CREATE TABLE batches (
     colour_changes                  integer,
     filament_by_colour              jsonb NOT NULL DEFAULT '[]',
     created_at                      timestamptz NOT NULL DEFAULT now(),
-    updated_at                      timestamptz NOT NULL DEFAULT now()
+    updated_at                      timestamptz NOT NULL DEFAULT now(),
+    -- The BambuBuddy slicer-pipeline run this batch was dispatched as. Set
+    -- when the run is accepted (202), before any queue entry exists - see
+    -- migration 0066.
+    pipeline_run_id                 integer
 );
 CREATE UNIQUE INDEX uq_batches_batch_number ON batches (batch_number);
 CREATE INDEX ix_batches_unsliced ON batches (created_at DESC) WHERE plate_sliced_at IS NULL;
@@ -471,6 +507,10 @@ CREATE TABLE filament_inventory (
     id                  uuid PRIMARY KEY,
     material            varchar(255) NOT NULL,
     colour              varchar(255),
+    -- The swatch for `colour`, e.g. '#1A1A1A'. A name is what the planner keys
+    -- on; the hex is what an operator recognises on a shelf. Null when the row
+    -- was entered by hand rather than synced (see 0043).
+    colour_hex          varchar(9),
     grams_available     numeric(10, 2) NOT NULL DEFAULT 0,
     reorder_level_grams numeric(10, 2) NOT NULL DEFAULT 0,
     created_at          timestamptz NOT NULL DEFAULT now(),
@@ -487,7 +527,7 @@ CREATE TABLE machines (
     name                      varchar(120) NOT NULL DEFAULT 'Bambu H2C',
     image_url                 text,
     status                    varchar(16) NOT NULL DEFAULT 'idle'
-                              CHECK (status IN ('idle', 'running', 'off')),
+                              CHECK (status IN ('idle', 'running', 'off', 'error')),
     filaments                 jsonb NOT NULL DEFAULT '[]',
     current_batch_id          uuid REFERENCES batches (id) ON DELETE SET NULL,
     current_layer             integer,
@@ -499,6 +539,13 @@ CREATE TABLE machines (
     -- scheduler resolves a batch's machine_id (a machine_profiles id) to a
     -- specific fleet machine by matching this column.
     machine_profile_id       uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
+    -- HMS text from the printer explaining an 'error' status; null otherwise.
+    status_reason            text,
+    -- What the printer is, as BambuBuddy reports it - see migration 0062.
+    model                    varchar(64),
+    location                 varchar(255),
+    ip_address               varchar(64),
+    nozzle_count             integer,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now()
 );

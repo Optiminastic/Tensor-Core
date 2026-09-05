@@ -28,7 +28,7 @@ UPDATE batches SET
     status                          = 'open',
     updated_at                      = now()
 WHERE id = $10 AND status = 'pending_approval'
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type ApproveBatchParams struct {
@@ -85,6 +85,9 @@ func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Bat
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -92,8 +95,102 @@ func (q *Queries) ApproveBatch(ctx context.Context, arg ApproveBatchParams) (Bat
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
+}
+
+const clearBatchPlateForEdit = `-- name: ClearBatchPlateForEdit :one
+UPDATE batches SET
+    merged_file_id    = NULL,
+    preview_file_id   = NULL,
+    plate_sliced_at   = NULL,
+    plate_slice_error = NULL,
+    queue_item_id     = NULL,
+    pipeline_run_id   = NULL,
+    print_error       = NULL,
+    print_error_at    = NULL,
+    updated_at        = now()
+WHERE id = $1
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
+`
+
+// Drops everything that described a bed's PREVIOUS contents, without changing
+// its status.
+//
+// Used when a locked bed is edited by hand. The merged plate, its slice and its
+// BambuBuddy queue id all describe four planks that are no longer the four on
+// the bed; leaving any of them behind sends the old plate to a printer. The
+// queue id in particular reads to the dispatcher as "already sent", so the bed
+// would sit corrected in Tensor and never reach a machine.
+//
+// Distinct from ReopenBatchForReplanning, which does the same clearing but also
+// unlocks the bed. A hand-edited bed stays exactly as locked as it was: the
+// operator changed its contents deliberately and does not want the planner
+// rearranging it afterwards.
+func (q *Queries) ClearBatchPlateForEdit(ctx context.Context, id uuid.UUID) (Batch, error) {
+	row := q.db.QueryRow(ctx, clearBatchPlateForEdit, id)
+	var i Batch
+	err := row.Scan(
+		&i.ID,
+		&i.BatchNumber,
+		&i.MachineID,
+		&i.Status,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.MaterialShortage,
+		&i.MergedFileID,
+		&i.PreviewFileID,
+		&i.UnitsPerBed,
+		&i.TotalPrintTimeMinutes,
+		&i.EffectiveTimePerUnitMinutes,
+		&i.TotalFilamentGrams,
+		&i.BedUtilizationPercent,
+		&i.PackingStrategy,
+		&i.FilamentReserved,
+		&i.PlateSlicedAt,
+		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
+		&i.TotalLayers,
+		&i.SupportGrams,
+		&i.PurgeGrams,
+		&i.ColourChanges,
+		&i.FilamentByColour,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PipelineRunID,
+	)
+	return i, err
+}
+
+const clearBatchPrintError = `-- name: ClearBatchPrintError :exec
+UPDATE batches SET
+    print_error     = NULL,
+    print_error_at  = NULL,
+    queue_item_id   = $1,
+    pipeline_run_id = $2,
+    updated_at      = now()
+WHERE id = $3
+`
+
+type ClearBatchPrintErrorParams struct {
+	QueueItemID   *int32
+	PipelineRunID *int32
+	ID            uuid.UUID
+}
+
+// Clears the failure and records what the batch is now waiting on.
+//
+// Both happen together because a successful send is exactly the moment the
+// previous failure stops being true. Two identifiers, because they arrive at
+// different times: the pipeline run is known as soon as BambuBuddy accepts the
+// work, while the queue item only exists once slicing has finished. The run id
+// is what stops the dispatcher sending the same plate twice in the meantime.
+func (q *Queries) ClearBatchPrintError(ctx context.Context, arg ClearBatchPrintErrorParams) error {
+	_, err := q.db.Exec(ctx, clearBatchPrintError, arg.QueueItemID, arg.PipelineRunID, arg.ID)
+	return err
 }
 
 const countCommittedBatchesForMachine = `-- name: CountCommittedBatchesForMachine :one
@@ -177,7 +274,7 @@ func (q *Queries) DeleteDraftBatches(ctx context.Context, batchIds []uuid.UUID) 
 }
 
 const getBatchByID = `-- name: GetBatchByID :one
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches WHERE id = $1
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches WHERE id = $1
 `
 
 func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error) {
@@ -202,6 +299,9 @@ func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error)
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -209,6 +309,7 @@ func (q *Queries) GetBatchByID(ctx context.Context, id uuid.UUID) (Batch, error)
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }
@@ -225,7 +326,7 @@ INSERT INTO batches (
     $8::float8, $9::float8,
     $10::float8, $11
 )
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type InsertBatchParams struct {
@@ -279,6 +380,9 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -286,12 +390,13 @@ func (q *Queries) InsertBatch(ctx context.Context, arg InsertBatchParams) (Batch
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }
 
 const listApprovableDraftsForMachine = `-- name: ListApprovableDraftsForMachine :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches
 WHERE machine_id = $1
   AND status = 'pending_approval'
 ORDER BY bed_utilization_percent DESC NULLS LAST,
@@ -345,6 +450,9 @@ func (q *Queries) ListApprovableDraftsForMachine(ctx context.Context, arg ListAp
 			&i.FilamentReserved,
 			&i.PlateSlicedAt,
 			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
 			&i.TotalLayers,
 			&i.SupportGrams,
 			&i.PurgeGrams,
@@ -352,6 +460,7 @@ func (q *Queries) ListApprovableDraftsForMachine(ctx context.Context, arg ListAp
 			&i.FilamentByColour,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PipelineRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -396,9 +505,23 @@ func (q *Queries) ListBatchStatusesForIDs(ctx context.Context, ids []uuid.UUID) 
 }
 
 const listBatches = `-- name: ListBatches :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches ORDER BY created_at DESC, id DESC
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches
+ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
+         created_at DESC, id DESC
 `
 
+// Newest batch first, by the batch's own number.
+//
+// created_at alone shuffled the list. batch_number comes from a sequence, so it
+// already IS creation order - but a planning run inserts every batch it makes in
+// one transaction, so dozens share a created_at to the microsecond and the rows
+// came back 1001103, 1001087, 1001084, 1001089. The number is what an operator
+// reads off the batch, so a list that does not descend by it reads as broken.
+//
+// Sorted on the numeric part rather than the string: "BATCH-999" sorts after
+// "BATCH-1001051" lexically, which is only right today because every live number
+// is the same width. NULLS LAST keeps a hand-named batch (no digits at all) out
+// of the way rather than at the top.
 func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 	rows, err := q.db.Query(ctx, listBatches)
 	if err != nil {
@@ -427,6 +550,9 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 			&i.FilamentReserved,
 			&i.PlateSlicedAt,
 			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
 			&i.TotalLayers,
 			&i.SupportGrams,
 			&i.PurgeGrams,
@@ -434,6 +560,59 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 			&i.FilamentByColour,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PipelineRunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBatchesAwaitingPlateMeasurement = `-- name: ListBatchesAwaitingPlateMeasurement :many
+SELECT id, batch_number, queue_item_id, units_per_bed
+FROM batches
+WHERE queue_item_id IS NOT NULL
+  AND plate_sliced_at IS NULL
+  AND status IN ('open', 'in_progress')
+ORDER BY created_at ASC, id ASC
+`
+
+type ListBatchesAwaitingPlateMeasurementRow struct {
+	ID          uuid.UUID
+	BatchNumber string
+	QueueItemID *int32
+	UnitsPerBed *int32
+}
+
+// Beds that have been handed to BambuBuddy but carry no measured print time.
+//
+// Every scheduling decision downstream is arithmetic on print time - when a
+// machine frees, which machine to build the next bed for - and until this is
+// filled in, that arithmetic is running on a MAX-of-jobs approximation, or on
+// nothing at all. Tensor used to measure it by slicing the plate itself; it does
+// not slice any more, BambuBuddy does, and BambuBuddy's queue item carries the
+// answer.
+//
+// Ordered oldest first so a backlog is worked through in the order it was
+// queued, and capped by the caller rather than here.
+func (q *Queries) ListBatchesAwaitingPlateMeasurement(ctx context.Context) ([]ListBatchesAwaitingPlateMeasurementRow, error) {
+	rows, err := q.db.Query(ctx, listBatchesAwaitingPlateMeasurement)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBatchesAwaitingPlateMeasurementRow{}
+	for rows.Next() {
+		var i ListBatchesAwaitingPlateMeasurementRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.QueueItemID,
+			&i.UnitsPerBed,
 		); err != nil {
 			return nil, err
 		}
@@ -446,7 +625,7 @@ func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
 }
 
 const listBatchesPage = `-- name: ListBatchesPage :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches
 WHERE (
     $1::timestamptz IS NULL
     OR (created_at, id) < ($1::timestamptz, $2::uuid)
@@ -489,6 +668,9 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 			&i.FilamentReserved,
 			&i.PlateSlicedAt,
 			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
 			&i.TotalLayers,
 			&i.SupportGrams,
 			&i.PurgeGrams,
@@ -496,6 +678,75 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 			&i.FilamentByColour,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PipelineRunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBatchesToDispatch = `-- name: ListBatchesToDispatch :many
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches
+WHERE status IN ('pending_approval', 'open')
+ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         created_at ASC, id ASC
+`
+
+// Batches that still have somewhere to go, OLDEST ORDER FIRST.
+//
+// The opposite order to ListBatches, and deliberately: that one feeds a screen,
+// where newest-first is what a person expects, while this one feeds the
+// dispatcher, where the whole point is that the customer who has waited longest
+// gets on a printer first. batch_number comes from a sequence and the planner
+// builds beds oldest-order-first, so ascending batch number IS oldest order.
+//
+// Both pre-print states are returned and the caller decides what each needs:
+// pending_approval wants approving, open wants sending once its plate has been
+// sliced. Anything further along (in_progress, completed) has left the queue.
+func (q *Queries) ListBatchesToDispatch(ctx context.Context) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listBatchesToDispatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Batch{}
+	for rows.Next() {
+		var i Batch
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.PlateSlicedAt,
+			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
+			&i.TotalLayers,
+			&i.SupportGrams,
+			&i.PurgeGrams,
+			&i.ColourChanges,
+			&i.FilamentByColour,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PipelineRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -568,8 +819,51 @@ func (q *Queries) ListDraftBatchJobIDs(ctx context.Context) ([]ListDraftBatchJob
 	return items, nil
 }
 
+const listJobNumbersForBatches = `-- name: ListJobNumbersForBatches :many
+SELECT j.batch_id, j.job_number, j.colour
+FROM production_jobs j
+WHERE j.batch_id = ANY($1::uuid[])
+ORDER BY j.job_number
+`
+
+type ListJobNumbersForBatchesRow struct {
+	BatchID   *uuid.UUID
+	JobNumber string
+	Colour    *string
+}
+
+// Each batch's jobs, by job number.
+//
+// For the Batches table's Jobs column, which shows WHICH orders are on a bed
+// rather than how many jobs it holds - "114556 114557 114558" answers the
+// question an operator actually has, where "4" does not. The order number is
+// read back out of the job number (JOB-114556), the same way the merged plate is
+// named, so the column and the file the operator downloads always agree.
+//
+// Only the two columns that mapping needs: this is asked for a whole page of
+// batches at once, and the column has no use for a job's full row.
+func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.UUID) ([]ListJobNumbersForBatchesRow, error) {
+	rows, err := q.db.Query(ctx, listJobNumbersForBatches, batchIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJobNumbersForBatchesRow{}
+	for rows.Next() {
+		var i ListJobNumbersForBatchesRow
+		if err := rows.Scan(&i.BatchID, &i.JobNumber, &i.Colour); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingApprovalBatchesForMachine = `-- name: ListPendingApprovalBatchesForMachine :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at FROM batches WHERE machine_id = $1 AND status = 'pending_approval'
+SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches WHERE machine_id = $1 AND status = 'pending_approval'
 `
 
 // Draft batches still parked on a machine profile that's about to go
@@ -604,6 +898,9 @@ func (q *Queries) ListPendingApprovalBatchesForMachine(ctx context.Context, mach
 			&i.FilamentReserved,
 			&i.PlateSlicedAt,
 			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
 			&i.TotalLayers,
 			&i.SupportGrams,
 			&i.PurgeGrams,
@@ -611,6 +908,7 @@ func (q *Queries) ListPendingApprovalBatchesForMachine(ctx context.Context, mach
 			&i.FilamentByColour,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PipelineRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -633,6 +931,75 @@ func (q *Queries) NextBatchNumber(ctx context.Context) (string, error) {
 	var batch_number string
 	err := row.Scan(&batch_number)
 	return batch_number, err
+}
+
+const reopenBatchForReplanning = `-- name: ReopenBatchForReplanning :one
+UPDATE batches SET
+    status                   = 'pending_approval',
+    approved_by              = NULL,
+    approved_at              = NULL,
+    merged_file_id           = NULL,
+    plate_sliced_at          = NULL,
+    plate_slice_error        = NULL,
+    queue_item_id            = NULL,
+    pipeline_run_id          = NULL,
+    print_error              = NULL,
+    print_error_at           = NULL,
+    filament_reserved        = false,
+    updated_at               = now()
+WHERE id = $1 AND status = 'open'
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
+`
+
+// Returns a locked bed to being a Draft so the planner can refill it.
+//
+// Used when a bed printed only partly: the planks that came off the printer are
+// completed and removed, and what is left is a bed with free places that nothing
+// would ever fill, because a locked bed has left the replanning pool.
+//
+// Everything approval produced is cleared, not just the status. The merged plate
+// and its slice describe a bed that no longer exists, and queue_item_id /
+// pipeline_run_id say "already sent to BambuBuddy" - which the dispatcher reads
+// as "nothing to do", so a refilled bed carrying a stale queue id would sit at
+// four planks and never reach a printer.
+//
+// Guarded on 'open': a bed that is printing or printed is a record of what
+// physically happened, and must not be reopened underneath it.
+func (q *Queries) ReopenBatchForReplanning(ctx context.Context, id uuid.UUID) (Batch, error) {
+	row := q.db.QueryRow(ctx, reopenBatchForReplanning, id)
+	var i Batch
+	err := row.Scan(
+		&i.ID,
+		&i.BatchNumber,
+		&i.MachineID,
+		&i.Status,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.MaterialShortage,
+		&i.MergedFileID,
+		&i.PreviewFileID,
+		&i.UnitsPerBed,
+		&i.TotalPrintTimeMinutes,
+		&i.EffectiveTimePerUnitMinutes,
+		&i.TotalFilamentGrams,
+		&i.BedUtilizationPercent,
+		&i.PackingStrategy,
+		&i.FilamentReserved,
+		&i.PlateSlicedAt,
+		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
+		&i.TotalLayers,
+		&i.SupportGrams,
+		&i.PurgeGrams,
+		&i.ColourChanges,
+		&i.FilamentByColour,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PipelineRunID,
+	)
+	return i, err
 }
 
 const setBatchPlateSliceError = `-- name: SetBatchPlateSliceError :exec
@@ -671,7 +1038,7 @@ UPDATE batches SET
     plate_slice_error               = NULL,
     updated_at                      = now()
 WHERE id = $9
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type SetBatchPlateSliceResultParams struct {
@@ -722,6 +1089,9 @@ func (q *Queries) SetBatchPlateSliceResult(ctx context.Context, arg SetBatchPlat
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -729,6 +1099,7 @@ func (q *Queries) SetBatchPlateSliceResult(ctx context.Context, arg SetBatchPlat
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }
@@ -736,7 +1107,7 @@ func (q *Queries) SetBatchPlateSliceResult(ctx context.Context, arg SetBatchPlat
 const setBatchPreviewFile = `-- name: SetBatchPreviewFile :one
 UPDATE batches SET preview_file_id = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type SetBatchPreviewFileParams struct {
@@ -766,6 +1137,9 @@ func (q *Queries) SetBatchPreviewFile(ctx context.Context, arg SetBatchPreviewFi
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -773,14 +1147,36 @@ func (q *Queries) SetBatchPreviewFile(ctx context.Context, arg SetBatchPreviewFi
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
+}
+
+const setBatchPrintError = `-- name: SetBatchPrintError :exec
+UPDATE batches SET
+    print_error    = $1,
+    print_error_at = now(),
+    updated_at     = now()
+WHERE id = $2
+`
+
+type SetBatchPrintErrorParams struct {
+	PrintError *string
+	ID         uuid.UUID
+}
+
+// Records why a batch could not be sent to the printer. Called on every failure
+// path in printBatch so a Locked batch that failed is distinguishable from one
+// nobody has sent yet.
+func (q *Queries) SetBatchPrintError(ctx context.Context, arg SetBatchPrintErrorParams) error {
+	_, err := q.db.Exec(ctx, setBatchPrintError, arg.PrintError, arg.ID)
+	return err
 }
 
 const startBatchPrint = `-- name: StartBatchPrint :one
 UPDATE batches SET status = 'in_progress', updated_at = now()
 WHERE id = $1 AND status = 'open'
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 // Claims an approved batch for a machine that is about to start printing it.
@@ -814,6 +1210,9 @@ func (q *Queries) StartBatchPrint(ctx context.Context, id uuid.UUID) (Batch, err
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -821,6 +1220,7 @@ func (q *Queries) StartBatchPrint(ctx context.Context, id uuid.UUID) (Batch, err
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }
@@ -831,7 +1231,7 @@ UPDATE batches SET
     machine_id = CASE WHEN $2::bool THEN $3 ELSE machine_id END,
     updated_at = now()
 WHERE id = $4
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type UpdateBatchParams struct {
@@ -869,6 +1269,9 @@ func (q *Queries) UpdateBatch(ctx context.Context, arg UpdateBatchParams) (Batch
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -876,6 +1279,7 @@ func (q *Queries) UpdateBatch(ctx context.Context, arg UpdateBatchParams) (Batch
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }
@@ -891,7 +1295,7 @@ UPDATE batches SET
     plate_sliced_at          = NULL,
     updated_at               = now()
 WHERE id = $7
-RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at
+RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id
 `
 
 type UpdateBatchDerivedMetricsParams struct {
@@ -947,6 +1351,9 @@ func (q *Queries) UpdateBatchDerivedMetrics(ctx context.Context, arg UpdateBatch
 		&i.FilamentReserved,
 		&i.PlateSlicedAt,
 		&i.PlateSliceError,
+		&i.PrintError,
+		&i.PrintErrorAt,
+		&i.QueueItemID,
 		&i.TotalLayers,
 		&i.SupportGrams,
 		&i.PurgeGrams,
@@ -954,6 +1361,7 @@ func (q *Queries) UpdateBatchDerivedMetrics(ctx context.Context, arg UpdateBatch
 		&i.FilamentByColour,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PipelineRunID,
 	)
 	return i, err
 }

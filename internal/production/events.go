@@ -14,6 +14,14 @@ const (
 	EventPrintStarted   = "print.started"
 	EventPrintCompleted = "print.completed"
 	EventPrintFailed    = "print.failed"
+	// EventModelGenerated and EventModelFailed record the automatic render of a
+	// personalised model - the step that builds a Dual Name Plank from the
+	// customer's own names instead of a designer drawing one.
+	EventModelGenerated = "model.generated"
+	EventModelFailed    = "model.failed"
+	// EventModelUploaded is a person supplying geometry Tensor cannot build
+	// itself - every product that is not a generated one.
+	EventModelUploaded = "model.uploaded"
 )
 
 // Station events. Each station has a completion, a skip where skipping is a

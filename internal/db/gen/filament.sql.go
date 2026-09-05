@@ -33,9 +33,45 @@ func (q *Queries) AdjustFilamentStock(ctx context.Context, arg AdjustFilamentSto
 	return err
 }
 
+const deleteFilamentNotIn = `-- name: DeleteFilamentNotIn :exec
+DELETE FROM filament_inventory
+WHERE (material || chr(31) || COALESCE(colour, '')) <> ALL ($1::text[])
+`
+
+// Removes rows the source no longer reports. Only ever called from the
+// operator-initiated sync: a shelf that lost a material is a real change, but
+// it is not one a background job should act on unasked.
+// Keys are material and colour joined by chr(31), the ASCII unit separator -
+// a single array is far easier for sqlc to reason about than a two-column
+// unnest, and chr(31) cannot occur in a material or colour name.
+func (q *Queries) DeleteFilamentNotIn(ctx context.Context, keys []string) error {
+	_, err := q.db.Exec(ctx, deleteFilamentNotIn, keys)
+	return err
+}
+
+const getColourHexByName = `-- name: GetColourHexByName :one
+SELECT colour_hex FROM filament_inventory
+WHERE colour_hex IS NOT NULL
+  AND lower(trim(colour)) = lower(trim($1::text))
+LIMIT 1
+`
+
+// The swatch BambuBuddy holds for a colour name, matched case-insensitively.
+//
+// The filament shelf is the best source for this: it is the colour that will
+// physically be loaded, kept current by the sync, and it already carries the
+// hex BambuBuddy shows. Any row of that colour will do - the hex is a property
+// of the colour, not of the material.
+func (q *Queries) GetColourHexByName(ctx context.Context, colour string) (*string, error) {
+	row := q.db.QueryRow(ctx, getColourHexByName, colour)
+	var colour_hex *string
+	err := row.Scan(&colour_hex)
+	return colour_hex, err
+}
+
 const getFilamentByMaterialColour = `-- name: GetFilamentByMaterialColour :one
 
-SELECT id, material, colour, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
 WHERE material = $1
   AND COALESCE(colour, '') = COALESCE($2, '')
 `
@@ -55,6 +91,7 @@ func (q *Queries) GetFilamentByMaterialColour(ctx context.Context, arg GetFilame
 		&i.ID,
 		&i.Material,
 		&i.Colour,
+		&i.ColourHex,
 		&i.GramsAvailable,
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
@@ -64,18 +101,19 @@ func (q *Queries) GetFilamentByMaterialColour(ctx context.Context, arg GetFilame
 }
 
 const insertFilament = `-- name: InsertFilament :one
-INSERT INTO filament_inventory (id, material, colour, grams_available, reorder_level_grams)
+INSERT INTO filament_inventory (id, material, colour, colour_hex, grams_available, reorder_level_grams)
 VALUES (
-    $1, $2, $3,
-    $4::float8, $5::float8
+    $1, $2, $3, $4,
+    $5::float8, $6::float8
 )
-RETURNING id, material, colour, grams_available, reorder_level_grams, created_at, updated_at
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
 `
 
 type InsertFilamentParams struct {
 	ID                uuid.UUID
 	Material          string
 	Colour            *string
+	ColourHex         *string
 	GramsAvailable    float64
 	ReorderLevelGrams float64
 }
@@ -85,6 +123,7 @@ func (q *Queries) InsertFilament(ctx context.Context, arg InsertFilamentParams) 
 		arg.ID,
 		arg.Material,
 		arg.Colour,
+		arg.ColourHex,
 		arg.GramsAvailable,
 		arg.ReorderLevelGrams,
 	)
@@ -93,6 +132,7 @@ func (q *Queries) InsertFilament(ctx context.Context, arg InsertFilamentParams) 
 		&i.ID,
 		&i.Material,
 		&i.Colour,
+		&i.ColourHex,
 		&i.GramsAvailable,
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
@@ -102,7 +142,7 @@ func (q *Queries) InsertFilament(ctx context.Context, arg InsertFilamentParams) 
 }
 
 const listFilament = `-- name: ListFilament :many
-SELECT id, material, colour, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory ORDER BY material, colour NULLS FIRST
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory ORDER BY material, colour NULLS FIRST
 `
 
 func (q *Queries) ListFilament(ctx context.Context) ([]FilamentInventory, error) {
@@ -118,6 +158,7 @@ func (q *Queries) ListFilament(ctx context.Context) ([]FilamentInventory, error)
 			&i.ID,
 			&i.Material,
 			&i.Colour,
+			&i.ColourHex,
 			&i.GramsAvailable,
 			&i.ReorderLevelGrams,
 			&i.CreatedAt,
@@ -133,8 +174,37 @@ func (q *Queries) ListFilament(ctx context.Context) ([]FilamentInventory, error)
 	return items, nil
 }
 
+const listFilamentKeys = `-- name: ListFilamentKeys :many
+SELECT material, COALESCE(colour, '') AS colour FROM filament_inventory
+`
+
+type ListFilamentKeysRow struct {
+	Material string
+	Colour   string
+}
+
+func (q *Queries) ListFilamentKeys(ctx context.Context) ([]ListFilamentKeysRow, error) {
+	rows, err := q.db.Query(ctx, listFilamentKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFilamentKeysRow{}
+	for rows.Next() {
+		var i ListFilamentKeysRow
+		if err := rows.Scan(&i.Material, &i.Colour); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFilamentPage = `-- name: ListFilamentPage :many
-SELECT id, material, colour, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
 WHERE (
     $1::timestamptz IS NULL
     OR (created_at, id) < ($1::timestamptz, $2::uuid)
@@ -162,6 +232,7 @@ func (q *Queries) ListFilamentPage(ctx context.Context, arg ListFilamentPagePara
 			&i.ID,
 			&i.Material,
 			&i.Colour,
+			&i.ColourHex,
 			&i.GramsAvailable,
 			&i.ReorderLevelGrams,
 			&i.CreatedAt,
@@ -177,13 +248,48 @@ func (q *Queries) ListFilamentPage(ctx context.Context, arg ListFilamentPagePara
 	return items, nil
 }
 
+const setFilamentStockFromSource = `-- name: SetFilamentStockFromSource :one
+UPDATE filament_inventory SET
+    grams_available = $1::float8,
+    colour_hex      = COALESCE($2, colour_hex),
+    updated_at      = now()
+WHERE id = $3
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
+`
+
+type SetFilamentStockFromSourceParams struct {
+	GramsAvailable float64
+	ColourHex      *string
+	ID             uuid.UUID
+}
+
+// The sync's write: stock and swatch from BambuBuddy, reorder level untouched.
+// Separate from UpdateFilamentLevel because that one is the operator's edit
+// form, where the reorder level IS the thing being changed - folding the two
+// together would let a sync silently reset a threshold someone chose.
+func (q *Queries) SetFilamentStockFromSource(ctx context.Context, arg SetFilamentStockFromSourceParams) (FilamentInventory, error) {
+	row := q.db.QueryRow(ctx, setFilamentStockFromSource, arg.GramsAvailable, arg.ColourHex, arg.ID)
+	var i FilamentInventory
+	err := row.Scan(
+		&i.ID,
+		&i.Material,
+		&i.Colour,
+		&i.ColourHex,
+		&i.GramsAvailable,
+		&i.ReorderLevelGrams,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateFilamentLevel = `-- name: UpdateFilamentLevel :one
 UPDATE filament_inventory SET
     grams_available     = $1::float8,
     reorder_level_grams = $2::float8,
     updated_at          = now()
 WHERE id = $3
-RETURNING id, material, colour, grams_available, reorder_level_grams, created_at, updated_at
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
 `
 
 type UpdateFilamentLevelParams struct {
@@ -199,6 +305,7 @@ func (q *Queries) UpdateFilamentLevel(ctx context.Context, arg UpdateFilamentLev
 		&i.ID,
 		&i.Material,
 		&i.Colour,
+		&i.ColourHex,
 		&i.GramsAvailable,
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,

@@ -92,6 +92,15 @@ const (
 	// FleetMachineOff covers both powered-down and unreachable - the fleet
 	// table records what the shop floor can see, not why.
 	FleetMachineOff = "off"
+	// FleetMachineError is a printer the host can reach but that is reporting a
+	// fault serious enough to need a person - a jam, a filament runout, a
+	// hardware error.
+	//
+	// Distinct from "off" on purpose: an off printer is a scheduling fact, and
+	// an errored one is a request for attention. Collapsing them would let a
+	// machine sit broken behind a grey pill that reads like a deliberate
+	// shutdown.
+	FleetMachineError = "error"
 )
 
 // ValidFleetMachineState reports whether s is a fleet machine's live state.
@@ -269,6 +278,21 @@ type LineItem struct {
 	PersonalisationPhotoURL      *string    `json:"personalisation_photo_url"`
 	CustomerApprovalRequired     bool       `json:"customer_approval_required"`
 	CustomerApprovalReceived     bool       `json:"customer_approval_received"`
+	// VariantTitle is the option string Shopify shows under the product name,
+	// e.g. "BABY PINK / NO LIGHT". Empty on a product with no variants.
+	//
+	// Kept separate from ProductName rather than concatenated: the operator
+	// reads the variant to know which colour to load, and burying it inside the
+	// product name would make it unfindable.
+	VariantTitle *string `json:"variant_title,omitempty"`
+	// UnitPrice is what the line cost before any discount - the struck-through
+	// figure on Shopify's page - DiscountedUnitPrice what was actually charged
+	// per unit, and LineTotal the row's total. Strings, in the store's own
+	// decimal form: these are displayed, never summed, and parsing them to
+	// floats only invites a rounding difference against Shopify's own page.
+	UnitPrice           *string `json:"unit_price,omitempty"`
+	DiscountedUnitPrice *string `json:"discounted_unit_price,omitempty"`
+	LineTotal           *string `json:"line_total,omitempty"`
 	// Properties is every custom attribute Shopify sent for this line, kept
 	// verbatim and in order.
 	//

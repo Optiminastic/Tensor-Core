@@ -66,7 +66,9 @@ func TestIntegrationImportShopifyOrder(t *testing.T) {
 
 	productID := int64(900)
 	payload := shopifyOrderPayload{
-		ID: 55501, Name: "#1042", FinancialStatus: "paid", TotalPrice: "1499.00", Currency: "INR",
+		// Numbered inside the current production run, or ShouldCreateJobs
+		// excludes it and from-order returns no jobs.
+		ID: 55501, Name: "#114642", FinancialStatus: "paid", TotalPrice: "1499.00", Currency: "INR",
 		Customer: &shopifyCustomer{FirstName: "Ada", LastName: "Lovelace"},
 		LineItems: []shopifyLineItem{{
 			ProductID: &productID, Name: "Custom Nameplate", Quantity: 1,

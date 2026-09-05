@@ -28,6 +28,9 @@ type Batch struct {
 	FilamentReserved            bool
 	PlateSlicedAt               pgtype.Timestamptz
 	PlateSliceError             *string
+	PrintError                  *string
+	PrintErrorAt                pgtype.Timestamptz
+	QueueItemID                 *int32
 	TotalLayers                 *int32
 	SupportGrams                pgtype.Numeric
 	PurgeGrams                  pgtype.Numeric
@@ -35,6 +38,7 @@ type Batch struct {
 	FilamentByColour            []byte
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
+	PipelineRunID               *int32
 }
 
 type Brand struct {
@@ -141,6 +145,7 @@ type FilamentInventory struct {
 	ID                uuid.UUID
 	Material          string
 	Colour            *string
+	ColourHex         *string
 	GramsAvailable    pgtype.Numeric
 	ReorderLevelGrams pgtype.Numeric
 	CreatedAt         pgtype.Timestamptz
@@ -175,6 +180,11 @@ type Machine struct {
 	PrintStartedAt        pgtype.Timestamptz
 	TotalWasteGrams       pgtype.Numeric
 	MachineProfileID      *uuid.UUID
+	StatusReason          *string
+	Model                 *string
+	Location              *string
+	IpAddress             *string
+	NozzleCount           *int32
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 }
@@ -228,6 +238,22 @@ type Order struct {
 	ImportedAt          pgtype.Timestamptz
 	JobCreationError    *string
 	JobCreationFailedAt pgtype.Timestamptz
+	PlacedAt            pgtype.Timestamptz
+	Note                *string
+	Attributes          []byte
+	Tags                []byte
+	FulfillmentStatus   *string
+	DeliveryStatus      *string
+	ReturnStatus        *string
+	SourceName          *string
+	SubtotalPrice       pgtype.Numeric
+	TotalDiscounts      pgtype.Numeric
+	TotalShipping       pgtype.Numeric
+	TotalReceived       pgtype.Numeric
+	DiscountTitle       *string
+	ShippingTitle       *string
+	ShippingAddress     []byte
+	BillingAddress      []byte
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
 }
@@ -304,6 +330,10 @@ type ProductionJob struct {
 	FlowPct                    pgtype.Numeric
 	QualityMm                  pgtype.Numeric
 	MachineFamily              *string
+	VariantTitle               *string
+	PersonalisationProperties  []byte
+	ModelError                 *string
+	ModelErrorAt               pgtype.Timestamptz
 	IssueReason                *string
 	BboxXMm                    pgtype.Numeric
 	BboxYMm                    pgtype.Numeric

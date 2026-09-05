@@ -49,3 +49,16 @@ DELETE FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
 SELECT id FROM brand_connections
 WHERE provider = 'shopify' AND status = 'connected' AND lower(external_account_id) = lower(sqlc.arg('domain'))
 LIMIT 1;
+
+-- name: ListConnectedShopifyBrands :many
+-- Every brand with a usable Shopify connection, for the all-brands sync.
+--
+-- Returns the token because the caller's next act is to pull orders with it;
+-- like GetConnectionWithToken this must never reach a caller-facing endpoint.
+SELECT brand_slug, external_account_id, access_token
+FROM brand_connections
+WHERE provider = 'shopify'
+  AND status = 'connected'
+  AND access_token IS NOT NULL
+  AND external_account_id IS NOT NULL
+ORDER BY brand_slug;

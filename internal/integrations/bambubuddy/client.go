@@ -30,10 +30,27 @@ type Client struct {
 	http    *http.Client
 }
 
-// requestTimeout bounds a single call. BambuBuddy answers from cached MQTT
-// state rather than by polling the printer, so a slow response means the
-// service itself is struggling and waiting longer will not help.
-const requestTimeout = 10 * time.Second
+// DefaultRequestTimeout bounds a single call when nothing overrides it.
+//
+// It was 10 seconds, on the reasoning that BambuBuddy answers from cached MQTT
+// state rather than by polling the printer, so a slow reply means the service
+// is struggling and waiting longer will not help. That holds on a LAN and not
+// at all across a Tailscale relay: the same /printers/ call measured 11s, 20s
+// and 58s on consecutive attempts to a remote site, none of them BambuBuddy's
+// fault, and every fleet sync failed at 10s by a second or two.
+//
+// 30 seconds accommodates a relayed link without letting a genuinely wedged
+// service hold a request open. The fleet sync's own River timeout is two
+// minutes, so it can absorb this; a caller that cannot should pass its own.
+const DefaultRequestTimeout = 30 * time.Second
+
+// requestTimeout is DefaultRequestTimeout unless the caller overrode it.
+func requestTimeoutOr(d time.Duration) time.Duration {
+	if d <= 0 {
+		return DefaultRequestTimeout
+	}
+	return d
+}
 
 // New builds a client. baseURL is the service root, e.g.
 // "http://192.168.1.19:8000" or "http://host.tailnet.ts.net:8000".
@@ -48,10 +65,18 @@ const requestTimeout = 10 * time.Second
 // .env file often carries a trailing space, and an unreachable host is a
 // miserable way to discover it.
 func New(baseURL, apiKey string) *Client {
+	return NewWithTimeout(baseURL, apiKey, 0)
+}
+
+// NewWithTimeout is New with an explicit per-call timeout. Zero uses
+// DefaultRequestTimeout. Exists so a deployment reaching BambuBuddy across a
+// relay can wait longer than one on the same LAN, without that becoming
+// everyone's default.
+func NewWithTimeout(baseURL, apiKey string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		apiKey:  strings.TrimSpace(apiKey),
-		http:    &http.Client{Timeout: requestTimeout},
+		http:    &http.Client{Timeout: requestTimeoutOr(timeout)},
 	}
 }
 
@@ -198,6 +223,14 @@ type HMSError struct {
 // plate still sitting on the bed is not occupying machine time, it is waiting
 // for a human.
 func (s Status) Printing() bool { return s.State == "RUNNING" }
+
+// Failed reports whether the printer's last print ended badly.
+//
+// A separate question from Printing(): a FAILED printer is connected, idle and
+// available, so scheduling treats it as free - but a person still needs to
+// clear the plate and find out why. Reporting it as merely "idle", which is
+// what everything-that-is-not-RUNNING used to collapse to, hides that.
+func (s Status) Failed() bool { return s.State == "FAILED" }
 
 // ListPrinters returns every printer BambuBuddy has configured.
 func (c *Client) ListPrinters(ctx context.Context) ([]Printer, error) {
