@@ -26,10 +26,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 FROM debian:12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
-# openscad-nogui, not openscad: the GUI package pulls in X11 and Qt for a
-# binary that only ever runs headless with -o.
+# openscad 2021.01, which is what bookworm ships and what the templates are
+# written for - dnp_with_no_heart.scad and its siblings carry an explicit note
+# that 2021.01 has no textmetrics() and size their own text instead. A newer
+# AppImage would be a change of renderer under models that already print
+# correctly, so the distro package is the conservative choice, not a compromise.
+#
+# There is no openscad-nogui in Debian or Ubuntu - it does not exist in either
+# archive - so this is the GUI package. It pulls Qt in, and that is only image
+# size: STL export with -o needs no display, and runs here with none.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openscad-nogui ca-certificates \
+      openscad ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
