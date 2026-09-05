@@ -130,6 +130,63 @@ type Settings struct {
 	// real progress and always applies, however small its score delta.
 	BatchReplanMinImprovementPercent float64
 
+	// BatchStrategy selects how queued jobs are grouped onto beds.
+	//
+	//   "colour"  - one colour per bed, at most BatchMaxUnitsPerBed products on
+	//               it, oldest order first (production.GroupByColour).
+	//   "planner" - the multi-strategy optimiser (production.PlanWithReasons).
+	//
+	// Empty means the default, which is "colour" - that is the shop's stated
+	// rule today. The optimiser is kept rather than deleted: this catalogue is
+	// one product on a bed it fills to 38%, so an optimiser has nothing to
+	// optimise, but a mixed catalogue would want it back and it is not worth
+	// re-deriving.
+	//
+	// The default is resolved where it is used (httpapi.batchStrategy) rather
+	// than here, so this package keeps its stdlib-only imports and the value
+	// cannot drift from production.StrategyColour.
+	BatchStrategy string
+
+	// BambuBuddyWebhookSecret authenticates BambuBuddy's pushed events.
+	//
+	// BambuBuddy holds no Better Auth token, so POST
+	// /integrations/bambubuddy/events proves the caller with this instead -
+	// sent as an X-Tensor-Token header or a ?token= query parameter, whichever
+	// the notification provider's config allows. Empty means the endpoint is
+	// off: an unauthenticated endpoint that accepts fleet state is worse than
+	// one that does not exist.
+	BambuBuddyWebhookSecret string
+
+	// BatchMaxUnitsPerBed caps how many products share one bed under the colour
+	// strategy. Zero uses production.MaxColourBatchUnits.
+	//
+	// A policy number, not a geometric one - four planks fit with room to
+	// spare. It exists so a bed is a manageable unit of work rather than the
+	// most the packer could fit.
+	BatchMaxUnitsPerBed int
+
+	// ModelGenConcurrency is how many personalised models render at once.
+	// Zero uses the worker's default. Each render is a single-threaded OpenSCAD
+	// process, so this is effectively "how many cores may renders use".
+	ModelGenConcurrency int
+
+	// BatchAutoDispatch lets the production worker walk batches toward a
+	// printer on its own: approving a Draft (which reserves filament, stamps a
+	// machine and queues the plate slice) and sending a sliced plate to
+	// BambuBuddy, oldest order first.
+	//
+	// Off would mean every bed waits for someone to press two buttons. On means
+	// an order placed overnight can be printing before anyone arrives - which is
+	// the point - but it also means filament is committed with no human in the
+	// loop, so it is a switch rather than a hard-coded behaviour.
+	BatchAutoDispatch bool
+
+	// BatchAutoDispatchMax caps how many batches one pass advances. Zero uses
+	// httpapi's default. Each approval starts a plate slice and each send is a
+	// multi-megabyte upload, so a backlog should drain over several passes
+	// rather than arrive as one stampede.
+	BatchAutoDispatchMax int
+
 	// BatchHorizonJobs caps how many jobs of one compatibility group a single
 	// planning run considers (production.BatchGate.HorizonJobs). The packing
 	// search is superlinear in group size, so an unbounded group is what turns
@@ -146,6 +203,27 @@ type Settings struct {
 	// repository, and it is never logged or returned on any response.
 	BambuBuddyURL    string
 	BambuBuddyAPIKey string
+
+	// OpenSCADBin is the OpenSCAD executable used to render personalised
+	// models. A bare name is looked up on PATH; an absolute path is used as
+	// given, which is the normal case on Windows where the installer never
+	// adds itself to PATH. Empty disables model generation, and personalised
+	// jobs are then held for an operator instead.
+	OpenSCADBin string
+	// OpenSCADAssetDir holds the STL parts a template imports (hearts and
+	// other pieces). Empty means a template that asks for one draws nothing
+	// rather than failing.
+	OpenSCADAssetDir string
+	// GeneratedMachineFamily is the printer family a rendered model runs on,
+	// e.g. "A2L", "H2C" or "P2S".
+	//
+	// Every other job takes its family from a matched design's machine
+	// profile. A generated model has no design, so without this it would be
+	// stamped 'profile_missing' and never reach a bed - the batch planner
+	// refuses to guess a family, deliberately. Empty leaves that guard in
+	// place and holds the job with an explanation, rather than picking a
+	// printer on the operator's behalf.
+	GeneratedMachineFamily string
 
 	// Caching for the two BambuBuddy reads on hot paths, now that live status
 	// is polled rather than fetched once per page load. Without these, upstream
@@ -171,6 +249,39 @@ type Settings struct {
 	// planner reads these rows), while display freshness comes from the live
 	// endpoint. 0 disables the schedule.
 	FleetSyncIntervalSeconds int
+	// BambuBuddyTimeoutSeconds bounds a single call to BambuBuddy. Zero uses
+	// bambubuddy.DefaultRequestTimeout. Raise it when reaching the printer host
+	// across a Tailscale relay, where the same call can take 11s or 58s.
+	BambuBuddyTimeoutSeconds int
+
+	// RunProductionWorkers decides whether cmd/api consumes the production
+	// queues itself as well as serving HTTP.
+	//
+	// True by default: "the backend is running" should mean the pipeline is
+	// running. When the workers lived only in cmd/productionworker, starting the
+	// API alone produced a system that imported orders and created jobs that
+	// nothing ever picked up - and nothing on screen said so, because enqueuing
+	// had succeeded.
+	//
+	// Set RUN_PRODUCTION_WORKERS=false where a dedicated worker host consumes
+	// the queues instead.
+	RunProductionWorkers bool
+
+	// OrderSyncIntervalMinutes drives the periodic pull of every connected
+	// store's Shopify orders. Until this existed the only path an order took
+	// into Tensor was somebody pressing "Sync from Shopify", so an order placed
+	// overnight was not in the system until an operator arrived.
+	//
+	// Ten minutes because orders are what the whole print floor works from and
+	// Shopify's cost-based rate limit is nowhere near troubled by six pulls an
+	// hour. 0 disables the schedule.
+	OrderSyncIntervalMinutes int
+	// OrderSyncTimeoutMinutes overrides River's 1-minute default: a pull is up
+	// to eight paged GraphQL calls followed by a database write per order, and
+	// the run that started this - importing a backlog of hundreds - takes
+	// minutes. Timing out mid-import is precisely the failure this replaced.
+	OrderSyncTimeoutMinutes int
+
 	// FleetSyncTimeoutMinutes overrides River's 1-minute default: a refresh is
 	// 1 + N SEQUENTIAL calls, each with its own 10s client timeout, so an
 	// unreachable fleet of six exceeds the default before it finishes.
@@ -302,14 +413,27 @@ func Load() Settings {
 		BatchPlanDebounceSeconds:         intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
 		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),
 		BatchHorizonJobs:                 intEnvOr("BATCH_HORIZON_JOBS", 250),
+		ModelGenConcurrency:              intEnvOr("MODEL_GEN_CONCURRENCY", 0),
+		BatchAutoDispatch:                boolEnvOr("BATCH_AUTO_DISPATCH", false),
+		BatchAutoDispatchMax:             intEnvOr("BATCH_AUTO_DISPATCH_MAX", 0),
+		BatchStrategy:                    envOr("BATCH_STRATEGY", ""),
+		BatchMaxUnitsPerBed:              intEnvOr("BATCH_MAX_UNITS_PER_BED", 0),
+		BambuBuddyWebhookSecret:          envOr("BAMBUBUDDY_WEBHOOK_SECRET", ""),
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
 		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
+		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
+		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
+		GeneratedMachineFamily:           envOr("GENERATED_MACHINE_FAMILY", ""),
 		BambuStatusTTL:                   secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
 		BambuPrinterIndexTTL:             secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
 		BambuErrorTTL:                    secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
 		FleetSyncIntervalSeconds:         intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
 		FleetSyncTimeoutMinutes:          intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
+		RunProductionWorkers:             boolEnvOr("RUN_PRODUCTION_WORKERS", true),
+		OrderSyncIntervalMinutes:         intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
+		OrderSyncTimeoutMinutes:          intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
+		BambuBuddyTimeoutSeconds:         intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),

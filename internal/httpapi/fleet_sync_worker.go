@@ -68,6 +68,21 @@ func (w *FleetSyncWorker) Work(ctx context.Context, job *river.Job[production.Sy
 		return fmt.Errorf("refresh fleet: %w", err)
 	}
 
+	// The same trip to BambuBuddy answers a second question: how long the plates
+	// it has sliced actually take. Nothing else asks, so without this every bed
+	// carries no measured time and the machine scheduler projects availability
+	// from an approximation - see plate_measurement.go.
+	//
+	// After the refresh, not instead of it: a failed refresh is worth retrying on
+	// its own, and a measurement pass that never runs costs nothing beyond a
+	// later number.
+	plates := w.server.RecordPlateMeasurements(ctx)
+	if plates.Measured > 0 || plates.Missing > 0 {
+		w.logger.Info("plate measurements recorded",
+			"measured", plates.Measured, "pending", plates.Pending,
+			"missing", plates.Missing, "awaiting", plates.Awaiting)
+	}
+
 	w.logger.Info("fleet refreshed", "printers", result.Synced, "attempt", job.Attempt)
 	return nil
 }

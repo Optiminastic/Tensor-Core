@@ -133,17 +133,29 @@ LIMIT sqlc.arg('row_limit');
 -- and a sync that overwrote both would lose the link between a running print
 -- and the batch it belongs to.
 INSERT INTO machines (
-    id, machine_id, name, image_url, status, filaments, current_layer, total_layers
+    id, machine_id, name, image_url, status, status_reason, filaments,
+    current_layer, total_layers, model, location, ip_address, nozzle_count
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('machine_id'), sqlc.arg('name'), sqlc.narg('image_url'),
-    sqlc.arg('status'), sqlc.arg('filaments'), sqlc.narg('current_layer'), sqlc.narg('total_layers')
+    sqlc.arg('status'), sqlc.narg('status_reason'), sqlc.arg('filaments'),
+    sqlc.narg('current_layer'), sqlc.narg('total_layers'),
+    sqlc.narg('model'), sqlc.narg('location'), sqlc.narg('ip_address'),
+    sqlc.narg('nozzle_count')
 )
 ON CONFLICT (machine_id) DO UPDATE SET
     name          = EXCLUDED.name,
     status        = EXCLUDED.status,
+    -- Overwritten unconditionally, including back to NULL: a fault that has
+    -- cleared must stop being reported, and a stale reason beside a healthy
+    -- status is worse than none.
+    status_reason = EXCLUDED.status_reason,
     filaments     = EXCLUDED.filaments,
     current_layer = EXCLUDED.current_layer,
     total_layers  = EXCLUDED.total_layers,
+    model         = EXCLUDED.model,
+    location      = EXCLUDED.location,
+    ip_address    = EXCLUDED.ip_address,
+    nozzle_count  = EXCLUDED.nozzle_count,
     updated_at    = now()
 RETURNING *;
 

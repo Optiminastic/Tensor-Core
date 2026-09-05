@@ -92,6 +92,15 @@ const (
 	// FleetMachineOff covers both powered-down and unreachable - the fleet
 	// table records what the shop floor can see, not why.
 	FleetMachineOff = "off"
+	// FleetMachineError is a printer the host can reach but that is reporting a
+	// fault serious enough to need a person - a jam, a filament runout, a
+	// hardware error.
+	//
+	// Distinct from "off" on purpose: an off printer is a scheduling fact, and
+	// an errored one is a request for attention. Collapsing them would let a
+	// machine sit broken behind a grey pill that reads like a deliberate
+	// shutdown.
+	FleetMachineError = "error"
 )
 
 // ValidFleetMachineState reports whether s is a fleet machine's live state.
@@ -269,7 +278,54 @@ type LineItem struct {
 	PersonalisationPhotoURL      *string    `json:"personalisation_photo_url"`
 	CustomerApprovalRequired     bool       `json:"customer_approval_required"`
 	CustomerApprovalReceived     bool       `json:"customer_approval_received"`
+	// VariantTitle is the option string Shopify shows under the product name,
+	// e.g. "BABY PINK / NO LIGHT". Empty on a product with no variants.
+	//
+	// Kept separate from ProductName rather than concatenated: the operator
+	// reads the variant to know which colour to load, and burying it inside the
+	// product name would make it unfindable.
+	VariantTitle *string `json:"variant_title,omitempty"`
+	// UnitPrice is what the line cost before any discount - the struck-through
+	// figure on Shopify's page - DiscountedUnitPrice what was actually charged
+	// per unit, and LineTotal the row's total. Strings, in the store's own
+	// decimal form: these are displayed, never summed, and parsing them to
+	// floats only invites a rounding difference against Shopify's own page.
+	UnitPrice           *string `json:"unit_price,omitempty"`
+	DiscountedUnitPrice *string `json:"discounted_unit_price,omitempty"`
+	LineTotal           *string `json:"line_total,omitempty"`
+	// Properties is every custom attribute Shopify sent for this line, kept
+	// verbatim and in order.
+	//
+	// The typed fields above are a mapping, and a mapping only knows the keys
+	// it was told about. A real store names them however its personaliser
+	// happens to - "STEP 4-First Name-:", "_gpo_addon_price" - and anything
+	// unrecognised used to be read from Shopify and then silently dropped,
+	// which is the worst outcome: the operator sees a blank where the customer
+	// typed their child's name, and nothing anywhere says it was discarded.
+	//
+	// So everything is kept. The typed fields stay the machine-readable path;
+	// this is the record of what was actually sent.
+	Properties []LineProp `json:"properties,omitempty"`
 }
+
+// LineProp is one Shopify line-item custom attribute, verbatim.
+//
+// A slice rather than a map: Shopify sends these in a deliberate order (the
+// "STEP 3 / STEP 4 / STEP 5" sequence a customer filled in), and a map would
+// throw that away along with any duplicate keys.
+type LineProp struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// Hidden reports whether a property is Shopify plumbing rather than something
+// a person entered.
+//
+// Shopify's convention is a leading underscore for attributes hidden from the
+// storefront - "_has_gpo", "_gpo_product_group". They are worth storing, since
+// they explain how an order was built, but showing them beside a customer's
+// name treats bookkeeping as if it were the order.
+func (p LineProp) Hidden() bool { return strings.HasPrefix(p.Name, "_") }
 
 // Confirms is the set of personalisation confirmation booleans. A job is
 // validated only when every one is true (matching the source's six check fields).

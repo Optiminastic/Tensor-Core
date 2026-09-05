@@ -12,7 +12,8 @@ INSERT INTO production_jobs (
     font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
     personalisation_notes, personalisation_photo_file_id, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
     colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-    quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+    quality_mm, machine_family, variant_title, personalisation_properties,
+    model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
     support_weight_g, purge_weight_g, colour_count
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('job_number'), sqlc.narg('order_id'), sqlc.narg('batch_id'),
@@ -30,6 +31,13 @@ INSERT INTO production_jobs (
     sqlc.arg('colours'), sqlc.narg('support_used'), sqlc.narg('infill_pct')::float8,
     sqlc.narg('left_nozzle_mm')::float8, sqlc.narg('right_nozzle_mm')::float8,
     sqlc.narg('flow_pct')::float8, sqlc.narg('quality_mm')::float8, sqlc.narg('machine_family'),
+    sqlc.narg('variant_title'),
+    -- COALESCE, not a bare argument: the column is NOT NULL with a '[]'
+    -- default, but naming it in the INSERT means the default never applies -
+    -- so any caller that does not set it would fail the constraint. Every
+    -- job has a line to snapshot; not every caller has one to hand.
+    COALESCE(sqlc.narg('personalisation_properties')::jsonb, '[]'::jsonb),
+    sqlc.narg('model_error'), sqlc.narg('model_error_at'),
     sqlc.narg('issue_reason'), sqlc.narg('bbox_x_mm')::float8, sqlc.narg('bbox_y_mm')::float8,
     sqlc.narg('bbox_z_mm')::float8, sqlc.narg('support_weight_g')::float8,
     sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
@@ -43,7 +51,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetProductionJobByID :one
@@ -56,9 +65,30 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs WHERE id = $1;
+
+-- name: GetProductionJobByNumber :one
+-- The same row, found by the number a person actually reads and quotes.
+--
+-- Job numbers are unique (uq_production_jobs_job_number) and derived from the
+-- Shopify order, so "JOB-114556" identifies a job as precisely as its uuid
+-- does - and is the only one of the two anybody can say out loud.
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       nozzle_profile, filament_grams_required, print_file_id,
+       estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+       personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+       photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+       personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+       personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+          colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+FROM production_jobs WHERE job_number = sqlc.arg('job_number');
 
 -- name: ListProductionJobs :many
 -- Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
@@ -72,7 +102,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
@@ -82,7 +113,22 @@ WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
   AND (sqlc.narg('batch_id')::uuid IS NULL OR batch_id = sqlc.narg('batch_id')::uuid)
-ORDER BY created_at DESC, id DESC;
+-- Newest ORDER first, matching the Orders page, not newest job.
+--
+-- created_at is when Tensor happened to build the row, which on a bulk import
+-- is the same second for dozens of them - so it sorted by nothing and the list
+-- read as shuffled. What an operator means by "latest" is the customer's own
+-- order date, and it is the one thing the two pages must agree on: a job and
+-- its order have to appear in the same relative position or the lists cannot
+-- be read side by side.
+--
+-- A subquery rather than a join: the column list above is the whole
+-- production_jobs row, and joining would change the result shape into a Row
+-- type instead of the shared ProductionJob one.
+ORDER BY COALESCE(
+    (SELECT o.placed_at FROM orders o WHERE o.id = production_jobs.order_id),
+    created_at
+) DESC, created_at DESC, id DESC;
 
 -- name: ListProductionJobsPage :many
 -- Keyset page over (created_at, id) with the same optional filters.
@@ -95,7 +141,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
@@ -140,7 +187,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ValidateProductionJobPersonalisation :one
@@ -167,7 +215,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobPrintFile :one
@@ -191,7 +240,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobStatus :one
@@ -206,7 +256,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: ListBatchableJobs :many
@@ -329,7 +380,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: GetSplitJobProgress :one
@@ -417,15 +469,25 @@ SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_numbe
 -- re-planned. Approved batches and beyond are deliberately absent - their
 -- jobs have left 'queued' anyway, so the status filter excludes them twice
 -- over.
+--
+-- Ordered by when the CUSTOMER placed the order, not when the job row was
+-- written. The colour strategy serves this list in order (see
+-- production.GroupByColour), so "oldest order first" is exactly this ORDER BY -
+-- and j.created_at cannot express it: jobs created by one import share a
+-- timestamp to the microsecond, so ordering by it served a batch of 90 orders in
+-- essentially arbitrary sequence. placed_at falls back to created_at for a job
+-- with no linked order (a reprint, a manually-added job), which keeps those in
+-- their own arrival order rather than sorting them all to the front.
 SELECT j.* FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
+LEFT JOIN orders o ON o.id = j.order_id
 WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
   AND j.issue_reason IS NULL
   AND j.held = false
-ORDER BY j.created_at ASC, j.id ASC;
+ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
 
 -- name: UnassignJobsFromBatches :exec
 -- Detaches jobs from the given batches so they can be re-planned. Guarded on
@@ -456,3 +518,113 @@ WHERE batch_id IS NULL
     OR issue_reason IS NOT NULL
   )
 ORDER BY created_at ASC, id ASC;
+
+-- name: SetProductionJobMachineFamily :one
+-- Records which printer family a job must run on, for a job whose family does
+-- not come from a matched design - a personalised model Tensor rendered itself.
+--
+-- Clears issue_reason only when it is exactly 'profile_missing', mirroring
+-- SetProductionJobPrintFile's treatment of 'stl_missing': supplying the missing
+-- fact resolves that one issue and must not paper over a different one.
+UPDATE production_jobs SET
+    machine_family = sqlc.arg('machine_family'),
+    issue_reason   = CASE WHEN issue_reason = 'profile_missing' THEN NULL ELSE issue_reason END,
+    updated_at     = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: JobNumberExists :one
+-- Whether a job number is already taken.
+--
+-- Job numbers are derived from the Shopify order, which is unique, so this
+-- should never find anything. It exists because the alternative failure is
+-- bad out of proportion to the check: a duplicate violates the unique index,
+-- which aborts the whole transaction, and an order silently ends up with no
+-- jobs at all.
+SELECT EXISTS (SELECT 1 FROM production_jobs WHERE job_number = sqlc.arg('job_number'));
+
+-- name: SetJobModelError :exec
+-- Records why a generated model could not be built, and when.
+--
+-- Deliberately does NOT touch issue_reason: the job already carries
+-- 'stl_missing' (it has no print file), which is what keeps it out of
+-- batching. This is the explanation, not the exclusion.
+UPDATE production_jobs SET
+    model_error    = sqlc.arg('model_error'),
+    model_error_at = now(),
+    updated_at     = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ClearJobModelError :exec
+-- Clears a previous render failure. Called when a model lands, whether the
+-- retry succeeded or somebody uploaded one by hand - either way the job is no
+-- longer waiting on a render that failed.
+UPDATE production_jobs SET
+    model_error    = NULL,
+    model_error_at = NULL,
+    updated_at     = now()
+WHERE id = sqlc.arg('id');
+
+
+-- name: CompleteJobsForFulfilledOrder :many
+-- Marks an order's outstanding jobs done and takes them off any bed that has
+-- not been committed to a machine.
+--
+-- Shopify saying an order is fulfilled is the end of the story: the parcel has
+-- left, so nothing about it is still work for the floor. Left alone, its jobs sit
+-- in the queue forever and occupy bed space that live orders need.
+--
+-- Only jobs still in flight are touched. A job that already failed keeps its
+-- failure - its reprint is what is being fulfilled, and overwriting it would
+-- erase why there was a reprint at all.
+--
+-- The batch link is cleared ONLY while the bed is still a proposal or merely
+-- approved. A batch that is printing or printed is a record of what physically
+-- happened, and quietly removing a job from it would make that record a lie -
+-- so the job is completed but its membership stands.
+UPDATE production_jobs j SET
+    status     = 'completed',
+    batch_id   = CASE
+                   WHEN b.status IS NULL OR b.status IN ('pending_approval', 'open')
+                     THEN NULL
+                   ELSE j.batch_id
+                 END,
+    updated_at = now()
+FROM (
+    SELECT p.id, p.batch_id FROM production_jobs p WHERE p.order_id = sqlc.arg('order_id')
+) src
+LEFT JOIN batches b ON b.id = src.batch_id
+WHERE j.id = src.id
+  AND j.status IN ('queued', 'in_production')
+RETURNING j.id, src.batch_id AS freed_batch_id;
+
+-- name: CompleteSelectedJobsOnBatch :many
+-- Marks the named jobs on a bed done, and only those.
+--
+-- A plate comes off the printer and an operator checks it plank by plank: three
+-- are good, one warped. So finishing a bed is a selection, not a switch - this
+-- takes the ids that were ticked and leaves the rest exactly where they are, on
+-- the bed, still to be dealt with.
+--
+-- The jobs stay ON the bed rather than being detached, unlike the fulfilment
+-- path: a bed that has printed is a record of what physically ran, and the
+-- Completed list reads its orders and colours from the jobs pointing at it.
+--
+-- A job already 'failed' is left alone for the reason
+-- CompleteProductionJobsForBatch gives: its reprint is already queued, and
+-- force-completing it would erase that.
+UPDATE production_jobs
+SET status = 'completed', updated_at = now()
+WHERE batch_id = sqlc.arg('batch_id')
+  AND id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND status NOT IN ('completed', 'failed')
+RETURNING id, job_number;
+
+-- name: CountUnfinishedJobsOnBatch :one
+-- How many planks on a bed are still to be dealt with.
+--
+-- Zero is what turns a bed Done. 'failed' counts as dealt with: that plank's
+-- reprint is a job of its own on some future bed, so the bed it failed on is
+-- finished with it.
+SELECT count(*) FROM production_jobs
+WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');

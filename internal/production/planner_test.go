@@ -158,11 +158,19 @@ func TestDueUrgencyRanksTheSoonerBatchHigher(t *testing.T) {
 }
 
 func TestPlanOversizedJobIsUnbatchable(t *testing.T) {
-	// Two near-max units of one job cannot share a bed, and jobs never split, so the
-	// job is unbatchable.
+	// A unit wider than the bed itself, so no orientation and no quantity split
+	// can rescue it.
+	//
+	// This used to be a 290x310 part, which is near-max rather than oversized:
+	// turned 90 degrees it is 310x290 and fits the 310x300 envelope exactly. The
+	// packer refused it anyway, because the fit test demanded a clearance gap
+	// beyond the part as well as between parts - the same over-strictness that
+	// held a 256mm bed to three 200x50 planks when four fit. With that corrected,
+	// a part that exactly fills the envelope is placed, so proving "oversized" now
+	// needs a part that genuinely does not fit.
 	j := PlanJob{
 		ID: "big", JobNumber: "JOB-big", Material: "PLA", Quantity: 2,
-		Footprint: bedpack.UnitFootprint{RefID: "big", XMM: 290, YMM: 310, ZMM: 20},
+		Footprint: bedpack.UnitFootprint{RefID: "big", XMM: 400, YMM: 310, ZMM: 20},
 	}
 	batches, unb, _ := Plan([]PlanJob{j}, testNow, alwaysBatchGate)
 	if len(batches) != 0 || len(unb) != 1 {

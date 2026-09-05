@@ -109,8 +109,15 @@ func (s *Server) syncFleet(ctx context.Context, opts syncFleetOptions) (SyncFlee
 
 		machine, err := s.store.Q.UpsertFleetMachineFromSource(ctx, gen.UpsertFleetMachineFromSourceParams{
 			ID: uuid.New(), MachineID: code, Name: fleetName(p),
-			Status:    fleetStatus(p, status, statusErr == nil),
-			Filaments: filamentsJSON(status),
+			Status:       fleetStatus(p, status, statusErr == nil),
+			StatusReason: statusReason(status),
+			Filaments:    filamentsJSON(status),
+			// What the unit is, so the fleet list can be read without opening
+			// BambuBuddy to find out which of thirteen printers is an H2C.
+			Model:       nonEmptyPtr(p.Model),
+			Location:    nonEmptyPtr(p.Location),
+			IpAddress:   nonEmptyPtr(p.IPAddress),
+			NozzleCount: int32Ptr(p.NozzleCount),
 			// Layer progress only means something mid-print. A finished plate
 			// still reporting 25/25 would render as a machine permanently at
 			// 100%, which reads as stuck rather than done.
@@ -168,25 +175,43 @@ func fleetCode(p bambubuddy.Printer) string {
 	return fmt.Sprintf("bambubuddy-%d", p.ID)
 }
 
-// fleetName is what an operator sees: the printer's own name and model.
+// fleetName is what an operator sees: the printer's own name, exactly as they
+// named it in BambuBuddy.
+//
+// The model used to be appended - "A1 (A2L)" - because there was nowhere else
+// to put it. It has its own column now, so appending it would print the same
+// fact twice in the same row and stop the two systems agreeing on what a
+// printer is called.
 func fleetName(p bambubuddy.Printer) string {
-	name := strings.TrimSpace(p.Name)
-	if name == "" {
-		name = fmt.Sprintf("Printer %d", p.ID)
+	if name := strings.TrimSpace(p.Name); name != "" {
+		return name
 	}
-	if m := strings.TrimSpace(p.Model); m != "" {
-		return fmt.Sprintf("%s (%s)", name, m)
-	}
-	return name
+	return fmt.Sprintf("Printer %d", p.ID)
 }
 
-// fleetStatus maps Bambu's state vocabulary onto Tensor's three.
+// fleetStatus maps Bambu's state vocabulary onto Tensor's four.
 //
-// Bambu distinguishes RUNNING, FINISH, IDLE, PREPARE, PAUSE and more; Tensor's
-// machines column allows only idle/running/off. Only RUNNING is "running" - a
-// finished plate sitting on the bed is not consuming machine time, it is
-// waiting for a human, and counting it as running would keep the scheduler
-// from ever assigning that printer more work.
+// Bambu distinguishes RUNNING, FINISH, IDLE, PREPARE, PAUSE, FAILED and more;
+// Tensor's machines column allows idle/running/off/error. Only RUNNING is
+// "running" - a finished plate sitting on the bed is not consuming machine
+// time, it is waiting for a human, and counting it as running would keep the
+// scheduler from ever assigning that printer more work.
+//
+// Derived from STATE, never from the printer's HMS list.
+//
+// This used to treat any health message above severity 1 as a fault, assuming
+// Bambu's severity ran from 1 (informational) upward. It does not, and the
+// live fleet disproved it outright: severity 6 appears on printers that had
+// just FINISHED a plate at 143/143, on printers midway through RUNNING one,
+// and on printers that had FAILED - the same value across success and failure
+// alike. Two printers reported an identical code with different severities.
+//
+// So the whole fleet rendered red, including machines printing normally at
+// that moment. An invented fault is worse than a missed one: it teaches an
+// operator that red rows mean nothing, which is the habit that makes a real
+// fault invisible. BambuBuddy reads these codes in its own UI with knowledge
+// Tensor does not have; until Tensor has it too, HMS is information to show,
+// not a status to derive.
 func fleetStatus(p bambubuddy.Printer, s bambubuddy.Status, reachable bool) string {
 	if !p.IsActive || !reachable || !s.Connected {
 		return production.FleetMachineOff
@@ -194,7 +219,39 @@ func fleetStatus(p bambubuddy.Printer, s bambubuddy.Status, reachable bool) stri
 	if s.Printing() {
 		return production.FleetMachineRunning
 	}
+	// FAILED lands here, as idle, and that is deliberate.
+	//
+	// BambuBuddy reports FAILED as a fact about the LAST PRINT, not about the
+	// printer: such a machine is connected, sitting at 0% and available - its
+	// own UI shows it as ready, and it keeps assigning work to it. Tensor used
+	// to turn that into an error status, which painted five of thirteen
+	// machines red and, far worse, took them out of scheduling entirely:
+	// machineCanPrint and plannableMachine both accept only idle or running, so
+	// five free printers were being withheld from batching because of something
+	// that happened on a previous job.
+	//
+	// The information is not lost - statusReason still says the last print
+	// failed and the plate needs clearing. It is reported as a note about a
+	// working machine rather than as a fault that stops it being used.
 	return production.FleetMachineIdle
+}
+
+// statusReason is what a person still needs to do to this machine, or nil.
+//
+// Advisory, not a status: a printer whose last print failed is available and
+// scheduled like any other (see fleetStatus), but somebody has to clear the
+// plate before the next plate lands on top of the last one.
+//
+// HMS codes are deliberately not reported here, for the reason fleetStatus
+// gives: a line reading "Printer fault 0500060000020070" beside a machine that
+// is printing perfectly well is worse than silence - a fault report the
+// operator cannot act on and that turns out not to be true.
+func statusReason(s bambubuddy.Status) *string {
+	if !s.Failed() {
+		return nil
+	}
+	text := "The last print failed - check the plate is clear before the next one."
+	return &text
 }
 
 // filamentsJSON renders the AMS trays that actually hold filament, in the shape

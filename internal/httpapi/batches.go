@@ -22,6 +22,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/orientation"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
@@ -45,6 +46,15 @@ type batchResponse struct {
 	CreatedAt                   time.Time  `json:"created_at"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 	JobsCount                   *int64     `json:"jobs_count,omitempty"`
+	// OrderNumbers is which Shopify orders are on this bed, ascending and
+	// deduplicated - what the Batches table's Jobs column renders as tags.
+	// Carried on the list response, where jobs_count deliberately is not: the
+	// question standing at a printer is whose work is on the plate.
+	OrderNumbers []string `json:"order_numbers,omitempty"`
+	// Colours is the distinct filament colours on this bed, with the swatch to
+	// draw each one. One entry under colour batching; more only on a
+	// hand-assembled batch.
+	Colours []BatchColour `json:"colours,omitempty"`
 	// OccupiedAreaMm2/FreeAreaMm2 are derived from BedUtilizationPercent at
 	// response time (bedpack.BedXMM*BedYMM is the same denominator the
 	// percentage was computed against) - no new column, cheap on every
@@ -63,6 +73,13 @@ type batchResponse struct {
 	// failed (in which case PlateSliceError says why).
 	PlateSlicedAt   *time.Time `json:"plate_sliced_at"`
 	PlateSliceError *string    `json:"plate_slice_error"`
+	// PrintError is why the batch never reached the printer, in BambuBuddy's
+	// own words where it gave any. Null on a batch that printed or was never
+	// sent - the two are told apart by whether it is Locked and unqueued.
+	PrintError *string `json:"print_error"`
+	// QueueItemID is BambuBuddy's queue item, so a sent batch can be followed
+	// rather than only observed at the moment of sending.
+	QueueItemID *int32 `json:"queue_item_id"`
 	// Measured on the merged plate, present only once it has been sliced.
 	// Support and purge in particular are properties of the combined plate
 	// rather than of any single job on it, which is why they cannot be summed
@@ -87,6 +104,7 @@ func batchDTO(b gen.Batch) batchResponse {
 		OccupiedAreaMm2: occupied, FreeAreaMm2: free,
 		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
 		PlateSlicedAt: db.TimePtr(b.PlateSlicedAt), PlateSliceError: b.PlateSliceError,
+		PrintError: b.PrintError, QueueItemID: b.QueueItemID,
 		TotalLayers: b.TotalLayers, SupportGrams: db.NumFloatPtr(b.SupportGrams),
 		PurgeGrams: db.NumFloatPtr(b.PurgeGrams), ColourChanges: b.ColourChanges,
 		FilamentByColour: rawOrEmptyArray(b.FilamentByColour),
@@ -132,6 +150,9 @@ func (s *Server) registerBatches(r *gin.Engine) {
 	g.GET("/:id/compatible-jobs", s.guards.RequirePermission(auth.BatchManage.Key()), s.listCompatibleJobs)
 	g.POST("/:id/jobs", s.guards.RequirePermission(auth.BatchManage.Key()), s.addJobsToBatch)
 	g.DELETE("/:id/jobs/:jobId", s.guards.RequirePermission(auth.BatchManage.Key()), s.removeJobFromBatch)
+	// Finishing a bed is a selection of planks, not a switch - see
+	// batch_complete_jobs.go.
+	g.POST("/:id/jobs/complete", s.guards.RequirePermission(auth.BatchManage.Key()), s.completeBatchJobs)
 	s.registerBatchPrint(g)
 }
 
@@ -151,7 +172,7 @@ func (s *Server) listBatches(c *gin.Context) {
 		for _, b := range rows {
 			out = append(out, batchDTO(b))
 		}
-		c.JSON(http.StatusOK, out)
+		c.JSON(http.StatusOK, s.decorateBatches(ctx, out, batchIDsOf(rows)))
 		return
 	}
 	rows, err := s.store.Q.ListBatchesPage(ctx, gen.ListBatchesPageParams{
@@ -168,7 +189,7 @@ func (s *Server) listBatches(c *gin.Context) {
 	if n := len(rows); n > 0 {
 		setNextCursor(c, n, page.limit, db.Time(rows[n-1].CreatedAt), rows[n-1].ID)
 	}
-	c.JSON(http.StatusOK, out)
+	c.JSON(http.StatusOK, s.decorateBatches(ctx, out, batchIDsOf(rows)))
 }
 
 type createBatchRequest struct {
@@ -237,8 +258,19 @@ func (s *Server) patchBatch(c *gin.Context) {
 		params.SetMachineID = true
 		params.MachineID = machineID
 	}
-	if _, err := s.store.Q.GetBatchByID(ctx, id); err != nil {
+	batch, err := s.store.Q.GetBatchByID(ctx, id)
+	if err != nil {
 		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
+		return
+	}
+	// A locked bed's machine is not a preference any more. Approval reserved
+	// that machine's filament, stamped it on the batch and sliced the plate for
+	// it; moving it afterwards would leave the reservation on one printer and
+	// the plate on another. Its status may still advance - that is how an
+	// operator marks the bed Done - so only the machine is refused here.
+	if params.SetMachineID && batch.Status != production.BatchPendingApproval {
+		detail(c, http.StatusConflict,
+			"This batch is locked; its machine can no longer be changed.")
 		return
 	}
 	completing := req.Status != nil && *req.Status == production.BatchCompleted
@@ -265,6 +297,11 @@ func (s *Server) getBatch(c *gin.Context) {
 	dto := batchDTO(b)
 	if count, err := s.store.Q.CountJobsInBatch(ctx, &id); err == nil {
 		dto.JobsCount = &count
+	}
+	// Also on the detail, so the batch's own page names the same orders its row
+	// in the table does.
+	if one := s.decorateBatches(ctx, []batchResponse{dto}, []uuid.UUID{id}); len(one) == 1 {
+		dto.OrderNumbers, dto.Colours = one[0].OrderNumbers, one[0].Colours
 	}
 	s.attachPlateBbox(ctx, &dto, b.MergedFileID, b.PreviewFileID)
 	c.JSON(http.StatusOK, dto)
@@ -357,9 +394,11 @@ func (s *Server) previewBatch(c *gin.Context) {
 	}
 	// Cache-aside: reuse the stored preview plate if it is still in storage.
 	if batch.PreviewFileID != nil {
-		if data, ok := s.fetchStored(ctx, *batch.PreviewFileID); ok {
-			c.Data(http.StatusOK, "model/stl", data)
-			return
+		if file, err := s.store.Q.GetFileAsset(ctx, *batch.PreviewFileID); err == nil {
+			if data, ok := s.fetchStored(ctx, *batch.PreviewFileID); ok {
+				servePlate(c, file.Filename, file.ContentType, data)
+				return
+			}
 		}
 	}
 	jobs, err := s.store.Q.ListJobsForBatch(ctx, &id)
@@ -372,7 +411,7 @@ func (s *Server) previewBatch(c *gin.Context) {
 		detail(c, herr.status, herr.msg)
 		return
 	}
-	fileID, err := s.storePlate(ctx, id, "preview", batch.BatchNumber, plate.data, plate.bbox, c)
+	fileID, err := s.storePlate(ctx, id, "preview", plate, c)
 	if err != nil {
 		return
 	}
@@ -380,7 +419,23 @@ func (s *Server) previewBatch(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not cache the preview.")
 		return
 	}
-	c.Data(http.StatusOK, "model/stl", plate.data)
+	servePlate(c, plate.name+plate.ext, plate.contentType, plate.data)
+}
+
+// servePlate writes a merged plate to the response with its real type and name.
+//
+// Both used to be hard-coded to STL, so a coloured 3MF arrived as model/stl
+// under whatever name the browser inferred from the URL - which is a uuid. The
+// Content-Disposition is what makes a download land as
+// "114556-114557-114558-BLUE.3mf" instead of the batch's id with no extension.
+func servePlate(c *gin.Context, filename, contentType string, data []byte) {
+	if contentType == "" {
+		contentType = plateSTLContentType
+	}
+	if filename != "" {
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	}
+	c.Data(http.StatusOK, contentType, data)
 }
 
 type approveBatchRequest struct {
@@ -474,10 +529,13 @@ type addJobsToBatchRequest struct {
 }
 
 // addJobsToBatch assigns one or more currently-unassigned, configuration-
-// matching jobs onto a Draft batch, then re-merges the plate and refreshes
-// the batch's derived snapshot fields. Only pending_approval batches accept
-// this - once approved, filament is already debited with no reversal path,
-// so membership is locked in from there.
+// matching jobs onto a batch, then rebuilds the plate from what is now on the
+// bed and refreshes its derived fields.
+//
+// Draft AND Locked. A locked bed used to refuse this because approval had
+// already debited filament with no way back; there is a way back now (see
+// beginBatchEdit), and refusing meant the only way to change a locked bed was
+// to delete it and lose the three planks that were fine.
 func (s *Server) addJobsToBatch(c *gin.Context) {
 	id, ok := parseUUIDParam(c, "id")
 	if !ok {
@@ -492,16 +550,23 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	batch, err := s.store.Q.GetBatchByID(ctx, id)
-	if err != nil {
-		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
+	batch, ok := s.requireEditableBatch(c, id)
+	if !ok {
 		return
 	}
-	if batch.Status != production.BatchPendingApproval {
-		detail(c, http.StatusConflict, "Only Draft batches can have jobs added.")
-		return
-	}
+	// Two ways to be full, because the two strategies mean different things by
+	// it. The optimiser fills a bed by area, so utilisation against its 80%
+	// target is the measure. Colour batching fills it by count - and four
+	// 200x50 planks cover 37.9%, so the area test alone can never fire and a
+	// bed could be hand-loaded well past the four it is allowed to hold.
 	if u := db.NumFloatPtr(batch.BedUtilizationPercent); u != nil && *u >= production.TargetBedUtilisationPercent {
+		detail(c, http.StatusUnprocessableEntity, "This batch is full - remove a job before adding another.")
+		return
+	}
+	if full, err := s.bedIsFull(ctx, id); err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the batch's jobs.")
+		return
+	} else if full {
 		detail(c, http.StatusUnprocessableEntity, "This batch is full - remove a job before adding another.")
 		return
 	}
@@ -540,20 +605,37 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 		ids = append(ids, jobID)
 	}
 
+	// Adding always ends in a new plate, so storage is required - checked here,
+	// before anything is written, rather than when the rebuild reaches for it.
+	if !s.plateableBatch(c, len(existing)+len(ids)) {
+		return
+	}
+	// A locked bed gives its plate back and its filament back before it changes
+	// - see batch_edit.go. Done here rather than at the top so a request that
+	// fails validation above does not withdraw a plate from the printer queue
+	// for an edit that never happens.
+	if err := s.beginBatchEdit(ctx, batch); err != nil {
+		writeStatusError(c, err, "Could not prepare the batch for editing.")
+		return
+	}
 	if err := s.store.Q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{BatchID: &id, JobIds: ids}); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not add the jobs to the batch.")
 		return
 	}
 
-	updated, ok := s.recomputeBatchPlate(ctx, c, batch)
+	updated, ok := s.finishBatchEdit(ctx, c, batch)
 	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, batchDTO(updated))
 }
 
-// removeJobFromBatch detaches one job from a Draft batch, then re-merges the
-// plate and refreshes the batch's derived snapshot fields. Always allowed on
+// removeJobFromBatch detaches one job from a batch, then rebuilds the plate
+// from what is left on the bed and refreshes its derived fields - so a bed of
+// four that loses one is re-plated with three, not left describing the plank
+// that was taken off it.
+//
+// Draft AND Locked; see addJobsToBatch. Always allowed on
 // a Draft batch (no utilisation gate) - this is what lets an operator drop
 // below the full threshold and add a different job afterward.
 func (s *Server) removeJobFromBatch(c *gin.Context) {
@@ -565,22 +647,7 @@ func (s *Server) removeJobFromBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ctx := c.Request.Context()
-	batch, err := s.store.Q.GetBatchByID(ctx, id)
-	if err != nil {
-		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
-		return
-	}
-	if batch.Status != production.BatchPendingApproval {
-		detail(c, http.StatusConflict, "Only Draft batches can have jobs removed.")
-		return
-	}
-	if _, err := s.store.Q.RemoveJobFromBatch(ctx, gen.RemoveJobFromBatchParams{ID: jobID, BatchID: &id}); err != nil {
-		dbError(c, err, "That job is not on this batch.", "Could not remove the job.")
-		return
-	}
-
-	updated, ok := s.recomputeBatchPlate(ctx, c, batch)
+	updated, ok := s.EditBatchByRemovingJob(c.Request.Context(), c, id, jobID)
 	if !ok {
 		return
 	}
@@ -617,7 +684,7 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 		detail(c, herr.status, herr.msg)
 		return gen.Batch{}, false
 	}
-	fileID, err := s.storePlate(ctx, batch.ID, "preview", batch.BatchNumber, plate.data, plate.bbox, c)
+	fileID, err := s.storePlate(ctx, batch.ID, "preview", plate, c)
 	if err != nil {
 		return gen.Batch{}, false
 	}
@@ -672,7 +739,7 @@ func (s *Server) mergedPlateFor(
 	if herr != nil {
 		return uuid.Nil, nil, nil, statusErr(herr.status, herr.msg)
 	}
-	id, err := s.storePlateAs(ctx, batch.ID, "plate", batch.BatchNumber, plate.data, plate.bbox, uploadedBy)
+	id, err := s.storePlateAs(ctx, batch.ID, "plate", plate, uploadedBy)
 	if err != nil {
 		return uuid.Nil, nil, nil, err
 	}
@@ -686,7 +753,23 @@ type plateResult struct {
 	unitsPerBed int
 	utilisation float64
 	bbox        meshio.Bbox
+	// name is the plate's filename stem - the orders on the bed and their
+	// colour, e.g. "114556-114557-114558-BLUE". See plateFileStem.
+	name string
+	// ext and contentType describe what data actually is. A bed whose models
+	// all carry colour is written as a coloured 3MF; anything else falls back
+	// to binary STL, exactly as before colour existed.
+	ext         string
+	contentType string
 }
+
+// The two shapes a merged plate can take.
+const (
+	plate3MFExt         = ".3mf"
+	plate3MFContentType = "model/3mf"
+	plateSTLExt         = ".stl"
+	plateSTLContentType = "model/stl"
+)
 
 type httpErr struct {
 	status int
@@ -697,7 +780,12 @@ type httpErr struct {
 // one bed, downloads and merges the source models, and returns the plate STL. It
 // yields a 409 when a job lacks a measurable print file or the batch overflows the
 // bed.
-func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob, batchNumber string) (plateResult, *httpErr) {
+func (s *Server) buildMergedPlate(
+	ctx context.Context, jobs []gen.ProductionJob, batchNumber string,
+) (plateResult, *httpErr) {
+	// One bed for every plate: it is built before anything knows which printer
+	// will take it, so it has to fit the smallest bed in the fleet.
+	bed := bedpack.DefaultBed
 	type resolved struct {
 		job  gen.ProductionJob
 		file gen.FileAsset
@@ -740,51 +828,246 @@ func (s *Server) buildMergedPlate(ctx context.Context, jobs []gen.ProductionJob,
 	// Sorting by descending area is the standard heuristic for this packer and
 	// matches the planner's own strategyArea. Placements carry RefID, so
 	// reordering here cannot mis-attach a mesh to the wrong job.
-	sort.SliceStable(units, func(a, b int) bool {
-		return units[a].XMM*units[a].YMM > units[b].XMM*units[b].YMM
-	})
-
-	placements, rejected := bedpack.Pack(units)
+	// A bed of identical products goes into a single column, in the order it was
+	// built - which for a colour batch is oldest order first.
+	//
+	// bedpack.Pack would turn some of them 90 degrees and grid them two-by-two,
+	// because that wastes least area. On a bed of four planks that produces a
+	// plate whose parts face different ways: harder to read, harder to lift off
+	// in order, and not what the shop asked for. Area is not scarce here - four
+	// planks cover 38% of the bed either way - so the tidier layout costs
+	// nothing real.
+	//
+	// Only when the column actually fits. Anything else falls through to the
+	// packer, so a mixed or oversized bed still gets the best arrangement
+	// available rather than no plate at all.
+	placements, rejected := columnOrPack(bed, units)
 	if len(rejected) > 0 {
 		return plateResult{}, &httpErr{http.StatusConflict, "The batch's jobs do not fit on a single bed."}
 	}
 
-	// Download and parse each distinct print file once.
-	meshByJob := map[string][]orientation.Triangle{}
+	// Download and parse each distinct print file once, keeping each model's
+	// coloured parts apart. A generated plank is two objects - a white base and
+	// the customer's lettering - and flattening them here is what used to make
+	// a whole bed print in one anonymous colour.
+	partsByJob := map[string][]meshio.Part{}
+	coloured := true
 	for _, it := range items {
-		mesh, herr := s.loadModelMesh(ctx, it.file)
+		parts, herr := s.loadModelParts(ctx, it.job, it.file)
 		if herr != nil {
 			return plateResult{}, herr
 		}
-		meshByJob[it.job.ID.String()] = mesh.Triangles
+		partsByJob[it.job.ID.String()] = parts
+		for _, p := range parts {
+			if p.Colour == "" {
+				coloured = false
+			}
+		}
 	}
 
-	parts := make([]meshio.Placed, 0, len(placements))
+	stem := plateFileStem(jobs, batchNumber)
+
+	// Every model knows its colours: write a 3MF that keeps them.
+	if coloured {
+		// Each plank is named for the order it belongs to, so the slicer's
+		// object list reads as a list of customers rather than "Object 1..4".
+		nameByJob := map[string]string{}
+		for _, it := range items {
+			if n := orderNumberFromJobNumber(it.job.JobNumber); n != "" {
+				nameByJob[it.job.ID.String()] = n
+			}
+		}
+		models := make([]meshio.PlacedModel, 0, len(placements))
+		for _, p := range placements {
+			models = append(models, meshio.PlacedModel{
+				Name:  nameByJob[p.RefID],
+				Parts: partsByJob[p.RefID], XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
+			})
+		}
+		data, bbox, err := meshio.Merge3MF(models)
+		if err != nil {
+			// Not fatal: the STL path below still produces a printable plate,
+			// just without colour. Losing the colour is much better than losing
+			// the bed.
+			obs.FromContext(ctx).Warn("could not merge the plate in colour, falling back to STL",
+				"batch", batchNumber, "error", err)
+		} else {
+			return plateResult{
+				data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercentOn(bed, units),
+				bbox: bbox, name: stem, ext: plate3MFExt, contentType: plate3MFContentType,
+			}, nil
+		}
+	}
+
+	// At least one model had no colour to carry - an operator's own upload, say.
+	// Binary STL, exactly as before, rather than a 3MF asserting a colour
+	// nobody chose.
+	flat := make([]meshio.Placed, 0, len(placements))
 	for _, p := range placements {
-		parts = append(parts, meshio.Placed{
-			Triangles: meshByJob[p.RefID], XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
+		var tris []orientation.Triangle
+		for _, part := range partsByJob[p.RefID] {
+			tris = append(tris, part.Triangles...)
+		}
+		flat = append(flat, meshio.Placed{
+			Triangles: tris, XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
 		})
 	}
-	data, bbox := meshio.MergeBinarySTL(batchNumber, parts)
+	data, bbox := meshio.MergeBinarySTL(batchNumber, flat)
 	return plateResult{
-		data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercent(units), bbox: bbox,
+		data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercentOn(bed, units),
+		bbox: bbox, name: stem, ext: plateSTLExt, contentType: plateSTLContentType,
 	}, nil
 }
 
-// loadModelMesh downloads a file asset to a temp path and parses its mesh.
-func (s *Server) loadModelMesh(ctx context.Context, file gen.FileAsset) (orientation.Mesh, *httpErr) {
+// columnOrPack lays the units out, preferring a single tidy column.
+//
+// Falls back to bedpack.Pack, whose comment on ordering still applies there:
+// guillotine packing is order-sensitive, so the units are sorted largest-first
+// before it sees them. The column path needs no such sort - it never rotates and
+// never splits free space, so the order it is given is the order it keeps.
+func columnOrPack(bed bedpack.Bed, units []bedpack.UnitFootprint) ([]bedpack.Placement, []bedpack.UnitFootprint) {
+	if uniformFootprints(units) {
+		if placements, rejected := bedpack.PackColumnOn(bed, units); len(rejected) == 0 {
+			return placements, nil
+		}
+	}
+
+	// Largest first. bedpack is a guillotine packer, and guillotine packing is
+	// ORDER-SENSITIVE: placing a small part first splits the free space into
+	// offcuts too narrow for a large one later, so the same set of units can
+	// pack in one order and be rejected in another.
+	//
+	// This is not theoretical. The planner tries four orderings and keeps the
+	// best (see production.packingStrategies), then this function re-packed the
+	// same jobs in whatever order the database returned them - and rejected beds
+	// the planner had just proved fit. A batch of 3x(88x200) plus 4x(55x69) fits
+	// comfortably three-across with the hooks in the leftover strip, but
+	// interleaved small-first it does not, and the batch silently lost its
+	// preview plate with "The batch's jobs do not fit on a single bed".
+	//
+	// Sorting by descending area is the standard heuristic for this packer and
+	// matches the planner's own strategyArea. Placements carry RefID, so
+	// reordering here cannot mis-attach a mesh to the wrong job.
+	ordered := append([]bedpack.UnitFootprint(nil), units...)
+	sort.SliceStable(ordered, func(a, b int) bool {
+		return ordered[a].XMM*ordered[a].YMM > ordered[b].XMM*ordered[b].YMM
+	})
+	return bedpack.PackOn(bed, ordered)
+}
+
+// uniformFootprints reports whether every unit is the same size, which is what
+// makes a single column sensible: a column of mixed sizes is a ragged strip that
+// wastes the bed without reading any better.
+func uniformFootprints(units []bedpack.UnitFootprint) bool {
+	if len(units) == 0 {
+		return false
+	}
+	first := units[0]
+	for _, u := range units[1:] {
+		if u.XMM != first.XMM || u.YMM != first.YMM || u.ZMM != first.ZMM {
+			return false
+		}
+	}
+	return true
+}
+
+// loadModelParts reads one job's print file as coloured parts.
+//
+// A 3MF this system generated comes back as its own objects with their own
+// materials, which is what makes a merged bed keep the customer's colour. Any
+// other file - an STL, or a 3MF from elsewhere - is one part, and its colour is
+// taken from what the JOB records instead, resolved through the same filament
+// shelf the renderer uses. A part still left with no colour is not an error
+// here: buildMergedPlate falls back to a colourless STL plate for the bed.
+func (s *Server) loadModelParts(ctx context.Context, job gen.ProductionJob, file gen.FileAsset) ([]meshio.Part, *httpErr) {
+	data, herr := s.fetchModelBytes(ctx, file)
+	if herr != nil {
+		return nil, herr
+	}
+
+	if parts, err := meshio.Read3MF(data); err == nil {
+		complete := true
+		for _, p := range parts {
+			if p.Colour == "" {
+				complete = false
+			}
+		}
+		if complete {
+			return parts, nil
+		}
+	}
+
+	mesh, herr := s.parseModel(file, data)
+	if herr != nil {
+		return nil, herr
+	}
+	return []meshio.Part{{
+		Name:      job.JobNumber,
+		Colour:    s.jobColourHex(ctx, job),
+		Triangles: mesh.Triangles,
+	}}, nil
+}
+
+// jobColourHex is the swatch for a job whose model file carries no colour of its
+// own, or "" when the job records nothing usable.
+//
+// Best-effort by design: this only ever adds colour to a plate that would
+// otherwise have none, and a failure costs the bed its colour rather than the
+// bed itself.
+func (s *Server) jobColourHex(ctx context.Context, job gen.ProductionJob) string {
+	for _, name := range decodeColours(job.Colours) {
+		if hex, err := s.resolveColourHex(ctx, name); err == nil {
+			return hex
+		}
+	}
+	if job.Colour != nil {
+		if hex, err := s.resolveColourHex(ctx, *job.Colour); err == nil {
+			return hex
+		}
+	}
+	return ""
+}
+
+// fetchModelBytes reads a file asset's bytes.
+//
+// In memory rather than straight to a temp path, because the bytes are examined
+// before they are parsed: a 3MF is read for its coloured objects first (see
+// loadModelParts), and only falls through to the geometry loader if that finds
+// no colour. These are single models of a few megabytes, so holding one is
+// cheaper than downloading it twice.
+func (s *Server) fetchModelBytes(ctx context.Context, file gen.FileAsset) ([]byte, *httpErr) {
+	obj, err := s.storage.Get(ctx, file.StorageKey)
+	if err != nil {
+		return nil, &httpErr{http.StatusConflict, fmt.Sprintf("Could not read the model %q from storage.", file.Filename)}
+	}
+	defer func() { _ = obj.Body.Close() }()
+	buf := &bytes.Buffer{}
+	if _, err := buf.ReadFrom(obj.Body); err != nil {
+		return nil, &httpErr{http.StatusConflict, fmt.Sprintf("Could not read the model %q from storage.", file.Filename)}
+	}
+	return buf.Bytes(), nil
+}
+
+// parseModel loads a model's geometry, flattened.
+//
+// orientation.LoadModel reads from a path, so the bytes go back to disk here.
+// Keeping that boundary rather than teaching the loader to take a reader: it is
+// the same loader the orientation recommender and the slicer path use, and this
+// is not the change to alter what they all depend on.
+func (s *Server) parseModel(file gen.FileAsset, data []byte) (orientation.Mesh, *httpErr) {
 	ext := filepath.Ext(file.Filename)
 	tmp, err := os.CreateTemp("", "tensor-merge-*"+ext)
 	if err != nil {
 		return orientation.Mesh{}, &httpErr{http.StatusInternalServerError, "Could not buffer a model file."}
 	}
 	tmpPath := tmp.Name()
+	_, werr := tmp.Write(data)
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(tmpPath) }()
-
-	if err := s.storage.Download(ctx, file.StorageKey, tmpPath); err != nil {
-		return orientation.Mesh{}, &httpErr{http.StatusConflict, fmt.Sprintf("Could not read the model %q from storage.", file.Filename)}
+	if werr != nil {
+		return orientation.Mesh{}, &httpErr{http.StatusInternalServerError, "Could not buffer a model file."}
 	}
+
 	mesh, err := orientation.LoadModel(tmpPath, ext)
 	if err != nil {
 		return orientation.Mesh{}, &httpErr{http.StatusConflict, fmt.Sprintf("The model %q could not be merged.", file.Filename)}
@@ -795,8 +1078,8 @@ func (s *Server) loadModelMesh(ctx context.Context, file gen.FileAsset) (orienta
 // storePlate is storePlateAs for a request-scoped caller: the plate is
 // attributed to the signed-in user, and the two failure modes are written to
 // the response here rather than returned.
-func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchNumber string, data []byte, bbox meshio.Bbox, c *gin.Context) (uuid.UUID, error) {
-	fileID, err := s.storePlateAs(ctx, batchID, kind, batchNumber, data, bbox, currentUserID(c))
+func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind string, plate plateResult, c *gin.Context) (uuid.UUID, error) {
+	fileID, err := s.storePlateAs(ctx, batchID, kind, plate, currentUserID(c))
 	if err != nil {
 		writeStatusError(c, err, "Could not store the merged plate.")
 		return uuid.Nil, err
@@ -810,18 +1093,26 @@ func (s *Server) storePlate(ctx context.Context, batchID uuid.UUID, kind, batchN
 // request-driven merge and "system" for one a background process builds,
 // matching design_match.go's convention.
 func (s *Server) storePlateAs(
-	ctx context.Context, batchID uuid.UUID, kind, batchNumber string,
-	data []byte, bbox meshio.Bbox, uploadedBy string,
+	ctx context.Context, batchID uuid.UUID, kind string,
+	plate plateResult, uploadedBy string,
 ) (uuid.UUID, error) {
-	key := fmt.Sprintf("batches/%s/%s.stl", batchID, kind)
-	if err := s.storage.Put(ctx, key, bytes.NewReader(data), int64(len(data)), "model/stl"); err != nil {
+	// Both taken from the plate rather than assumed. They were hard-coded to
+	// STL in the key, the filename and the content type, so a coloured 3MF was
+	// stored as "preview.stl" and served as model/stl - which every viewer and
+	// slicer then tried to parse as an STL, and none could.
+	key := fmt.Sprintf("batches/%s/%s%s", batchID, kind, plate.ext)
+	if err := s.storage.Put(ctx, key, bytes.NewReader(plate.data), int64(len(plate.data)), plate.contentType); err != nil {
 		return uuid.Nil, statusErrf(http.StatusInternalServerError, "Could not store the merged plate.", err)
 	}
 	fileID := uuid.New()
 	if _, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
-		ID: fileID, Filename: batchNumber + "-" + kind + ".stl", ContentType: "model/stl",
-		SizeBytes: int64(len(data)), StorageKey: key, UploadedBy: uploadedBy,
-		BboxXMm: &bbox.XMM, BboxYMm: &bbox.YMM, BboxZMm: &bbox.ZMM,
+		// The name an operator downloads: the orders on the bed and their
+		// colour, e.g. "114556-114557-114558-BLUE.3mf". The kind (preview or
+		// plate) is deliberately not in it - it is an internal distinction, and
+		// the file is the same bed either way.
+		ID: fileID, Filename: plate.name + plate.ext, ContentType: plate.contentType,
+		SizeBytes: int64(len(plate.data)), StorageKey: key, UploadedBy: uploadedBy,
+		BboxXMm: &plate.bbox.XMM, BboxYMm: &plate.bbox.YMM, BboxZMm: &plate.bbox.ZMM,
 	}); err != nil {
 		return uuid.Nil, statusErrf(http.StatusInternalServerError, "Could not record the merged plate.", err)
 	}

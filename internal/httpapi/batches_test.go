@@ -159,6 +159,10 @@ func TestIntegrationFilamentAndDecrement(t *testing.T) {
 	}
 
 	// Fail a PLA job wasting 150 g; stock should drop to 850.
+	//
+	// Deliberately colourless, unlike the batching fixtures below: the shelf
+	// row above has no colour either, and the decrement matches on material AND
+	// colour, so giving the job one would leave it matching no spool.
 	orderID := seedOrder(t, store, 7001, []map[string]any{
 		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
 	})
@@ -227,7 +231,7 @@ func TestIntegrationBatchAutoCreateSplitsLargeQuantityOrder(t *testing.T) {
 	router := testServer(t, store, guards)
 
 	orderID := seedOrder(t, store, 8101, []map[string]any{
-		{"product_id": "SKU1", "product_name": "Keychain", "quantity": 20, "material": "PLA", "priority": 1},
+		{"product_id": "SKU1", "product_name": "Keychain", "quantity": 20, "material": "PLA", "colour": "BLUE", "priority": 1},
 	})
 	jobs := fromOrderJobs(t, router, minter, orderID)
 	if len(jobs) != 1 {
@@ -294,8 +298,8 @@ func TestIntegrationBatchAutoCreate(t *testing.T) {
 	router := testServer(t, store, guards)
 
 	orderID := seedOrder(t, store, 8001, []map[string]any{
-		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
-		{"product_id": "SKU2", "product_name": "Block", "quantity": 1, "material": "PLA"},
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA", "colour": "BLUE"},
+		{"product_id": "SKU2", "product_name": "Block", "quantity": 1, "material": "PLA", "colour": "BLUE"},
 	})
 	jobs := fromOrderJobs(t, router, minter, orderID)
 	// Give both jobs a small measurable print file.
@@ -427,7 +431,7 @@ func TestIntegrationBatchIdPatchAndGuard(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &batch)
 
 	orderID := seedOrder(t, store, 9001, []map[string]any{
-		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA", "colour": "BLUE"},
 	})
 	jobs := fromOrderJobs(t, router, minter, orderID)
 	jobID := jobs[0].ID
@@ -650,21 +654,29 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 		t.Errorf("add already-assigned = %d, want 422", rr.Code)
 	}
 
-	// Accepts the compatible job: membership is committed before the plate
-	// re-merge, which needs object storage - unconfigured in this test
-	// environment (see testServer/NewServer, storage is always nil here, the
-	// same known gap approveBatch/previewBatch already have). So the request
-	// itself 503s on the re-merge step, but the membership change it already
-	// made is real and durable - assert that directly against the DB rather
-	// than asserting on the (unreachable-here) 200 response body.
+	// The compatible job passes validation and is then refused for want of
+	// object storage - unconfigured in this test environment (see
+	// testServer/NewServer, storage is always nil here, the same known gap
+	// approveBatch/previewBatch have). Every add ends in a rebuilt plate, and a
+	// plate needs a bucket.
+	//
+	// What matters is that the refusal changes NOTHING. This used to assign the
+	// job first and discover the missing storage afterwards, so a 503 left the
+	// job on the bed anyway - and the test asserted that, which made a
+	// half-applied write the documented contract. An edit either happens
+	// completely or not at all.
 	rr = doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
 		map[string]any{"job_ids": []string{compatible.String()}})
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("add compatible = %d body=%s, want 503 (no storage configured in tests)", rr.Code, rr.Body.String())
 	}
 	job, err := store.Q.GetProductionJobByID(ctx, compatible)
-	if err != nil || job.BatchID == nil || *job.BatchID != b.ID {
-		t.Errorf("job batch_id after add = %v, want %s", job.BatchID, b.ID)
+	if err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if job.BatchID != nil {
+		t.Errorf("job batch_id after a REFUSED add = %v, want nil - a refused edit "+
+			"must not leave the job on the bed", job.BatchID)
 	}
 }
 
@@ -727,25 +739,31 @@ func TestIntegrationBatchJobEditingGuards(t *testing.T) {
 	fileID := seedFileAsset(t, store, 50, 50, 20)
 	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
 
-	// A non-Draft batch rejects both add and remove.
-	approved, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
-		ID: uuid.New(), BatchNumber: "BATCH-GUARD-1", Status: production.BatchOpen, MaterialShortage: false,
+	// A PRINTING batch rejects both add and remove.
+	//
+	// This used to be any non-Draft batch, locked ones included. That made the
+	// only way to pull one bad plank off a locked bed deleting the bed and
+	// losing the three beside it, so a locked bed is editable now - see
+	// editableBatch. Printing is different in kind: that plate is on a machine
+	// laying plastic, and no edit reaches it.
+	printing, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-GUARD-1", Status: production.BatchInProgress, MaterialShortage: false,
 	})
 	if err != nil {
-		t.Fatalf("insert approved batch: %v", err)
+		t.Fatalf("insert printing batch: %v", err)
 	}
-	onApproved := seedConfiguredJob(t, store, "BATCH-GUARD-1-J1", jobConfig{
-		batchID: &approved.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	onPrinting := seedConfiguredJob(t, store, "BATCH-GUARD-1-J1", jobConfig{
+		batchID: &printing.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 	unassigned := seedConfiguredJob(t, store, "BATCH-GUARD-1-J2", jobConfig{
 		material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
-	if rr := doJSON(router, http.MethodPost, "/batches/"+approved.ID.String()+"/jobs", manage,
+	if rr := doJSON(router, http.MethodPost, "/batches/"+printing.ID.String()+"/jobs", manage,
 		map[string]any{"job_ids": []string{unassigned.String()}}); rr.Code != http.StatusConflict {
-		t.Errorf("add to non-draft batch = %d, want 409", rr.Code)
+		t.Errorf("add to a printing batch = %d, want 409", rr.Code)
 	}
-	if rr := doJSON(router, http.MethodDelete, "/batches/"+approved.ID.String()+"/jobs/"+onApproved.String(), manage, nil); rr.Code != http.StatusConflict {
-		t.Errorf("remove from non-draft batch = %d, want 409", rr.Code)
+	if rr := doJSON(router, http.MethodDelete, "/batches/"+printing.ID.String()+"/jobs/"+onPrinting.String(), manage, nil); rr.Code != http.StatusConflict {
+		t.Errorf("remove from a printing batch = %d, want 409", rr.Code)
 	}
 
 	// A Draft batch already at/above the 80% target rejects further adds.
@@ -918,7 +936,7 @@ func TestIntegrationReplanGrowsDraftAndSparesLocked(t *testing.T) {
 	// First job in, first plan: one thin Draft.
 	fileID := seedFileAsset(t, store, 50, 50, 20)
 	first := seedOrder(t, store, 9101, []map[string]any{
-		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA"},
+		{"product_id": "SKU1", "product_name": "Cube", "quantity": 1, "material": "PLA", "colour": "BLUE"},
 	})
 	for _, j := range fromOrderJobs(t, router, minter, first) {
 		givePrintFile(t, store, uuid.MustParse(j.ID), fileID)
@@ -933,7 +951,7 @@ func TestIntegrationReplanGrowsDraftAndSparesLocked(t *testing.T) {
 
 	// A compatible job arrives, and the planner runs again.
 	second := seedOrder(t, store, 9102, []map[string]any{
-		{"product_id": "SKU2", "product_name": "Block", "quantity": 1, "material": "PLA"},
+		{"product_id": "SKU2", "product_name": "Block", "quantity": 1, "material": "PLA", "colour": "BLUE"},
 	})
 	for _, j := range fromOrderJobs(t, router, minter, second) {
 		givePrintFile(t, store, uuid.MustParse(j.ID), fileID)

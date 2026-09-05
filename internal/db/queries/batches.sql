@@ -25,7 +25,21 @@ SELECT * FROM batches WHERE id = $1;
 SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 
 -- name: ListBatches :many
-SELECT * FROM batches ORDER BY created_at DESC, id DESC;
+-- Newest batch first, by the batch's own number.
+--
+-- created_at alone shuffled the list. batch_number comes from a sequence, so it
+-- already IS creation order - but a planning run inserts every batch it makes in
+-- one transaction, so dozens share a created_at to the microsecond and the rows
+-- came back 1001103, 1001087, 1001084, 1001089. The number is what an operator
+-- reads off the batch, so a list that does not descend by it reads as broken.
+--
+-- Sorted on the numeric part rather than the string: "BATCH-999" sorts after
+-- "BATCH-1001051" lexically, which is only right today because every live number
+-- is the same width. NULLS LAST keeps a hand-named batch (no digits at all) out
+-- of the way rather than at the top.
+SELECT * FROM batches
+ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
+         created_at DESC, id DESC;
 
 -- name: ListBatchesPage :many
 SELECT * FROM batches
@@ -232,3 +246,139 @@ FROM batches b
 JOIN production_jobs j ON j.batch_id = b.id
 WHERE b.status = 'pending_approval'
 ORDER BY b.id, j.id;
+
+-- name: SetBatchPrintError :exec
+-- Records why a batch could not be sent to the printer. Called on every failure
+-- path in printBatch so a Locked batch that failed is distinguishable from one
+-- nobody has sent yet.
+UPDATE batches SET
+    print_error    = sqlc.arg('print_error'),
+    print_error_at = now(),
+    updated_at     = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ClearBatchPrintError :exec
+-- Clears the failure and records what the batch is now waiting on.
+--
+-- Both happen together because a successful send is exactly the moment the
+-- previous failure stops being true. Two identifiers, because they arrive at
+-- different times: the pipeline run is known as soon as BambuBuddy accepts the
+-- work, while the queue item only exists once slicing has finished. The run id
+-- is what stops the dispatcher sending the same plate twice in the meantime.
+UPDATE batches SET
+    print_error     = NULL,
+    print_error_at  = NULL,
+    queue_item_id   = sqlc.narg('queue_item_id'),
+    pipeline_run_id = sqlc.narg('pipeline_run_id'),
+    updated_at      = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ListJobNumbersForBatches :many
+-- Each batch's jobs, by job number.
+--
+-- For the Batches table's Jobs column, which shows WHICH orders are on a bed
+-- rather than how many jobs it holds - "114556 114557 114558" answers the
+-- question an operator actually has, where "4" does not. The order number is
+-- read back out of the job number (JOB-114556), the same way the merged plate is
+-- named, so the column and the file the operator downloads always agree.
+--
+-- Only the two columns that mapping needs: this is asked for a whole page of
+-- batches at once, and the column has no use for a job's full row.
+SELECT j.batch_id, j.job_number, j.colour
+FROM production_jobs j
+WHERE j.batch_id = ANY(sqlc.arg('batch_ids')::uuid[])
+ORDER BY j.job_number;
+
+-- name: ListBatchesToDispatch :many
+-- Batches that still have somewhere to go, OLDEST ORDER FIRST.
+--
+-- The opposite order to ListBatches, and deliberately: that one feeds a screen,
+-- where newest-first is what a person expects, while this one feeds the
+-- dispatcher, where the whole point is that the customer who has waited longest
+-- gets on a printer first. batch_number comes from a sequence and the planner
+-- builds beds oldest-order-first, so ascending batch number IS oldest order.
+--
+-- Both pre-print states are returned and the caller decides what each needs:
+-- pending_approval wants approving, open wants sending once its plate has been
+-- sliced. Anything further along (in_progress, completed) has left the queue.
+SELECT * FROM batches
+WHERE status IN ('pending_approval', 'open')
+ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         created_at ASC, id ASC;
+
+-- name: ReopenBatchForReplanning :one
+-- Returns a locked bed to being a Draft so the planner can refill it.
+--
+-- Used when a bed printed only partly: the planks that came off the printer are
+-- completed and removed, and what is left is a bed with free places that nothing
+-- would ever fill, because a locked bed has left the replanning pool.
+--
+-- Everything approval produced is cleared, not just the status. The merged plate
+-- and its slice describe a bed that no longer exists, and queue_item_id /
+-- pipeline_run_id say "already sent to BambuBuddy" - which the dispatcher reads
+-- as "nothing to do", so a refilled bed carrying a stale queue id would sit at
+-- four planks and never reach a printer.
+--
+-- Guarded on 'open': a bed that is printing or printed is a record of what
+-- physically happened, and must not be reopened underneath it.
+UPDATE batches SET
+    status                   = 'pending_approval',
+    approved_by              = NULL,
+    approved_at              = NULL,
+    merged_file_id           = NULL,
+    plate_sliced_at          = NULL,
+    plate_slice_error        = NULL,
+    queue_item_id            = NULL,
+    pipeline_run_id          = NULL,
+    print_error              = NULL,
+    print_error_at           = NULL,
+    filament_reserved        = false,
+    updated_at               = now()
+WHERE id = sqlc.arg('id') AND status = 'open'
+RETURNING *;
+
+-- name: ClearBatchPlateForEdit :one
+-- Drops everything that described a bed's PREVIOUS contents, without changing
+-- its status.
+--
+-- Used when a locked bed is edited by hand. The merged plate, its slice and its
+-- BambuBuddy queue id all describe four planks that are no longer the four on
+-- the bed; leaving any of them behind sends the old plate to a printer. The
+-- queue id in particular reads to the dispatcher as "already sent", so the bed
+-- would sit corrected in Tensor and never reach a machine.
+--
+-- Distinct from ReopenBatchForReplanning, which does the same clearing but also
+-- unlocks the bed. A hand-edited bed stays exactly as locked as it was: the
+-- operator changed its contents deliberately and does not want the planner
+-- rearranging it afterwards.
+UPDATE batches SET
+    merged_file_id    = NULL,
+    preview_file_id   = NULL,
+    plate_sliced_at   = NULL,
+    plate_slice_error = NULL,
+    queue_item_id     = NULL,
+    pipeline_run_id   = NULL,
+    print_error       = NULL,
+    print_error_at    = NULL,
+    updated_at        = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: ListBatchesAwaitingPlateMeasurement :many
+-- Beds that have been handed to BambuBuddy but carry no measured print time.
+--
+-- Every scheduling decision downstream is arithmetic on print time - when a
+-- machine frees, which machine to build the next bed for - and until this is
+-- filled in, that arithmetic is running on a MAX-of-jobs approximation, or on
+-- nothing at all. Tensor used to measure it by slicing the plate itself; it does
+-- not slice any more, BambuBuddy does, and BambuBuddy's queue item carries the
+-- answer.
+--
+-- Ordered oldest first so a backlog is worked through in the order it was
+-- queued, and capped by the caller rather than here.
+SELECT id, batch_number, queue_item_id, units_per_bed
+FROM batches
+WHERE queue_item_id IS NOT NULL
+  AND plate_sliced_at IS NULL
+  AND status IN ('open', 'in_progress')
+ORDER BY created_at ASC, id ASC;

@@ -26,7 +26,6 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
-	"github.com/Optiminastic/tensor-core/internal/meshio"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
@@ -91,7 +90,21 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	}
 	now := time.Now()
 	planStart := now
-	planned, unbatchable, held, deferred := production.PlanWithReasons(planJobs, now, gate, production.DefaultNester)
+	strategy := s.batchStrategy()
+	var (
+		planned     []production.PlannedBatch
+		unbatchable []production.Unbatchable
+		held        []production.PlannedBatch
+		deferred    []production.Unbatchable
+	)
+	if strategy == production.StrategyColour {
+		// One colour per bed, at most four products on it, oldest order first.
+		// No held list: the whole point of this strategy is that an under-full
+		// bed prints rather than waiting for volume that may never arrive.
+		planned, unbatchable = production.GroupByColour(planJobs, s.cfg.BatchMaxUnitsPerBed, production.DefaultBedNester)
+	} else {
+		planned, unbatchable, held, deferred = production.PlanWithReasons(planJobs, now, gate, production.DefaultNester)
+	}
 
 	log := obs.FromContext(ctx)
 	// Every queued job not on a bed, with why - the planner's own deferrals
@@ -125,7 +138,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	for _, j := range planJobs {
 		poolByID[j.ID] = j
 	}
-	if ok, why := s.worthReplanning(planned, poolByID, s.draftJobsByBatch(ctx), now, gate); !ok {
+	if ok, why := s.worthReplanning(strategy, planned, poolByID, s.draftJobsByBatch(ctx), now, gate); !ok {
 		log.Info("batch replan skipped, existing drafts kept", "reason", why)
 		return nil, unbatchable, held, nil
 	} else if len(draftIDs) > 0 {
@@ -268,10 +281,14 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 			}); err != nil {
 				return err
 			}
-			if p.BedUtilisationPercent < production.TargetBedUtilisationPercent {
-				// Created despite being under target: an override fired
-				// (urgent priority, due soon, or max wait) - worth flagging
-				// distinctly from a normal >=80% batch.
+			// Under the optimiser's target. Only worth flagging when the
+			// optimiser built it: there it means an override fired (urgent
+			// priority, due soon, max wait) rather than the bed filling up.
+			// Under colour batching every bed is under target by
+			// construction - four planks cover 37.9% - so the same line
+			// would fire once per batch and say nothing.
+			if strategy != production.StrategyColour &&
+				p.BedUtilisationPercent < production.TargetBedUtilisationPercent {
 				log.Warn("batch created under the bed-utilisation target via override",
 					"batch", b.ID, "utilisation_percent", p.BedUtilisationPercent,
 					"target_percent", production.TargetBedUtilisationPercent, "jobs", len(p.Jobs))
@@ -307,6 +324,19 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		// Bambu Studio CPU. Planning and scheduling run on the fast estimate
 		// (batchTimeFromJobs); the real slice happens once at approval, when the
 		// plate is actually committed to a machine. See ApproveBatchFor.
+	}
+
+	// A bed with four products on it has nothing left to absorb, so it stops
+	// being a proposal here rather than staying open to a rearrangement nobody
+	// asked for. Under-full beds are left as Drafts on purpose - that is what
+	// lets the next matching colour join them. See batch_lock.go.
+	if strategy == production.StrategyColour {
+		s.lockFullBatches(ctx, created)
+	}
+	// New beds exist, so there is something to walk toward a printer. Debounced
+	// into one pass, and a no-op when auto-dispatch is off.
+	if len(created) > 0 {
+		s.triggerDispatch(ctx)
 	}
 	return created, unbatchable, held, nil
 }
@@ -374,7 +404,7 @@ func (s *Server) cachePreview(ctx context.Context, b gen.Batch) {
 		log.Warn("could not build preview plate", "batch", b.ID, "error", herr.msg)
 		return
 	}
-	fileID, err := s.storePlateSystem(ctx, b.ID, "preview", b.BatchNumber, plate.data, plate.bbox)
+	fileID, err := s.storePlateSystem(ctx, b.ID, "preview", plate)
 	if err != nil {
 		log.Warn("could not store preview plate", "batch", b.ID, "error", err)
 		return
@@ -475,8 +505,8 @@ func (s *Server) plateSliceSpecFor(ctx context.Context, jobs []gen.ProductionJob
 
 // storePlateSystem is storePlateAs attributed to systemActor (see
 // production_events.go): the batch worker has no signed-in user to credit.
-func (s *Server) storePlateSystem(ctx context.Context, batchID uuid.UUID, kind, batchNumber string, data []byte, bbox meshio.Bbox) (uuid.UUID, error) {
-	return s.storePlateAs(ctx, batchID, kind, batchNumber, data, bbox, systemActor)
+func (s *Server) storePlateSystem(ctx context.Context, batchID uuid.UUID, kind string, plate plateResult) (uuid.UUID, error) {
+	return s.storePlateAs(ctx, batchID, kind, plate, systemActor)
 }
 
 // triggerBatchPlan schedules a debounced replan (see BatchPlanEnqueuer)
@@ -522,6 +552,29 @@ func (s *Server) triggerBatchPlanIfThresholdMet(ctx context.Context) {
 	}
 	s.triggerBatchPlan(ctx)
 }
+
+// batchStrategy is how this deployment groups jobs onto beds, with the default
+// resolved here rather than in config so config keeps its stdlib-only imports
+// and the name cannot drift from production's own constant.
+//
+// An unrecognised value falls back to the default rather than failing: a typo in
+// BATCH_STRATEGY should not stop the floor batching, and the warning says what
+// happened.
+func (s *Server) batchStrategy() string {
+	switch v := strings.ToLower(strings.TrimSpace(s.cfg.BatchStrategy)); v {
+	case "", production.StrategyColour:
+		return production.StrategyColour
+	case batchStrategyPlanner:
+		return batchStrategyPlanner
+	default:
+		obs.FromContext(context.Background()).Warn(
+			"unrecognised BATCH_STRATEGY, falling back to colour batching", "value", v)
+		return production.StrategyColour
+	}
+}
+
+// batchStrategyPlanner selects the multi-strategy optimiser in planner.go.
+const batchStrategyPlanner = "planner"
 
 // batchMachineFamily is the one machine family every job on a bed needs, and
 // whether they agree on it.
@@ -760,11 +813,21 @@ func (s *Server) draftJobsByBatch(ctx context.Context) map[uuid.UUID][]string {
 // Both plans are scored through production.ScorePlan, so "better" means exactly
 // what it means to the optimizer that produced the proposal.
 func (s *Server) worthReplanning(
-	planned []production.PlannedBatch, poolByID map[string]production.PlanJob,
+	strategy string, planned []production.PlannedBatch, poolByID map[string]production.PlanJob,
 	draftJobs map[uuid.UUID][]string, now time.Time, gate production.BatchGate,
 ) (bool, string) {
 	if len(draftJobs) == 0 {
 		return true, "no existing drafts to preserve"
+	}
+	// The colour strategy has no score to compare against. EvaluateBatch and
+	// ScorePlan both measure a bed against TargetBedUtilisationPercent, and a
+	// bed of four planks sits at 38% by construction - so scoring a correct
+	// colour bed against the drafts would reliably decide it was not worth
+	// creating. Stability comes from the rule itself instead: the same jobs in
+	// the same order always produce the same beds, so an unchanged pool
+	// reproduces every draft exactly and keepUnchangedDrafts leaves them alone.
+	if strategy == production.StrategyColour {
+		return true, "colour batching is deterministic, so drafts it reproduces are kept by job set"
 	}
 
 	current := make([]production.PlannedBatch, 0, len(draftJobs))

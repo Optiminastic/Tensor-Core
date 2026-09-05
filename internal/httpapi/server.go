@@ -15,6 +15,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/secretbox"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
@@ -43,6 +44,23 @@ type Server struct {
 	jobEnqueuer   *production.JobCreationEnqueuer
 	batchEnqueuer *production.BatchPlanEnqueuer
 
+	// orderSyncEnqueuer schedules Shopify order pulls. Nil until
+	// EnableOrderSync is called, in which case the sync endpoint says so rather
+	// than running the pull on the request - see order_sync_worker.go for why
+	// that mattered.
+	orderSyncEnqueuer OrderSyncEnqueuer
+
+	// dispatchEnqueuer walks freshly locked beds to a printer without waiting
+	// for the periodic tick, which only fires on whichever process holds River
+	// leadership. Nil until EnableBatchDispatchQueue is called.
+	dispatchEnqueuer *production.DispatchEnqueuer
+
+	// lastEventRefresh debounces the fleet refresh a pushed BambuBuddy event
+	// triggers, so a burst of events does not become a burst of full fleet
+	// reads. See refreshFleetAfterEvent.
+	eventRefreshMu   sync.Mutex
+	lastEventRefresh time.Time
+
 	// lastPlannedPool is the signature of the job pool the last completed
 	// batch plan ran over, so an unchanged pool can be skipped. See
 	// AutoCreateBatches. Guarded by its mutex because the periodic tick and an
@@ -52,6 +70,15 @@ type Server struct {
 	// whether it has anywhere to call, so an install with no printers simply
 	// never syncs rather than erroring every cycle.
 	bambu *bambubuddy.Client
+	// renderer turns an order's personalisation text into a printable model.
+	// Nil when OpenSCAD is not installed, in which case a personalised job
+	// stays held with its reason rather than the service failing to start -
+	// the same way the design pipeline degrades without object storage.
+	renderer *personalise.Renderer
+	// modelEnqueuer schedules those renders. Nil until EnableModelGeneration
+	// is called; job creation then leaves personalised jobs at
+	// issue_reason = 'stl_missing' for an operator to resolve by hand.
+	modelEnqueuer *production.ModelGenEnqueuer
 	// bambuCache collapses the BambuBuddy reads that the live-status poll would
 	// otherwise multiply by the number of open tabs. Constructed here rather
 	// than opted into per-process (as permission freshness is) because there is
@@ -75,7 +102,8 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		logger:  logger,
 		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
 		secrets: box,
-		bambu:   bambubuddy.New(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey),
+		bambu: bambubuddy.NewWithTimeout(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey,
+			time.Duration(cfg.BambuBuddyTimeoutSeconds)*time.Second),
 		bambuCache: newBambuCache(
 			cfg.BambuPrinterIndexTTL, cfg.BambuStatusTTL, cfg.BambuErrorTTL,
 		),
@@ -103,6 +131,20 @@ func (s *Server) EnablePipeline(objects *storage.Client, enqueuer *slicing.Enque
 func (s *Server) EnableProductionQueue(jobs *production.JobCreationEnqueuer, batches *production.BatchPlanEnqueuer) {
 	s.jobEnqueuer = jobs
 	s.batchEnqueuer = batches
+}
+
+// EnableBatchDispatchQueue attaches the dispatch enqueuer, so creating a full
+// bed also schedules the pass that takes it to a printer.
+func (s *Server) EnableBatchDispatchQueue(e *production.DispatchEnqueuer) {
+	s.dispatchEnqueuer = e
+}
+
+// EnableModelGeneration turns on rendering personalised models from an order's
+// own text. Without it, a Dual Name Plank job is created and held as
+// 'stl_missing' - visible and fixable by hand, rather than silently absent.
+func (s *Server) EnableModelGeneration(r *personalise.Renderer, e *production.ModelGenEnqueuer) {
+	s.renderer = r
+	s.modelEnqueuer = e
 }
 
 // Router builds the Gin engine with CORS, health, and every router mounted at
@@ -137,6 +179,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)
 	s.registerShopify(r)
+	s.registerBambuBuddyEvents(r)
 	s.registerInternal(r)
 
 	return r

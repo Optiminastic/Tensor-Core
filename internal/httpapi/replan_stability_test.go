@@ -48,6 +48,7 @@ func TestWorthReplanningProtectsDraftsFromChurn(t *testing.T) {
 
 	t.Run("an identical plan is not worth applying", func(t *testing.T) {
 		apply, why := srv.worthReplanning(
+			batchStrategyPlanner,
 			[]production.PlannedBatch{same}, pool, drafts, time.Now(), production.BatchGate{})
 		if apply {
 			t.Errorf("replan applied for an identical plan (%s); this is pure churn", why)
@@ -66,6 +67,7 @@ func TestWorthReplanningProtectsDraftsFromChurn(t *testing.T) {
 		withC := map[string]production.PlanJob{"a": a, "b": b, "c": c}
 
 		apply, why := srv.worthReplanning(
+			batchStrategyPlanner,
 			[]production.PlannedBatch{grown}, withC, drafts, time.Now(), production.BatchGate{})
 		if !apply {
 			t.Errorf("replan skipped a plan that batches an extra job (%s); a Draft must be able to grow", why)
@@ -77,6 +79,7 @@ func TestWorthReplanningProtectsDraftsFromChurn(t *testing.T) {
 		// always-replan behaviour rather than wedging the planner.
 		open := stabilityServer(0)
 		apply, _ := open.worthReplanning(
+			batchStrategyPlanner,
 			[]production.PlannedBatch{same}, pool, drafts, time.Now(), production.BatchGate{})
 		if !apply {
 			t.Error("with a 0% threshold an equal-scoring plan should still apply")
@@ -85,6 +88,7 @@ func TestWorthReplanningProtectsDraftsFromChurn(t *testing.T) {
 
 	t.Run("no drafts means nothing to protect", func(t *testing.T) {
 		apply, _ := srv.worthReplanning(
+			batchStrategyPlanner,
 			[]production.PlannedBatch{same}, pool, nil, time.Now(), production.BatchGate{})
 		if !apply {
 			t.Error("replan skipped with no existing drafts; there is nothing to churn")
@@ -97,6 +101,7 @@ func TestWorthReplanningProtectsDraftsFromChurn(t *testing.T) {
 		// proceed rather than silently scoring against a partial batch.
 		partial := map[string]production.PlanJob{"a": a}
 		apply, why := srv.worthReplanning(
+			batchStrategyPlanner,
 			[]production.PlannedBatch{same}, partial, drafts, time.Now(), production.BatchGate{})
 		if !apply {
 			t.Errorf("replan skipped on an unscoreable draft (%s); it must fail open", why)

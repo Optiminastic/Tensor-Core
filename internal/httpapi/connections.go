@@ -62,6 +62,12 @@ func (s *Server) registerConnections(r *gin.Engine) {
 	g.PUT("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.upsertConnection)
 	g.DELETE("/:provider", s.guards.RequirePermission(auth.BrandManage.Key()), s.deleteConnection)
 	g.POST("/shopify/sync", s.guards.RequirePermission(auth.BrandManage.Key()), s.syncShopifyOrders)
+
+	// Not under /brands/:slug - it deliberately spans every brand, and the
+	// all-brands view's slug is a sentinel with no connection of its own.
+	all := r.Group("/connections/shopify")
+	all.Use(s.guards.RequireUser())
+	all.POST("/sync-all", s.guards.RequirePermission(auth.BrandManage.Key()), s.syncAllShopifyOrders)
 }
 
 // providerParam validates the {provider} path segment against the fixed set.
@@ -168,13 +174,21 @@ func (s *Server) deleteConnection(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// syncShopifyOrders imports the brand's most recent Shopify orders, using the
-// access token already stored on this brand's Shopify connection (the same one
-// the frontend's OAuth flow wrote via PUT .../connections/shopify) - no
-// separate order-import OAuth grant required. This is the only ongoing way
-// orders enter Tensor: it runs when someone presses "Sync from Shopify", never
-// on a schedule and never from a Shopify webhook. Re-running it is safe - each
-// order upserts by shopify_order_id.
+// syncShopifyOrders schedules an import of the brand's Shopify orders.
+//
+// Scheduled, not performed: the pull is minutes of work - up to 2000 orders,
+// each a database write - and it used to run right here, on the request
+// context. The browser gives up after five seconds (TIMEOUT_MS in the
+// frontend's connections.service.ts), Gin cancels the context when it does, and
+// every import still to come failed.
+//
+// It failed silently, which is what made it costly. Per-order failures are
+// logged and skipped by design, so the handler returned {"imported": 4} and
+// looked like a success while thirty-five orders in the middle of the range
+// never arrived. Orders 114775-114809 were missing from the Orders page for
+// exactly this reason.
+//
+// Re-running is safe either way: each order upserts by shopify_order_id.
 func (s *Server) syncShopifyOrders(c *gin.Context) {
 	slug, ok := brandSlugParam(c)
 	if !ok {
@@ -184,16 +198,34 @@ func (s *Server) syncShopifyOrders(c *gin.Context) {
 	conn, err := s.store.Q.GetConnectionWithToken(ctx, gen.GetConnectionWithTokenParams{
 		BrandSlug: slug, Provider: shopifyProvider,
 	})
-	shop, token, connected := shopifyCredentials(conn, err)
-	if !connected {
+	// Checked here rather than left to the worker so pressing Sync on a brand
+	// with no store still says so immediately, instead of appearing to start
+	// work that quietly does nothing.
+	if _, _, connected := shopifyCredentials(conn, err); !connected {
 		detail(c, http.StatusConflict, "This brand's Shopify isn't connected yet.")
 		return
 	}
-	imported, err := s.fetchAndImportShopifyOrders(ctx, nil, shop, token)
-	if err != nil {
-		obs.FromContext(ctx).Error("shopify order sync failed", "brand", slug, "shop", shop, "error", err)
-		detail(c, http.StatusBadGateway, "Could not fetch orders from Shopify.")
+	s.startOrderSync(c, slug)
+}
+
+// startOrderSync hands a pull to the worker and reports that it started.
+//
+// brandSlug empty means every connected store.
+func (s *Server) startOrderSync(c *gin.Context, brandSlug string) {
+	ctx := c.Request.Context()
+	if s.orderSyncEnqueuer == nil {
+		detail(c, http.StatusServiceUnavailable,
+			"The order sync worker isn't running, so orders can't be fetched right now.")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"imported": imported})
+	if err := s.orderSyncEnqueuer.Enqueue(ctx, brandSlug); err != nil {
+		obs.FromContext(ctx).Error("could not schedule a shopify order sync",
+			"brand", brandSlug, "error", err)
+		detail(c, http.StatusInternalServerError, "Could not start the Shopify sync.")
+		return
+	}
+	// 202, and no count: the import has not happened yet, and an "imported"
+	// number here could only be a guess. The page refreshes to show what
+	// actually landed.
+	c.JSON(http.StatusAccepted, gin.H{"started": true})
 }

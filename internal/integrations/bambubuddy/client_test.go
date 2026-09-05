@@ -7,7 +7,10 @@ import "testing"
 // is not something a config value should decide.
 func TestNewTrimsTrailingSlashAndSpace(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
-		{"trailing slash", "http://opti.tail72d1ae.ts.net:8000/", "http://opti.tail72d1ae.ts.net:8000"},
+		// A generic host, like the cases below: a real hostname here was caught by
+		// a repo-wide URL find-and-replace that rewrote the expected value too, so
+		// the test asserted the slash SURVIVED - the opposite of its own name.
+		{"trailing slash", "http://host:8000/", "http://host:8000"},
 		{"several slashes", "http://host:8000///", "http://host:8000"},
 		{"surrounding space", "  http://host:8000  ", "http://host:8000"},
 		{"already clean", "http://host:8000", "http://host:8000"},

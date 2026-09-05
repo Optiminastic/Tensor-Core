@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,63 +16,85 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // productionJobResponse is the API shape of a production job. machine_* are resolved via the
 // job's batch and stay null until the batching phase.
 type productionJobResponse struct {
-	ID                         string     `json:"id"`
-	JobNumber                  string     `json:"job_number"`
-	OrderID                    *string    `json:"order_id"`
-	BatchID                    *string    `json:"batch_id"`
-	Description                string     `json:"description"`
-	Quantity                   int32      `json:"quantity"`
-	Status                     string     `json:"status"`
-	AssemblyStatus             string     `json:"assembly_status"`
-	FinishingStatus            string     `json:"finishing_status"`
-	QcStatus                   string     `json:"qc_status"`
-	PackagingStatus            string     `json:"packaging_status"`
-	ShopifyOrderID             *int64     `json:"shopify_order_id"`
-	ShopifyCustomerID          *int64     `json:"shopify_customer_id"`
-	CustomerName               *string    `json:"customer_name"`
-	Sku                        *string    `json:"sku"`
-	ProductName                *string    `json:"product_name"`
-	Material                   *string    `json:"material"`
-	Colour                     *string    `json:"colour"`
-	NozzleProfile              *string    `json:"nozzle_profile"`
-	FilamentGramsRequired      *float64   `json:"filament_grams_required"`
-	PrintFileID                *string    `json:"print_file_id"`
-	EstimatedPrintTimeMinutes  *int32     `json:"estimated_print_time_minutes"`
-	DueDate                    *time.Time `json:"due_date"`
-	Priority                   int32      `json:"priority"`
-	PersonalisationName        *string    `json:"personalisation_name"`
-	PersonalisationFont        *string    `json:"personalisation_font"`
-	PersonalisationColour      *string    `json:"personalisation_colour"`
-	PersonalisationVariant     *string    `json:"personalisation_variant"`
-	PersonalisationStatus      string     `json:"personalisation_status"`
-	NameConfirmed              bool       `json:"name_confirmed"`
-	PhotoConfirmed             bool       `json:"photo_confirmed"`
-	FontConfirmed              bool       `json:"font_confirmed"`
-	ColourConfirmed            bool       `json:"colour_confirmed"`
-	VariantConfirmed           bool       `json:"variant_confirmed"`
-	CustomerApprovalReceived   bool       `json:"customer_approval_received"`
-	PersonalisationNotes       *string    `json:"personalisation_notes"`
-	PersonalisationPhotoFileID *string    `json:"personalisation_photo_file_id"`
-	PersonalisationValidatedBy *string    `json:"personalisation_validated_by"`
-	PersonalisationValidatedAt *time.Time `json:"personalisation_validated_at"`
-	ReprintOfJobID             *string    `json:"reprint_of_job_id"`
-	SplitOfJobID               *string    `json:"split_of_job_id"`
-	Held                       bool       `json:"held"`
-	Colours                    []string   `json:"colours"`
-	SupportUsed                *bool      `json:"support_used"`
-	InfillPct                  *float64   `json:"infill_pct"`
-	LeftNozzleMm               *float64   `json:"left_nozzle_mm"`
-	RightNozzleMm              *float64   `json:"right_nozzle_mm"`
-	FlowPct                    *float64   `json:"flow_pct"`
-	QualityMm                  *float64   `json:"quality_mm"`
-	MachineFamily              *string    `json:"machine_family"`
-	IssueReason                *string    `json:"issue_reason"`
+	ID                    string   `json:"id"`
+	JobNumber             string   `json:"job_number"`
+	OrderID               *string  `json:"order_id"`
+	BatchID               *string  `json:"batch_id"`
+	Description           string   `json:"description"`
+	Quantity              int32    `json:"quantity"`
+	Status                string   `json:"status"`
+	AssemblyStatus        string   `json:"assembly_status"`
+	FinishingStatus       string   `json:"finishing_status"`
+	QcStatus              string   `json:"qc_status"`
+	PackagingStatus       string   `json:"packaging_status"`
+	ShopifyOrderID        *int64   `json:"shopify_order_id"`
+	ShopifyCustomerID     *int64   `json:"shopify_customer_id"`
+	CustomerName          *string  `json:"customer_name"`
+	Sku                   *string  `json:"sku"`
+	ProductName           *string  `json:"product_name"`
+	Material              *string  `json:"material"`
+	Colour                *string  `json:"colour"`
+	NozzleProfile         *string  `json:"nozzle_profile"`
+	FilamentGramsRequired *float64 `json:"filament_grams_required"`
+	PrintFileID           *string  `json:"print_file_id"`
+	// ModelStatus says where this job's geometry comes from and whether it has
+	// arrived: "ready", "generating", "failed" or "approval_required".
+	//
+	// Derived here rather than in the browser because it turns on
+	// IsGeneratedProduct, and a second copy of that rule in TypeScript would
+	// drift - a product the two disagreed about would either wait for an
+	// approval that never comes or a render that never runs.
+	ModelStatus string `json:"model_status"`
+	// ModelError is why a generated model could not be built, in the
+	// renderer's own words. Null unless ModelStatus is "failed".
+	ModelError *string `json:"model_error"`
+	// What the customer asked for, snapshotted when the job was created.
+	//
+	// VariantTitle is the storefront's own option string - "BABY PINK / NO
+	// LIGHT" - the colour and the light choice together, because that is how
+	// the store sells it. PersonalisationProperties is every custom attribute
+	// for this line, verbatim and in the order the customer answered them,
+	// which is where the two names and the heart count actually live: the
+	// typed personalisation_name joins them into "A & B" and loses the split.
+	VariantTitle               *string         `json:"variant_title"`
+	PersonalisationProperties  json.RawMessage `json:"personalisation_properties"`
+	EstimatedPrintTimeMinutes  *int32          `json:"estimated_print_time_minutes"`
+	DueDate                    *time.Time      `json:"due_date"`
+	Priority                   int32           `json:"priority"`
+	PersonalisationName        *string         `json:"personalisation_name"`
+	PersonalisationFont        *string         `json:"personalisation_font"`
+	PersonalisationColour      *string         `json:"personalisation_colour"`
+	PersonalisationVariant     *string         `json:"personalisation_variant"`
+	PersonalisationStatus      string          `json:"personalisation_status"`
+	NameConfirmed              bool            `json:"name_confirmed"`
+	PhotoConfirmed             bool            `json:"photo_confirmed"`
+	FontConfirmed              bool            `json:"font_confirmed"`
+	ColourConfirmed            bool            `json:"colour_confirmed"`
+	VariantConfirmed           bool            `json:"variant_confirmed"`
+	CustomerApprovalReceived   bool            `json:"customer_approval_received"`
+	PersonalisationNotes       *string         `json:"personalisation_notes"`
+	PersonalisationPhotoFileID *string         `json:"personalisation_photo_file_id"`
+	PersonalisationValidatedBy *string         `json:"personalisation_validated_by"`
+	PersonalisationValidatedAt *time.Time      `json:"personalisation_validated_at"`
+	ReprintOfJobID             *string         `json:"reprint_of_job_id"`
+	SplitOfJobID               *string         `json:"split_of_job_id"`
+	Held                       bool            `json:"held"`
+	Colours                    []string        `json:"colours"`
+	SupportUsed                *bool           `json:"support_used"`
+	InfillPct                  *float64        `json:"infill_pct"`
+	LeftNozzleMm               *float64        `json:"left_nozzle_mm"`
+	RightNozzleMm              *float64        `json:"right_nozzle_mm"`
+	FlowPct                    *float64        `json:"flow_pct"`
+	QualityMm                  *float64        `json:"quality_mm"`
+	MachineFamily              *string         `json:"machine_family"`
+	IssueReason                *string         `json:"issue_reason"`
 	// Geometry/slice snapshot taken from the matched design at creation time
 	// (see 0030_job_geometry_snapshot.sql). BboxXMm/YMm/ZMm and ColourCount
 	// are per-unit facts; SupportWeightG/PurgeWeightG are already scaled to
@@ -86,6 +109,19 @@ type productionJobResponse struct {
 	// job sits end to end - see production.PipelineStage's doc comment for
 	// exactly how it's derived and its two documented simplifications.
 	PipelineStage string `json:"pipeline_stage"`
+	// BatchingBlockedReason says, in a sentence an operator can act on, why
+	// this job is not eligible for a bed. Null when nothing is blocking it.
+	//
+	// The pipeline already computed this and threw it away: exclusionReason
+	// produced exactly this text inside AutoCreateBatches and logged it at
+	// Debug. A job could sit unbatched indefinitely with the explanation
+	// sitting in a log line nobody reads.
+	//
+	// Deliberately NOT issue_reason. That column's presence excludes a job from
+	// ListBatchableJobs, so writing to it to mark a display concern would
+	// silently strand the job - see production_issues.go, which makes the same
+	// point about station issues.
+	BatchingBlockedReason *string `json:"batching_blocked_reason"`
 	// PersonalisationLog explains what's ready/still pending and why - a
 	// checklist derived from the six confirm booleans above, nil when
 	// personalisation isn't required for this job at all.
@@ -109,6 +145,64 @@ type splitProgressResponse struct {
 }
 
 // productionJobDTO builds the API shape for one job. batchStatus/dispatched
+// batchingBlockedReason explains why a queued job cannot be batched, or nil
+// when nothing is stopping it.
+//
+// Only meaningful for a job that is actually waiting for a bed: one already on
+// a batch, printing, or past printing is not "blocked" in any sense worth
+// showing, and saying so would put a red row against work that is going fine.
+//
+// The conditions mirror ListExcludedQueuedJobs exactly - that query is the
+// complement of ListBatchableJobs - so this reads as the same answer the
+// planner would give. Wording comes from production's Reason* constants so the
+// two never drift into saying the same thing differently.
+func batchingBlockedReason(j gen.ProductionJob) *string {
+	if j.Status != production.StatusQueued || j.BatchID != nil {
+		return nil
+	}
+	// A product Tensor is still rendering is making progress, not blocked. It
+	// carries stl_missing because it genuinely has no file yet, but saying so
+	// puts every plank in the queue under a red warning for the twenty seconds
+	// its own render takes - which teaches an operator that red means nothing.
+	// The "Creating" pill already says where it is.
+	if modelStatusOf(j) == ModelGenerating {
+		return nil
+	}
+
+	blocked := j.Held ||
+		(j.PersonalisationStatus != production.PersonalisationValidated &&
+			j.PersonalisationStatus != production.PersonalisationNotRequired) ||
+		j.IssueReason != nil
+	if !blocked {
+		return nil
+	}
+	reason := humanReason(exclusionReason(j.Held, j.PersonalisationStatus, j.IssueReason))
+	return &reason
+}
+
+// issueWording turns an issue_reason enum into something an operator can read.
+//
+// exclusionReason falls through to the raw value for issues the planner has no
+// sentence for, and those leaked to the queue as "stl_missing" - a column name
+// shown to somebody who has never seen the schema.
+var issueWording = map[string]string{
+	production.IssueSTLMissing:         "No model file yet. Upload one to release this job.",
+	production.IssueSKUMissing:         "This line has no SKU, so nothing can be matched to it.",
+	production.IssueNoApprovedDesign:   "No approved design for this SKU.",
+	production.IssueColourMissing:      "The design does not say which colour to print.",
+	production.IssueMaterialMissing:    "The design does not say which material to print in.",
+	production.IssueFilamentOutOfStock: "Not enough filament in stock for this job.",
+}
+
+// humanReason maps an enum to its wording, passing anything already written as
+// a sentence straight through - exclusionReason returns both kinds.
+func humanReason(reason string) string {
+	if worded, ok := issueWording[reason]; ok {
+		return worded
+	}
+	return reason
+}
+
 // are the two bits of cross-table state PipelineStage needs beyond the job
 // row itself - resolved by the caller (singleJobDTO for one job,
 // productionJobsDTO's bulk lookups for a list), never re-queried here.
@@ -125,7 +219,8 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
 	})
 	return productionJobResponse{
-		ID: j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
+		BatchingBlockedReason: batchingBlockedReason(j),
+		ID:                    j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
 		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
 		QcStatus:        j.QcStatus,
@@ -133,6 +228,10 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
 		FilamentGramsRequired: db.NumFloatPtr(j.FilamentGramsRequired), PrintFileID: uuidPtrStr(j.PrintFileID),
+		ModelStatus:               modelStatusOf(j),
+		ModelError:                j.ModelError,
+		VariantTitle:              j.VariantTitle,
+		PersonalisationProperties: rawJSON(j.PersonalisationProperties, "[]"),
 		EstimatedPrintTimeMinutes: j.EstimatedPrintTimeMinutes, DueDate: db.TimePtr(j.DueDate),
 		Priority: j.Priority, PersonalisationName: j.PersonalisationName, PersonalisationFont: j.PersonalisationFont,
 		PersonalisationColour: j.PersonalisationColour, PersonalisationVariant: j.PersonalisationVariant,
@@ -242,6 +341,7 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.POST("/from-order/:order_id", s.guards.RequirePermission(auth.ProductionCreate.Key()), s.createJobsFromOrder)
 	g.POST("/:id/personalisation", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.validatePersonalisation)
 	g.POST("/:id/print-file", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.setPrintFile)
+	s.registerJobModelUpload(g)
 	g.POST("/:id/fail", s.guards.RequirePermission(auth.ProductionFail.Key()), s.failProductionJob)
 	g.POST("/:id/assembly", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.submitAssembly)
 	g.POST("/:id/assembly/skip", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.skipAssembly)
@@ -326,12 +426,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 }
 
 func (s *Server) getProductionJob(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
-	if !ok {
-		return
-	}
 	ctx := c.Request.Context()
-	j, err := s.store.Q.GetProductionJobByID(ctx, id)
+	j, err := s.findProductionJob(ctx, c.Param("id"))
 	if err != nil {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
@@ -341,7 +437,7 @@ func (s *Server) getProductionJob(c *gin.Context) {
 	// endpoint, so no N+1 risk) - only surfaced when the group is actually
 	// bigger than this job alone, which is a no-op for the overwhelming
 	// majority of jobs that were never split.
-	if progress, err := s.store.Q.GetSplitJobProgress(ctx, id); err == nil && progress.TotalQuantity > int64(j.Quantity) {
+	if progress, err := s.store.Q.GetSplitJobProgress(ctx, j.ID); err == nil && progress.TotalQuantity > int64(j.Quantity) {
 		dto.SplitProgress = &splitProgressResponse{
 			TotalQuantity: progress.TotalQuantity, CompletedQuantity: progress.CompletedQuantity,
 			RemainingQuantity: progress.TotalQuantity - progress.CompletedQuantity,
@@ -449,6 +545,16 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	if err != nil {
 		return nil, fmt.Errorf("load order: %w", err)
 	}
+	// Not every imported order is work for the print floor - see
+	// ShouldCreateJobs. Returning no jobs and no error, because an order this
+	// run does not cover is a normal outcome, not a failure to retry: River
+	// would otherwise back off and retry it five times before giving up.
+	if !ShouldCreateJobs(order) {
+		obs.FromContext(ctx).Info("order is outside this production run; no jobs created",
+			"order", order.OrderNumber)
+		return nil, nil
+	}
+
 	// A fast path only: it skips buildJobsForOrder's per-line design lookups on
 	// a replay. The authoritative check is the locked one inside the
 	// transaction below - this one races by construction.
@@ -529,8 +635,11 @@ func (s *Server) buildJobsForOrder(
 ) ([]gen.InsertProductionJobParams, error) {
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
-	for _, li := range items {
-		jobNumber, err := s.store.Q.NextJobNumber(ctx)
+	for i, li := range items {
+		// Named for the Shopify order, so the job, the order and the customer's
+		// own paperwork all carry the same number. Falls back to the sequence
+		// when the order number has no digits to borrow.
+		jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, i)
 		if err != nil {
 			return nil, err
 		}
@@ -539,7 +648,17 @@ func (s *Server) buildJobsForOrder(
 			quantity = 1
 		}
 		status, confirms := production.AutoValidatePersonalisation(li)
-		match := s.matchDesignForSKU(ctx, li.SKU)
+
+		// A product Tensor renders itself has no design and never will, so
+		// looking one up would stamp 'no_approved_design' - a job waiting on a
+		// designer who is never coming. It waits on its own render instead,
+		// which is 'stl_missing', and the generator clears that when the model
+		// lands. See dnp_generate.go.
+		var match production.MatchResult
+		generated := IsGeneratedProduct(deref(li.SKU), li.ProductName)
+		if !generated {
+			match = s.matchDesignForSKU(ctx, li.SKU)
+		}
 
 		p := gen.InsertProductionJobParams{
 			ID: uuid.New(), JobNumber: jobNumber,
@@ -561,11 +680,184 @@ func (s *Server) buildJobsForOrder(
 			ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
 			CustomerApprovalReceived: confirms.Approval,
 			Colours:                  []byte("[]"),
+			// Snapshotted, not looked up: the job must show what it was made
+			// from even after the order is re-synced and its line items are
+			// rewritten - the same reason material and bbox are copied here.
+			VariantTitle:              li.VariantTitle,
+			PersonalisationProperties: propertiesJSON(li.Properties),
 		}
-		applyMatch(&p, match, quantity)
+		if generated {
+			reason := production.IssueSTLMissing
+			p.IssueReason = &reason
+
+			// There is nothing for a person to confirm about a generated
+			// product's personalisation. The two names and the heart count are
+			// not preferences somebody checks against a proof - they are the
+			// INPUTS the model is built from, consumed directly by OpenSCAD.
+			// The font is the template's, and the colour is the SKU.
+			//
+			// Left as 'pending' these jobs sat behind "Waiting for
+			// personalisation details to be confirmed" for ever, waiting on a
+			// check with nothing to check: no order carries a font, colour or
+			// variant property, so font_confirmed and its two siblings could
+			// never become true.
+			p.PersonalisationStatus = production.PersonalisationNotRequired
+			p.NameConfirmed = true
+			p.PhotoConfirmed = true
+			p.FontConfirmed = true
+			p.ColourConfirmed = true
+			p.VariantConfirmed = true
+			p.CustomerApprovalReceived = true
+
+			// The colour the customer chose, which for a generated product
+			// arrives only in the variant - "SKY BLUE / NO LIGHT". Without
+			// this a plank reaches the planner with no colour at all, and
+			// colour is what decides which planks can share a bed and which
+			// filament has to be loaded.
+			if colour := colourFromVariant(li.VariantTitle); colour != "" {
+				p.Colour = &colour
+				if raw, err := json.Marshal([]string{colour}); err == nil {
+					p.Colours = raw
+				}
+			}
+		} else {
+			applyMatch(&p, match, quantity)
+		}
+
+		// Last resort: the colour the ORDER itself states.
+		//
+		// A generated product takes its colour from the variant just above, and
+		// a matched design supplies its own - but a line that matched no design
+		// still names a colour on the order, and that was simply dropped. Colour
+		// now decides which jobs may share a bed (see production.GroupByColour),
+		// so a colourless job cannot be batched at all. Reading what the customer
+		// actually ordered is better than leaving it queued for ever.
+		if isEmptyColours(p.Colours) && li.Colour != nil {
+			if c := strings.TrimSpace(*li.Colour); c != "" {
+				if raw, err := json.Marshal([]string{c}); err == nil {
+					p.Colours = raw
+				}
+				if p.Colour == nil {
+					p.Colour = &c
+				}
+			}
+		}
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// isEmptyColours reports whether a job's colours snapshot carries nothing -
+// unset, or the empty array the insert defaults to.
+func isEmptyColours(raw []byte) bool {
+	return len(decodeColours(raw)) == 0
+}
+
+// Model states a job can be in, from the point of view of "can this be
+// printed yet".
+const (
+	// ModelReady - the job has geometry and needs nothing from anyone.
+	ModelReady = "ready"
+	// ModelGenerating - a product Tensor builds itself, whose render has not
+	// landed yet. No human step; it clears on its own.
+	ModelGenerating = "generating"
+	// ModelFailed - a render that will not succeed on its own. Distinct from
+	// generating because the two look identical on the job otherwise (no print
+	// file either way) and the difference is whether anyone needs to act.
+	ModelFailed = "failed"
+	// ModelApprovalRequired - a product Tensor cannot build. Somebody has to
+	// supply the model, and supplying it IS the approval: attaching a file is
+	// what releases the job into batching.
+	ModelApprovalRequired = "approval_required"
+)
+
+// findProductionJob resolves a job by either identifier.
+//
+// The uuid is what the database joins on; the job number - "JOB-114556" - is
+// what a person reads off a plank, quotes to a customer and types into a
+// browser. Both are unique, so accepting both costs one branch and means the
+// URL can carry the number that means something instead of a uuid nobody can
+// read back over the phone.
+//
+// Uuid is tried first because it is the exact form every internal link uses;
+// only something that is not a uuid is looked up as a number, so a job whose
+// number somehow looked like a uuid could still be reached by id.
+func (s *Server) findProductionJob(ctx context.Context, ref string) (gen.ProductionJob, error) {
+	if id, err := uuid.Parse(ref); err == nil {
+		return s.store.Q.GetProductionJobByID(ctx, id)
+	}
+	return s.store.Q.GetProductionJobByNumber(ctx, ref)
+}
+
+// modelStatusOf reports whether a job can be printed, and if not, who is
+// waiting on whom.
+func modelStatusOf(j gen.ProductionJob) string {
+	if j.PrintFileID != nil {
+		return ModelReady
+	}
+	if IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)) {
+		// Checked before "generating": a failed render is still a render that
+		// has not landed, and reporting it as in-progress would leave the job
+		// looking busy for ever.
+		if j.ModelError != nil {
+			return ModelFailed
+		}
+		return ModelGenerating
+	}
+	return ModelApprovalRequired
+}
+
+// jobNumberFor names the index-th job on an order after the order itself,
+// falling back to the sequence.
+//
+// The fallback covers two cases. An order number with no digits to borrow has
+// nothing to derive from; and a number already taken would violate the unique
+// index, which aborts the transaction and leaves the order with NO jobs - a
+// far worse outcome than a job numbered from the sequence. Order numbers are
+// unique, so the second should never happen; it is guarded because the cost of
+// the check is one indexed lookup and the cost of being wrong is a lost order.
+func (s *Server) jobNumberFor(ctx context.Context, orderNumber string, index int) (string, error) {
+	if candidate := jobNumberForOrder(orderNumber, index); candidate != "" {
+		taken, err := s.store.Q.JobNumberExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
+		}
+		obs.FromContext(ctx).Warn("job number already taken; falling back to the sequence",
+			"order", orderNumber, "candidate", candidate)
+	}
+	return s.store.Q.NextJobNumber(ctx)
+}
+
+// colourFromVariant reads the filament colour out of a storefront variant.
+//
+// The store sells colour and the light option as one string - "SKY BLUE / NO
+// LIGHT", "RED / I NEED LIGHT + Rs390" - so the colour is everything before
+// the first slash. Only the colour is taken: the light option is a fulfilment
+// extra, not something that changes which filament goes in the printer.
+func colourFromVariant(variant *string) string {
+	if variant == nil {
+		return ""
+	}
+	colour, _, _ := strings.Cut(*variant, "/")
+	return strings.TrimSpace(colour)
+}
+
+// propertiesJSON encodes a line's custom attributes for the job snapshot.
+//
+// Always valid JSON: the column is NOT NULL, and a line with nothing on it is
+// an empty list rather than a null the reader has to guard.
+func propertiesJSON(props []production.LineProp) []byte {
+	if len(props) == 0 {
+		return []byte("[]")
+	}
+	raw, err := json.Marshal(props)
+	if err != nil {
+		return []byte("[]")
+	}
+	return raw
 }
 
 // defaultUnitPrintMinutes derives a per-unit print time from the bounding box

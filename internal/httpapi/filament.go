@@ -14,9 +14,12 @@ import (
 )
 
 type filamentResponse struct {
-	ID                string    `json:"id"`
-	Material          string    `json:"material"`
-	Colour            *string   `json:"colour"`
+	ID       string  `json:"id"`
+	Material string  `json:"material"`
+	Colour   *string `json:"colour"`
+	// ColourHex is the swatch for Colour, e.g. "#1A1A1A". Null on rows entered
+	// by hand: a made-up default would render a confidently wrong colour.
+	ColourHex         *string   `json:"colour_hex"`
 	GramsAvailable    float64   `json:"grams_available"`
 	ReorderLevelGrams float64   `json:"reorder_level_grams"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -25,7 +28,7 @@ type filamentResponse struct {
 
 func filamentDTO(f gen.FilamentInventory) filamentResponse {
 	return filamentResponse{
-		ID: f.ID.String(), Material: f.Material, Colour: f.Colour,
+		ID: f.ID.String(), Material: f.Material, Colour: f.Colour, ColourHex: f.ColourHex,
 		GramsAvailable: db.NumFloat(f.GramsAvailable), ReorderLevelGrams: db.NumFloat(f.ReorderLevelGrams),
 		CreatedAt: db.Time(f.CreatedAt), UpdatedAt: db.Time(f.UpdatedAt),
 	}
