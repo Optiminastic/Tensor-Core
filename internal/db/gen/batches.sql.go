@@ -691,10 +691,11 @@ func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams
 }
 
 const listBatchesToDispatch = `-- name: ListBatchesToDispatch :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches
-WHERE status IN ('pending_approval', 'open')
-ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
-         created_at ASC, id ASC
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id FROM batches b
+WHERE b.status IN ('pending_approval', 'open')
+ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id) ASC NULLS LAST,
+         NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         b.created_at ASC, b.id ASC
 `
 
 // Batches that still have somewhere to go, OLDEST ORDER FIRST.
@@ -708,6 +709,14 @@ ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint ASC NUL
 // Both pre-print states are returned and the caller decides what each needs:
 // pending_approval wants approving, open wants sending once its plate has been
 // sliced. Anything further along (in_progress, completed) has left the queue.
+//
+// Priority beds go ahead of that, which is the ONLY thing that overrides
+// longest-waiting. Forming beds priority-first is not enough on its own: a bed
+// carrying an expedited plank still reaches a printer in batch-number order,
+// so without this the customer who paid to jump the queue waits behind every
+// bed formed before theirs. min(priority) ASC NULLS LAST is the same
+// convention as the machine scheduler - LOWER IS MORE URGENT - and a bed with
+// no jobs sorts last rather than first.
 func (q *Queries) ListBatchesToDispatch(ctx context.Context) ([]Batch, error) {
 	rows, err := q.db.Query(ctx, listBatchesToDispatch)
 	if err != nil {

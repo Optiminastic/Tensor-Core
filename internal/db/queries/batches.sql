@@ -304,10 +304,19 @@ ORDER BY j.job_number;
 -- Both pre-print states are returned and the caller decides what each needs:
 -- pending_approval wants approving, open wants sending once its plate has been
 -- sliced. Anything further along (in_progress, completed) has left the queue.
-SELECT * FROM batches
-WHERE status IN ('pending_approval', 'open')
-ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
-         created_at ASC, id ASC;
+--
+-- Priority beds go ahead of that, which is the ONLY thing that overrides
+-- longest-waiting. Forming beds priority-first is not enough on its own: a bed
+-- carrying an expedited plank still reaches a printer in batch-number order,
+-- so without this the customer who paid to jump the queue waits behind every
+-- bed formed before theirs. min(priority) ASC NULLS LAST is the same
+-- convention as the machine scheduler - LOWER IS MORE URGENT - and a bed with
+-- no jobs sorts last rather than first.
+SELECT b.* FROM batches b
+WHERE b.status IN ('pending_approval', 'open')
+ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id) ASC NULLS LAST,
+         NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         b.created_at ASC, b.id ASC;
 
 -- name: ReopenBatchForReplanning :one
 -- Returns a locked bed to being a Draft so the planner can refill it.
