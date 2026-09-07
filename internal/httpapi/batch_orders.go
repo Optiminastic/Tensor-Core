@@ -127,6 +127,7 @@ func (s *Server) decorateBatches(ctx context.Context, out []batchResponse, ids [
 	orders := orderNumbersByBatch(rows)
 	colours := s.batchColoursFor(ctx, rows)
 	priority := priorityByBatch(rows)
+	priorityOrders := priorityOrderNumbersByBatch(rows)
 	for i := range out {
 		id, err := uuid.Parse(out[i].ID)
 		if err != nil {
@@ -135,6 +136,40 @@ func (s *Server) decorateBatches(ctx context.Context, out []batchResponse, ids [
 		out[i].OrderNumbers = orders[id]
 		out[i].Colours = colours[id]
 		out[i].HasPriority = priority[id]
+		out[i].PriorityOrderNumbers = priorityOrders[id]
+	}
+	return out
+}
+
+// priorityOrderNumbersByBatch is WHICH orders on each bed paid for priority.
+//
+// A parallel list to orderNumbersByBatch rather than a richer shape for the
+// Jobs column, because that column is a list of identifiers and stays one: the
+// frontend tints the tags it finds here and renders every other tag exactly as
+// before. Deduplicated the same way - one order with two priority planks on a
+// bed is one tag.
+func priorityOrderNumbersByBatch(rows []gen.ListJobNumbersForBatchesRow) map[uuid.UUID][]string {
+	out := map[uuid.UUID][]string{}
+	seen := map[uuid.UUID]map[string]bool{}
+	for _, r := range rows {
+		if r.BatchID == nil || r.Priority >= NormalRank {
+			continue
+		}
+		number := orderNumberFromJobNumber(r.JobNumber)
+		if number == "" {
+			continue
+		}
+		if seen[*r.BatchID] == nil {
+			seen[*r.BatchID] = map[string]bool{}
+		}
+		if seen[*r.BatchID][number] {
+			continue
+		}
+		seen[*r.BatchID][number] = true
+		out[*r.BatchID] = append(out[*r.BatchID], number)
+	}
+	for id := range out {
+		sortOrderNumbers(out[id])
 	}
 	return out
 }

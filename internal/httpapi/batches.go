@@ -57,6 +57,10 @@ type batchResponse struct {
 	// IS the bed somebody is waiting on, and colour batching mixes a priority
 	// order in with three standard ones as a matter of course.
 	HasPriority bool `json:"has_priority"`
+	// PriorityOrderNumbers is the subset of OrderNumbers that paid for priority
+	// dispatch, so the Jobs column can tint those tags without the frontend
+	// having to know the shipping rule.
+	PriorityOrderNumbers []string `json:"priority_order_numbers,omitempty"`
 	// Colours is the distinct filament colours on this bed, with the swatch to
 	// draw each one. One entry under colour batching; more only on a
 	// hand-assembled batch.
