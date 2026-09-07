@@ -7,9 +7,11 @@ package httpapi
 // these pin "lower is more urgent" rather than leaving it to a comment.
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
@@ -95,4 +97,79 @@ func jobNames(jobs []production.PlanJob) []string {
 		out = append(out, j.JobNumber)
 	}
 	return out
+}
+
+// A priority order's jobs are ranked on every import, not only when they are
+// created.
+//
+// This is the gap that let 21 of 32 priority jobs go unranked on the live
+// database: jobPriorityRank runs at job CREATION, so a job that already existed
+// when its order became known as priority kept the ordinary rank for ever, and
+// the Priority tab showed six beds where there should have been many more. A
+// one-off backfill repaired it once; this is what stops it happening again.
+func TestIntegrationPriorityRankIsRepairedOnImport(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
+	ctx := context.Background()
+
+	// An order that paid for priority, with a job already on the ordinary rank -
+	// exactly the state a job created before the rule existed is left in.
+	orderID := seedOrder(t, store, 9301, []map[string]any{
+		{"product_id": "SKU1", "product_name": "Plank", "quantity": 1, "material": "PLA", "colour": "BLUE"},
+	})
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE orders SET shipping_title = $1 WHERE id = $2`,
+		"PRIORITY DISPATCH", orderID); err != nil {
+		t.Fatalf("mark the order priority: %v", err)
+	}
+	jobID := seedConfiguredJob(t, store, "JOB-REPAIR-1", jobConfig{
+		material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "A2L",
+	})
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE production_jobs SET order_id = $1, priority = $2 WHERE id = $3`,
+		orderID, NormalRank, jobID); err != nil {
+		t.Fatalf("attach the job: %v", err)
+	}
+
+	order, err := store.Q.GetOrderByID(ctx, orderID)
+	if err != nil {
+		t.Fatalf("load the order: %v", err)
+	}
+	srv.rankPriorityJobs(ctx, order)
+
+	job, err := store.Q.GetProductionJobByID(ctx, jobID)
+	if err != nil {
+		t.Fatalf("reload the job: %v", err)
+	}
+	if job.Priority != PriorityRank {
+		t.Errorf("job rank = %d, want %d - a priority order's existing jobs must be "+
+			"repaired on import, not left for a one-off command", job.Priority, PriorityRank)
+	}
+
+	// A standard order leaves its jobs alone.
+	standardOrder := seedOrder(t, store, 9302, []map[string]any{
+		{"product_id": "SKU1", "product_name": "Plank", "quantity": 1, "material": "PLA", "colour": "BLUE"},
+	})
+	standardJob := seedConfiguredJob(t, store, "JOB-REPAIR-2", jobConfig{
+		material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "A2L",
+	})
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE production_jobs SET order_id = $1 WHERE id = $2`, standardOrder, standardJob); err != nil {
+		t.Fatalf("attach the standard job: %v", err)
+	}
+	std, err := store.Q.GetOrderByID(ctx, standardOrder)
+	if err != nil {
+		t.Fatalf("load the standard order: %v", err)
+	}
+	srv.rankPriorityJobs(ctx, std)
+
+	job, err = store.Q.GetProductionJobByID(ctx, standardJob)
+	if err != nil {
+		t.Fatalf("reload the standard job: %v", err)
+	}
+	if job.Priority != NormalRank {
+		t.Errorf("a standard order's job was ranked %d, want %d", job.Priority, NormalRank)
+	}
 }

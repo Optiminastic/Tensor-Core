@@ -1878,6 +1878,37 @@ func (q *Queries) NextJobNumber(ctx context.Context) (string, error) {
 	return job_number, err
 }
 
+const rankJobsForPriorityOrder = `-- name: RankJobsForPriorityOrder :execrows
+UPDATE production_jobs SET priority = $1::int, updated_at = now()
+WHERE order_id = $2 AND priority > $1::int
+`
+
+type RankJobsForPriorityOrderParams struct {
+	Rank    int32
+	OrderID *uuid.UUID
+}
+
+// Stamps the urgent rank on an order's jobs.
+//
+// jobPriorityRank does this when a job is CREATED, which only covers jobs made
+// after the order was known to be priority. It missed every job that already
+// existed - 21 of 32 on the live database - and would miss any order whose
+// shipping option is only learned on a later sync. Run on every import, it
+// makes the rank self-healing rather than something a one-off command has to
+// repair.
+//
+// Only ever makes a job MORE urgent: a line escalated by hand below
+// PriorityRank keeps the rank somebody gave it deliberately. Jobs already at or
+// below the rank are untouched, so this is a no-op on the common path and does
+// not churn updated_at.
+func (q *Queries) RankJobsForPriorityOrder(ctx context.Context, arg RankJobsForPriorityOrderParams) (int64, error) {
+	result, err := q.db.Exec(ctx, rankJobsForPriorityOrder, arg.Rank, arg.OrderID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const removeJobFromBatch = `-- name: RemoveJobFromBatch :one
 UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE id = $1 AND batch_id = $2

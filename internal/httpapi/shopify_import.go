@@ -13,6 +13,7 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -107,7 +108,38 @@ func (s *Server) importShopifyOrder(
 	// holding the order write open across that would make an import wait on the
 	// batch tables.
 	s.reconcileFulfilledOrder(ctx, order)
+	// And an order that paid for priority dispatch has its jobs ranked, every
+	// import.
+	//
+	// jobPriorityRank stamps the rank when a job is CREATED, which covers only
+	// jobs made after the order was known to be priority - it missed 21 of the
+	// 32 priority jobs on the live database, and would miss any order whose
+	// shipping option is learned on a later sync. Doing it here makes the rank
+	// self-healing instead of something a one-off command has to repair. Cheap
+	// on the common path: the UPDATE matches nothing once the jobs are ranked.
+	s.rankPriorityJobs(ctx, order)
 	return order, nil
+}
+
+// rankPriorityJobs marks an order's jobs urgent when the customer paid for
+// priority dispatch. Best-effort: a failure here costs queue position, not
+// correctness, and must not fail the import that carried the order in.
+func (s *Server) rankPriorityJobs(ctx context.Context, order gen.Order) {
+	if !OrderIsPriority(order) {
+		return
+	}
+	rows, err := s.store.Q.RankJobsForPriorityOrder(ctx, gen.RankJobsForPriorityOrderParams{
+		OrderID: ptr(order.ID), Rank: PriorityRank,
+	})
+	if err != nil {
+		obs.FromContext(ctx).Warn("could not rank a priority order's jobs",
+			"order", order.OrderNumber, "error", err)
+		return
+	}
+	if rows > 0 {
+		obs.FromContext(ctx).Info("priority order's jobs ranked urgent",
+			"order", order.OrderNumber, "jobs", rows)
+	}
 }
 
 // --- Shopify order payload + line-item mapping --------------------------------

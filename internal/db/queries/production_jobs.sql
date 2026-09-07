@@ -489,6 +489,23 @@ WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
   AND j.held = false
 ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
 
+-- name: RankJobsForPriorityOrder :execrows
+-- Stamps the urgent rank on an order's jobs.
+--
+-- jobPriorityRank does this when a job is CREATED, which only covers jobs made
+-- after the order was known to be priority. It missed every job that already
+-- existed - 21 of 32 on the live database - and would miss any order whose
+-- shipping option is only learned on a later sync. Run on every import, it
+-- makes the rank self-healing rather than something a one-off command has to
+-- repair.
+--
+-- Only ever makes a job MORE urgent: a line escalated by hand below
+-- PriorityRank keeps the rank somebody gave it deliberately. Jobs already at or
+-- below the rank are untouched, so this is a no-op on the common path and does
+-- not churn updated_at.
+UPDATE production_jobs SET priority = sqlc.arg('rank')::int, updated_at = now()
+WHERE order_id = sqlc.arg('order_id') AND priority > sqlc.arg('rank')::int;
+
 -- name: ListUnbatchedJobsByUrgency :many
 -- Jobs not committed to any bed, most urgent first.
 --
