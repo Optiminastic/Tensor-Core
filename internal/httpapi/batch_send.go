@@ -81,16 +81,19 @@ func (s *Server) SendBatchToPrinter(ctx context.Context, batch gen.Batch) (print
 		return printBatchResponse{}, statusErrf(http.StatusInternalServerError,
 			"Could not read the batch's jobs.", err)
 	}
-	need := s.plateColoursFor(ctx, jobs)
-	family := batchFamilyFromRows(jobs)
-	if gate := s.canAnyMachinePrint(ctx, family, need); len(gate.Ready) == 0 {
-		reason := gate.holdReason(need)
-		s.recordPrintError(ctx, batch.ID, reason)
-		log.Info("batch held before sending, no machine can print it",
-			"batch", batch.BatchNumber, "needs", need, "missing", gate.Missing,
-			"machines_checked", gate.Checked)
-		return printBatchResponse{Queued: false, Note: reason}, nil
-	}
+	// No filament gate here any more.
+	//
+	// A bed used to be held before sending unless some machine already had every
+	// colour of its plate loaded, and the hold was written to print_error - which
+	// is what put a red "no machine has this bed's filament loaded" note on most
+	// rows of the Batches page. That was the dispatch-time twin of the fleet
+	// scoring removed from planning: it made whether a plate could be sent depend
+	// on which spools happened to be in which printer at that instant.
+	//
+	// The shop's own workflow is the other way round: the plate goes to the
+	// queue, and the operator loads the spool it asks for. Holding it back only
+	// hid the work. A plate BambuBuddy genuinely refuses is still reported - see
+	// the send below - because that is a failure rather than a preference.
 
 	// The merged plate: one 3MF carrying every plank on the bed and their
 	// colours. NOT a sliced file - see this file's own comment.
