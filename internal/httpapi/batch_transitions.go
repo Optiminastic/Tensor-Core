@@ -101,18 +101,11 @@ func (s *Server) ApproveBatchFor(
 		return gen.Batch{}, statusErr(http.StatusConflict, "This batch has already been approved.")
 	}
 
+	// An explicit machine wins, then whatever the batch already carries. A
+	// Draft normally carries none: planning no longer looks at the fleet, so
+	// the choice is made below, once the jobs are known and validated.
 	if machineID == nil {
 		machineID = batch.MachineID
-	}
-	if machineID == nil {
-		return gen.Batch{}, statusErr(http.StatusUnprocessableEntity,
-			"This batch has no machine assigned yet; provide a machine_id.")
-	}
-	if _, err := s.store.Q.GetMachineOps(ctx, *machineID); err != nil {
-		if isNoRows(err) {
-			return gen.Batch{}, statusErrf(http.StatusNotFound, "That machine does not exist.", err)
-		}
-		return gen.Batch{}, statusErrf(http.StatusInternalServerError, "Could not load the machine.", err)
 	}
 
 	jobs, err := s.store.Q.ListJobsForBatch(ctx, &batchID)
@@ -139,6 +132,36 @@ func (s *Server) ApproveBatchFor(
 		case j.Status != production.StatusQueued:
 			return gen.Batch{}, statusErr(http.StatusConflict, "A job in this batch is no longer queued.")
 		}
+	}
+
+	// The machine is chosen HERE, not when the bed was planned.
+	//
+	// Planning used to score the whole fleet and stamp a winner on the Draft,
+	// which meant a bed was assigned from fleet state that was already stale by
+	// the time anyone approved it - and made how beds are formed depend on
+	// which printers happened to be free. Approval is the moment the plate is
+	// merged, the filament reserved and the slice queued, so it is the moment
+	// where "which machine" is a question worth answering.
+	//
+	// nil in-run load: that accumulator exists to stop one planning run
+	// stacking every bed onto the same idle printer. Here there is one bed.
+	if machineID == nil {
+		machineID = s.assignMachineForBatch(ctx,
+			batchFamilyFromRows(jobs), deref(batchMaterialFromRows(jobs)),
+			planColoursFromJobs(jobs), nil)
+	}
+	if machineID == nil {
+		// Not "no machine assigned" any more - nothing could be found that can
+		// take it. The bed stays a Draft and the next dispatch pass retries,
+		// which is what happens while every printer is busy or offline.
+		return gen.Batch{}, statusErr(http.StatusUnprocessableEntity,
+			"No machine can take this batch yet.")
+	}
+	if _, err := s.store.Q.GetMachineOps(ctx, *machineID); err != nil {
+		if isNoRows(err) {
+			return gen.Batch{}, statusErrf(http.StatusNotFound, "That machine does not exist.", err)
+		}
+		return gen.Batch{}, statusErrf(http.StatusInternalServerError, "Could not load the machine.", err)
 	}
 
 	mergedID, unitsPerBed, utilisation, err := s.mergedPlateFor(ctx, batch, jobs, approvedBy)

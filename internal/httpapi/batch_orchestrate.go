@@ -169,10 +169,6 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	}
 	committed := make(map[string]bool, len(planJobs))
 
-	// Minutes this run has already committed to each machine, so successive
-	// batches in the same transaction see each other - see inRunLoad.
-	pending := inRunLoad{}
-
 	// Drafts whose job set this plan reproduces exactly. They are left alone:
 	// same row, same id, same merged plate, same plate slice.
 	//
@@ -229,40 +225,22 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 			}
 			material := batchMaterial(p.Jobs)
 			shortage := !s.filamentAvailable(ctx, q, material, p.TotalFilamentGrams)
-			// Stage 9: auto-assign the best-scoring machine for this batch's
-			// required family/material/colours; a human can still override
-			// at approval.
-			family, familyOK, familyWhy := batchMachineFamily(p.Jobs)
-			if !familyOK {
-				// Machine family is no longer a compatibility boundary (see
-				// production.groupKey), so a bed CAN now hold jobs wanting
-				// different families. Picking the first job's family would
-				// assign the plate to a machine the rest of it cannot print
-				// on. Leave it unassigned for a human instead of guessing.
-				// Unassigned is not a soft state: ListApprovableDraftsForMachine
-				// finds a machine's drafts *by* machine_id, so this batch can
-				// never be picked up by any printer and will sit in Draft until
-				// a human intervenes. Warn with the reason and the job count.
-				log.Warn("batch left unassigned and no machine can ever pick it up: "+familyWhy,
-					"jobs", len(p.Jobs))
-			}
-			var materialStr string
-			if material != nil {
-				materialStr = *material
-			}
-			assigned := s.assignMachineForBatch(ctx, family, materialStr, planColours(p.Jobs), pending)
-			if assigned != nil {
-				// Charge this machine for the batch it is about to receive, so
-				// the next batch in this same run sees it as busier.
-				mins := 0
-				if p.TotalPrintTimeMinutes != nil {
-					mins = *p.TotalPrintTimeMinutes
-				}
-				pending[*assigned] += mins
-			}
+			// No machine is chosen here, and nothing about the fleet is read.
+			//
+			// A bed used to be scored against every printer as it was created -
+			// loaded material, loaded colours, queue depth, health, idle
+			// recency - and stamped with the winner. That made how beds are
+			// formed depend on which machines happened to be free at planning
+			// time, and on what filament happened to be in their AMS, using
+			// state that is already stale by the time the plate is sent.
+			//
+			// The rule is now the shop's own: four planks of one colour on a
+			// bed. The machine is chosen at approval instead (see
+			// ApproveBatchFor), which is the moment the plate is actually built
+			// and sent, from fleet state that is current.
 			b, err := q.InsertBatch(ctx, gen.InsertBatchParams{
 				ID: uuid.New(), BatchNumber: number, Status: production.BatchPendingApproval,
-				MachineID:        assigned,
+				MachineID:        nil,
 				MaterialShortage: shortage, UnitsPerBed: int32ptr(p.UnitsPerBed),
 				TotalPrintTimeMinutes:       int32PtrFromInt(p.TotalPrintTimeMinutes),
 				EffectiveTimePerUnitMinutes: p.EffectiveTimePerUnitMinutes,
@@ -678,6 +656,18 @@ func (s *Server) poolSignature(ctx context.Context) (string, bool) {
 // planColoursFromJobs is planColours for already-loaded job rows: the distinct
 // colours on a bed, in first-seen order. Used to label the plate's filament
 // split, since the slicer reports per extruder rather than per colour name.
+// batchMaterialFromRows is batchMaterial for job rows - the first material any
+// job on the bed records. One bed is one filament load, so the first is the
+// bed's, and a bed whose jobs all record none returns nil.
+func batchMaterialFromRows(jobs []gen.ProductionJob) *string {
+	for _, j := range jobs {
+		if m := strings.TrimSpace(deref(j.Material)); m != "" {
+			return &m
+		}
+	}
+	return nil
+}
+
 func planColoursFromJobs(jobs []gen.ProductionJob) []string {
 	seen := map[string]bool{}
 	var out []string
