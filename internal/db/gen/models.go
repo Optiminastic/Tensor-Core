@@ -166,6 +166,16 @@ type FileAsset struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
+type InventoryItem struct {
+	ID        uuid.UUID
+	Name      string
+	Quantity  pgtype.Numeric
+	Unit      string
+	UnitPrice pgtype.Numeric
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
 type Machine struct {
 	ID                    uuid.UUID
 	MachineID             string

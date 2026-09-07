@@ -173,6 +173,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerProductionJobs(r)
 	s.registerBatches(r)
 	s.registerFilament(r)
+	s.registerInventoryItems(r)
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)

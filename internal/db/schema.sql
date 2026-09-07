@@ -519,6 +519,22 @@ CREATE TABLE filament_inventory (
 CREATE UNIQUE INDEX uq_filament_material_colour
     ON filament_inventory (material, COALESCE(colour, ''));
 
+-- Everything on the shelf that is not filament: boxes, inserts, cards, tape.
+-- Separate from filament_inventory because that table is keyed
+-- (material, colour) and its grams are read by the planner, the colour resolver
+-- and the reservation path - see migration 0067.
+CREATE TABLE inventory_items (
+    id         uuid PRIMARY KEY,
+    name       varchar(255) NOT NULL,
+    quantity   numeric(12, 3) NOT NULL DEFAULT 0,
+    unit       varchar(32) NOT NULL,
+    unit_price numeric(12, 2),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_inventory_item_name
+    ON inventory_items (lower(name));
+
 -- The physical printer fleet - one row per physical unit, live print-state.
 -- Distinct from machine_profiles (the printer model/slicing profile).
 CREATE TABLE machines (
