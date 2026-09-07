@@ -489,6 +489,55 @@ WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
   AND j.held = false
 ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
 
+-- name: ListUnbatchedJobsByUrgency :many
+-- Jobs on no bed at all, most urgent first.
+--
+-- ListReplannableJobs' eligibility bar, minus the Draft members it also
+-- returns: this feeds the locked-bed top-up, which may only take work nothing
+-- else has claimed. A job sitting in a Draft belongs to the planner, and moving
+-- it here would hollow that Draft out without dissolving it.
+--
+-- The ordering is sortPriorityFirst expressed in SQL: priority ASC (LOWER IS
+-- MORE URGENT), then the customer's placed_at within each rank. Written here
+-- rather than sorted in Go so the top-up and the planner cannot come to
+-- different conclusions about who is next.
+SELECT j.* FROM production_jobs j
+LEFT JOIN orders o ON o.id = j.order_id
+WHERE j.batch_id IS NULL
+  AND j.status = 'queued'
+  AND j.quantity > 0
+  AND j.personalisation_status IN ('validated', 'not_required')
+  AND j.issue_reason IS NULL
+  AND j.held = false
+ORDER BY j.priority ASC, COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
+
+-- name: AssignUnbatchedJobsWithinCap :execrows
+-- Puts UNBATCHED jobs on a bed, refusing the whole statement if the units being
+-- added would take it past its cap.
+--
+-- The capacity rule lives in the write, not in a check before it: two callers
+-- that each saw one free place would otherwise both succeed and put five
+-- products on a bed of four. The CTEs and the UPDATE share one statement
+-- snapshot, so the arithmetic is self-consistent; pair it with LockBatchRow to
+-- stop two transactions racing.
+--
+-- batch_id IS NULL, deliberately narrower than AssignJobsToBatch: a job in a
+-- Draft is the planner's, and silently taking it would empty that Draft behind
+-- its back. Zero rows back means somebody claimed the jobs first, which the
+-- caller treats as "skip", not as an error.
+WITH used AS (
+    SELECT coalesce(sum(quantity), 0)::int AS n
+      FROM production_jobs WHERE batch_id = sqlc.arg('batch_id')
+), adding AS (
+    SELECT coalesce(sum(quantity), 0)::int AS n
+      FROM production_jobs
+     WHERE id = ANY(sqlc.arg('job_ids')::uuid[]) AND batch_id IS NULL
+)
+UPDATE production_jobs SET batch_id = sqlc.arg('batch_id'), updated_at = now()
+WHERE id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND batch_id IS NULL
+  AND (SELECT n FROM used) + (SELECT n FROM adding) <= sqlc.arg('max_units')::int;
+
 -- name: UnassignJobsFromBatches :exec
 -- Detaches jobs from the given batches so they can be re-planned. Guarded on
 -- the batch still being a Draft, so a batch approved between the planner

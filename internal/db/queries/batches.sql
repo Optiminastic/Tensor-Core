@@ -318,6 +318,51 @@ ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id)
          NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
          b.created_at ASC, b.id ASC;
 
+-- name: ListLockedBedsWithRoom :many
+-- Locked beds that still have a free place, best candidate for a top-up first.
+--
+-- A locked bed is invisible to the planner - ListReplannableJobs returns only
+-- unbatched jobs and Draft members - so nothing has ever been able to fill the
+-- gap left when a bed locks under-full or loses a plank. This is what lets an
+-- expedited order take that place instead of waiting for a whole new bed.
+--
+-- The ordering is the interesting part.
+--
+-- NOT oldest-first, which is the obvious guess. ListBatchesToDispatch already
+-- sorts min(priority) ASC ahead of batch number, so the moment a priority plank
+-- joins ANY bed that bed jumps to the head of the dispatch queue - the bed's
+-- age does not change when it prints, so it cannot discriminate.
+--
+-- What does discriminate is what the edit costs. A bed with no queue_item_id
+-- was never handed to BambuBuddy: topping it up costs one re-plate. A bed
+-- already sent costs a withdrawal, a re-upload and re-entry at the BACK of the
+-- printer's queue, which can leave the expedited plank slower than if we had
+-- left that bed alone. So unsent beds first (false sorts before true).
+--
+-- Fullest first within that: it disturbs the fewest committed plates for a
+-- given amount of work, and it drives beds to the cap where they stop being
+-- candidates at all. The usual "leave room on the emptier bed" argument does
+-- not apply - a locked bed is out of the replanning pool, so its free places
+-- are dead space nothing else will ever fill.
+SELECT b.*, coalesce(u.units, 0)::int AS units_on_bed
+FROM batches b
+JOIN LATERAL (
+    SELECT sum(j.quantity)::int AS units FROM production_jobs j WHERE j.batch_id = b.id
+) u ON true
+WHERE b.status = 'open'
+  AND coalesce(u.units, 0) > 0
+  AND coalesce(u.units, 0) < sqlc.arg('max_units')::int
+ORDER BY (b.queue_item_id IS NOT NULL),
+         coalesce(u.units, 0) DESC,
+         NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         b.created_at ASC, b.id ASC;
+
+-- name: LockBatchRow :one
+-- Takes a row lock on one bed, so two callers cannot both read "one place
+-- free" and both fill it. Held for microseconds inside a transaction that does
+-- no I/O.
+SELECT id FROM batches WHERE id = sqlc.arg('id') FOR UPDATE;
+
 -- name: ReopenBatchForReplanning :one
 -- Returns a locked bed to being a Draft so the planner can refill it.
 --

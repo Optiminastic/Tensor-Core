@@ -52,6 +52,22 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	s.planMu.Lock()
 	defer s.planMu.Unlock()
 
+	// Expedited work takes any free place on a bed that already exists, before
+	// the planner reads its pool.
+	//
+	// Inside the mutex and BEFORE the read, deliberately: a job placed on a
+	// locked bed is then simply absent from the pool the planner sees, so the
+	// two cannot both claim it and there is nothing to reconcile afterwards.
+	// Before the signature short-circuit too, because a locked bed can become
+	// toppable without the unbatched pool changing at all.
+	if s.batchStrategy() == production.StrategyColour {
+		if t := s.TopUpLockedBedsWithPriority(ctx); t.BedsFilled > 0 {
+			obs.FromContext(ctx).Info("expedited work placed on existing beds before planning",
+				"beds", t.BedsFilled, "priority", t.PriorityPlaced, "standard", t.StandardPlaced,
+				"skipped_printing", t.SkippedPrinting, "failed", t.Failed)
+		}
+	}
+
 	signature, sigOK := s.poolSignature(ctx)
 	if sigOK && signature == s.lastPlannedPool {
 		obs.FromContext(ctx).Info("batch plan skipped, the job pool is unchanged since the last run",

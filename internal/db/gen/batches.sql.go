@@ -880,6 +880,130 @@ func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.
 	return items, nil
 }
 
+const listLockedBedsWithRoom = `-- name: ListLockedBedsWithRoom :many
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, coalesce(u.units, 0)::int AS units_on_bed
+FROM batches b
+JOIN LATERAL (
+    SELECT sum(j.quantity)::int AS units FROM production_jobs j WHERE j.batch_id = b.id
+) u ON true
+WHERE b.status = 'open'
+  AND coalesce(u.units, 0) > 0
+  AND coalesce(u.units, 0) < $1::int
+ORDER BY (b.queue_item_id IS NOT NULL),
+         coalesce(u.units, 0) DESC,
+         NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+         b.created_at ASC, b.id ASC
+`
+
+type ListLockedBedsWithRoomRow struct {
+	ID                          uuid.UUID
+	BatchNumber                 string
+	MachineID                   *uuid.UUID
+	Status                      string
+	ApprovedBy                  *string
+	ApprovedAt                  pgtype.Timestamptz
+	MaterialShortage            bool
+	MergedFileID                *uuid.UUID
+	PreviewFileID               *uuid.UUID
+	UnitsPerBed                 *int32
+	TotalPrintTimeMinutes       *int32
+	EffectiveTimePerUnitMinutes pgtype.Numeric
+	TotalFilamentGrams          pgtype.Numeric
+	BedUtilizationPercent       pgtype.Numeric
+	PackingStrategy             *string
+	FilamentReserved            bool
+	PlateSlicedAt               pgtype.Timestamptz
+	PlateSliceError             *string
+	PrintError                  *string
+	PrintErrorAt                pgtype.Timestamptz
+	QueueItemID                 *int32
+	TotalLayers                 *int32
+	SupportGrams                pgtype.Numeric
+	PurgeGrams                  pgtype.Numeric
+	ColourChanges               *int32
+	FilamentByColour            []byte
+	CreatedAt                   pgtype.Timestamptz
+	UpdatedAt                   pgtype.Timestamptz
+	PipelineRunID               *int32
+	UnitsOnBed                  int32
+}
+
+// Locked beds that still have a free place, best candidate for a top-up first.
+//
+// A locked bed is invisible to the planner - ListReplannableJobs returns only
+// unbatched jobs and Draft members - so nothing has ever been able to fill the
+// gap left when a bed locks under-full or loses a plank. This is what lets an
+// expedited order take that place instead of waiting for a whole new bed.
+//
+// The ordering is the interesting part.
+//
+// NOT oldest-first, which is the obvious guess. ListBatchesToDispatch already
+// sorts min(priority) ASC ahead of batch number, so the moment a priority plank
+// joins ANY bed that bed jumps to the head of the dispatch queue - the bed's
+// age does not change when it prints, so it cannot discriminate.
+//
+// What does discriminate is what the edit costs. A bed with no queue_item_id
+// was never handed to BambuBuddy: topping it up costs one re-plate. A bed
+// already sent costs a withdrawal, a re-upload and re-entry at the BACK of the
+// printer's queue, which can leave the expedited plank slower than if we had
+// left that bed alone. So unsent beds first (false sorts before true).
+//
+// Fullest first within that: it disturbs the fewest committed plates for a
+// given amount of work, and it drives beds to the cap where they stop being
+// candidates at all. The usual "leave room on the emptier bed" argument does
+// not apply - a locked bed is out of the replanning pool, so its free places
+// are dead space nothing else will ever fill.
+func (q *Queries) ListLockedBedsWithRoom(ctx context.Context, maxUnits int32) ([]ListLockedBedsWithRoomRow, error) {
+	rows, err := q.db.Query(ctx, listLockedBedsWithRoom, maxUnits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLockedBedsWithRoomRow{}
+	for rows.Next() {
+		var i ListLockedBedsWithRoomRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.PlateSlicedAt,
+			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
+			&i.TotalLayers,
+			&i.SupportGrams,
+			&i.PurgeGrams,
+			&i.ColourChanges,
+			&i.FilamentByColour,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PipelineRunID,
+			&i.UnitsOnBed,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingApprovalBatchesForMachine = `-- name: ListPendingApprovalBatchesForMachine :many
 SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id FROM batches WHERE machine_id = $1 AND status = 'pending_approval'
 `
@@ -936,6 +1060,20 @@ func (q *Queries) ListPendingApprovalBatchesForMachine(ctx context.Context, mach
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockBatchRow = `-- name: LockBatchRow :one
+SELECT id FROM batches WHERE id = $1 FOR UPDATE
+`
+
+// Takes a row lock on one bed, so two callers cannot both read "one place
+// free" and both fill it. Held for microseconds inside a transaction that does
+// no I/O.
+func (q *Queries) LockBatchRow(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockBatchRow, id)
+	var id_2 uuid.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
 }
 
 const nextBatchNumber = `-- name: NextBatchNumber :one

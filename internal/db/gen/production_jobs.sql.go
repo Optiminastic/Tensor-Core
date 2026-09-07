@@ -39,6 +39,48 @@ func (q *Queries) AssignJobsToBatch(ctx context.Context, arg AssignJobsToBatchPa
 	return err
 }
 
+const assignUnbatchedJobsWithinCap = `-- name: AssignUnbatchedJobsWithinCap :execrows
+WITH used AS (
+    SELECT coalesce(sum(quantity), 0)::int AS n
+      FROM production_jobs WHERE batch_id = $1
+), adding AS (
+    SELECT coalesce(sum(quantity), 0)::int AS n
+      FROM production_jobs
+     WHERE id = ANY($2::uuid[]) AND batch_id IS NULL
+)
+UPDATE production_jobs SET batch_id = $1, updated_at = now()
+WHERE id = ANY($2::uuid[])
+  AND batch_id IS NULL
+  AND (SELECT n FROM used) + (SELECT n FROM adding) <= $3::int
+`
+
+type AssignUnbatchedJobsWithinCapParams struct {
+	BatchID  *uuid.UUID
+	JobIds   []uuid.UUID
+	MaxUnits int32
+}
+
+// Puts UNBATCHED jobs on a bed, refusing the whole statement if the units being
+// added would take it past its cap.
+//
+// The capacity rule lives in the write, not in a check before it: two callers
+// that each saw one free place would otherwise both succeed and put five
+// products on a bed of four. The CTEs and the UPDATE share one statement
+// snapshot, so the arithmetic is self-consistent; pair it with LockBatchRow to
+// stop two transactions racing.
+//
+// batch_id IS NULL, deliberately narrower than AssignJobsToBatch: a job in a
+// Draft is the planner's, and silently taking it would empty that Draft behind
+// its back. Zero rows back means somebody claimed the jobs first, which the
+// caller treats as "skip", not as an error.
+func (q *Queries) AssignUnbatchedJobsWithinCap(ctx context.Context, arg AssignUnbatchedJobsWithinCapParams) (int64, error) {
+	result, err := q.db.Exec(ctx, assignUnbatchedJobsWithinCap, arg.BatchID, arg.JobIds, arg.MaxUnits)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const clearJobModelError = `-- name: ClearJobModelError :exec
 UPDATE production_jobs SET
     model_error    = NULL,
@@ -1596,6 +1638,113 @@ func (q *Queries) ListUnassignedCompatibleJobs(ctx context.Context, arg ListUnas
 		arg.QualityMm,
 		arg.MachineFamily,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductionJob{}
+	for rows.Next() {
+		var i ProductionJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.FinishingStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.VariantTitle,
+			&i.PersonalisationProperties,
+			&i.ModelError,
+			&i.ModelErrorAt,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnbatchedJobsByUrgency = `-- name: ListUnbatchedJobsByUrgency :many
+SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+LEFT JOIN orders o ON o.id = j.order_id
+WHERE j.batch_id IS NULL
+  AND j.status = 'queued'
+  AND j.quantity > 0
+  AND j.personalisation_status IN ('validated', 'not_required')
+  AND j.issue_reason IS NULL
+  AND j.held = false
+ORDER BY j.priority ASC, COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC
+`
+
+// Jobs on no bed at all, most urgent first.
+//
+// ListReplannableJobs' eligibility bar, minus the Draft members it also
+// returns: this feeds the locked-bed top-up, which may only take work nothing
+// else has claimed. A job sitting in a Draft belongs to the planner, and moving
+// it here would hollow that Draft out without dissolving it.
+//
+// The ordering is sortPriorityFirst expressed in SQL: priority ASC (LOWER IS
+// MORE URGENT), then the customer's placed_at within each rank. Written here
+// rather than sorted in Go so the top-up and the planner cannot come to
+// different conclusions about who is next.
+func (q *Queries) ListUnbatchedJobsByUrgency(ctx context.Context) ([]ProductionJob, error) {
+	rows, err := q.db.Query(ctx, listUnbatchedJobsByUrgency)
 	if err != nil {
 		return nil, err
 	}
