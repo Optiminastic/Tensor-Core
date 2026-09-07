@@ -194,19 +194,38 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 // An empty family or material does not force its own bucket: unset means
 // unknown, not different, matching batchMachineFamily's own reading.
 func colourBedKey(j PlanJob) (string, bool) {
-	colours := make([]string, 0, len(j.Colours))
-	for _, c := range j.Colours {
-		if c = strings.TrimSpace(c); c != "" {
-			colours = append(colours, strings.ToUpper(c))
-		}
-	}
-	if len(colours) == 0 {
+	key := NormalisedColourKey(j.Colours)
+	if key == "" {
 		return "", false
 	}
-	// Sorted so a job recording ["WHITE","BLUE"] joins one recording
-	// ["BLUE","WHITE"] - the set is what matters, not the order it was written.
-	sort.Strings(colours)
-	return strings.Join(colours, "+") + "|" + j.Material + "|" + j.MachineFamily, true
+	return key + "|" + j.Material + "|" + j.MachineFamily, true
+}
+
+// NormalisedColourKey is the canonical form of a job's colour set: each colour
+// trimmed and uppercased, the set sorted, joined with "+". Empty when the job
+// records no colour at all, which is what makes a colourless job unbatchable.
+//
+// Sorted because the SET is what matters, not the order somebody wrote it in -
+// a job recording ["WHITE","BLUE"] belongs with one recording ["blue","white"].
+// Uppercased because the store really does send both "GOLD" and "Gold" for one
+// filament, and two beds for one colour is exactly the mistake this prevents.
+//
+// Exported because the manual add-jobs path needs the SAME answer: it decides
+// compatibility with production.CompatibilityKey, and if that computed colour
+// differently from the planner the two would disagree about which jobs may
+// share a plate. One function, one definition.
+func NormalisedColourKey(colours []string) string {
+	out := make([]string, 0, len(colours))
+	for _, c := range colours {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, strings.ToUpper(c))
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	sort.Strings(out)
+	return strings.Join(out, "+")
 }
 
 // repeat is n copies of one footprint - a job's quantity expanded into units.

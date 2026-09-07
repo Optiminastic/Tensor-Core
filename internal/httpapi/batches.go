@@ -493,10 +493,25 @@ func (s *Server) approveBatch(c *gin.Context) {
 // (see production.CompatibilityKey) from its already-loaded row.
 func compatibilityKeyOf(j gen.ProductionJob) production.CompatibilityKey {
 	return production.CompatibilityKey{
-		Material: deref(j.Material), NozzleLeft: numAsString(j.LeftNozzleMm),
+		Material: deref(j.Material), Colour: jobColourKey(j),
+		NozzleLeft:  numAsString(j.LeftNozzleMm),
 		NozzleRight: numAsString(j.RightNozzleMm), QualityMM: numAsString(j.QualityMm),
 		MachineFamily: deref(j.MachineFamily),
 	}
+}
+
+// jobColourKey is a job's canonical colour set.
+//
+// The jsonb `colours` array is what the planner groups on, but a job can carry
+// only the scalar `colour` column - so this falls back to it, the same reading
+// jobColourHex takes when it resolves a swatch. A key built from the jsonb
+// alone would call such a job colourless and refuse to put it on any bed.
+func jobColourKey(j gen.ProductionJob) string {
+	colours := decodeColours(j.Colours)
+	if len(colours) == 0 && j.Colour != nil {
+		colours = []string{*j.Colour}
+	}
+	return production.NormalisedColourKey(colours)
 }
 
 // listCompatibleJobs returns unassigned jobs matching the batch's own
@@ -522,6 +537,15 @@ func (s *Server) listCompatibleJobs(c *gin.Context) {
 		return
 	}
 	ref := jobs[0]
+	key := compatibilityKeyOf(ref)
+	if key.Colour == "" {
+		// The planner's ReasonNoColour, at this end: colour decides which jobs
+		// may share a plate, so a bed that records none has nothing to match
+		// against and would otherwise accept anything.
+		detail(c, http.StatusUnprocessableEntity,
+			"This batch's jobs record no filament colour, so no job can be matched to it.")
+		return
+	}
 	rows, err := s.store.Q.ListUnassignedCompatibleJobs(ctx, gen.ListUnassignedCompatibleJobsParams{
 		Material: ref.Material, LeftNozzleMm: db.NumFloatPtr(ref.LeftNozzleMm),
 		RightNozzleMm: db.NumFloatPtr(ref.RightNozzleMm), QualityMm: db.NumFloatPtr(ref.QualityMm),
@@ -531,7 +555,20 @@ func (s *Server) listCompatibleJobs(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not list compatible jobs.")
 		return
 	}
-	c.JSON(http.StatusOK, s.productionJobsDTO(ctx, rows))
+
+	// Colour is filtered here rather than in the SQL above. The predicate would
+	// be a second implementation of NormalisedColourKey in another language -
+	// and Go sorts by byte, Postgres by collation, so the two would disagree on
+	// non-ASCII names without an explicit COLLATE "C". The query has already
+	// narrowed this to jobs of one material, nozzle and family; filtering those
+	// in Go costs nothing and leaves one definition of colour compatibility.
+	compatible := make([]gen.ProductionJob, 0, len(rows))
+	for _, r := range rows {
+		if compatibilityKeyOf(r) == key {
+			compatible = append(compatible, r)
+		}
+	}
+	c.JSON(http.StatusOK, s.productionJobsDTO(ctx, compatible))
 }
 
 type addJobsToBatchRequest struct {
@@ -593,6 +630,7 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 	key := compatibilityKeyOf(existing[0])
 
 	ids := make([]uuid.UUID, 0, len(req.JobIDs))
+	adding := 0
 	for _, raw := range req.JobIDs {
 		jobID, err := uuid.Parse(raw)
 		if err != nil {
@@ -609,10 +647,23 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 			return
 		}
 		if compatibilityKeyOf(job) != key {
-			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("Job %s's material/nozzle/machine profile doesn't match this batch.", job.JobNumber))
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("Job %s's material/colour/nozzle/machine profile doesn't match this batch.", job.JobNumber))
 			return
 		}
+		adding += int(jobQuantity(job.Quantity))
 		ids = append(ids, jobID)
+	}
+
+	// The units being ADDED count against the cap, not just the ones already
+	// there. The bedIsFull check above only refuses a bed that is already full,
+	// so without this a bed at 3 of 4 accepted any number of jobs - or one job
+	// of quantity 10 - and went to a printer holding more planks than a plate
+	// has places.
+	if cap := s.bedUnitCap(); unitsOf(existing)+adding > cap {
+		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+			"This batch holds %d of %d products; these jobs would add %d.",
+			unitsOf(existing), cap, adding))
+		return
 	}
 
 	// Adding always ends in a new plate, so storage is required - checked here,

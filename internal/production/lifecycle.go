@@ -141,7 +141,23 @@ var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMai
 // on them. A plain comparable struct - build one from a job's already-loaded
 // fields and compare with ==.
 type CompatibilityKey struct {
-	Material      string
+	Material string
+	// Colour is NormalisedColourKey of the job's colour set.
+	//
+	// It is here for the same reason Material is, and NOT as one of the packing
+	// heuristics the comment above deliberately excludes: one plate is sliced
+	// once against one filament load, so a bed mixing colours describes a print
+	// that cannot happen. Without it this key offered - and accepted - a RED
+	// plank onto a BLUE bed, which the planner's own colourBedKey has always
+	// refused. Both now read the same NormalisedColourKey, so they cannot
+	// disagree about which jobs may share a plate.
+	//
+	// Note for the non-default BATCH_STRATEGY=planner: that optimiser allows up
+	// to maxGroupColours colours on one bed, so this is stricter than it needs
+	// to be there and would refuse a legitimate second colour. Accepted
+	// deliberately - the failure modes are not symmetric. Refusing one costs an
+	// extra bed; accepting one costs a ruined plate and a reprint.
+	Colour        string
 	NozzleLeft    string
 	NozzleRight   string
 	QualityMM     string

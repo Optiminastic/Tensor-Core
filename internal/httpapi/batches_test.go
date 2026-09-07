@@ -472,6 +472,14 @@ type jobConfig struct {
 	machineFamily string
 	printFileID   *uuid.UUID
 	held          bool
+	// colour is written to BOTH the colours jsonb the planner groups on and the
+	// scalar colour column, the pair the job creator writes together. Empty
+	// leaves the job colourless, which is a real state - and now an
+	// incompatible one, since colour is part of CompatibilityKey.
+	colour string
+	// quantity defaults to 1. Set it to prove the unit cap counts products
+	// rather than jobs.
+	quantity int32
 }
 
 // seedConfiguredJob inserts a job with real material/nozzle/machine-family
@@ -480,11 +488,27 @@ type jobConfig struct {
 // ListUnassignedCompatibleJobs's eligibility bar exactly.
 func seedConfiguredJob(t *testing.T, store *db.Store, jobNumber string, cfg jobConfig) uuid.UUID {
 	t.Helper()
+	colours := []byte("[]")
+	var colour *string
+	if cfg.colour != "" {
+		raw, err := json.Marshal([]string{cfg.colour})
+		if err != nil {
+			t.Fatalf("marshal colour: %v", err)
+		}
+		colours = raw
+		c := cfg.colour
+		colour = &c
+	}
+	quantity := cfg.quantity
+	if quantity == 0 {
+		quantity = 1
+	}
 	j, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber, BatchID: cfg.batchID, Description: "Test job",
-		Quantity: 1, Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		Quantity: quantity, Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
+		PersonalisationStatus: production.PersonalisationNotRequired,
+		Colours:               colours, Colour: colour,
 		Material: &cfg.material, LeftNozzleMm: &cfg.leftNozzleMm, MachineFamily: &cfg.machineFamily,
 		PrintFileID: cfg.printFileID, Held: cfg.held,
 	})
@@ -611,14 +635,21 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 		t.Fatalf("insert batch: %v", err)
 	}
 	bID := &b.ID
+	// Every job carries a colour: it is part of CompatibilityKey now, and a bed
+	// whose jobs record none can be matched against nothing.
 	seedConfiguredJob(t, store, "BATCH-ADD-1-J1", jobConfig{
-		batchID: bID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+		batchID: bID, material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 	compatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J2", jobConfig{
-		material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+		material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 	incompatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J3", jobConfig{
-		material: "PETG", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+		material: "PETG", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+	})
+	// Same machine configuration, different filament. Before colour joined the
+	// key this was offered for a BLUE bed and accepted onto it.
+	wrongColour := seedConfiguredJob(t, store, "BATCH-ADD-1-J5", jobConfig{
+		material: "PLA", colour: "RED", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 	otherBatch, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
 		ID: uuid.New(), BatchNumber: "BATCH-ADD-2", Status: production.BatchPendingApproval, MaterialShortage: false,
@@ -627,7 +658,7 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 		t.Fatalf("insert other batch: %v", err)
 	}
 	alreadyAssigned := seedConfiguredJob(t, store, "BATCH-ADD-1-J4", jobConfig{
-		batchID: &otherBatch.ID, material: "PLA", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
+		batchID: &otherBatch.ID, material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 
 	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
@@ -647,6 +678,13 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
 		map[string]any{"job_ids": []string{incompatible.String()}}); rr.Code != http.StatusUnprocessableEntity {
 		t.Errorf("add incompatible = %d, want 422", rr.Code)
+	}
+	// Rejects a job whose only difference is its filament colour. One plate is
+	// sliced once against one filament load, so this is as physical a mismatch
+	// as PETG-on-PLA above - it just used to be invisible.
+	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
+		map[string]any{"job_ids": []string{wrongColour.String()}}); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("add wrong-colour = %d, want 422", rr.Code)
 	}
 	// Rejects a job already assigned elsewhere.
 	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,

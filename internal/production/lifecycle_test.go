@@ -96,7 +96,8 @@ func TestAllowedPatchFieldsByRole(t *testing.T) {
 
 func TestCompatibilityKeyEquality(t *testing.T) {
 	base := CompatibilityKey{
-		Material: "PLA", NozzleLeft: "0.4", NozzleRight: "", QualityMM: "0.2", MachineFamily: "H2C",
+		Material: "PLA", Colour: "BLUE",
+		NozzleLeft: "0.4", NozzleRight: "", QualityMM: "0.2", MachineFamily: "H2C",
 	}
 	same := base
 	if same != base {
@@ -110,7 +111,15 @@ func TestCompatibilityKeyEquality(t *testing.T) {
 		{"different material", CompatibilityKey{Material: "PETG", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
 		{"different left nozzle", CompatibilityKey{Material: "PLA", NozzleLeft: "0.6", QualityMM: "0.2", MachineFamily: "H2C"}},
 		{"different quality", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.12", MachineFamily: "H2C"}},
-		{"different machine family", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2S"}},
+		{"different machine family", CompatibilityKey{Material: "PLA", Colour: "BLUE", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2S"}},
+
+		// One plate is sliced once against one filament load, so a different
+		// colour is as physical a mismatch as a different material. Without
+		// this field the endpoint offered a RED plank for a BLUE bed.
+		{"different colour", CompatibilityKey{Material: "PLA", Colour: "RED", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
+		// A colourless job is not a wildcard that matches every bed - it is its
+		// own value, and the planner will not bed it at all.
+		{"no colour", CompatibilityKey{Material: "PLA", Colour: "", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
