@@ -34,6 +34,27 @@ SET name       = EXCLUDED.name,
     updated_at = now()
 RETURNING *;
 
+-- name: UpdateInventoryItem :one
+-- Edits an item in place, addressed by id.
+--
+-- Separate from UpsertInventoryItem because that one is keyed on the NAME: it
+-- exists so re-adding "Gift box" restocks the shelf instead of opening a second
+-- one. Editing through it could not rename anything - a new name simply misses
+-- every existing row and inserts, leaving the old item behind under the old
+-- name. Addressing by id is what makes a rename a rename.
+--
+-- A collision with another item's name is left to the unique index, so the
+-- handler can answer "you already have one of those" rather than silently
+-- merging two shelves.
+UPDATE inventory_items SET
+    name       = sqlc.arg('name'),
+    quantity   = sqlc.arg('quantity')::float8,
+    unit       = sqlc.arg('unit'),
+    unit_price = sqlc.narg('unit_price')::float8,
+    updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
 -- name: DeleteInventoryItem :execrows
 -- Removes an item from the shelf entirely.
 --

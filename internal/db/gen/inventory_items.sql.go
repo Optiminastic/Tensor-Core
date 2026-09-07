@@ -66,6 +66,57 @@ func (q *Queries) ListInventoryItems(ctx context.Context) ([]InventoryItem, erro
 	return items, nil
 }
 
+const updateInventoryItem = `-- name: UpdateInventoryItem :one
+UPDATE inventory_items SET
+    name       = $1,
+    quantity   = $2::float8,
+    unit       = $3,
+    unit_price = $4::float8,
+    updated_at = now()
+WHERE id = $5
+RETURNING id, name, quantity, unit, unit_price, created_at, updated_at
+`
+
+type UpdateInventoryItemParams struct {
+	Name      string
+	Quantity  float64
+	Unit      string
+	UnitPrice *float64
+	ID        uuid.UUID
+}
+
+// Edits an item in place, addressed by id.
+//
+// Separate from UpsertInventoryItem because that one is keyed on the NAME: it
+// exists so re-adding "Gift box" restocks the shelf instead of opening a second
+// one. Editing through it could not rename anything - a new name simply misses
+// every existing row and inserts, leaving the old item behind under the old
+// name. Addressing by id is what makes a rename a rename.
+//
+// A collision with another item's name is left to the unique index, so the
+// handler can answer "you already have one of those" rather than silently
+// merging two shelves.
+func (q *Queries) UpdateInventoryItem(ctx context.Context, arg UpdateInventoryItemParams) (InventoryItem, error) {
+	row := q.db.QueryRow(ctx, updateInventoryItem,
+		arg.Name,
+		arg.Quantity,
+		arg.Unit,
+		arg.UnitPrice,
+		arg.ID,
+	)
+	var i InventoryItem
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Quantity,
+		&i.Unit,
+		&i.UnitPrice,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const upsertInventoryItem = `-- name: UpsertInventoryItem :one
 INSERT INTO inventory_items (id, name, quantity, unit, unit_price)
 VALUES (

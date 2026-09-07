@@ -87,6 +87,10 @@ func (s *Server) registerInventoryItems(r *gin.Engine) {
 	// version bump to express a distinction nobody has asked for.
 	g.GET("", s.guards.RequirePermission(auth.FilamentRead.Key()), s.listInventoryItems)
 	g.POST("", s.guards.RequirePermission(auth.FilamentManage.Key()), s.upsertInventoryItem)
+	// PATCH rather than a second POST: this one is addressed by id, which is
+	// what lets it rename. The POST above is keyed on the name and exists so
+	// re-adding an item restocks it.
+	g.PATCH("/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.updateInventoryItem)
 	g.DELETE("/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.deleteInventoryItem)
 }
 
@@ -103,39 +107,92 @@ func (s *Server) listInventoryItems(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (s *Server) upsertInventoryItem(c *gin.Context) {
+// validatedItem is a request that has passed every check, so add and edit
+// cannot drift on what a valid item is.
+type validatedItem struct {
+	name      string
+	unit      string
+	quantity  float64
+	unitPrice *float64
+}
+
+// bindInventoryItem parses and validates the dialog's payload, answering the
+// caller with false once it has already written the error response.
+func bindInventoryItem(c *gin.Context) (validatedItem, bool) {
 	var req upsertInventoryItemRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		detail(c, http.StatusUnprocessableEntity, "Give the item a name, a quantity and a unit.")
-		return
+		return validatedItem{}, false
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		detail(c, http.StatusUnprocessableEntity, "Give the item a name.")
-		return
+		return validatedItem{}, false
 	}
 	unit := strings.ToLower(strings.TrimSpace(req.Unit))
 	if !inventoryUnits[unit] {
 		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
 			"%q is not a unit this shelf counts in. Use one of: %s.",
 			req.Unit, strings.Join(InventoryUnits(), ", ")))
-		return
+		return validatedItem{}, false
 	}
 	if req.UnitPrice != nil && *req.UnitPrice < 0 {
 		detail(c, http.StatusUnprocessableEntity, "A price cannot be negative.")
+		return validatedItem{}, false
+	}
+	return validatedItem{name: name, unit: unit, quantity: req.Quantity, unitPrice: req.UnitPrice}, true
+}
+
+func (s *Server) upsertInventoryItem(c *gin.Context) {
+	req, ok := bindInventoryItem(c)
+	if !ok {
 		return
 	}
 
 	item, err := s.store.Q.UpsertInventoryItem(c.Request.Context(), gen.UpsertInventoryItemParams{
-		ID: uuid.New(), Name: name, Unit: unit,
-		Quantity:  req.Quantity,
-		UnitPrice: req.UnitPrice,
+		ID: uuid.New(), Name: req.name, Unit: req.unit,
+		Quantity:  req.quantity,
+		UnitPrice: req.unitPrice,
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not save the inventory item.")
 		return
 	}
 	c.JSON(http.StatusCreated, toInventoryItemResponse(item))
+}
+
+// updateInventoryItem edits an item in place, including its name.
+func (s *Server) updateInventoryItem(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		detail(c, http.StatusBadRequest, "That is not a valid item id.")
+		return
+	}
+	req, ok := bindInventoryItem(c)
+	if !ok {
+		return
+	}
+
+	item, err := s.store.Q.UpdateInventoryItem(c.Request.Context(), gen.UpdateInventoryItemParams{
+		ID: id, Name: req.name, Unit: req.unit,
+		Quantity:  req.quantity,
+		UnitPrice: req.unitPrice,
+	})
+	if isNoRows(err) {
+		detail(c, http.StatusNotFound, "That inventory item no longer exists.")
+		return
+	}
+	if isUniqueViolation(err) {
+		// Renaming onto another item would merge two shelves into one silently,
+		// losing whichever count was not kept.
+		detail(c, http.StatusConflict, "An item with that name is already on the shelf.")
+		return
+	}
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not save the inventory item.")
+		return
+	}
+	c.JSON(http.StatusOK, toInventoryItemResponse(item))
 }
 
 func (s *Server) deleteInventoryItem(c *gin.Context) {
