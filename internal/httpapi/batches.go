@@ -51,6 +51,12 @@ type batchResponse struct {
 	// Carried on the list response, where jobs_count deliberately is not: the
 	// question standing at a printer is whose work is on the plate.
 	OrderNumbers []string `json:"order_numbers,omitempty"`
+	// HasPriority is true when ANY plank on this bed came from an order that
+	// paid for priority dispatch, which is what the Batches table's Priority
+	// tab filters on. Any rather than all: a bed carrying one priority plank
+	// IS the bed somebody is waiting on, and colour batching mixes a priority
+	// order in with three standard ones as a matter of course.
+	HasPriority bool `json:"has_priority"`
 	// Colours is the distinct filament colours on this bed, with the swatch to
 	// draw each one. One entry under colour batching; more only on a
 	// hand-assembled batch.

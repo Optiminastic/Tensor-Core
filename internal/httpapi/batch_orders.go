@@ -126,6 +126,7 @@ func (s *Server) decorateBatches(ctx context.Context, out []batchResponse, ids [
 	}
 	orders := orderNumbersByBatch(rows)
 	colours := s.batchColoursFor(ctx, rows)
+	priority := priorityByBatch(rows)
 	for i := range out {
 		id, err := uuid.Parse(out[i].ID)
 		if err != nil {
@@ -133,6 +134,24 @@ func (s *Server) decorateBatches(ctx context.Context, out []batchResponse, ids [
 		}
 		out[i].OrderNumbers = orders[id]
 		out[i].Colours = colours[id]
+		out[i].HasPriority = priority[id]
+	}
+	return out
+}
+
+// priorityByBatch marks the beds carrying priority work.
+//
+// A bed counts as priority when ANY plank on it does. Colour batching groups by
+// filament and serves oldest-first within a rank, so a priority order routinely
+// shares a plate with three standard ones - requiring all four would leave the
+// Priority tab almost always empty and hide the very beds it exists to surface.
+func priorityByBatch(rows []gen.ListJobNumbersForBatchesRow) map[uuid.UUID]bool {
+	out := map[uuid.UUID]bool{}
+	for _, r := range rows {
+		if r.BatchID == nil || r.Priority >= NormalRank {
+			continue
+		}
+		out[*r.BatchID] = true
 	}
 	return out
 }

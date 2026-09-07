@@ -672,7 +672,7 @@ func (s *Server) buildJobsForOrder(
 			FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
 			EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
 			DueDate:                   db.Timestamptz(li.DueDate),
-			Priority:                  int32(li.Priority),
+			Priority:                  jobPriorityRank(order, li),
 			PersonalisationName:       li.PersonalisationName, PersonalisationFont: li.PersonalisationFont,
 			PersonalisationColour: li.PersonalisationColour, PersonalisationVariant: li.PersonalisationVariant,
 			PersonalisationStatus: status,

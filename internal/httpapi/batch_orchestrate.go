@@ -79,6 +79,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: %v", errPlanBatchableJobs, err)
 	}
+	sortPriorityFirst(planJobs)
 	gate := production.BatchGate{
 		MaxWait:           time.Duration(s.cfg.BatchMaxWaitHours * float64(time.Hour)),
 		DueSoonWindow:     time.Duration(s.cfg.BatchDueSoonHours * float64(time.Hour)),

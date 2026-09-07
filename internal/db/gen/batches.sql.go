@@ -820,7 +820,7 @@ func (q *Queries) ListDraftBatchJobIDs(ctx context.Context) ([]ListDraftBatchJob
 }
 
 const listJobNumbersForBatches = `-- name: ListJobNumbersForBatches :many
-SELECT j.batch_id, j.job_number, j.colour
+SELECT j.batch_id, j.job_number, j.colour, j.priority
 FROM production_jobs j
 WHERE j.batch_id = ANY($1::uuid[])
 ORDER BY j.job_number
@@ -830,6 +830,7 @@ type ListJobNumbersForBatchesRow struct {
 	BatchID   *uuid.UUID
 	JobNumber string
 	Colour    *string
+	Priority  int32
 }
 
 // Each batch's jobs, by job number.
@@ -840,8 +841,11 @@ type ListJobNumbersForBatchesRow struct {
 // read back out of the job number (JOB-114556), the same way the merged plate is
 // named, so the column and the file the operator downloads always agree.
 //
-// Only the two columns that mapping needs: this is asked for a whole page of
-// batches at once, and the column has no use for a job's full row.
+// Only the columns the decorated columns need: this is asked for a whole page
+// of batches at once, and they have no use for a job's full row. priority comes
+// along because the Batches table's Priority tab is answered per bed - a bed is
+// priority when any plank on it is - and asking per batch would be one query
+// per row on the page.
 func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.UUID) ([]ListJobNumbersForBatchesRow, error) {
 	rows, err := q.db.Query(ctx, listJobNumbersForBatches, batchIds)
 	if err != nil {
@@ -851,7 +855,12 @@ func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.
 	items := []ListJobNumbersForBatchesRow{}
 	for rows.Next() {
 		var i ListJobNumbersForBatchesRow
-		if err := rows.Scan(&i.BatchID, &i.JobNumber, &i.Colour); err != nil {
+		if err := rows.Scan(
+			&i.BatchID,
+			&i.JobNumber,
+			&i.Colour,
+			&i.Priority,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

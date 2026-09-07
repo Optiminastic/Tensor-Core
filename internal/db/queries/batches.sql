@@ -282,9 +282,12 @@ WHERE id = sqlc.arg('id');
 -- read back out of the job number (JOB-114556), the same way the merged plate is
 -- named, so the column and the file the operator downloads always agree.
 --
--- Only the two columns that mapping needs: this is asked for a whole page of
--- batches at once, and the column has no use for a job's full row.
-SELECT j.batch_id, j.job_number, j.colour
+-- Only the columns the decorated columns need: this is asked for a whole page
+-- of batches at once, and they have no use for a job's full row. priority comes
+-- along because the Batches table's Priority tab is answered per bed - a bed is
+-- priority when any plank on it is - and asking per batch would be one query
+-- per row on the page.
+SELECT j.batch_id, j.job_number, j.colour, j.priority
 FROM production_jobs j
 WHERE j.batch_id = ANY(sqlc.arg('batch_ids')::uuid[])
 ORDER BY j.job_number;
