@@ -43,21 +43,23 @@ const assignUnbatchedJobsWithinCap = `-- name: AssignUnbatchedJobsWithinCap :exe
 WITH used AS (
     SELECT coalesce(sum(quantity), 0)::int AS n
       FROM production_jobs WHERE batch_id = $1
+), movable AS (
+    SELECT j.id, j.quantity FROM production_jobs j
+      LEFT JOIN batches b ON b.id = j.batch_id
+     WHERE j.id = ANY($3::uuid[])
+       AND (j.batch_id IS NULL OR b.status = 'pending_approval')
 ), adding AS (
-    SELECT coalesce(sum(quantity), 0)::int AS n
-      FROM production_jobs
-     WHERE id = ANY($2::uuid[]) AND batch_id IS NULL
+    SELECT coalesce(sum(quantity), 0)::int AS n FROM movable
 )
 UPDATE production_jobs SET batch_id = $1, updated_at = now()
-WHERE id = ANY($2::uuid[])
-  AND batch_id IS NULL
-  AND (SELECT n FROM used) + (SELECT n FROM adding) <= $3::int
+WHERE id IN (SELECT id FROM movable)
+  AND (SELECT n FROM used) + (SELECT n FROM adding) <= $2::int
 `
 
 type AssignUnbatchedJobsWithinCapParams struct {
 	BatchID  *uuid.UUID
-	JobIds   []uuid.UUID
 	MaxUnits int32
+	JobIds   []uuid.UUID
 }
 
 // Puts UNBATCHED jobs on a bed, refusing the whole statement if the units being
@@ -69,12 +71,13 @@ type AssignUnbatchedJobsWithinCapParams struct {
 // snapshot, so the arithmetic is self-consistent; pair it with LockBatchRow to
 // stop two transactions racing.
 //
-// batch_id IS NULL, deliberately narrower than AssignJobsToBatch: a job in a
-// Draft is the planner's, and silently taking it would empty that Draft behind
-// its back. Zero rows back means somebody claimed the jobs first, which the
-// caller treats as "skip", not as an error.
+// Takes jobs that are unbatched OR on a Draft, never off a locked bed: a Draft
+// is a proposal the planner rebuilds every run, so moving a plank out of one
+// costs nothing, while a locked bed is a committed plate. Zero rows back means
+// somebody claimed the jobs first, which the caller treats as "skip", not an
+// error.
 func (q *Queries) AssignUnbatchedJobsWithinCap(ctx context.Context, arg AssignUnbatchedJobsWithinCapParams) (int64, error) {
-	result, err := q.db.Exec(ctx, assignUnbatchedJobsWithinCap, arg.BatchID, arg.JobIds, arg.MaxUnits)
+	result, err := q.db.Exec(ctx, assignUnbatchedJobsWithinCap, arg.BatchID, arg.MaxUnits, arg.JobIds)
 	if err != nil {
 		return 0, err
 	}
@@ -1722,8 +1725,9 @@ func (q *Queries) ListUnassignedCompatibleJobs(ctx context.Context, arg ListUnas
 
 const listUnbatchedJobsByUrgency = `-- name: ListUnbatchedJobsByUrgency :many
 SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE j.batch_id IS NULL
+WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
@@ -1732,12 +1736,18 @@ WHERE j.batch_id IS NULL
 ORDER BY j.priority ASC, COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC
 `
 
-// Jobs on no bed at all, most urgent first.
+// Jobs not committed to any bed, most urgent first.
 //
-// ListReplannableJobs' eligibility bar, minus the Draft members it also
-// returns: this feeds the locked-bed top-up, which may only take work nothing
-// else has claimed. A job sitting in a Draft belongs to the planner, and moving
-// it here would hollow that Draft out without dissolving it.
+// ListReplannableJobs' eligibility bar and its reach: unbatched jobs PLUS
+// Draft members. A Draft is a proposal the planner dissolves and rebuilds every
+// run, so taking a plank out of one costs nothing - the remainder is re-formed
+// moments later in the same pass. Locked beds are excluded, as everywhere: a
+// committed plate is not a pool to draw from.
+//
+// Draft members are here because a priority plank parked in a half-empty Draft
+// is the exact case this feature exists for: it will not print until two more
+// of its colour arrive, while a locked bed of three sits one plank short of
+// going to a machine.
 //
 // The ordering is sortPriorityFirst expressed in SQL: priority ASC (LOWER IS
 // MORE URGENT), then the customer's placed_at within each rank. Written here

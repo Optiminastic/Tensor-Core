@@ -89,12 +89,9 @@ func (s *Server) lockFullBatches(ctx context.Context, created []gen.Batch) {
 		if b.Status != production.BatchPendingApproval {
 			continue
 		}
-		full, err := s.bedIsFull(ctx, b.ID)
-		if err != nil {
-			log.Warn("could not tell whether a new bed is full", "batch", b.BatchNumber, "error", err)
-			continue
-		}
-		if !full {
+		// The same rule the dispatcher applies, so a bed does not have to wait
+		// for the next pass to be committed on grounds that already hold.
+		if !s.readyToLock(ctx, b) {
 			continue
 		}
 		units, _ := s.unitsOnBed(ctx, b.ID)
@@ -106,26 +103,37 @@ func (s *Server) lockFullBatches(ctx context.Context, created []gen.Batch) {
 				"batch", b.BatchNumber, "error", err)
 			continue
 		}
-		log.Info("bed full, locked", "batch", b.BatchNumber, "units", units)
+		log.Info("bed locked", "batch", b.BatchNumber, "units", units, "cap", s.bedUnitCap())
 	}
 }
 
 // readyToLock reports whether a Draft should be committed now.
 //
-// Full, and only full. A bed of three waits for a fourth however long that
-// takes, because a Draft is the only state that can still absorb one: the
+// Full, or carrying expedited work.
+//
+// Full is the ordinary rule. A bed of three waits for a fourth however long
+// that takes, because a Draft is the only state that can still absorb one: the
 // planner dissolves and reforms Drafts on every run, so the next order in that
 // colour joins the bed instead of opening one of its own.
 //
-// There used to be an escape - after BATCH_MAX_WAIT_HOURS a partial bed locked
-// anyway, so a lone plank in an unpopular colour was not held for company that
-// never arrived. That is gone at the shop's instruction: a partial bed is a
-// wasted plate, and waiting costs less than printing one.
+// There used to be a second escape - after BATCH_MAX_WAIT_HOURS a partial bed
+// locked anyway. That is gone at the shop's instruction: a partial bed is a
+// wasted plate, and for STANDARD work waiting costs less than printing one.
 //
-// THE CONSEQUENCE, stated plainly: a colour that never reaches four never prints
-// by itself. An operator can still approve such a bed by hand - ApproveBatchFor
-// has no fullness check, deliberately - so the judgement moves to a person
-// rather than to a clock.
+// THE CONSEQUENCE for standard work, stated plainly: a colour that never
+// reaches four never prints by itself. An operator can still approve such a bed
+// by hand - ApproveBatchFor has no fullness check, deliberately - so the
+// judgement moves to a person rather than to a clock.
+//
+// Expedited work is the exception, and it is not a clock. A customer paid for
+// priority dispatch, and the arithmetic is against them ever being filled:
+// priority orders arrive one or two per colour per day, so a bed of one waits
+// days for a fourth of its colour. The order in which the pieces run is what
+// keeps the waste small - the planner has already filled this bed with standard
+// work of the same colour, and the locked-bed top-up has already tried to move
+// the plank onto a bed that would complete one. Only a bed that neither could
+// fill reaches here, and printing that under-full is the last resort the shop
+// chose over letting it sit.
 //
 // Outside colour batching every Draft is ready: the optimiser's own gate already
 // decided a bed was worth building before it produced one, so second-guessing it
@@ -134,15 +142,29 @@ func (s *Server) readyToLock(ctx context.Context, b gen.Batch) bool {
 	if s.batchStrategy() != production.StrategyColour {
 		return true
 	}
-	full, err := s.bedIsFull(ctx, b.ID)
+	jobs, err := s.store.Q.ListJobsForBatch(ctx, &b.ID)
 	if err != nil {
 		// Unknown is not "no": failing to read the bed must not strand it
 		// permanently, and approval re-checks everything that matters anyway.
-		obs.FromContext(ctx).Warn("could not tell whether a bed is full, treating it as ready",
+		obs.FromContext(ctx).Warn("could not read a bed's jobs, treating it as ready",
 			"batch", b.BatchNumber, "error", err)
 		return true
 	}
-	return full
+	return unitsOf(jobs) >= s.bedUnitCap() || carriesPriority(jobs)
+}
+
+// carriesPriority reports whether any plank on a bed was expedited.
+//
+// Any, not all: colour batching mixes one priority order with three standard
+// ones as a matter of course, and it is the expedited customer who decides
+// whether the bed can afford to wait.
+func carriesPriority(jobs []gen.ProductionJob) bool {
+	for _, j := range jobs {
+		if j.Priority < NormalRank {
+			return true
+		}
+	}
+	return false
 }
 
 // triggerDispatch schedules a pass that walks ready beds onto printers.

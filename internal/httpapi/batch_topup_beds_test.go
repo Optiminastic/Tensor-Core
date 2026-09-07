@@ -63,8 +63,10 @@ func TestIntegrationLockedBedsWithRoomAreOfferedUnsentAndFullestFirst(t *testing
 	unsentTwo := lockedBedWith(t, store, "BATCH-ROOM-UNSENT2", 2, nil)
 	full := lockedBedWith(t, store, "BATCH-ROOM-FULL", 4, nil)
 
-	// A Draft with room is NOT a candidate: the planner already refills those
-	// every run, and taking its jobs here would hollow it out behind its back.
+	// A Draft is never a candidate BED. The planner dissolves and rebuilds
+	// Drafts every run, so one with room refills itself; opening it here would
+	// duplicate that. (Its JOBS are a different matter - the top-up does draw
+	// expedited planks out of Drafts, see the draft-rescue test below.)
 	draft := seedDraftBatch(t, store, "BATCH-ROOM-DRAFT", production.BatchPendingApproval, nil, "A2L")
 
 	rows, err := store.Q.ListLockedBedsWithRoom(ctx, int32(cap))
@@ -157,6 +159,65 @@ func TestIntegrationTopUpChangesNothingWithoutObjectStorage(t *testing.T) {
 	}
 	if job.BatchID != nil {
 		t.Error("the expedited job was assigned to a bed whose plate could never be built")
+	}
+}
+
+// A priority plank parked in a half-empty Draft is reachable, and is preferred
+// onto the bed that completes soonest.
+//
+// This is the case the feature exists for: three Drafts on the real database
+// each held one expedited plank at 2 of 4, going nowhere until two more of that
+// colour arrived - while a locked bed of three sat one plank short of a printer.
+func TestIntegrationTopUpTakesPriorityWorkOutOfADraft(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
+	ctx := context.Background()
+
+	// A Draft holding one expedited plank, stuck well under the cap.
+	draft, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-DRAFT-PRIO",
+		Status: production.BatchPendingApproval, MaterialShortage: false,
+	})
+	if err != nil {
+		t.Fatalf("insert draft: %v", err)
+	}
+	stuck := seedConfiguredJob(t, store, "BATCH-DRAFT-PRIO-J1", jobConfig{
+		batchID: &draft.ID, material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "A2L",
+	})
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE production_jobs SET priority = $1 WHERE id = $2`, PriorityRank, stuck); err != nil {
+		t.Fatalf("rank the stuck plank: %v", err)
+	}
+
+	// Two locked beds it could join. The fuller one completes; the emptier one
+	// would still be short, so it must not be chosen.
+	nearlyFull := lockedBedWith(t, store, "BATCH-DRAFT-PRIO-NEAR", 3, nil)
+	lockedBedWith(t, store, "BATCH-DRAFT-PRIO-FAR", 1, nil)
+
+	// ListUnbatchedJobsByUrgency must reach it - that is the half that changed.
+	pool, err := store.Q.ListUnbatchedJobsByUrgency(ctx)
+	if err != nil {
+		t.Fatalf("list the pool: %v", err)
+	}
+	found := false
+	for _, j := range pool {
+		if j.ID == stuck {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a priority plank sitting in a Draft was invisible to the top-up pool")
+	}
+
+	// And it must be offered to the bed that completes, not merely to any bed.
+	beds, err := store.Q.ListLockedBedsWithRoom(ctx, int32(srv.bedUnitCap()))
+	if err != nil {
+		t.Fatalf("list beds: %v", err)
+	}
+	if len(beds) == 0 || beds[0].ID != nearlyFull {
+		t.Errorf("first bed offered = %v, want the one at 3 of 4 that this plank completes", beds)
 	}
 }
 

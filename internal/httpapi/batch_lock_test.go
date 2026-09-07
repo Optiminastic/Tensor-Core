@@ -236,3 +236,44 @@ func TestIntegrationOnlyAFullBedIsReadyToLock(t *testing.T) {
 		t.Errorf("a bed of %d did not lock; a full bed has nothing left to absorb", cap)
 	}
 }
+
+// A bed carrying expedited work locks under-full, which is the one exception to
+// the rule above.
+//
+// The arithmetic is why: priority orders arrive one or two per colour per day,
+// so a bed holding one waits days for a fourth of its colour. By the time a bed
+// reaches here the planner has already filled it with standard work of the same
+// colour and the top-up has already tried to move the plank onto a bed that
+// would complete one - so this is the last resort, not the first.
+func TestIntegrationAPriorityBedLocksEvenWhenUnderFull(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
+	ctx := context.Background()
+
+	cap := srv.bedUnitCap()
+	batchID := seedBedWith(t, store, "BATCH-PRIO-PARTIAL", cap-2)
+
+	batch, err := store.Q.GetBatchByID(ctx, batchID)
+	if err != nil {
+		t.Fatalf("load the bed: %v", err)
+	}
+	// Standard work at this size waits, as the test above pins.
+	if srv.readyToLock(ctx, batch) {
+		t.Fatalf("a standard bed of %d locked; this test needs it not to", cap-2)
+	}
+
+	// One plank on it was expedited.
+	if _, err := store.Pool.Exec(ctx,
+		`UPDATE production_jobs SET priority = $1
+		  WHERE id = (SELECT id FROM production_jobs WHERE batch_id = $2 LIMIT 1)`,
+		PriorityRank, batchID); err != nil {
+		t.Fatalf("rank a plank on the bed: %v", err)
+	}
+
+	if !srv.readyToLock(ctx, batch) {
+		t.Errorf("a bed of %d carrying expedited work did not lock - it would wait days "+
+			"for a fourth plank of its colour", cap-2)
+	}
+}
