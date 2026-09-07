@@ -64,11 +64,6 @@ func main() {
 		cap = production.MaxColourBatchUnits
 	}
 
-	// What is genuinely at a printer, from BambuBuddy rather than from Tensor's
-	// own columns: a pipeline id records that a run was STARTED, which is not
-	// the same as a plate waiting on a machine.
-	live := liveQueueItems(ctx, cfg)
-
 	rows, err := store.Pool.Query(ctx, `
 		SELECT id, batch_number, units_per_bed, queue_item_id
 		  FROM batches
@@ -92,6 +87,24 @@ func main() {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		log.Fatalf("read locked beds: %v", err)
+	}
+
+	// What is genuinely at a printer, from BambuBuddy rather than from Tensor's
+	// own columns: a pipeline id records that a run was STARTED, which is not
+	// the same as a plate waiting on a machine.
+	//
+	// Asked only when some bed actually claims to have been sent. A bed with no
+	// queue id was never handed to BambuBuddy, so its answer cannot change what
+	// happens to it - and refusing to reform anything because an unreachable
+	// printer host could not confirm a negative would make this tool unusable
+	// exactly when the fleet is down. The safety is unchanged: the moment one
+	// bed carries a queue id, BambuBuddy is consulted and an unreachable host
+	// is still fatal.
+	live := map[int]bool{}
+	if anySent(beds) {
+		live = liveQueueItems(ctx, cfg)
+	} else {
+		fmt.Println("no bed has ever been sent to BambuBuddy, so nothing can be at a printer")
 	}
 
 	var reopen []bed
@@ -135,6 +148,20 @@ func main() {
 		done++
 	}
 	fmt.Printf("\nreopened %d beds - run a replan to reform them\n", done)
+}
+
+// anySent reports whether any bed claims to have been handed to BambuBuddy.
+//
+// The queue id is Tensor's own record of having sent a plate. It is not proof
+// the plate is still there - that is what liveQueueItems checks - but its
+// ABSENCE is proof the plate was never sent at all.
+func anySent(beds []bed) bool {
+	for _, b := range beds {
+		if b.queueItem != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // liveQueueItems is the set of BambuBuddy queue items still waiting or printing.

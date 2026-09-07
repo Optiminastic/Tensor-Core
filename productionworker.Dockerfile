@@ -35,6 +35,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # it the Priority tab opens empty on a floor that has priority work in it.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/backfillpriority ./cmd/backfillpriority
+# reformbeds returns locked beds to Draft so the planner can rebuild them -
+# the only way to reshape beds committed under an older rule.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/reformbeds ./cmd/reformbeds
 
 # --- Runtime stage -------------------------------------------------------------
 FROM debian:12-slim
@@ -57,6 +61,7 @@ COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
 COPY --from=build /out/replate /usr/local/bin/replate
 COPY --from=build /out/backfillpriority /usr/local/bin/backfillpriority
+COPY --from=build /out/reformbeds /usr/local/bin/reformbeds
 
 # Unprivileged, matching the API and slice-worker images. OpenSCAD writes its
 # temporary .scad and .stl through a writable HOME.
