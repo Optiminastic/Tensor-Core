@@ -31,6 +31,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # every bed still holding - and still printing - the old geometry until this runs.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/replate ./cmd/replate
+# backfillpriority ranks jobs created before priority ordering existed. Without
+# it the Priority tab opens empty on a floor that has priority work in it.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/backfillpriority ./cmd/backfillpriority
 
 # --- Runtime stage -------------------------------------------------------------
 FROM debian:12-slim
@@ -52,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
 COPY --from=build /out/replate /usr/local/bin/replate
+COPY --from=build /out/backfillpriority /usr/local/bin/backfillpriority
 
 # Unprivileged, matching the API and slice-worker images. OpenSCAD writes its
 # temporary .scad and .stl through a writable HOME.
