@@ -176,8 +176,33 @@ func batchingBlockedReason(j gen.ProductionJob) *string {
 	if !blocked {
 		return nil
 	}
+	// A product Tensor does not build says the same thing three ways -
+	// stl_missing, no_approved_design, sku_missing all mean "there is no model
+	// here". The operator's move is identical in every case and does not
+	// depend on which of the three the importer happened to write, so the
+	// queue asks for the file instead of reporting on the design tables.
+	if modelStatusOf(j) == ModelApprovalRequired && j.IssueReason != nil && !j.Held &&
+		noModelIssues[*j.IssueReason] {
+		reason := UploadDesignFileWording
+		return &reason
+	}
 	reason := humanReason(exclusionReason(j.Held, j.PersonalisationStatus, j.IssueReason))
 	return &reason
+}
+
+// UploadDesignFileWording is what the queue says about a product Tensor cannot
+// build and nobody has supplied a model for yet. It names the action, not the
+// diagnosis: the row's own control is an upload button.
+const UploadDesignFileWording = "Design file required - upload the 3MF for this job."
+
+// noModelIssues are the issue reasons that all mean "Tensor has no model for
+// this product", and which an uploaded file therefore all clear. Kept beside
+// the wording so the two cannot drift, and matched by
+// SetProductionJobPrintFile, which clears exactly this set.
+var noModelIssues = map[string]bool{
+	production.IssueSTLMissing:       true,
+	production.IssueNoApprovedDesign: true,
+	production.IssueSKUMissing:       true,
 }
 
 // issueWording turns an issue_reason enum into something an operator can read.
@@ -229,7 +254,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
 		FilamentGramsRequired: db.NumFloatPtr(j.FilamentGramsRequired), PrintFileID: uuidPtrStr(j.PrintFileID),
 		ModelStatus:               modelStatusOf(j),
-		ModelError:                j.ModelError,
+		ModelError:                reportableModelError(j),
 		VariantTitle:              j.VariantTitle,
 		PersonalisationProperties: rawJSON(j.PersonalisationProperties, "[]"),
 		EstimatedPrintTimeMinutes: j.EstimatedPrintTimeMinutes, DueDate: db.TimePtr(j.DueDate),
@@ -805,6 +830,23 @@ func modelStatusOf(j gen.ProductionJob) string {
 		return ModelGenerating
 	}
 	return ModelApprovalRequired
+}
+
+// reportableModelError is the renderer's complaint, but only for a job the
+// renderer was ever meant to touch.
+//
+// A product Tensor does not generate has no render of its own, so a model_error
+// on it is debris - left by a misclassification, or by a SKU that once looked
+// generated and no longer does. Showing it puts a red renderer message
+// ("a plank needs both names") against a photo frame, which is both wrong and
+// unactionable: the remedy is to upload a model, and the queue already offers
+// that. This is the contract ModelError's own doc comment states - null unless
+// the status is "failed" - which the DTO previously did not keep.
+func reportableModelError(j gen.ProductionJob) *string {
+	if modelStatusOf(j) != ModelFailed {
+		return nil
+	}
+	return j.ModelError
 }
 
 // jobNumberFor names the index-th job on an order after the order itself,

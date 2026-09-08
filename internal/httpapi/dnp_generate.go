@@ -44,16 +44,31 @@ var errNotPersonalisable = errors.New("this product has no generated model")
 // name freely.
 var generatedProductNames = []string{"dual name plank"}
 
+// generatedSKUSegments are the hyphen-separated SKU segments that name a
+// product Tensor renders itself.
+//
+// Both live plank families: T3DPS-DNP-1..16 carries "DNP", and the
+// with-light range carries "DNPLB". Anything else beginning with those three
+// letters is a different product - DNPF is the Dual Name & Photo Frame, which
+// needs a design file uploaded, not a plank generated for it.
+var generatedSKUSegments = map[string]bool{
+	"DNP":   true,
+	"DNPLB": true,
+}
+
 // IsGeneratedProduct reports whether a product is one Tensor renders itself.
 //
 // The SKU is the primary key on it: the storefront renames products freely, but
 // the SKU is what the warehouse and the design tables key on. Both live families
 // are covered - T3DPS-DNP-1..16 and DNPLB-*.
 //
-// Matched per hyphen-separated segment, NOT as a bare substring. "DNP" appears
-// inside plenty of words, and a false positive here is not cosmetic: Tensor
-// would try to render a plank for a product that is not one, fail, and hold an
-// order that had nothing wrong with it.
+// Matched against a NAMED SET of segments, not a prefix. That distinction cost
+// real orders: the rule used to accept any segment starting with "DNP", which
+// swallowed DNPF - the Dual Name & PHOTO FRAME. Tensor rendered a plank for a
+// photo frame, failed with "a plank needs both names", and held four orders
+// that had nothing wrong with them behind an error about a product they are
+// not. The families it must match are known and short, so listing them is both
+// safer and more honest than a prefix that happens to fit today.
 //
 // The product name is the fallback, and it is not belt-and-braces. Nine live
 // Dual Name Plank lines - the GREEN and PURPLE variants - carry all four STEP
@@ -62,7 +77,7 @@ var generatedProductNames = []string{"dual name plank"}
 // lost its SKU in the catalogue.
 func IsGeneratedProduct(sku, productName string) bool {
 	for _, part := range strings.Split(strings.ToUpper(sku), "-") {
-		if strings.HasPrefix(part, "DNP") {
+		if generatedSKUSegments[part] {
 			return true
 		}
 	}

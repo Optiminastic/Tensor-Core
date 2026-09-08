@@ -20,14 +20,13 @@ import (
 // givePrintFile makes a job batchable the way the product does: attach a print
 // file and clear the validation flag.
 //
-// Both steps are needed. A job created from an order whose SKU has no approved
-// design is stamped issue_reason = no_approved_design (see applyMatch), and
 // ListBatchableJobs excludes any flagged job - by design, so a job with an
-// unresolved problem is never printed. SetProductionJobPrintFile only clears
-// the flag when it is exactly 'stl_missing', because an STL upload is not the
-// remedy for a missing design. Clearing the rest is a deliberate human act
-// (PATCH issue_reason, Admin/Project Lead only), which is what this stands in
-// for.
+// unresolved problem is never printed. SetProductionJobPrintFile clears the
+// three reasons an uploaded file actually answers (stl_missing,
+// no_approved_design, sku_missing); the explicit clear below covers the rest -
+// colour_missing, filament_out_of_stock - which an upload does not fix and
+// which only a deliberate human act clears (PATCH issue_reason, Admin/Project
+// Lead only). This stands in for both.
 func givePrintFile(t *testing.T, store *db.Store, jobID, fileID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()

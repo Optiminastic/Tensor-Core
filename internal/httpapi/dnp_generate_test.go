@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // This decides whether an order flows through untouched or waits for a designer.
@@ -31,6 +32,14 @@ func TestIsGeneratedProduct(t *testing.T) {
 		// so the match is per hyphen-separated segment rather than a substring.
 		{"substring in a sku segment", "CARDNPACK-1", "", false},
 		{"substring, no hyphens", "GRANDNPRIX", "", false},
+
+		// The regression this rule was rewritten for. DNPF is the Dual Name &
+		// Photo Frame, a different product that a HasPrefix("DNP") test
+		// swallowed: Tensor rendered a plank for it, failed with "a plank needs
+		// both names", and put a red renderer error on four live orders that
+		// had nothing wrong with them.
+		{"photo frame sku", "T3DPS-DNPF-2", "DUAL NAME & PHOTO FRAME - GOLD", false},
+		{"photo frame sku alone", "DNPF-1", "", false},
 
 		// Nine live plank lines - the GREEN and PURPLE variants - carry every
 		// STEP property and no SKU at all. They are planks; the variant just
@@ -82,6 +91,16 @@ func TestModelStatusOf(t *testing.T) {
 		{
 			"other product with no model",
 			gen.ProductionJob{Sku: sku("THO-PLA-FFF-0022")},
+			ModelApprovalRequired,
+		},
+		{
+			// A photo frame wants a file from a person, never a render - even
+			// though a misclassification once left a renderer error on it.
+			"photo frame carrying a stale render error",
+			gen.ProductionJob{
+				Sku:        sku("T3DPS-DNPF-2"),
+				ModelError: sku(`a plank needs both names; got first="" second=""`),
+			},
 			ModelApprovalRequired,
 		},
 		{
@@ -190,4 +209,101 @@ func TestFallbackCoversOrderedColours(t *testing.T) {
 			t.Errorf("fallback %q has an invalid hex %q", name, hex)
 		}
 	}
+}
+
+// A renderer's complaint belongs only to a job the renderer owns.
+//
+// The DTO used to hand j.ModelError over unconditionally, against its own
+// documented contract, which is how a photo frame ended up displaying "a plank
+// needs both names" in red on the queue - a message about a product it is not,
+// naming an action nobody can take. The row's own upload button is the remedy;
+// the debris is not information.
+func TestReportableModelError(t *testing.T) {
+	sku := func(s string) *string { return &s }
+	plankError := `a plank needs both names; got first="" second=""`
+
+	t.Run("a plank's own failure is reported", func(t *testing.T) {
+		got := reportableModelError(gen.ProductionJob{
+			Sku: sku("T3DPS-DNP-9"), ModelError: sku("openscad: exit 1"),
+		})
+		if got == nil || *got != "openscad: exit 1" {
+			t.Errorf("reportableModelError = %v, want the renderer's words", got)
+		}
+	})
+
+	t.Run("a photo frame's stale plank error is not", func(t *testing.T) {
+		if got := reportableModelError(gen.ProductionJob{
+			Sku: sku("T3DPS-DNPF-2"), ModelError: sku(plankError),
+		}); got != nil {
+			t.Errorf("reportableModelError = %q, want nil - nobody renders a photo frame", *got)
+		}
+	})
+
+	t.Run("a job that got its model keeps no old error", func(t *testing.T) {
+		id := uuid.New()
+		if got := reportableModelError(gen.ProductionJob{
+			PrintFileID: &id, Sku: sku("T3DPS-DNP-9"), ModelError: sku("openscad: exit 1"),
+		}); got != nil {
+			t.Errorf("reportableModelError = %q, want nil once the model is attached", *got)
+		}
+	})
+}
+
+// What the queue says about a product Tensor cannot build.
+//
+// All three issue reasons mean "there is no model here" and all three are
+// cleared by the same upload, so reporting which of them the importer happened
+// to write tells an operator nothing they can act on. Reasons with a different
+// remedy must still say what they are.
+func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
+	sku := func(s string) *string { return &s }
+	frame := func(issue string) gen.ProductionJob {
+		return gen.ProductionJob{
+			Status:                production.StatusQueued,
+			Sku:                   sku("T3DPS-DNPF-2"),
+			PersonalisationStatus: production.PersonalisationNotRequired,
+			IssueReason:           &issue,
+		}
+	}
+
+	for _, issue := range []string{
+		production.IssueSTLMissing,
+		production.IssueNoApprovedDesign,
+		production.IssueSKUMissing,
+	} {
+		t.Run(issue, func(t *testing.T) {
+			got := batchingBlockedReason(frame(issue))
+			if got == nil || *got != UploadDesignFileWording {
+				t.Errorf("batchingBlockedReason(%s) = %v, want %q", issue, got, UploadDesignFileWording)
+			}
+		})
+	}
+
+	// An upload does not conjure filament, so this one keeps its own words.
+	t.Run("a reason an upload does not fix", func(t *testing.T) {
+		got := batchingBlockedReason(frame(production.IssueFilamentOutOfStock))
+		if got == nil || *got == UploadDesignFileWording {
+			t.Errorf("batchingBlockedReason(filament_out_of_stock) = %v, want the stock wording", got)
+		}
+	})
+
+	// A hold is a person's decision and outranks the missing file: telling them
+	// to upload something would hide the fact that they held it themselves.
+	t.Run("a held job says it is held", func(t *testing.T) {
+		j := frame(production.IssueSTLMissing)
+		j.Held = true
+		got := batchingBlockedReason(j)
+		if got == nil || *got == UploadDesignFileWording {
+			t.Errorf("batchingBlockedReason(held) = %v, want the hold wording", got)
+		}
+	})
+
+	// A plank renders itself; asking anyone to upload one would be wrong.
+	t.Run("a plank is never asked for a file", func(t *testing.T) {
+		j := frame(production.IssueSTLMissing)
+		j.Sku = sku("T3DPS-DNP-9")
+		if got := batchingBlockedReason(j); got != nil {
+			t.Errorf("batchingBlockedReason(plank) = %q, want nil while it renders", *got)
+		}
+	})
 }

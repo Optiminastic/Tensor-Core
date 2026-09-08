@@ -220,15 +220,27 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
 -- name: SetProductionJobPrintFile :one
--- Clears issue_reason only when it is exactly 'stl_missing' - the flag this
--- upload is the direct remedy for (see applyMatch). Leaving it set would keep
--- the job out of ListBatchableJobs after an operator did the one thing that
--- fixes it. Any other reason survives untouched: an STL upload does not fix
--- colour_missing or filament_out_of_stock, and blanket-clearing would push a
--- genuinely unvalidated job into batching.
+-- Clears the issue reasons this upload is the direct remedy for, and only
+-- those. Leaving one set would keep the job out of ListBatchableJobs after an
+-- operator did the one thing that fixes it.
+--
+-- All three mean the same thing in different words - Tensor has no model for
+-- this product:
+--   stl_missing        a model was expected and is not there
+--   no_approved_design nothing in the design tables matches the SKU
+--   sku_missing        the line carries no SKU to match on at all
+-- An operator uploading the file answers every one of them. This is how a
+-- product Tensor does not generate - a photo frame, a night lamp - reaches a
+-- bed at all: somebody supplies the 3MF and the job joins the colour it was
+-- already recorded against.
+--
+-- Any other reason survives untouched: an upload does not fix colour_missing
+-- or filament_out_of_stock, and blanket-clearing would push a genuinely
+-- unvalidated job into batching.
 UPDATE production_jobs SET
     print_file_id = sqlc.arg('print_file_id'),
-    issue_reason  = CASE WHEN issue_reason = 'stl_missing' THEN NULL ELSE issue_reason END,
+    issue_reason  = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design', 'sku_missing')
+                         THEN NULL ELSE issue_reason END,
     updated_at    = now()
 WHERE id = sqlc.arg('id')
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
