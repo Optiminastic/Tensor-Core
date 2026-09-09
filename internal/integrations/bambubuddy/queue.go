@@ -91,18 +91,11 @@ func (q QueueItem) Name() string {
 // Colours splits the comma-separated colour field into individual swatches.
 //
 // Multi-material plates report every colour in one string; rendering that raw
-// would show "#FFFFFF,#D3B7A7" where an operator expects two chips.
+// would show "#FFFFFF,#D3B7A7" where an operator expects two chips. Shared with
+// Archive.Colours - the queue and the history report the field identically, and
+// two renderings of one idea is how a board starts contradicting itself.
 func (q QueueItem) Colours() []string {
-	if strings.TrimSpace(q.FilamentColour) == "" {
-		return nil
-	}
-	var out []string
-	for _, c := range strings.Split(q.FilamentColour, ",") {
-		if c = strings.TrimSpace(c); c != "" {
-			out = append(out, c)
-		}
-	}
-	return out
+	return splitColours(q.FilamentColour)
 }
 
 // Waiting reports whether the item has yet to start.

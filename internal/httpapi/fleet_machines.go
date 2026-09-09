@@ -155,6 +155,7 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	// Not under /machine-fleet: the queue belongs to BambuBuddy and spans every
 	// printer, so it is not a sub-resource of any one machine.
 	s.registerPrintingQueue(r)
+	s.registerPrintingHistory(r)
 }
 
 func (s *Server) listFleetMachines(c *gin.Context) {
