@@ -37,7 +37,20 @@ func names(pipelines []bambubuddy.Pipeline) []string {
 	return out
 }
 
-func TestPipelinesForKeepsOnlyTheBedsOwnClass(t *testing.T) {
+// The bed's own class is tried first, and the others are still offered.
+//
+// This used to keep ONLY the matching class, on the reasoning that an H2C plate
+// sliced through the P2S pipeline would not fit its bed. That plate does not
+// exist: bedpack.BedXMM is a single global 330mm constant and Tensor holds no
+// per-family bed dimensions, so every plate of four planks is byte-identical
+// whatever class it was planned for. The restriction bought nothing and cost
+// the fleet - GENERATED_MACHINE_FAMILY stamps every plank A2L, so five of
+// thirteen printers did all the plank work while eight sat idle.
+//
+// Preference, therefore, not restriction. Whether a printer can really run it
+// is BambuBuddy's call, since only it can compare the plate's filament slots
+// against what is actually loaded.
+func TestPipelinesForPrefersTheBedsClassButOffersTheRest(t *testing.T) {
 	all := []bambubuddy.Pipeline{
 		classPipeline(1, "p2s", "P2S"),
 		classPipeline(2, "h2c", "H2C"),
@@ -45,15 +58,18 @@ func TestPipelinesForKeepsOnlyTheBedsOwnClass(t *testing.T) {
 	}
 
 	got := pipelinesFor(all, "H2C")
-	if len(got) != 1 || got[0].Name != "h2c" {
-		t.Errorf("pipelines for H2C = %v, want only the H2C one - slicing an H2C plate "+
-			"through the P2S pipeline produces a plate that does not fit its bed", names(got))
+	if len(got) != 3 {
+		t.Fatalf("pipelines for H2C = %v, want all three - the others are a fallback, "+
+			"not a refusal", names(got))
+	}
+	if got[0].Name != "h2c" {
+		t.Errorf("pipeline order = %v, want the bed's own class tried first", names(got))
 	}
 
 	// Case is BambuBuddy's, not ours: it reports "H2C" but a profile family
 	// could be stored lower-case.
-	if got := pipelinesFor(all, "h2c"); len(got) != 1 || got[0].Name != "h2c" {
-		t.Errorf("pipelines for lower-case h2c = %v, want the H2C one", names(got))
+	if got := pipelinesFor(all, "h2c"); got[0].Name != "h2c" {
+		t.Errorf("pipelines for lower-case h2c = %v, want the H2C one first", names(got))
 	}
 }
 

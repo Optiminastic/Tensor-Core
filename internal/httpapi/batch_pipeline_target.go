@@ -15,9 +15,16 @@ package httpapi
 // looks at printer class and filament, not at whether the parts fit, so nothing
 // downstream would catch it.
 //
-// So a plate now goes only to a pipeline that targets the printer class Tensor
-// planned it for. Which physical printer of that class runs it stays
-// BambuBuddy's call, which is what the floor wants.
+// So a plate is offered to the pipeline for the class Tensor planned it for
+// FIRST - and then, if that class cannot take it, to the others. The planned
+// class is a preference rather than a restriction, because today nothing about
+// the plate is class-specific: bedpack packs everything onto one 330mm bed and
+// holds no per-family dimensions, so the "7-up H2C plate" above does not yet
+// exist. See pipelinesFor for what would have to change if it ever does.
+//
+// Which physical printer runs it stays BambuBuddy's call, which is what the
+// floor wants - it is the only side that can compare the plate's declared
+// filament slots against what is really in each AMS.
 
 import (
 	"context"
@@ -52,10 +59,10 @@ func (s *Server) batchTargetFamily(ctx context.Context, batch gen.Batch, jobs []
 	return batchFamilyFromRows(jobs)
 }
 
-// pipelinesFor narrows BambuBuddy's pipelines to the ones allowed to slice this
-// plate.
+// pipelinesFor ORDERS BambuBuddy's pipelines by how well each suits this plate,
+// best first. It no longer drops any.
 //
-// Matching is on the model class, because that is the granularity Tensor plans
+// Ordering is on the model class, because that is the granularity Tensor plans
 // at: a batch's machine_id is a machine_profiles row - a printer class with a
 // nozzle and flow - not one physical printer. Which of the three H2Cs actually
 // runs the plate stays BambuBuddy's decision, which is what the floor wants.
@@ -72,12 +79,14 @@ func pipelinesFor(all []bambubuddy.Pipeline, family string) []bambubuddy.Pipelin
 		return all // unknown class: widen, as the colour gate does
 	}
 
-	var byFamily, untargeted []bambubuddy.Pipeline
+	var byFamily, untargeted, otherFamilies []bambubuddy.Pipeline
 	for _, p := range all {
 		switch {
 		case p.TargetModelClass != nil && strings.TrimSpace(*p.TargetModelClass) != "":
 			if strings.EqualFold(strings.TrimSpace(*p.TargetModelClass), family) {
 				byFamily = append(byFamily, p)
+			} else {
+				otherFamilies = append(otherFamilies, p)
 			}
 		case p.TargetPrinterID != nil:
 			// Pinned to one printer of an unknown model - not safe to assume.
@@ -85,7 +94,28 @@ func pipelinesFor(all []bambubuddy.Pipeline, family string) []bambubuddy.Pipelin
 			untargeted = append(untargeted, p)
 		}
 	}
-	return append(byFamily, untargeted...)
+	// Preferred class first, then anything else that could take it.
+	//
+	// The planned class is a PREFERENCE, not a restriction, because nothing
+	// about the plate is class-specific: bedpack packs every plate onto one
+	// bed - bedpack.BedXMM is a single global 330mm constant, and Tensor holds
+	// no per-family bed dimensions at all - so an A2L plate and an H2C plate of
+	// the same four planks are byte-identical. Narrowing to the planned class
+	// therefore bought no safety and cost the fleet: with
+	// GENERATED_MACHINE_FAMILY stamping every plank A2L, five of thirteen
+	// printers did all the plank work while eight sat idle.
+	//
+	// Whether a given printer can actually run it stays BambuBuddy's call - it
+	// compares the plate's declared filament slots against real AMS trays, which
+	// is the colour matching the shop wants and which Tensor cannot do as well.
+	// sliceAndQueue takes the first pipeline that accepts, so this ordering means
+	// "the class we planned for if it can, otherwise whoever can".
+	//
+	// If plates ever become class-specific - a 7-up H2C plate that cannot fit a
+	// P2S bed - this ordering must become a restriction again, and bedpack
+	// growing per-family dimensions is the signal that day has come.
+	out := append(byFamily, untargeted...)
+	return append(out, otherFamilies...)
 }
 
 // pipelineTargetNote describes what was looked for, for a hold reason a person
