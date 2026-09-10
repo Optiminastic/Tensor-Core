@@ -89,7 +89,7 @@ func (s *Server) MarkOrdersPrinted(ctx context.Context, orderNumbers []string) (
 	out := PrintedOutcome{}
 
 	orderNumbers = dedupeKeys(orderNumbers)
-	orders, err := s.store.Q.ListOrders(ctx, nil)
+	orders, err := s.store.Q.ListOrders(ctx, gen.ListOrdersParams{})
 	if err != nil {
 		return out, fmt.Errorf("list orders: %w", err)
 	}
@@ -304,7 +304,7 @@ func (s *Server) unlockBatch(ctx context.Context, batch gen.Batch, jobs []gen.Pr
 // reprint.
 func (s *Server) PreviewOrdersPrinted(ctx context.Context, orderNumbers []string) (string, error) {
 	orderNumbers = dedupeKeys(orderNumbers)
-	orders, err := s.store.Q.ListOrders(ctx, nil)
+	orders, err := s.store.Q.ListOrders(ctx, gen.ListOrdersParams{})
 	if err != nil {
 		return "", fmt.Errorf("list orders: %w", err)
 	}

@@ -245,7 +245,7 @@ func (s *Server) closeEmptiedBatch(ctx context.Context, batch gen.Batch) {
 // any the per-order path missed. Returns how many orders had work closed out.
 func (s *Server) CloseOutFulfilledOrders(ctx context.Context) int {
 	log := obs.FromContext(ctx)
-	orders, err := s.store.Q.ListOrders(ctx, nil)
+	orders, err := s.store.Q.ListOrders(ctx, gen.ListOrdersParams{})
 	if err != nil {
 		log.Warn("could not list orders to close out fulfilled work", "error", err)
 		return 0

@@ -1221,6 +1221,14 @@ WHERE ($1::text IS NULL OR status = $1::text)
   AND ($5::text IS NULL OR packaging_status = $5::text)
   AND ($6::uuid IS NULL OR order_id = $6::uuid)
   AND ($7::uuid IS NULL OR batch_id = $7::uuid)
+  -- Same box as ListProductionJobsPage; see there for why these four fields.
+  AND (
+    $8::text IS NULL
+    OR job_number ILIKE '%' || $8::text || '%'
+    OR personalisation_name ILIKE '%' || $8::text || '%'
+    OR customer_name ILIKE '%' || $8::text || '%'
+    OR product_name ILIKE '%' || $8::text || '%'
+  )
 ORDER BY COALESCE(
     (SELECT o.placed_at FROM orders o WHERE o.id = production_jobs.order_id),
     created_at
@@ -1235,6 +1243,7 @@ type ListProductionJobsParams struct {
 	PackagingStatus *string
 	OrderID         *uuid.UUID
 	BatchID         *uuid.UUID
+	Search          *string
 }
 
 // Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
@@ -1260,6 +1269,7 @@ func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobs
 		arg.PackagingStatus,
 		arg.OrderID,
 		arg.BatchID,
+		arg.Search,
 	)
 	if err != nil {
 		return nil, err
@@ -1364,12 +1374,23 @@ WHERE ($1::text IS NULL OR status = $1::text)
   AND ($5::text IS NULL OR packaging_status = $5::text)
   AND ($6::uuid IS NULL OR order_id = $6::uuid)
   AND ($7::uuid IS NULL OR batch_id = $7::uuid)
+  -- One box, several fields. An operator looking for a plank has the customer's
+  -- names in front of them, or a job number off the plate, or the product - not
+  -- a column to choose first. personalisation_name is where BOTH names live,
+  -- joined as "HABEEB & FARSANA" by the importer, so either half matches.
   AND (
-    $8::timestamptz IS NULL
-    OR (created_at, id) < ($8::timestamptz, $9::uuid)
+    $8::text IS NULL
+    OR job_number ILIKE '%' || $8::text || '%'
+    OR personalisation_name ILIKE '%' || $8::text || '%'
+    OR customer_name ILIKE '%' || $8::text || '%'
+    OR product_name ILIKE '%' || $8::text || '%'
+  )
+  AND (
+    $9::timestamptz IS NULL
+    OR (created_at, id) < ($9::timestamptz, $10::uuid)
   )
 ORDER BY created_at DESC, id DESC
-LIMIT $10
+LIMIT $11
 `
 
 type ListProductionJobsPageParams struct {
@@ -1380,6 +1401,7 @@ type ListProductionJobsPageParams struct {
 	PackagingStatus *string
 	OrderID         *uuid.UUID
 	BatchID         *uuid.UUID
+	Search          *string
 	CursorCreatedAt pgtype.Timestamptz
 	CursorID        *uuid.UUID
 	PageLimit       int32
@@ -1395,6 +1417,7 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 		arg.PackagingStatus,
 		arg.OrderID,
 		arg.BatchID,
+		arg.Search,
 		arg.CursorCreatedAt,
 		arg.CursorID,
 		arg.PageLimit,

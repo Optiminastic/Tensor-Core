@@ -564,9 +564,23 @@ func (q *Queries) ListBatchStatusesForIDs(ctx context.Context, ids []uuid.UUID) 
 }
 
 const listBatches = `-- name: ListBatches :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id, archive_id, print_outcome, print_started_at, print_finished_at, actual_print_time_minutes, actual_filament_grams FROM batches
-ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
-         created_at DESC, id DESC
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams FROM batches b
+WHERE (
+    $1::text IS NULL
+    OR b.batch_number ILIKE '%' || $1::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || $1::text || '%'
+            OR o.order_number ILIKE '%' || $1::text || '%'
+            OR j.personalisation_name ILIKE '%' || $1::text || '%'
+          )
+    )
+)
+ORDER BY NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
+         b.created_at DESC, b.id DESC
 `
 
 // Newest batch first, by the batch's own number.
@@ -581,8 +595,9 @@ ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint DESC NU
 // "BATCH-1001051" lexically, which is only right today because every live number
 // is the same width. NULLS LAST keeps a hand-named batch (no digits at all) out
 // of the way rather than at the top.
-func (q *Queries) ListBatches(ctx context.Context) ([]Batch, error) {
-	rows, err := q.db.Query(ctx, listBatches)
+// Same box as ListBatchesPage; see there for why this reaches through the jobs.
+func (q *Queries) ListBatches(ctx context.Context, search *string) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listBatches, search)
 	if err != nil {
 		return nil, err
 	}
@@ -805,23 +820,53 @@ func (q *Queries) ListBatchesInFlight(ctx context.Context) ([]ListBatchesInFligh
 }
 
 const listBatchesPage = `-- name: ListBatchesPage :many
-SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id, archive_id, print_outcome, print_started_at, print_finished_at, actual_print_time_minutes, actual_filament_grams FROM batches
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams FROM batches b
 WHERE (
     $1::timestamptz IS NULL
-    OR (created_at, id) < ($1::timestamptz, $2::uuid)
+    OR (b.created_at, b.id) < ($1::timestamptz, $2::uuid)
 )
-ORDER BY created_at DESC, id DESC
-LIMIT $3
+AND (
+    $3::text IS NULL
+    OR b.batch_number ILIKE '%' || $3::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || $3::text || '%'
+            OR o.order_number ILIKE '%' || $3::text || '%'
+            OR j.personalisation_name ILIKE '%' || $3::text || '%'
+          )
+    )
+)
+ORDER BY b.created_at DESC, b.id DESC
+LIMIT $4
 `
 
 type ListBatchesPageParams struct {
 	CursorCreatedAt pgtype.Timestamptz
 	CursorID        *uuid.UUID
+	Search          *string
 	PageLimit       int32
 }
 
+// Optionally narrowed to the beds carrying one order.
+//
+// "Which bed is order 114873 on?" is the question the floor actually asks, and
+// it could only be answered by opening beds one at a time. Matched through the
+// bed's JOBS rather than on the batch itself, because a batch records nothing
+// about which orders it holds - job_number carries the order number ("JOB-114873")
+// and the join reaches the order's own number for anything hand-numbered.
+//
+// The batch number is searched too, so one box answers both "where is 114873"
+// and "show me BATCH-1001824".
 func (q *Queries) ListBatchesPage(ctx context.Context, arg ListBatchesPageParams) ([]Batch, error) {
-	rows, err := q.db.Query(ctx, listBatchesPage, arg.CursorCreatedAt, arg.CursorID, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listBatchesPage,
+		arg.CursorCreatedAt,
+		arg.CursorID,
+		arg.Search,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

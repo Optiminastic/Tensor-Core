@@ -463,6 +463,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 			Status: statusFilter, AssemblyStatus: assemblyFilter, FinishingStatus: finishingFilter,
 			QcStatus:        qcFilter,
 			PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
+			Search: searchParam(c),
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
@@ -477,6 +478,7 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 		QcStatus:        qcFilter,
 		PackagingStatus: packagingFilter, OrderID: orderFilter, BatchID: batchFilter,
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
+		Search: searchParam(c),
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list production jobs.")

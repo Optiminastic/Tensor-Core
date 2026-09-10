@@ -119,7 +119,7 @@ func (s dummyOrderSpec) totalINR() float64 {
 // no-ops if any seed order already exists.
 func seedDummyOrders(ctx context.Context, store *db.Store) (int, error) {
 	source := dummyOrderSourceKey
-	existing, err := store.Q.ListOrders(ctx, &source)
+	existing, err := store.Q.ListOrders(ctx, gen.ListOrdersParams{Source: &source})
 	if err != nil {
 		return 0, fmt.Errorf("check existing seed orders: %w", err)
 	}

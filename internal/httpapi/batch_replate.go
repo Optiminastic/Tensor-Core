@@ -92,7 +92,7 @@ func (s *Server) RebuildBatchPlate(ctx context.Context, batchID uuid.UUID) error
 // Completed beds are excluded deliberately - their plate is the record of what
 // was actually printed, and rewriting it would be falsifying history.
 func (s *Server) PlateableBatches(ctx context.Context) ([]gen.Batch, error) {
-	all, err := s.store.Q.ListBatches(ctx)
+	all, err := s.store.Q.ListBatches(ctx, nil)
 	if err != nil {
 		return nil, err
 	}

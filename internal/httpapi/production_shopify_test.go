@@ -93,7 +93,7 @@ func TestIntegrationImportShopifyOrder(t *testing.T) {
 
 	// The imported order feeds from-order: one job with the mapped material and a
 	// validated personalisation (name supplied, nothing else required).
-	orders, err := store.Q.ListOrders(ctx, nil)
+	orders, err := store.Q.ListOrders(ctx, gen.ListOrdersParams{})
 	if err != nil || len(orders) != 1 {
 		t.Fatalf("orders after import = %d (err %v), want 1", len(orders), err)
 	}

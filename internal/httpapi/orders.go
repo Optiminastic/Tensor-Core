@@ -49,6 +49,10 @@ type orderResponse struct {
 	// ReturnStatus is Shopify's own, "no_return" on an order nobody sent back.
 	DeliveryStatus *string `json:"delivery_status"`
 	ReturnStatus   *string `json:"return_status"`
+	// PersonalisationNames are the names the customer typed, so the orders page
+	// can be searched by them. The names only, never the whole line_items
+	// document - see order_search_names.go.
+	PersonalisationNames []string `json:"personalisation_names"`
 	// ItemCount is the units on the order, summed across its lines.
 	//
 	// Carried on the LIST response, unlike line_items itself: the orders table
@@ -113,23 +117,24 @@ func orderDTO(o gen.Order) orderResponse {
 		JobCreationError:    o.JobCreationError,
 		JobCreationFailedAt: db.TimePtr(o.JobCreationFailedAt),
 
-		PlacedAt:          db.TimePtr(o.PlacedAt),
-		Note:              o.Note,
-		FulfillmentStatus: o.FulfillmentStatus,
-		DeliveryStatus:    o.DeliveryStatus,
-		ReturnStatus:      o.ReturnStatus,
-		ItemCount:         countLineItems(o.LineItems),
-		SourceName:        o.SourceName,
-		SubtotalPrice:     numericStr(o.SubtotalPrice),
-		TotalDiscounts:    numericStr(o.TotalDiscounts),
-		TotalShipping:     numericStr(o.TotalShipping),
-		TotalReceived:     numericStr(o.TotalReceived),
-		DiscountTitle:     o.DiscountTitle,
-		ShippingTitle:     o.ShippingTitle,
-		Attributes:        rawJSON(o.Attributes, "[]"),
-		Tags:              rawJSON(o.Tags, "[]"),
-		ShippingAddress:   rawJSON(o.ShippingAddress, "null"),
-		BillingAddress:    rawJSON(o.BillingAddress, "null"),
+		PlacedAt:             db.TimePtr(o.PlacedAt),
+		Note:                 o.Note,
+		FulfillmentStatus:    o.FulfillmentStatus,
+		DeliveryStatus:       o.DeliveryStatus,
+		ReturnStatus:         o.ReturnStatus,
+		ItemCount:            countLineItems(o.LineItems),
+		PersonalisationNames: personalisationNamesFor(o.LineItems),
+		SourceName:           o.SourceName,
+		SubtotalPrice:        numericStr(o.SubtotalPrice),
+		TotalDiscounts:       numericStr(o.TotalDiscounts),
+		TotalShipping:        numericStr(o.TotalShipping),
+		TotalReceived:        numericStr(o.TotalReceived),
+		DiscountTitle:        o.DiscountTitle,
+		ShippingTitle:        o.ShippingTitle,
+		Attributes:           rawJSON(o.Attributes, "[]"),
+		Tags:                 rawJSON(o.Tags, "[]"),
+		ShippingAddress:      rawJSON(o.ShippingAddress, "null"),
+		BillingAddress:       rawJSON(o.BillingAddress, "null"),
 
 		CreatedAt: db.Time(o.CreatedAt), UpdatedAt: db.Time(o.UpdatedAt),
 	}
@@ -245,7 +250,7 @@ func (s *Server) listOrders(c *gin.Context) {
 	}
 
 	if !page.paginate {
-		rows, err := s.store.Q.ListOrders(ctx, source)
+		rows, err := s.store.Q.ListOrders(ctx, gen.ListOrdersParams{Source: source, Search: searchParam(c)})
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list orders.")
 			return
@@ -260,6 +265,7 @@ func (s *Server) listOrders(c *gin.Context) {
 
 	rows, err := s.store.Q.ListOrdersPage(ctx, gen.ListOrdersPageParams{
 		CursorImportedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit, Source: source,
+		Search: searchParam(c),
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list orders.")

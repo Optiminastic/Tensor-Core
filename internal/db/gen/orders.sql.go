@@ -171,11 +171,24 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 
 const listOrders = `-- name: ListOrders :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
-WHERE $1::text IS NULL OR source = $1
+WHERE ($1::text IS NULL OR source = $1)
+AND (
+    $2::text IS NULL
+    OR order_number ILIKE '%' || $2::text || '%'
+    OR customer_name ILIKE '%' || $2::text || '%'
+    OR customer_email ILIKE '%' || $2::text || '%'
+    OR line_items::text ILIKE '%' || $2::text || '%'
+)
 ORDER BY COALESCE(placed_at, imported_at) DESC, id DESC
 `
 
+type ListOrdersParams struct {
+	Source *string
+	Search *string
+}
+
 // A null source returns every order regardless of origin.
+// Same box as ListOrdersPage; see there for why the whole document is matched.
 // Newest ORDER first, not newest import.
 //
 // imported_at is when Tensor happened to fetch a row, which on a backfill is
@@ -184,8 +197,8 @@ ORDER BY COALESCE(placed_at, imported_at) DESC, id DESC
 // customer's own date and is what "latest first" means to anyone reading it.
 // COALESCE keeps orders imported before placed_at existed in a sensible place
 // rather than dropping them to the bottom.
-func (q *Queries) ListOrders(ctx context.Context, source *string) ([]Order, error) {
-	rows, err := q.db.Query(ctx, listOrders, source)
+func (q *Queries) ListOrders(ctx context.Context, arg ListOrdersParams) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listOrders, arg.Source, arg.Search)
 	if err != nil {
 		return nil, err
 	}
@@ -247,24 +260,42 @@ WHERE (
     OR (imported_at, id) < ($1::timestamptz, $2::uuid)
 )
 AND ($3::text IS NULL OR source = $3)
+AND (
+    $4::text IS NULL
+    OR order_number ILIKE '%' || $4::text || '%'
+    OR customer_name ILIKE '%' || $4::text || '%'
+    OR customer_email ILIKE '%' || $4::text || '%'
+    OR line_items::text ILIKE '%' || $4::text || '%'
+)
 ORDER BY imported_at DESC, id DESC
-LIMIT $4
+LIMIT $5
 `
 
 type ListOrdersPageParams struct {
 	CursorImportedAt pgtype.Timestamptz
 	CursorID         *uuid.UUID
 	Source           *string
+	Search           *string
 	PageLimit        int32
 }
 
 // Keyset page over (imported_at, id), newest first. A null cursor returns the
 // first page. A null source returns every order regardless of origin.
+// The customer's own words, wherever they put them.
+//
+// The two plank names live inside line_items, in a per-line properties array
+// whose KEYS move between products - "STEP 4-First Name-" on one, "STEP 2 -
+// First Name-" on another, "First Name on Plank" on a third. Matching the whole
+// document as text is what makes one search box work across all of them without
+// Tensor having to know every shape the storefront invents. It over-matches in
+// principle (a name equal to a SKU would hit) and that is the right trade for a
+// search box: an extra row is visible, a missing row is not.
 func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) ([]Order, error) {
 	rows, err := q.db.Query(ctx, listOrdersPage,
 		arg.CursorImportedAt,
 		arg.CursorID,
 		arg.Source,
+		arg.Search,
 		arg.PageLimit,
 	)
 	if err != nil {

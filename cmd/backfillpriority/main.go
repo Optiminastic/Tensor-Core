@@ -24,6 +24,7 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/httpapi"
 )
 
@@ -43,7 +44,7 @@ func main() {
 
 	// nil brand: every store's orders, since priority is a property of the
 	// shipping option rather than of any one brand.
-	orders, err := store.Q.ListOrders(ctx, nil)
+	orders, err := store.Q.ListOrders(ctx, gen.ListOrdersParams{})
 	if err != nil {
 		log.Fatalf("list orders: %v", err)
 	}

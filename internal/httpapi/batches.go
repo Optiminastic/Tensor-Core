@@ -173,7 +173,7 @@ func (s *Server) listBatches(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if !page.paginate {
-		rows, err := s.store.Q.ListBatches(ctx)
+		rows, err := s.store.Q.ListBatches(ctx, searchParam(c))
 		if err != nil {
 			detail(c, http.StatusInternalServerError, "Could not list batches.")
 			return
@@ -187,6 +187,7 @@ func (s *Server) listBatches(c *gin.Context) {
 	}
 	rows, err := s.store.Q.ListBatchesPage(ctx, gen.ListBatchesPageParams{
 		CursorCreatedAt: page.cursorTS, CursorID: page.cursorID, PageLimit: page.limit,
+		Search: searchParam(c),
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list batches.")

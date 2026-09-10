@@ -89,7 +89,15 @@ SELECT * FROM orders WHERE id = $1;
 -- name: ListOrders :many
 -- A null source returns every order regardless of origin.
 SELECT * FROM orders
-WHERE sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source')
+WHERE (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
+-- Same box as ListOrdersPage; see there for why the whole document is matched.
+AND (
+    sqlc.narg('search')::text IS NULL
+    OR order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_email ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR line_items::text ILIKE '%' || sqlc.narg('search')::text || '%'
+)
 -- Newest ORDER first, not newest import.
 --
 -- imported_at is when Tensor happened to fetch a row, which on a backfill is
@@ -109,6 +117,22 @@ WHERE (
     OR (imported_at, id) < (sqlc.narg('cursor_imported_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
 )
 AND (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
+-- The customer's own words, wherever they put them.
+--
+-- The two plank names live inside line_items, in a per-line properties array
+-- whose KEYS move between products - "STEP 4-First Name-" on one, "STEP 2 -
+-- First Name-" on another, "First Name on Plank" on a third. Matching the whole
+-- document as text is what makes one search box work across all of them without
+-- Tensor having to know every shape the storefront invents. It over-matches in
+-- principle (a name equal to a SKU would hit) and that is the right trade for a
+-- search box: an extra row is visible, a missing row is not.
+AND (
+    sqlc.narg('search')::text IS NULL
+    OR order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_email ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR line_items::text ILIKE '%' || sqlc.narg('search')::text || '%'
+)
 ORDER BY imported_at DESC, id DESC
 LIMIT sqlc.arg('page_limit');
 

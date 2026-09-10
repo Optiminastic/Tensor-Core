@@ -37,17 +37,56 @@ SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 -- "BATCH-1001051" lexically, which is only right today because every live number
 -- is the same width. NULLS LAST keeps a hand-named batch (no digits at all) out
 -- of the way rather than at the top.
-SELECT * FROM batches
-ORDER BY NULLIF(regexp_replace(batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
-         created_at DESC, id DESC;
+SELECT b.* FROM batches b
+-- Same box as ListBatchesPage; see there for why this reaches through the jobs.
+WHERE (
+    sqlc.narg('search')::text IS NULL
+    OR b.batch_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+    )
+)
+ORDER BY NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint DESC NULLS LAST,
+         b.created_at DESC, b.id DESC;
 
 -- name: ListBatchesPage :many
-SELECT * FROM batches
+-- Optionally narrowed to the beds carrying one order.
+--
+-- "Which bed is order 114873 on?" is the question the floor actually asks, and
+-- it could only be answered by opening beds one at a time. Matched through the
+-- bed's JOBS rather than on the batch itself, because a batch records nothing
+-- about which orders it holds - job_number carries the order number ("JOB-114873")
+-- and the join reaches the order's own number for anything hand-numbered.
+--
+-- The batch number is searched too, so one box answers both "where is 114873"
+-- and "show me BATCH-1001824".
+SELECT b.* FROM batches b
 WHERE (
     sqlc.narg('cursor_created_at')::timestamptz IS NULL
-    OR (created_at, id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
+    OR (b.created_at, b.id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
 )
-ORDER BY created_at DESC, id DESC
+AND (
+    sqlc.narg('search')::text IS NULL
+    OR b.batch_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+    )
+)
+ORDER BY b.created_at DESC, b.id DESC
 LIMIT sqlc.arg('page_limit');
 
 -- name: UpdateBatch :one

@@ -113,6 +113,14 @@ WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
   AND (sqlc.narg('batch_id')::uuid IS NULL OR batch_id = sqlc.narg('batch_id')::uuid)
+  -- Same box as ListProductionJobsPage; see there for why these four fields.
+  AND (
+    sqlc.narg('search')::text IS NULL
+    OR job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+  )
 -- Newest ORDER first, matching the Orders page, not newest job.
 --
 -- created_at is when Tensor happened to build the row, which on a bulk import
@@ -152,6 +160,17 @@ WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('packaging_status')::text IS NULL OR packaging_status = sqlc.narg('packaging_status')::text)
   AND (sqlc.narg('order_id')::uuid IS NULL OR order_id = sqlc.narg('order_id')::uuid)
   AND (sqlc.narg('batch_id')::uuid IS NULL OR batch_id = sqlc.narg('batch_id')::uuid)
+  -- One box, several fields. An operator looking for a plank has the customer's
+  -- names in front of them, or a job number off the plate, or the product - not
+  -- a column to choose first. personalisation_name is where BOTH names live,
+  -- joined as "HABEEB & FARSANA" by the importer, so either half matches.
+  AND (
+    sqlc.narg('search')::text IS NULL
+    OR job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+  )
   AND (
     sqlc.narg('cursor_created_at')::timestamptz IS NULL
     OR (created_at, id) < (sqlc.narg('cursor_created_at')::timestamptz, sqlc.narg('cursor_id')::uuid)
