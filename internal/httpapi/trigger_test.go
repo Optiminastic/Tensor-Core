@@ -72,11 +72,18 @@ func seedBatchableJob(t *testing.T, store *db.Store) {
 	if err != nil {
 		t.Fatalf("next job number: %v", err)
 	}
+	colour := "BLUE"
 	if _, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
 		ID: uuid.New(), JobNumber: jobNumber, Description: "Test job", Quantity: 1,
 		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
 		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-		PersonalisationStatus: production.PersonalisationNotRequired, Colours: []byte("[]"),
+		PersonalisationStatus: production.PersonalisationNotRequired,
+		// A colour, because under the colour strategy a job without one is not
+		// batchable - GroupByColour keys a bed on the colour set and has no bed
+		// for a job carrying none. This fixture used to claim otherwise, which
+		// is the shape of the bug: a colourless job looked perfectly fine
+		// everywhere while the planner refused it on every run.
+		Colours: []byte(`["BLUE"]`), Colour: &colour,
 	}); err != nil {
 		t.Fatalf("seed batchable job: %v", err)
 	}

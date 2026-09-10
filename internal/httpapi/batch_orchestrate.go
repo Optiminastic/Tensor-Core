@@ -130,6 +130,15 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	// appears to simply vanish from scheduling.
 	excluded := s.excludedJobReasons(ctx)
 	deferred = append(deferred, excluded...)
+	// The planner branch pairs its rejects with deferredFor; the colour branch
+	// did not, so a job GroupByColour refused - no colour, or too large for a
+	// bed - was counted in "unbatchable" as a bare integer and never named
+	// anywhere. On the worker path, which is how planning actually runs, that
+	// meant no log line carried its job number at all, while the job itself
+	// showed no blocked reason on the queue screen (it has no issue_reason, is
+	// not held, and its personalisation is fine) and was re-tried every run for
+	// the lifetime of the job. Naming it here costs one append.
+	deferred = append(deferred, unbatchable...)
 
 	log.Info("batch plan evaluated",
 		"jobs_considered", len(planJobs), "existing_drafts", len(draftIDs),

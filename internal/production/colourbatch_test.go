@@ -322,3 +322,40 @@ func TestGroupByColourFillsFullBedsBeforeLeavingARemainder(t *testing.T) {
 		t.Errorf("the remainder bed holds %d, want the 1 left over", batches[2].UnitsPerBed)
 	}
 }
+
+// A job whose print file has no bounding box is refused, not packed.
+//
+// bedpack's bestFit accepts a 0x0 unit into any free rectangle, because
+// `o.w > fr.w` is false for a zero width. So before this guard an unmeasurable
+// job silently took one of the four places on a real bed, added nothing to the
+// utilisation figure, and blew up later at buildMergedPlate - where the whole
+// bed fails rather than the one job that caused it. PlanWithReasons has always
+// had this check; the colour path is the one that lost it.
+func TestGroupByColourRefusesAJobWithNoFootprint(t *testing.T) {
+	jobs := []PlanJob{
+		{ID: "measurable", JobNumber: "JOB-1", Colours: []string{"BLUE"},
+			Footprint: bedpack.UnitFootprint{XMM: 200, YMM: 50, ZMM: 40}},
+		{ID: "no-bbox", JobNumber: "JOB-2", Colours: []string{"BLUE"}},
+		{ID: "zero-y", JobNumber: "JOB-3", Colours: []string{"BLUE"},
+			Footprint: bedpack.UnitFootprint{XMM: 200, ZMM: 40}},
+	}
+
+	batches, unbatchable := GroupByColour(jobs, 4, DefaultBedNester)
+
+	if len(unbatchable) != 2 {
+		t.Fatalf("unbatchable = %d, want 2 - both unmeasurable jobs", len(unbatchable))
+	}
+	for _, u := range unbatchable {
+		if u.Reason != ReasonNoFootprint {
+			t.Errorf("%s rejected as %q, want %q", u.JobNumber, u.Reason, ReasonNoFootprint)
+		}
+	}
+
+	// The measurable job still gets its bed, alone.
+	if len(batches) != 1 {
+		t.Fatalf("batches = %d, want 1", len(batches))
+	}
+	if n := len(batches[0].Jobs); n != 1 {
+		t.Errorf("bed holds %d units, want 1 - an unmeasurable job must not take a place", n)
+	}
+}

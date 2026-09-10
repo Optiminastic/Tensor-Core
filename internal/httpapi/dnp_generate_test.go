@@ -272,7 +272,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 		production.IssueSKUMissing,
 	} {
 		t.Run(issue, func(t *testing.T) {
-			got := batchingBlockedReason(frame(issue))
+			got := batchingBlockedReason(frame(issue), true)
 			if got == nil || *got != UploadDesignFileWording {
 				t.Errorf("batchingBlockedReason(%s) = %v, want %q", issue, got, UploadDesignFileWording)
 			}
@@ -281,7 +281,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 
 	// An upload does not conjure filament, so this one keeps its own words.
 	t.Run("a reason an upload does not fix", func(t *testing.T) {
-		got := batchingBlockedReason(frame(production.IssueFilamentOutOfStock))
+		got := batchingBlockedReason(frame(production.IssueFilamentOutOfStock), true)
 		if got == nil || *got == UploadDesignFileWording {
 			t.Errorf("batchingBlockedReason(filament_out_of_stock) = %v, want the stock wording", got)
 		}
@@ -292,7 +292,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	t.Run("a held job says it is held", func(t *testing.T) {
 		j := frame(production.IssueSTLMissing)
 		j.Held = true
-		got := batchingBlockedReason(j)
+		got := batchingBlockedReason(j, true)
 		if got == nil || *got == UploadDesignFileWording {
 			t.Errorf("batchingBlockedReason(held) = %v, want the hold wording", got)
 		}
@@ -302,8 +302,69 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	t.Run("a plank is never asked for a file", func(t *testing.T) {
 		j := frame(production.IssueSTLMissing)
 		j.Sku = sku("T3DPS-DNP-9")
-		if got := batchingBlockedReason(j); got != nil {
+		if got := batchingBlockedReason(j, true); got != nil {
 			t.Errorf("batchingBlockedReason(plank) = %q, want nil while it renders", *got)
+		}
+	})
+}
+
+// A job the planner silently refuses must still say why on the queue screen.
+//
+// GroupByColour keys a bed on the colours jsonb, so a job carrying none has no
+// bed it could ever join. It is rejected into a slice that gets counted and
+// dropped: nothing writes issue_reason, so the job is eligible again on the
+// next run, and the run after that, for ever - while every pre-planning check
+// passes and the row renders as ordinary unblocked work. This is the one
+// blocked reason that cannot be derived from the job's own flags.
+func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
+	queued := func(colours string) gen.ProductionJob {
+		return gen.ProductionJob{
+			Status:                production.StatusQueued,
+			PersonalisationStatus: production.PersonalisationNotRequired,
+			Colours:               []byte(colours),
+		}
+	}
+
+	t.Run("no colour at all", func(t *testing.T) {
+		got := batchingBlockedReason(queued("[]"), true)
+		if got == nil || *got != NoColourWording {
+			t.Errorf("batchingBlockedReason = %v, want %q", got, NoColourWording)
+		}
+	})
+
+	t.Run("unset colours", func(t *testing.T) {
+		if got := batchingBlockedReason(queued(""), true); got == nil || *got != NoColourWording {
+			t.Errorf("batchingBlockedReason = %v, want %q", got, NoColourWording)
+		}
+	})
+
+	// A job with a colour and nothing else wrong is not blocked, and must not
+	// acquire a reason it does not have.
+	t.Run("a colour is enough", func(t *testing.T) {
+		if got := batchingBlockedReason(queued(`["GOLD"]`), true); got != nil {
+			t.Errorf("batchingBlockedReason = %q, want nil", *got)
+		}
+	})
+
+	// A job already on a bed is not blocked, whatever its colours say.
+	t.Run("already batched", func(t *testing.T) {
+		j := queued("[]")
+		id := uuid.New()
+		j.BatchID = &id
+		if got := batchingBlockedReason(j, true); got != nil {
+			t.Errorf("batchingBlockedReason = %q, want nil for a batched job", *got)
+		}
+	})
+
+	// A real flag still wins - the colour note must not mask a held job or a
+	// missing model, which have their own remedies.
+	t.Run("a flagged job keeps its own reason", func(t *testing.T) {
+		j := queued("[]")
+		issue := production.IssueFilamentOutOfStock
+		j.IssueReason = &issue
+		got := batchingBlockedReason(j, true)
+		if got == nil || *got == NoColourWording {
+			t.Errorf("batchingBlockedReason = %v, want the filament wording", got)
 		}
 	})
 }

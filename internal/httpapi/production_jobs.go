@@ -145,6 +145,18 @@ type splitProgressResponse struct {
 }
 
 // productionJobDTO builds the API shape for one job. batchStatus/dispatched
+// colourGatesTheBed reports whether a job with no filament colour can be
+// batched at all.
+//
+// Only under the colour strategy, which is the default and what the shop runs:
+// GroupByColour keys a bed on the colour set, so a job carrying none has no bed
+// to join. The optimiser groups on a CompatibilityKey where an empty colour is
+// simply one more group, so the same job batches perfectly well there - and
+// telling an operator it cannot would be a lie under that configuration.
+func (s *Server) colourGatesTheBed() bool {
+	return s.batchStrategy() == production.StrategyColour
+}
+
 // batchingBlockedReason explains why a queued job cannot be batched, or nil
 // when nothing is stopping it.
 //
@@ -156,7 +168,7 @@ type splitProgressResponse struct {
 // complement of ListBatchableJobs - so this reads as the same answer the
 // planner would give. Wording comes from production's Reason* constants so the
 // two never drift into saying the same thing differently.
-func batchingBlockedReason(j gen.ProductionJob) *string {
+func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed bool) *string {
 	if j.Status != production.StatusQueued || j.BatchID != nil {
 		return nil
 	}
@@ -174,6 +186,23 @@ func batchingBlockedReason(j gen.ProductionJob) *string {
 			j.PersonalisationStatus != production.PersonalisationNotRequired) ||
 		j.IssueReason != nil
 	if !blocked {
+		// Nothing the pre-planning queries know about is wrong with this job,
+		// but the planner may still refuse it - and one refusal is invisible
+		// everywhere else. GroupByColour keys a bed on the colours jsonb, and
+		// a job with none is rejected as ReasonNoColour into a slice that is
+		// counted and dropped. Nothing writes issue_reason for it, so it is
+		// eligible again next run, and the run after that, for ever, while the
+		// queue screen shows an ordinary unblocked job.
+		//
+		// Said here rather than by writing colour_missing to the job, because
+		// this is a read-only explanation: issue_reason's presence EXCLUDES a
+		// job from batching, so writing one to mark a display concern would
+		// stop the planner ever reconsidering a job whose colour arrives later
+		// - see production_issues.go, which makes the same point.
+		if colourGatesTheBed && isEmptyColours(j.Colours) {
+			reason := NoColourWording
+			return &reason
+		}
 		return nil
 	}
 	// A product Tensor does not build says the same thing three ways -
@@ -194,6 +223,14 @@ func batchingBlockedReason(j gen.ProductionJob) *string {
 // build and nobody has supplied a model for yet. It names the action, not the
 // diagnosis: the row's own control is an upload button.
 const UploadDesignFileWording = "Design file required - upload the 3MF for this job."
+
+// NoColourWording is what the queue says about a job the planner cannot place
+// because nothing records what filament it prints in.
+//
+// A bed is grouped by colour, so a colourless job has no bed it could join.
+// Naming the missing fact rather than the symptom: an operator can set the
+// colour on the job, and the next planning run will place it.
+const NoColourWording = "No filament colour recorded, so this job cannot be put on a bed."
 
 // noModelIssues are the issue reasons that all mean "Tensor has no model for
 // this product", and which an uploaded file therefore all clear. Kept beside
@@ -231,7 +268,7 @@ func humanReason(reason string) string {
 // are the two bits of cross-table state PipelineStage needs beyond the job
 // row itself - resolved by the caller (singleJobDTO for one job,
 // productionJobsDTO's bulk lookups for a list), never re-queried here.
-func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool) productionJobResponse {
+func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colourGatesTheBed bool) productionJobResponse {
 	confirms := production.Confirms{
 		Name: j.NameConfirmed, Photo: j.PhotoConfirmed, Font: j.FontConfirmed,
 		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
@@ -244,7 +281,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched bool)
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
 	})
 	return productionJobResponse{
-		BatchingBlockedReason: batchingBlockedReason(j),
+		BatchingBlockedReason: batchingBlockedReason(j, colourGatesTheBed),
 		ID:                    j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
 		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
@@ -297,7 +334,7 @@ func (s *Server) singleJobDTO(ctx context.Context, j gen.ProductionJob) producti
 			dispatched = true
 		}
 	}
-	return productionJobDTO(j, batchStatus, dispatched)
+	return productionJobDTO(j, batchStatus, dispatched, s.colourGatesTheBed())
 }
 
 // productionJobsDTO is productionJobDTO for a list of jobs: two bulk lookups
@@ -325,6 +362,7 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 		}
 	}
 
+	colourGates := s.colourGatesTheBed()
 	out := make([]productionJobResponse, 0, len(rows))
 	for _, j := range rows {
 		var batchStatus *string
@@ -334,7 +372,7 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 			}
 		}
 		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
-		out = append(out, productionJobDTO(j, batchStatus, dispatched))
+		out = append(out, productionJobDTO(j, batchStatus, dispatched, colourGates))
 	}
 	return out
 }

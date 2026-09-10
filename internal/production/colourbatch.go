@@ -110,6 +110,20 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 			continue
 		}
 
+		// An unmeasurable job is rejected, not packed. PlanWithReasons has had
+		// this guard from the start; the colour path did not, and bedpack's
+		// bestFit accepts a 0x0 unit into any free rectangle - `o.w > fr.w` is
+		// false for a zero width. So a job whose print file carries no bounding
+		// box took one of the four places on a real bed, contributed nothing to
+		// the utilisation figure, and failed much later at buildMergedPlate,
+		// where the whole bed fails rather than the one job that caused it.
+		if j.Footprint.XMM <= 0 || j.Footprint.YMM <= 0 {
+			unbatchable = append(unbatchable, Unbatchable{
+				JobID: j.ID, JobNumber: j.JobNumber, Reason: ReasonNoFootprint,
+			})
+			continue
+		}
+
 		unit := bedpack.UnitFootprint{
 			RefID: j.ID, XMM: j.Footprint.XMM, YMM: j.Footprint.YMM, ZMM: j.Footprint.ZMM,
 		}
