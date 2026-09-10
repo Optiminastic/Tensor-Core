@@ -158,8 +158,51 @@ func (p Params) Args() map[string]string {
 var (
 	keyFirstName  = []string{"step 4 first name", "first name", "personalisation name", "custom name"}
 	keySecondName = []string{"step 5 second name", "second name"}
-	keyHearts     = []string{"step 3", "step 3 -", "hearts", "heart"}
+
+	// keyHeartsNamed are labels that SAY hearts. A label naming hearts means
+	// the product offered the option, so a value here that will not read is a
+	// genuine fault worth stopping for.
+	keyHeartsNamed = []string{"hearts", "heart"}
+	// keyHeartsPositional is where the heart option sits on the main plank -
+	// "STEP 3-", holding "2 RED HEART". It carries no word for what it is, so
+	// it is only ever a hint: on the STEP 2/STEP 3 product shape, "STEP 3
+	// -Second Name" is the customer's SECOND NAME and matching it here read
+	// "KRISHNA" as a heart count.
+	//
+	// ("step 3 -" used to be listed too. normaliseKey strips the hyphen, so no
+	// label could ever equal it and no word could equal the "-" token - it
+	// matched nothing and is gone.)
+	keyHeartsPositional = []string{"step 3"}
 )
+
+// isNameLabel reports whether a normalised label asks for somebody's NAME
+// rather than for a heart count.
+//
+// Two shapes, both of which were being read as heart counts:
+//
+//   - the plank's own name fields, wherever the storefront's step numbers put
+//     them. "STEP 3 -Second Name" is the second name on the 2-STEP product and
+//     the heart option on the main one, so a label naming a name is a name
+//     whatever number it carries.
+//   - another item's engraving. The Soulmate COMBO sells a plank alongside a 3D
+//     rose and a heart keychain, so it carries "STEP 5 - Name On Heart
+//     Keychain" - a field that mentions hearts and holds "PALLAVI". It says
+//     nothing about how many hearts go on the PLANK.
+//
+// Without the second case two combo orders refused to render while a third of
+// the same family rendered fine, the only difference being whether the keychain
+// field happened to be present.
+func isNameLabel(normalised string) bool {
+	if containsPhrase(normalised, "name on") {
+		return true
+	}
+	for _, key := range append(append([]string{}, keyFirstName...), keySecondName...) {
+		if normalised == key || containsPhrase(normalised, key) {
+			return true
+		}
+	}
+	return false
+}
 
 // digits finds the first run of digits in a value, which is how a heart count
 // is read out of "1 RED HEART".
@@ -188,14 +231,23 @@ func ParamsFromProperties(props []production.LineProp) (Params, error) {
 		return Params{}, fmt.Errorf("second name is %d letters; the plank fits %d", n, maxNameLetters)
 	}
 
-	hearts, ok := heartsFromProperties(props)
-	if !ok {
-		// Not defaulted to zero. "The customer chose no hearts" and "the
-		// property did not import" are indistinguishable from here, and
-		// guessing wrong prints the wrong product - the plank would come out
-		// with 9mm margins instead of 40mm.
+	hearts, found := heartsFromProperties(props)
+	if found == heartsUnreadable {
+		// A label named hearts, so the option WAS offered and its value should
+		// have read. Still an error rather than a guess: getting this wrong
+		// prints the wrong product, since the no-heart template lays the names
+		// out with 12mm margins where the two-heart one uses 60mm.
 		return Params{}, fmt.Errorf("this order does not say how many hearts to put on the plank")
 	}
+	// heartsNotOffered falls through as zero, deliberately.
+	//
+	// Nothing on the line names hearts, which on this storefront means the
+	// product does not sell them - the 2-STEP plank carries a first name, a
+	// second name and no heart property at all. Ten live lines are that shape,
+	// and refusing them left real orders unrendered with a message about a
+	// choice the customer was never given. The narrower heartsUnreadable case
+	// above still stops, so a heart option that failed to import is not
+	// quietly printed as zero.
 
 	return Params{
 		Template:  templateForHearts(hearts),
@@ -218,13 +270,55 @@ func ParamsFromProperties(props []production.LineProp) (Params, error) {
 // Reporting nothing found is the right answer for those orders. They are a
 // different product, and a person has to look at them - which is better than a
 // plank printed with a heart count invented from a name.
-func heartsFromProperties(props []production.LineProp) (int, bool) {
-	for _, raw := range lookupAll(props, keyHearts...) {
+// The three answers this can give, which are not two.
+//
+// "The product has no heart option" and "the heart option is here but
+// unreadable" used to collapse into one `false`, and that is what made
+// defaulting unsafe: a default would have been right for the first and wrong
+// for the second. Told apart, the first can default to zero and the second can
+// still stop.
+type heartsResult int
+
+const (
+	heartsFound heartsResult = iota
+	// heartsNotOffered - nothing on the line names hearts. The 2-STEP plank
+	// shape is exactly this: it carries a first name and a second name and no
+	// heart property at all, because that product does not sell hearts.
+	heartsNotOffered
+	// heartsUnreadable - a label NAMES hearts but no candidate value parsed.
+	// The option was offered, so this is an import fault, not a choice.
+	heartsUnreadable
+)
+
+func heartsFromProperties(props []production.LineProp) (int, heartsResult) {
+	named := heartCandidates(props, keyHeartsNamed)
+	for _, raw := range named {
 		if n, err := heartCount(raw); err == nil {
-			return n, true
+			return n, heartsFound
 		}
 	}
-	return 0, false
+	for _, raw := range heartCandidates(props, keyHeartsPositional) {
+		if n, err := heartCount(raw); err == nil {
+			return n, heartsFound
+		}
+	}
+	if len(named) > 0 {
+		return 0, heartsUnreadable
+	}
+	return 0, heartsNotOffered
+}
+
+// heartCandidates are the values whose labels match any of keys and which are
+// not one of the two name fields.
+func heartCandidates(props []production.LineProp, keys []string) []string {
+	var out []string
+	for _, raw := range lookupAllLabelled(props, keys...) {
+		if isNameLabel(raw.label) {
+			continue
+		}
+		out = append(out, raw.value)
+	}
+	return out
 }
 
 // heartCount reads a count out of the storefront's wording.
@@ -309,21 +403,40 @@ func lookupRaw(props []production.LineProp, keys ...string) (string, bool) {
 // matches first and phrase matches after, so a caller that can validate a value
 // gets the candidates in the order it should try them.
 func lookupAll(props []production.LineProp, keys ...string) []string {
-	var out []string
+	matches := lookupAllLabelled(props, keys...)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m.value)
+	}
+	return out
+}
+
+// labelledValue is a matched property with the normalised label it matched
+// under, so a caller can reject a match on what the label IS rather than only
+// on whether its value parses.
+type labelledValue struct {
+	label string
+	value string
+}
+
+// lookupAllLabelled is lookupAll keeping the label. Same ordering contract:
+// exact matches first, phrase matches after.
+func lookupAllLabelled(props []production.LineProp, keys ...string) []labelledValue {
+	var out []labelledValue
 	seen := map[int]bool{}
 	for _, key := range keys {
 		for i, p := range props {
-			if !seen[i] && normaliseKey(p.Name) == key {
+			if label := normaliseKey(p.Name); !seen[i] && label == key {
 				seen[i] = true
-				out = append(out, p.Value)
+				out = append(out, labelledValue{label: label, value: p.Value})
 			}
 		}
 	}
 	for _, key := range keys {
 		for i, p := range props {
-			if !seen[i] && containsPhrase(normaliseKey(p.Name), key) {
+			if label := normaliseKey(p.Name); !seen[i] && containsPhrase(label, key) {
 				seen[i] = true
-				out = append(out, p.Value)
+				out = append(out, labelledValue{label: label, value: p.Value})
 			}
 		}
 	}

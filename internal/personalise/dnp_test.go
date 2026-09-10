@@ -61,15 +61,28 @@ func TestTemplateChosenByHeartCount(t *testing.T) {
 	}
 }
 
-// A missing heart option must not silently become zero. "The customer chose
-// none" and "the property did not import" are indistinguishable here, and
-// guessing wrong prints 9mm margins where 40mm were ordered. Right now 43 of
-// the 46 imported orders carry no properties at all, so this is the common
-// case, not a corner one.
-func TestMissingHeartOptionIsAnError(t *testing.T) {
+// A line offering no heart option renders with no hearts.
+//
+// This test used to assert the opposite, on the grounds that "the customer
+// chose none" and "the property did not import" were indistinguishable. They
+// are distinguishable, by looking at the LABELS rather than only at the values:
+// a label that names hearts says the option was offered, and that case still
+// errors - TestParamsFromPropertiesStopsWhenAnOfferedHeartOptionWillNotRead.
+// Nothing naming hearts means the product does not sell them.
+//
+// The case the old test was really protecting against - an order that imported
+// with no properties at all - never reaches here: it fails the two-names check
+// above, and GenerateModelForJob stops it earlier still with "this order
+// carries no personalisation options".
+func TestNoHeartOptionOfferedRendersWithNoHearts(t *testing.T) {
 	p := props("STEP 4-First Name-", "VASU", "STEP 5-Second Name", "PADMANABH")
-	if _, err := ParamsFromProperties(p); err == nil {
-		t.Fatal("an order with no heart option must not be rendered")
+	got, err := ParamsFromProperties(p)
+	if err != nil {
+		t.Fatalf("ParamsFromProperties = %v, want a no-heart plank", err)
+	}
+	if got.Hearts != 0 || got.Template != templateNoHeart {
+		t.Errorf("hearts = %d, template = %q; want 0 and %q",
+			got.Hearts, got.Template, templateNoHeart)
 	}
 }
 
@@ -290,15 +303,25 @@ func TestContainsPhraseMatchesWholeWordsOnly(t *testing.T) {
 	}
 }
 
-// A combo product's options are not a plank's options.
+// A combo product's OTHER items are not the plank's heart count.
 //
-// Verbatim from order T3DPS-114753, an order for a 3D rose and a heart
-// keychain: its "STEP 3" is the SECOND NAME, and it carries a field called
-// "Name On Heart Keychain" that mentions hearts and holds a name. Reading a
-// heart count out of either produced "could not read a heart count from
-// \"PAVI\"" - a plank rendered from that would be wrong in a way nobody would
-// catch until it came off the printer.
-func TestParamsFromPropertiesRefusesACombosOptionsAsHearts(t *testing.T) {
+// Verbatim from order T3DPS-114753. This test used to assert the combo was
+// refused outright, on the reading that it "is a different product". The live
+// data says otherwise: the Soulmate COMBO carries a real plank SKU
+// (T3DPS-DNP-2 / -3) and sells a plank alongside a 3D rose and a heart
+// keychain. Its plank is an ordinary no-heart plank whose names sit on STEP 2
+// and STEP 3.
+//
+// Refusing it also produced an inconsistency that gave the game away: three
+// live orders of the same COMBO family, of which the one WITHOUT a keychain
+// field rendered and the two WITH one refused - the difference being a label
+// about a keychain, not anything about the plank.
+//
+// So both traps still have to be avoided, but by exclusion rather than
+// refusal: "STEP 3 -Second Name" is a name, and "Name On Heart Keychain" is
+// another item's engraving. Neither is a heart count; with both out of the
+// way the line offers no heart option at all, which is zero.
+func TestParamsFromPropertiesReadsACombosPlankWithNoHearts(t *testing.T) {
 	props := []production.LineProp{
 		{Name: "_has_gpo", Value: "1255456"},
 		{Name: "STEP 2 - First Name-", Value: "AATHI"},
@@ -308,20 +331,20 @@ func TestParamsFromPropertiesRefusesACombosOptionsAsHearts(t *testing.T) {
 		{Name: "STEP 6 - WhatsApp Number", Value: "7010078156"},
 	}
 
-	_, err := ParamsFromProperties(props)
-	if err == nil {
-		t.Fatal("a combo order was accepted as a plank; it has no heart count at all")
+	got, err := ParamsFromProperties(props)
+	if err != nil {
+		t.Fatalf("ParamsFromProperties = %v, want the combo's plank", err)
 	}
-	if !strings.Contains(err.Error(), "how many hearts") {
-		t.Errorf("error = %v, want it to say the order does not give a heart count", err)
+	if got.Hearts != 0 || got.Template != templateNoHeart {
+		t.Errorf("hearts = %d, template = %q; want 0 and %q - neither the second name "+
+			"nor the keychain's engraving is a heart count",
+			got.Hearts, got.Template, templateNoHeart)
 	}
 
 	// The names must still resolve - the step numbers moved, not the meaning.
-	if got := lookup(props, keyFirstName...); got != "AATHI" {
-		t.Errorf("first name = %q, want AATHI from a shifted step number", got)
-	}
-	if got := lookup(props, keySecondName...); got != "PAVI" {
-		t.Errorf("second name = %q, want PAVI", got)
+	if got.NameLeft != "AATHI" || got.NameRight != "PAVI" {
+		t.Errorf("names = %q/%q, want AATHI/PAVI from shifted step numbers",
+			got.NameLeft, got.NameRight)
 	}
 }
 
@@ -332,8 +355,94 @@ func TestHeartsFromPropertiesSkipsALabelHoldingAName(t *testing.T) {
 		{Name: "Name On Heart Keychain", Value: "AATHI PAVI"},
 		{Name: "Red Heart", Value: "2 Red Heart"},
 	}
-	hearts, ok := heartsFromProperties(props)
-	if !ok || hearts != 2 {
-		t.Errorf("hearts = %d (found %v), want 2 - the keychain's name is not a count", hearts, ok)
+	hearts, found := heartsFromProperties(props)
+	if found != heartsFound || hearts != 2 {
+		t.Errorf("hearts = %d (%v), want 2 - the keychain's name is not a count", hearts, found)
+	}
+}
+
+// A product that does not sell hearts renders with none, rather than not at all.
+//
+// Verbatim from JOB-114931. This shape numbers its steps differently - STEP 2
+// is the first name and STEP 3 is the SECOND NAME - and carries no heart
+// property, because the product has no heart option. Two faults met here:
+// "step 3" was listed as a heart key, so the lookup read the customer's second
+// name "KRISHNA" as a heart count; and finding nothing readable was then
+// treated as an error. Four live orders sat unrendered behind a message about
+// a choice the customer was never offered.
+func TestParamsFromPropertiesDefaultsToNoHeartsWhenNoneAreOffered(t *testing.T) {
+	props := []production.LineProp{
+		{Name: "_has_gpo", Value: "1255456"},
+		{Name: "STEP 2 - First Name-", Value: "KALYANI"},
+		{Name: "STEP 3 -Second Name", Value: "KRISHNA"},
+	}
+
+	got, err := ParamsFromProperties(props)
+	if err != nil {
+		t.Fatalf("ParamsFromProperties = %v, want a no-heart plank", err)
+	}
+	if got.Hearts != 0 {
+		t.Errorf("hearts = %d, want 0", got.Hearts)
+	}
+	if got.NameLeft != "KALYANI" || got.NameRight != "KRISHNA" {
+		t.Errorf("names = %q/%q, want KALYANI/KRISHNA - the step numbers moved, not the meaning",
+			got.NameLeft, got.NameRight)
+	}
+	if got.Template != templateNoHeart {
+		t.Errorf("template = %q, want %q", got.Template, templateNoHeart)
+	}
+}
+
+// The main plank shape, which must keep working unchanged: "STEP 3-" holds the
+// heart count and is matched positionally, because it names nothing.
+func TestParamsFromPropertiesStillReadsThePositionalHeartOption(t *testing.T) {
+	for value, want := range map[string]int{"2 RED HEART": 2, "1 RED HEART": 1, "0 RED HEART": 0} {
+		props := []production.LineProp{
+			{Name: "STEP 4-First Name-", Value: "VASU"},
+			{Name: "STEP 5-Second Name", Value: "PADMA"},
+			{Name: "STEP 3-", Value: value},
+		}
+		got, err := ParamsFromProperties(props)
+		if err != nil {
+			t.Fatalf("%q: %v", value, err)
+		}
+		if got.Hearts != want {
+			t.Errorf("%q gave %d hearts, want %d", value, got.Hearts, want)
+		}
+	}
+}
+
+// A heart option that IS offered but will not read still stops.
+//
+// This is the half of the old refusal worth keeping. "The product has no heart
+// option" and "the heart option failed to import" look identical only if you
+// refuse to look at the label; a label naming hearts says the option existed,
+// so an unreadable value there is a fault rather than a choice. Printing it as
+// zero would lay the names out with 12mm margins where 60mm were wanted.
+func TestParamsFromPropertiesStopsWhenAnOfferedHeartOptionWillNotRead(t *testing.T) {
+	props := []production.LineProp{
+		{Name: "STEP 4-First Name-", Value: "VASU"},
+		{Name: "STEP 5-Second Name", Value: "PADMA"},
+		{Name: "Red Heart", Value: "please surprise me"},
+	}
+	if _, err := ParamsFromProperties(props); err == nil {
+		t.Fatal("an unreadable heart option was defaulted to zero; it must stop")
+	}
+}
+
+// A label that names a name is a name, whatever step number it carries.
+func TestIsNameLabel(t *testing.T) {
+	for label, want := range map[string]bool{
+		"step 3 second name":     true,
+		"step 2 first name":      true,
+		"step 5 second name":     true,
+		"first name on plank":    true,
+		"step 3":                 false,
+		"red heart":              false,
+		"step 6 whatsapp number": false,
+	} {
+		if got := isNameLabel(label); got != want {
+			t.Errorf("isNameLabel(%q) = %v, want %v", label, got, want)
+		}
 	}
 }

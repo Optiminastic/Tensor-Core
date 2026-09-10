@@ -452,7 +452,15 @@ func (s *Server) enqueueModelGeneration(ctx context.Context, jobs []gen.Producti
 				"job", job.ID, "sku", deref(job.Sku), "error", err)
 			continue
 		}
-		log.Info("model render scheduled", "job", job.ID, "sku", *job.Sku)
+		// deref, not *job.Sku. IsGeneratedProduct matches the GREEN and PURPLE
+		// plank variants by PRODUCT NAME because those nine lines carry no SKU
+		// at all, so this line dereferenced nil on exactly the jobs the name
+		// fallback exists to catch. The panic aborted the loop, which meant
+		// every job after it on the same order never had a render enqueued -
+		// permanently, because River retries job creation and creation
+		// short-circuits on errJobsAlreadyCreated without ever reaching here
+		// again. Twenty such jobs exist on the live database.
+		log.Info("model render scheduled", "job", job.ID, "sku", deref(job.Sku))
 	}
 }
 
