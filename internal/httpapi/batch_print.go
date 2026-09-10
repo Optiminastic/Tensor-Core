@@ -23,6 +23,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 type printBatchResponse struct {
@@ -36,6 +37,10 @@ type printBatchResponse struct {
 	// Note carries BambuBuddy's own words about why an item is waiting, or why
 	// it declined to queue. Empty when it queued and started.
 	Note string `json:"note"`
+	// Locked is true when THIS call locked a Draft on the way to sending it.
+	// The half an operator cannot undo by pressing the button again, so it is
+	// reported separately from Queued rather than folded into the note.
+	Locked bool `json:"locked"`
 }
 
 func (s *Server) printBatch(c *gin.Context) {
@@ -45,13 +50,30 @@ func (s *Server) printBatch(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 
+	// Locking a Draft is a batch edit, and this route is guarded on
+	// machine:manage. Letting that permission alone freeze a bed and reserve
+	// its filament would quietly widen a role, which internal/auth's catalog
+	// tests treat as spec - so the extra half needs the extra permission.
+	// Checked here rather than in middleware because it depends on the batch's
+	// status, which the router does not know.
 	batch, err := s.store.Q.GetBatchByID(ctx, id)
 	if err != nil {
 		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
 		return
 	}
+	if batch.Status == production.BatchPendingApproval &&
+		!s.guards.HasPermission(c, auth.BatchManage.Key()) {
+		detail(c, http.StatusForbidden,
+			"Locking this draft needs the batch:manage permission.")
+		return
+	}
+	// Required because this path can now build a merged plate, which needs
+	// object storage - the same reason approveBatch calls it.
+	if !s.filesReady(c) {
+		return
+	}
 
-	resp, err := s.SendBatchToPrinter(ctx, batch)
+	resp, err := s.QueueBatchForPrinting(ctx, id, currentUserID(c))
 	if err != nil {
 		writeStatusError(c, err, "Could not send the batch to a printer.")
 		return
