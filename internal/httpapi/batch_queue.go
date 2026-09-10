@@ -66,7 +66,21 @@ func (s *Server) QueueBatchForPrinting(
 		locked = true
 
 	case production.BatchOpen:
-		// Already locked; nothing to do but send it.
+		// Already locked; nothing to do but send it - except that a bed whose
+		// last print FAILED keeps its 'open' status and its outcome, and
+		// ListBatchesToDispatch excludes anything holding one. Clearing it here
+		// is the deliberate human "run that again", and the only way back: the
+		// automatic dispatcher must never retry a failed plate into whatever
+		// went wrong the first time.
+		if batch.PrintOutcome != nil {
+			if err := s.store.Q.ClearBatchPrintOutcome(ctx, batch.ID); err != nil {
+				return printBatchResponse{}, statusErrf(http.StatusInternalServerError,
+					"Could not clear the previous print result.", err)
+			}
+			batch.PrintOutcome = nil
+			batch.QueueItemID = nil
+			batch.PipelineRunID = nil
+		}
 
 	case production.BatchInProgress:
 		return printBatchResponse{}, statusErr(http.StatusConflict,

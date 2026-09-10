@@ -187,6 +187,25 @@ type Settings struct {
 	// rather than arrive as one stampede.
 	BatchAutoDispatchMax int
 
+	// BatchAutoComplete lets a bed close itself when BambuBuddy reports its
+	// print finished, releasing its planks to Assembly with nobody pressing
+	// anything.
+	//
+	// A switch rather than a hard-coded behaviour because it decides whether
+	// finished goods enter the shop unattended: beds are correlated to prints by
+	// plate name, and if BambuBuddy ever archived an aborted plate as completed
+	// Tensor would pass a bad part on. With it off the reconciliation still runs
+	// and still RECORDS what it found, so the matching can be read out of the
+	// log before it is trusted - and turning it on later completes the beds it
+	// already recorded rather than losing them.
+	BatchAutoComplete bool
+
+	// ArchiveReconcileLimit is how much of BambuBuddy's history one
+	// reconciliation pass reads. Zero uses httpapi's default. The archive grows
+	// without end, and a pass only needs to reach back as far as the oldest bed
+	// still in flight.
+	ArchiveReconcileLimit int
+
 	// BatchHorizonJobs caps how many jobs of one compatibility group a single
 	// planning run considers (production.BatchGate.HorizonJobs). The packing
 	// search is superlinear in group size, so an unbounded group is what turns
@@ -416,6 +435,8 @@ func Load() Settings {
 		ModelGenConcurrency:              intEnvOr("MODEL_GEN_CONCURRENCY", 0),
 		BatchAutoDispatch:                boolEnvOr("BATCH_AUTO_DISPATCH", false),
 		BatchAutoDispatchMax:             intEnvOr("BATCH_AUTO_DISPATCH_MAX", 0),
+		BatchAutoComplete:                boolEnvOr("BATCH_AUTO_COMPLETE", true),
+		ArchiveReconcileLimit:            intEnvOr("ARCHIVE_RECONCILE_LIMIT", 0),
 		BatchStrategy:                    envOr("BATCH_STRATEGY", ""),
 		BatchMaxUnitsPerBed:              intEnvOr("BATCH_MAX_UNITS_PER_BED", 0),
 		BambuBuddyWebhookSecret:          envOr("BAMBUBUDDY_WEBHOOK_SECRET", ""),

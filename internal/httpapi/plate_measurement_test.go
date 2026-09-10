@@ -154,6 +154,10 @@ func testServerWithBambu(t *testing.T, store *db.Store, guards *auth.Guards, bas
 		CORSOrigins:      []string{"http://localhost:3001"},
 		BambuBuddyURL:    baseURL,
 		BambuBuddyAPIKey: "test-key",
+		// config.Load defaults this on; a hand-built Settings does not, and a
+		// reconciliation that records outcomes but completes nothing looks
+		// exactly like a broken correlation.
+		BatchAutoComplete: true,
 	}
 	return NewServer(cfg, store, guards, nil)
 }

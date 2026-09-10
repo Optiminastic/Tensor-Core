@@ -135,3 +135,64 @@ func plateColourToken(jobs []gen.ProductionJob) string {
 	sort.Strings(out)
 	return strings.Join(out, "-")
 }
+
+// plateKey reduces a plate filename to the set of orders it carries, so a bed
+// can be recognised in BambuBuddy's records.
+//
+// Deliberately order-INSENSITIVE and extension-insensitive, because the name
+// does not survive the round trip unchanged. plateFileStem writes the colour
+// LAST ("114556-114557-BLUE"), and the same plate comes back from the archive
+// with the colour FIRST ("BLUE-114840-114873"), sometimes with ".stl" or
+// "_plate_1.gcode.3mf" attached. Any prefix or positional match fails silently
+// on that; a sorted set of order numbers survives it.
+//
+// Returns "" when the name yields no order numbers, and "" never matches
+// anything. That is the point: a plate somebody ran straight from BambuBuddy,
+// or one named after a batch number by plateFileStem's own fallback, must not
+// be able to claim a bed and complete it.
+func plateKey(filename string) string {
+	name := strings.ToUpper(strings.TrimSpace(filename))
+	// Strip the extensions BambuBuddy adds, longest first so ".gcode.3mf" is
+	// not left as ".gcode".
+	for _, ext := range []string{".GCODE.3MF", ".3MF", ".GCODE", ".STL"} {
+		name = strings.TrimSuffix(name, ext)
+	}
+	// And the plate suffix a sliced file carries.
+	if i := strings.LastIndex(name, "_PLATE_"); i > 0 && allDigits(name[i+len("_PLATE_"):]) {
+		name = name[:i]
+	}
+
+	tokens := strings.FieldsFunc(name, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' '
+	})
+
+	var orders []string
+	seen := map[string]bool{}
+	for i, tok := range tokens {
+		// The number after "BATCH" is a batch number, not an order number, and
+		// it is long enough to pass every other test here. plateFileStem names
+		// a bed with no Shopify order behind it exactly that way, so without
+		// this such a plate would claim whichever bed shared its number.
+		if i > 0 && tokens[i-1] == "BATCH" {
+			continue
+		}
+		// Four digits or more, which is what an order number looks like and a
+		// heart count or a plate index does not.
+		if allDigits(tok) && len(tok) >= minOrderNumberDigits && !seen[tok] {
+			seen[tok] = true
+			orders = append(orders, tok)
+		}
+	}
+	if len(orders) == 0 {
+		return ""
+	}
+	sortOrderNumbers(orders)
+	return strings.Join(orders, "-")
+}
+
+// minOrderNumberDigits is what tells an order number from a plate index.
+//
+// Shopify order numbers here are six digits ("114556"); the digits that are NOT
+// order numbers in a plate name are a plate index ("1") and a split suffix
+// ("-2"). Four is comfortably between the two.
+const minOrderNumberDigits = 4

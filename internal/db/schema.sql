@@ -492,9 +492,21 @@ CREATE TABLE batches (
     -- The BambuBuddy slicer-pipeline run this batch was dispatched as. Set
     -- when the run is accepted (202), before any queue entry exists - see
     -- migration 0066.
-    pipeline_run_id                 integer
+    pipeline_run_id                 integer,
+    -- What actually happened on the printer, from BambuBuddy's archive - see
+    -- migration 0068. print_outcome is null until a print resolves and is the
+    -- idempotency key for the write that resolves it. The actual_* pair sits
+    -- beside the planned figures above rather than overwriting them.
+    archive_id                      integer,
+    print_outcome                   varchar(16),
+    print_started_at                timestamptz,
+    print_finished_at               timestamptz,
+    actual_print_time_minutes       integer,
+    actual_filament_grams           numeric(10, 2)
 );
 CREATE UNIQUE INDEX uq_batches_batch_number ON batches (batch_number);
+CREATE INDEX ix_batches_queue_item ON batches (queue_item_id) WHERE queue_item_id IS NOT NULL;
+CREATE INDEX ix_batches_archive ON batches (archive_id) WHERE archive_id IS NOT NULL;
 CREATE INDEX ix_batches_unsliced ON batches (created_at DESC) WHERE plate_sliced_at IS NULL;
 CREATE INDEX ix_batches_created ON batches (created_at DESC, id DESC);
 CREATE INDEX ix_batches_machine_status ON batches (machine_id, status);

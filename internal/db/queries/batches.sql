@@ -312,8 +312,15 @@ ORDER BY j.job_number;
 -- bed formed before theirs. min(priority) ASC NULLS LAST is the same
 -- convention as the machine scheduler - LOWER IS MORE URGENT - and a bed with
 -- no jobs sorts last rather than first.
+--
+-- A bed whose print already resolved is excluded. A failed plate keeps its
+-- 'open' status - a failure is "still locked, and here is why" rather than a
+-- lifecycle state - so without this the dispatcher would send it again on the
+-- very next pass, into whatever went wrong the first time. Clearing the outcome
+-- is the operator's deliberate act, through the Queue button.
 SELECT b.* FROM batches b
 WHERE b.status IN ('pending_approval', 'open')
+  AND b.print_outcome IS NULL
 ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id) ASC NULLS LAST,
          NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
          b.created_at ASC, b.id ASC;
@@ -389,6 +396,15 @@ UPDATE batches SET
     pipeline_run_id          = NULL,
     print_error              = NULL,
     print_error_at           = NULL,
+    -- And what the last print did. A bed re-plated from different jobs that
+    -- kept its archive_id would be completed by the next reconciliation pass
+    -- against a print of planks it no longer holds.
+    archive_id               = NULL,
+    print_outcome            = NULL,
+    print_started_at         = NULL,
+    print_finished_at        = NULL,
+    actual_print_time_minutes = NULL,
+    actual_filament_grams    = NULL,
     filament_reserved        = false,
     updated_at               = now()
 WHERE id = sqlc.arg('id') AND status = 'open'
@@ -439,3 +455,90 @@ WHERE queue_item_id IS NOT NULL
   AND plate_sliced_at IS NULL
   AND status IN ('open', 'in_progress')
 ORDER BY created_at ASC, id ASC;
+
+-- name: ListBatchesInFlight :many
+-- Beds that have been handed to BambuBuddy and whose print has not resolved.
+--
+-- The reconciliation pass's working set. plate_filename comes from the file
+-- actually uploaded (SendBatchToPrinter sends merged_file_id, falling back to
+-- preview_file_id), because the filename is the last-resort correlation key when
+-- BambuBuddy's queue no longer holds the item - and it must be the SAME name
+-- that was sent, not one rebuilt from the batch.
+--
+-- print_outcome IS NULL is what keeps a resolved bed out of the set for ever.
+SELECT b.*, f.filename AS plate_filename
+FROM batches b
+LEFT JOIN file_assets f ON f.id = COALESCE(b.merged_file_id, b.preview_file_id)
+WHERE b.status IN ('open', 'in_progress')
+  AND (b.queue_item_id IS NOT NULL OR b.pipeline_run_id IS NOT NULL)
+  AND b.print_outcome IS NULL
+ORDER BY b.approved_at ASC NULLS LAST, b.batch_number ASC;
+
+-- name: SetBatchQueueItem :exec
+-- Fills in the queue item a bed was sliced into.
+--
+-- Slicing is asynchronous, so RunPipeline answers 202 with no queue entry yet
+-- and recordQueued leaves this null. Nothing ever filled it in, which also meant
+-- ListBatchesAwaitingPlateMeasurement - which requires it - never saw those
+-- beds and they were never measured.
+--
+-- Guarded on the column still being null so a backfill can never overwrite the
+-- id a later send established.
+UPDATE batches SET queue_item_id = sqlc.arg('queue_item_id'), updated_at = now()
+WHERE id = sqlc.arg('id') AND queue_item_id IS NULL;
+
+-- name: RecordBatchPrintOutcome :one
+-- Claims a finished print, exactly once.
+--
+-- The idempotency gate for the whole completion path: one statement, guarded on
+-- print_outcome still being null. The reconciliation pass runs every fleet sync
+-- and a push event can arrive twice, so several callers may race here - exactly
+-- one gets a row back and the rest correctly do nothing. No rows returned means
+-- somebody else already recorded it.
+--
+-- Deliberately written BEFORE the status change, not after: a crash between the
+-- two leaves a bed with an outcome and no completion, which the next pass can
+-- see and repair. The other order leaves a completed bed with no record of why.
+UPDATE batches SET
+    print_outcome             = sqlc.arg('print_outcome'),
+    archive_id                = sqlc.narg('archive_id'),
+    print_started_at          = COALESCE(sqlc.narg('print_started_at'), print_started_at),
+    print_finished_at         = sqlc.narg('print_finished_at'),
+    actual_print_time_minutes = sqlc.narg('actual_print_time_minutes'),
+    actual_filament_grams     = sqlc.narg('actual_filament_grams'),
+    updated_at                = now()
+WHERE id = sqlc.arg('id') AND print_outcome IS NULL
+RETURNING *;
+
+-- name: ClearBatchPrintOutcome :exec
+-- Forgets a failed print so the bed can be sent again.
+--
+-- Only ever from the manual Queue button: the deliberate human "yes, run that
+-- again". ListBatchesToDispatch excludes a bed with an outcome, so without this
+-- a failed bed would be retried automatically for ever against whatever went
+-- wrong the first time.
+--
+-- The send identifiers go with it. SendBatchToPrinter refuses a bed that
+-- already carries a queue item or a pipeline run - the guard against printing
+-- one bed twice - so leaving them behind would make a failed bed permanently
+-- un-resendable, and the only escape would be editing it.
+UPDATE batches SET
+    print_outcome             = NULL,
+    archive_id                = NULL,
+    print_finished_at         = NULL,
+    print_error               = NULL,
+    print_error_at            = NULL,
+    queue_item_id             = NULL,
+    pipeline_run_id           = NULL,
+    updated_at                = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ListBatchesResolvedButNotClosed :many
+-- Beds whose print resolved as finished but which never reached 'completed'.
+--
+-- The repair set for a crash between RecordBatchPrintOutcome and the status
+-- change. Without this a bed would sit for ever holding an outcome nobody acted
+-- on, and its planks would never reach Assembly.
+SELECT * FROM batches
+WHERE print_outcome = 'completed' AND status <> 'completed'
+ORDER BY print_finished_at ASC NULLS LAST;

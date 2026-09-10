@@ -76,6 +76,22 @@ func (w *FleetSyncWorker) Work(ctx context.Context, job *river.Job[production.Sy
 	// After the refresh, not instead of it: a failed refresh is worth retrying on
 	// its own, and a measurement pass that never runs costs nothing beyond a
 	// later number.
+	// And a third: which of the beds we sent have finished. Before the
+	// measurement pass, not after - a bed that just finished is resolved from
+	// its archive here, where the real duration and filament are, instead of
+	// being counted as a vanished queue item there.
+	//
+	// This is the only thing that tells Tensor a print is over, so it is also
+	// the only thing that releases a bed's planks to Assembly.
+	prints := w.server.ReconcileFinishedPrints(ctx)
+	if prints.Completed > 0 || prints.Failed > 0 || prints.Unmatched > 0 ||
+		prints.Backfilled > 0 || prints.Repaired > 0 {
+		w.logger.Info("prints reconciled",
+			"considered", prints.Considered, "completed", prints.Completed,
+			"failed", prints.Failed, "backfilled", prints.Backfilled,
+			"repaired", prints.Repaired, "unmatched", prints.Unmatched)
+	}
+
 	plates := w.server.RecordPlateMeasurements(ctx)
 	if plates.Measured > 0 || plates.Missing > 0 {
 		w.logger.Info("plate measurements recorded",

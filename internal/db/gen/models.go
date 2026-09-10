@@ -39,6 +39,12 @@ type Batch struct {
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 	PipelineRunID               *int32
+	ArchiveID                   *int32
+	PrintOutcome                *string
+	PrintStartedAt              pgtype.Timestamptz
+	PrintFinishedAt             pgtype.Timestamptz
+	ActualPrintTimeMinutes      *int32
+	ActualFilamentGrams         pgtype.Numeric
 }
 
 type Brand struct {
