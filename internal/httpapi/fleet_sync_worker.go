@@ -68,30 +68,30 @@ func (w *FleetSyncWorker) Work(ctx context.Context, job *river.Job[production.Sy
 		return fmt.Errorf("refresh fleet: %w", err)
 	}
 
-	// The same trip to BambuBuddy answers a second question: how long the plates
-	// it has sliced actually take. Nothing else asks, so without this every bed
-	// carries no measured time and the machine scheduler projects availability
-	// from an approximation - see plate_measurement.go.
+	// The same trip to BambuBuddy answers a second question: which of the beds
+	// we sent have finished. This is the ONLY thing that tells Tensor a print is
+	// over, so it is also the only thing that releases a bed's planks to
+	// Assembly - and, on the way past, the first pass at which a queue entry
+	// exists to point at the machine that frees up soonest.
 	//
-	// After the refresh, not instead of it: a failed refresh is worth retrying on
-	// its own, and a measurement pass that never runs costs nothing beyond a
-	// later number.
-	// And a third: which of the beds we sent have finished. Before the
-	// measurement pass, not after - a bed that just finished is resolved from
-	// its archive here, where the real duration and filament are, instead of
-	// being counted as a vanished queue item there.
-	//
-	// This is the only thing that tells Tensor a print is over, so it is also
-	// the only thing that releases a bed's planks to Assembly.
+	// After the refresh, not instead of it: a failed refresh is worth retrying
+	// on its own. Before the measurement pass below, so a bed that just finished
+	// is resolved from its archive - where the real duration and filament are -
+	// rather than being counted there as a queue item that vanished.
 	prints := w.server.ReconcileFinishedPrints(ctx)
 	if prints.Completed > 0 || prints.Failed > 0 || prints.Unmatched > 0 ||
-		prints.Backfilled > 0 || prints.Repaired > 0 {
+		prints.Backfilled > 0 || prints.Repaired > 0 || prints.Assigned > 0 {
 		w.logger.Info("prints reconciled",
 			"considered", prints.Considered, "completed", prints.Completed,
 			"failed", prints.Failed, "backfilled", prints.Backfilled,
+			"assigned", prints.Assigned,
 			"repaired", prints.Repaired, "unmatched", prints.Unmatched)
 	}
 
+	// And a third: how long the plates it has sliced actually take. Nothing else
+	// asks, so without this every bed carries no measured time and the machine
+	// scheduler projects availability from an approximation - see
+	// plate_measurement.go.
 	plates := w.server.RecordPlateMeasurements(ctx)
 	if plates.Measured > 0 || plates.Missing > 0 {
 		w.logger.Info("plate measurements recorded",

@@ -53,6 +53,9 @@ type PrintReconcileOutcome struct {
 	// matched no archive. Worth a line each: it is what a naming drift looks
 	// like from here, and the alternative is silence.
 	Unmatched int
+	// Assigned counts plates pointed at the printer that frees up soonest and
+	// holds their colours.
+	Assigned int
 }
 
 // ReconcileFinishedPrints resolves every in-flight bed against BambuBuddy.
@@ -134,6 +137,15 @@ func (s *Server) ReconcileFinishedPrints(ctx context.Context) PrintReconcileOutc
 				} else {
 					out.Backfilled++
 					b.QueueItemID = int32Ptr(item.ID)
+					// The reliable moment to choose a machine. Slicing is
+					// asynchronous, so when the plate was sent there was usually
+					// no queue entry yet to point anywhere - this is the first
+					// pass at which one exists. An item BambuBuddy has already
+					// bound to a printer is left alone: it may be part-way
+					// through, and moving it would be a withdrawal.
+					if item.PrinterID == nil {
+						out.Assigned += s.assignBackfilledItem(ctx, b, item.ID)
+					}
 				}
 			}
 		}
@@ -378,3 +390,23 @@ func (s *Server) archiveReconcileLimit() int {
 }
 
 const defaultArchiveReconcileLimit = 200
+
+// assignBackfilledItem points a newly-seen queue item at the best machine,
+// returning 1 when it moved one.
+//
+// Split out so the reconciliation loop reads as a list of decisions rather than
+// a list of error handling. Best-effort throughout: a plate that stays where
+// BambuBuddy's own fanout put it still prints.
+func (s *Server) assignBackfilledItem(ctx context.Context, b gen.ListBatchesInFlightRow, itemID int) int {
+	jobs, err := s.store.Q.ListJobsForBatch(ctx, &b.ID)
+	if err != nil {
+		obs.FromContext(ctx).Debug("could not read a bed's jobs to choose a printer",
+			"batch", b.BatchNumber, "error", err)
+		return 0
+	}
+	batch := gen.Batch{ID: b.ID, BatchNumber: b.BatchNumber}
+	if s.assignQueuedItemToBestMachine(ctx, batch, jobs, itemID) == "" {
+		return 0
+	}
+	return 1
+}

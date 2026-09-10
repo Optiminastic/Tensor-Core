@@ -10,7 +10,9 @@ package bambubuddy
 // the moment somebody reordered the queue in BambuBuddy's own UI.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -204,6 +206,48 @@ func (c *Client) RemoveQueueItem(ctx context.Context, itemID int) error {
 		// The status alone, for the reason c.get gives: the body can echo the
 		// request back, API key included.
 		return fmt.Errorf("bambubuddy remove queue item %d: HTTP %d", itemID, resp.StatusCode)
+	}
+	return nil
+}
+
+// AssignQueueItemToPrinter pins a queued plate to one physical printer.
+//
+// The seam that lets Tensor choose the machine while BambuBuddy still does the
+// slicing. A pipeline run targets a printer CLASS - its run payload accepts only
+// the file, a copy count and a force flag, with no way to name a printer - so
+// the choice has to be made after the item exists. Which is the right order
+// anyway: the plate is sliced for the class, and the class is what slicing
+// depends on.
+//
+// Sent as a PATCH of one field. Position and AMS mapping are deliberately left
+// alone: reordering somebody else's queue is not this call's business, and an
+// AMS mapping guessed by Tensor would override the one BambuBuddy derived from
+// the plate's own declared slots.
+func (c *Client) AssignQueueItemToPrinter(ctx context.Context, itemID, printerID int) error {
+	body, err := json.Marshal(map[string]any{"printer_id": printerID})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		fmt.Sprintf("%s/api/v1/queue/%d", c.baseURL, itemID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("bambubuddy assign queue item %d to printer %d: %w", itemID, printerID, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 300 {
+		// The status alone, for the reason c.get gives: the body can echo the
+		// request back, API key included.
+		return fmt.Errorf("bambubuddy assign queue item %d to printer %d: HTTP %d",
+			itemID, printerID, resp.StatusCode)
 	}
 	return nil
 }

@@ -179,7 +179,7 @@ func (s *Server) sliceAndQueue(
 	for _, p := range eligible {
 		run, err := s.bambu.RunPipeline(ctx, p, uploaded.ID)
 		if err == nil {
-			return s.recordQueued(ctx, batch, uploaded, run), nil
+			return s.recordQueued(ctx, batch, jobs, uploaded, run), nil
 		}
 
 		var ineligible bambubuddy.NotEligibleError
@@ -209,7 +209,8 @@ func (s *Server) sliceAndQueue(
 
 // recordQueued stores the queue entry a successful run created and reports it.
 func (s *Server) recordQueued(
-	ctx context.Context, batch gen.Batch, uploaded bambubuddy.UploadedFile, run bambubuddy.PipelineRun,
+	ctx context.Context, batch gen.Batch, jobs []gen.ProductionJob,
+	uploaded bambubuddy.UploadedFile, run bambubuddy.PipelineRun,
 ) printBatchResponse {
 	log := obs.FromContext(ctx)
 
@@ -235,6 +236,18 @@ func (s *Server) recordQueued(
 	note := "slicing on BambuBuddy"
 	if name := run.PrinterName(); name != "" {
 		note = "queued on " + name
+	}
+	// Point it at the machine that frees up soonest and holds its colours.
+	//
+	// Only possible when slicing has already produced a queue entry, which it
+	// usually has not - the run answers 202 while the slice is still going. The
+	// reconciliation pass picks up the rest, when it backfills queue_item_id
+	// from the queue; this is the fast path for a slice that finished quickly,
+	// not the only one.
+	if queueID != nil {
+		if chosen := s.assignQueuedItemToBestMachine(ctx, batch, jobs, int(*queueID)); chosen != "" {
+			note = chosen
+		}
 	}
 	log.Info("batch sliced and queued by BambuBuddy",
 		"batch", batch.BatchNumber, "file", uploaded.Filename,
