@@ -175,6 +175,11 @@ func (s *Server) listBatches(c *gin.Context) {
 	if !page.paginate {
 		rows, err := s.store.Q.ListBatches(ctx, searchParam(c))
 		if err != nil {
+			// Logged, not just answered. "Could not list batches." on its own
+			// tells an operator nothing and leaves whoever is diagnosing it
+			// with no cause at all - which is exactly the position a 500 on
+			// this page left us in.
+			obs.FromContext(ctx).Error("could not list batches", "error", err)
 			detail(c, http.StatusInternalServerError, "Could not list batches.")
 			return
 		}
@@ -190,6 +195,7 @@ func (s *Server) listBatches(c *gin.Context) {
 		Search: searchParam(c),
 	})
 	if err != nil {
+		obs.FromContext(ctx).Error("could not list batches (paged)", "error", err)
 		detail(c, http.StatusInternalServerError, "Could not list batches.")
 		return
 	}
