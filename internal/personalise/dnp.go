@@ -52,6 +52,23 @@ const (
 	OutputZMM = 40
 )
 
+// Shape is the finished size a rendered product is scaled to, in millimetres.
+//
+// A size per product, not one for everything: the plank and the photo frame
+// print from the same template and are different objects. Rendering a frame at
+// the plank's 200x50x40 would produce a part that fits no frame and looks
+// correct in every preview, which is the kind of wrong that reaches a customer.
+type Shape struct{ X, Y, Z int }
+
+var (
+	// PlankShape is the Dual Name Plank, and the default for anything that does
+	// not say otherwise.
+	PlankShape = Shape{X: OutputXMM, Y: OutputYMM, Z: OutputZMM}
+	// FrameShape is the Dual Name & Photo Frame: shorter and shallower, so the
+	// names sit inside the frame's aperture rather than spanning a plank.
+	FrameShape = Shape{X: 150, Y: 40, Z: 40}
+)
+
 // Margins are NOT set here in the general case. They live in each template,
 // where the shop edits them directly - 60/60, 12/50 and 12/12 at the time of
 // writing. Overriding them wholesale meant a change to the .scad quietly did
@@ -108,6 +125,46 @@ type Params struct {
 	// Hearts is what the customer asked for, kept for the operator's benefit
 	// even though Template already encodes it.
 	Hearts int
+	// Shape is the finished size. Zero means the plank, so a caller that
+	// predates per-product sizes keeps rendering exactly what it did before.
+	Shape Shape
+}
+
+// ForProduct adjusts p for the product being rendered.
+//
+// The Dual Name & Photo Frame prints from the SAME no-heart template as the
+// plank and differs only in finished size - it is the same two names, scaled
+// into a frame instead of a plank. It is forced to the no-heart template rather
+// than trusting the heart count, because a frame has no hearts to offer and a
+// stray heart property on the line would otherwise pick a template whose
+// margins are laid out for a different object.
+func (p Params) ForProduct(sku, productName string) Params {
+	if !isFrame(sku, productName) {
+		return p
+	}
+	p.Template = templateNoHeart
+	p.Hearts = 0
+	p.Shape = FrameShape
+	return p
+}
+
+// frameSKUSegment names the photo frame in a SKU, matched as a whole
+// hyphen-separated segment. A prefix test would also catch DNP and DNPLB, which
+// is the mistake that once sent plank orders down the wrong path.
+const frameSKUSegment = "DNPF"
+
+// frameProductName is matched as a substring of the lower-cased product name,
+// for the lines that carry no usable SKU. The storefront writes it as
+// "DUAL NAME & PHOTO FRAME".
+const frameProductName = "photo frame"
+
+func isFrame(sku, productName string) bool {
+	for _, part := range strings.Split(strings.ToUpper(sku), "-") {
+		if part == frameSKUSegment {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(productName), frameProductName)
 }
 
 // Args renders Params as OpenSCAD -D parameters.
@@ -135,15 +192,19 @@ func (p Params) ArgsForPart(part string) map[string]string {
 }
 
 func (p Params) Args() map[string]string {
+	shape := p.Shape
+	if shape.X == 0 {
+		shape = PlankShape
+	}
 	args := map[string]string{
 		"NAME_L": Quote(p.NameLeft),
 		"NAME_R": Quote(p.NameRight),
 		// Scales the finished model to the product size. See the note on
 		// OutputXMM: this is a non-uniform scale and it thins the lettering on
 		// a long name, which is an open question rather than a settled one.
-		"OUT_X": strconv.Itoa(OutputXMM),
-		"OUT_Y": strconv.Itoa(OutputYMM),
-		"OUT_Z": strconv.Itoa(OutputZMM),
+		"OUT_X": strconv.Itoa(shape.X),
+		"OUT_Y": strconv.Itoa(shape.Y),
+		"OUT_Z": strconv.Itoa(shape.Z),
 	}
 	if p.needsWideMargins() {
 		args["MARGIN_L"] = strconv.Itoa(wideMarginMM)
@@ -155,9 +216,18 @@ func (p Params) Args() map[string]string {
 // The storefront's own wording, e.g. "STEP 4-First Name-:". Matched on the
 // normalised key the importer already produces, so punctuation and case do not
 // matter - see normalisePropKey in httpapi/shopify_import.go.
+//
+// "left name" and "right name" are the photo frame's wording. It asks for the
+// same two names as the plank under completely different labels, and without
+// them every frame order fails with "a plank needs both names" - which reads
+// like the customer left the fields blank when in fact they filled both in.
+// They do not collide with the frame's LEFT PHOTO and RIGHT PHOTO properties,
+// which are matched whole rather than by prefix.
 var (
-	keyFirstName  = []string{"step 4 first name", "first name", "personalisation name", "custom name"}
-	keySecondName = []string{"step 5 second name", "second name"}
+	keyFirstName = []string{
+		"step 4 first name", "first name", "personalisation name", "custom name", "left name",
+	}
+	keySecondName = []string{"step 5 second name", "second name", "right name"}
 
 	// keyHeartsNamed are labels that SAY hearts. A label naming hearts means
 	// the product offered the option, so a value here that will not read is a

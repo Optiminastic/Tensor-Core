@@ -33,13 +33,16 @@ func TestIsGeneratedProduct(t *testing.T) {
 		{"substring in a sku segment", "CARDNPACK-1", "", false},
 		{"substring, no hyphens", "GRANDNPRIX", "", false},
 
-		// The regression this rule was rewritten for. DNPF is the Dual Name &
-		// Photo Frame, a different product that a HasPrefix("DNP") test
-		// swallowed: Tensor rendered a plank for it, failed with "a plank needs
-		// both names", and put a red renderer error on four live orders that
-		// had nothing wrong with them.
-		{"photo frame sku", "T3DPS-DNPF-2", "DUAL NAME & PHOTO FRAME - GOLD", false},
-		{"photo frame sku alone", "DNPF-1", "", false},
+		// DNPF is now generated too. It renders from the same no-heart
+		// template as the plank at its own finished size (150x40x40), so the
+		// frame no longer waits for somebody to upload a file per order.
+		//
+		// It is listed as a whole segment rather than arriving via a prefix.
+		// That distinction still matters and is still tested below: a
+		// HasPrefix("DNP") rule once swallowed products that were not planks
+		// and put a red renderer error on four live orders.
+		{"photo frame sku", "T3DPS-DNPF-2", "DUAL NAME & PHOTO FRAME - GOLD", true},
+		{"photo frame sku alone", "DNPF-1", "", true},
 
 		// Nine live plank lines - the GREEN and PURPLE variants - carry every
 		// STEP property and no SKU at all. They are planks; the variant just
@@ -49,9 +52,13 @@ func TestIsGeneratedProduct(t *testing.T) {
 		{"plank, name decorated", "", "DUAL NAME PLANK - Green", true},
 		{"plank with both", "T3DPS-DNP-9", "Dual Name Plank", true},
 
-		// The name must be as tight as the SKU rule. These are genuinely
+		// The frame carries a name fallback of its own, for the same reason
+		// the plank needs one: a variant that lost its SKU is still the
+		// product.
+		{"photo frame by name", "", "DUAL NAME & PHOTO FRAME", true},
+
+		// The name must stay as tight as the SKU rule. These are genuinely
 		// different products that happen to sit next to planks in the store.
-		{"photo frame", "", "DUAL NAME & PHOTO FRAME", false},
 		{"love display", "", "LOVE DISPLAY", false},
 		{"temple name plate", "", "TEMPLE - Home Name Plate", false},
 	} {
@@ -94,14 +101,14 @@ func TestModelStatusOf(t *testing.T) {
 			ModelApprovalRequired,
 		},
 		{
-			// A photo frame wants a file from a person, never a render - even
-			// though a misclassification once left a renderer error on it.
-			"photo frame carrying a stale render error",
+			// A photo frame is rendered now, so a render error on one is a
+			// failure to report rather than a misclassification to ignore.
+			"photo frame whose render failed",
 			gen.ProductionJob{
 				Sku:        sku("T3DPS-DNPF-2"),
 				ModelError: sku(`a plank needs both names; got first="" second=""`),
 			},
-			ModelApprovalRequired,
+			ModelFailed,
 		},
 		{
 			// No SKU is nothing Tensor can render, so it needs a person.
@@ -231,11 +238,16 @@ func TestReportableModelError(t *testing.T) {
 		}
 	})
 
-	t.Run("a photo frame's stale plank error is not", func(t *testing.T) {
+	// The photo frame used to be the example here; it is rendered now, so the
+	// case needs a product Tensor genuinely does not build. The rule is
+	// unchanged: an error about a plank means nothing on something that was
+	// never going to be one, and showing it sends an operator hunting a fault
+	// in an order that has none.
+	t.Run("another product's stale plank error is not", func(t *testing.T) {
 		if got := reportableModelError(gen.ProductionJob{
-			Sku: sku("T3DPS-DNPF-2"), ModelError: sku(plankError),
+			Sku: sku("THO-PLA-FFF-0022"), ModelError: sku(plankError),
 		}); got != nil {
-			t.Errorf("reportableModelError = %q, want nil - nobody renders a photo frame", *got)
+			t.Errorf("reportableModelError = %q, want nil - nobody renders this product", *got)
 		}
 	})
 
@@ -257,10 +269,13 @@ func TestReportableModelError(t *testing.T) {
 // remedy must still say what they are.
 func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	sku := func(s string) *string { return &s }
-	frame := func(issue string) gen.ProductionJob {
+	// A product Tensor does not render, so the remedy really is an upload. The
+	// photo frame filled this role until it became a generated product.
+	uploaded := func(issue string) gen.ProductionJob {
 		return gen.ProductionJob{
 			Status:                production.StatusQueued,
-			Sku:                   sku("T3DPS-DNPF-2"),
+			Sku:                   sku("THO-PLA-FFF-0022"),
+			ProductName:           sku("Sunrise Lamp"),
 			PersonalisationStatus: production.PersonalisationNotRequired,
 			IssueReason:           &issue,
 		}
@@ -272,7 +287,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 		production.IssueSKUMissing,
 	} {
 		t.Run(issue, func(t *testing.T) {
-			got := batchingBlockedReason(frame(issue), true)
+			got := batchingBlockedReason(uploaded(issue), true)
 			if got == nil || *got != UploadDesignFileWording {
 				t.Errorf("batchingBlockedReason(%s) = %v, want %q", issue, got, UploadDesignFileWording)
 			}
@@ -281,7 +296,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 
 	// An upload does not conjure filament, so this one keeps its own words.
 	t.Run("a reason an upload does not fix", func(t *testing.T) {
-		got := batchingBlockedReason(frame(production.IssueFilamentOutOfStock), true)
+		got := batchingBlockedReason(uploaded(production.IssueFilamentOutOfStock), true)
 		if got == nil || *got == UploadDesignFileWording {
 			t.Errorf("batchingBlockedReason(filament_out_of_stock) = %v, want the stock wording", got)
 		}
@@ -290,7 +305,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	// A hold is a person's decision and outranks the missing file: telling them
 	// to upload something would hide the fact that they held it themselves.
 	t.Run("a held job says it is held", func(t *testing.T) {
-		j := frame(production.IssueSTLMissing)
+		j := uploaded(production.IssueSTLMissing)
 		j.Held = true
 		got := batchingBlockedReason(j, true)
 		if got == nil || *got == UploadDesignFileWording {
@@ -300,7 +315,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 
 	// A plank renders itself; asking anyone to upload one would be wrong.
 	t.Run("a plank is never asked for a file", func(t *testing.T) {
-		j := frame(production.IssueSTLMissing)
+		j := uploaded(production.IssueSTLMissing)
 		j.Sku = sku("T3DPS-DNP-9")
 		if got := batchingBlockedReason(j, true); got != nil {
 			t.Errorf("batchingBlockedReason(plank) = %q, want nil while it renders", *got)

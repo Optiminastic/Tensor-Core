@@ -42,18 +42,25 @@ var errNotPersonalisable = errors.New("this product has no generated model")
 // Lower-case, and compared as a substring of the lower-cased product name,
 // because the storefront appends and reorders words around the product's own
 // name freely.
-var generatedProductNames = []string{"dual name plank"}
+var generatedProductNames = []string{"dual name plank", "dual name & photo frame"}
 
 // generatedSKUSegments are the hyphen-separated SKU segments that name a
 // product Tensor renders itself.
 //
-// Both live plank families: T3DPS-DNP-1..16 carries "DNP", and the
-// with-light range carries "DNPLB". Anything else beginning with those three
-// letters is a different product - DNPF is the Dual Name & Photo Frame, which
-// needs a design file uploaded, not a plank generated for it.
+// Three live families: T3DPS-DNP-1..16 carries "DNP", the with-light range
+// carries "DNPLB", and the Dual Name & Photo Frame carries "DNPF".
+//
+// Matched as whole hyphen-separated segments, never as a prefix. The rule used
+// to accept anything starting with "DNP" and that cost real orders, which is
+// why DNPF is listed here explicitly rather than falling in by accident.
+//
+// DNPF renders from the same no-heart template as the plank and differs only in
+// finished size - see personalise.Params.ForProduct. It used to need a design
+// file uploaded per order; it no longer does.
 var generatedSKUSegments = map[string]bool{
 	"DNP":   true,
 	"DNPLB": true,
+	"DNPF":  true,
 }
 
 // IsGeneratedProduct reports whether a product is one Tensor renders itself.
@@ -272,7 +279,13 @@ func (s *Server) plankParamsForJob(
 			return personalise.Params{}, fmt.Errorf(
 				"this order carries no personalisation options - press Sync from Shopify to fetch them")
 		}
-		return personalise.ParamsFromProperties(li.Properties)
+		params, err := personalise.ParamsFromProperties(li.Properties)
+		if err != nil {
+			return personalise.Params{}, err
+		}
+		// The names come from the line's properties; the product decides what
+		// they are scaled into.
+		return params.ForProduct(sku, product), nil
 	}
 	if sku != "" {
 		return personalise.Params{}, fmt.Errorf("no line item on this order matches SKU %s", sku)

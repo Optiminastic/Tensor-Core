@@ -446,3 +446,100 @@ func TestIsNameLabel(t *testing.T) {
 		}
 	}
 }
+
+// The Dual Name & Photo Frame is the same two names as the plank, scaled into a
+// frame instead. It prints from the SAME no-heart template, so the only thing
+// separating the two products is the finished size - which makes getting that
+// size right the whole job.
+func TestPhotoFrameRendersAtItsOwnSize(t *testing.T) {
+	base := Params{Template: templateTwoHeart, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
+
+	for _, c := range []struct{ name, sku, product string }{
+		{"by SKU segment", "T3DPS-DNPF-2", ""},
+		{"by product name", "", "DUAL NAME & PHOTO FRAME"},
+		{"by lower-cased name", "", "dual name & photo frame"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := base.ForProduct(c.sku, c.product)
+			if got.Shape != FrameShape {
+				t.Errorf("shape = %+v, want %+v", got.Shape, FrameShape)
+			}
+			// Forced, not inherited: a frame has no hearts to offer, and a
+			// stray heart property must not pick a template whose margins are
+			// laid out for a plank.
+			if got.Template != templateNoHeart {
+				t.Errorf("template = %q, want %q", got.Template, templateNoHeart)
+			}
+			if got.Hearts != 0 {
+				t.Errorf("hearts = %d, want 0", got.Hearts)
+			}
+			args := got.Args()
+			for name, want := range map[string]string{"OUT_X": "150", "OUT_Y": "40", "OUT_Z": "40"} {
+				if args[name] != want {
+					t.Errorf("%s = %q, want %q", name, args[name], want)
+				}
+			}
+		})
+	}
+}
+
+// The prefix mistake, guarded. "DNP" and "DNPLB" both start the same way as
+// "DNPF", and treating the frame as a plank - or a plank as a frame - prints
+// the wrong object at the wrong size.
+func TestPlankIsNotMistakenForAFrame(t *testing.T) {
+	base := Params{Template: templateTwoHeart, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
+
+	for _, c := range []struct{ name, sku, product string }{
+		{"plain plank SKU", "T3DPS-DNP-2", "Dual Name Plank"},
+		{"with-light plank SKU", "DNPLB-RED", "Dual Name Plank"},
+		{"a name that merely contains dnpf", "", "DNPFRAMEWORK"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := base.ForProduct(c.sku, c.product)
+			if got.Shape != (Shape{}) && got.Shape != PlankShape {
+				t.Errorf("shape = %+v, want the plank's", got.Shape)
+			}
+			if got.Template != templateTwoHeart {
+				t.Errorf("template = %q, want it left alone", got.Template)
+			}
+			args := got.Args()
+			if args["OUT_X"] != "200" || args["OUT_Y"] != "50" {
+				t.Errorf("OUT_X/OUT_Y = %q/%q, want 200/50", args["OUT_X"], args["OUT_Y"])
+			}
+		})
+	}
+}
+
+// The photo frame asks for the same two names as the plank under its own
+// labels. Real order T3DPS-114836 carries exactly this shape.
+//
+// Without these labels every frame order failed with "a plank needs both
+// names", which reads like the customer left the fields blank when they had
+// filled both in - and the photo properties sitting beside them must not be
+// mistaken for names.
+func TestFrameNamePropertiesAreRead(t *testing.T) {
+	props := []production.LineProp{
+		{Name: "_has_gpo", Value: "854058"},
+		{Name: "LEFT NAME", Value: "AMENA"},
+		{Name: "LEFT PHOTO", Value: "https://example.test/left.jpg"},
+		{Name: "RIGHT NAME", Value: "SALMAN"},
+		{Name: "RIGHT PHOTO", Value: "https://example.test/right.jpg"},
+	}
+
+	got, err := ParamsFromProperties(props)
+	if err != nil {
+		t.Fatalf("ParamsFromProperties: %v", err)
+	}
+	if got.NameLeft != "AMENA" || got.NameRight != "SALMAN" {
+		t.Errorf("names = %q/%q, want AMENA/SALMAN", got.NameLeft, got.NameRight)
+	}
+
+	frame := got.ForProduct("DNPF-1", "DUAL NAME & PHOTO FRAME - GOLD")
+	args := frame.Args()
+	if args["NAME_L"] != `"AMENA"` || args["NAME_R"] != `"SALMAN"` {
+		t.Errorf("NAME_L/NAME_R = %s/%s", args["NAME_L"], args["NAME_R"])
+	}
+	if args["OUT_X"] != "150" || args["OUT_Y"] != "40" || args["OUT_Z"] != "40" {
+		t.Errorf("size = %s/%s/%s, want 150/40/40", args["OUT_X"], args["OUT_Y"], args["OUT_Z"])
+	}
+}
