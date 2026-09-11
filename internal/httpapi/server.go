@@ -143,7 +143,11 @@ func (s *Server) EnableBatchDispatchQueue(e *production.DispatchEnqueuer) {
 // own text. Without it, a Dual Name Plank job is created and held as
 // 'stl_missing' - visible and fixable by hand, rather than silently absent.
 func (s *Server) EnableModelGeneration(r *personalise.Renderer, e *production.ModelGenEnqueuer) {
-	s.renderer = r
+	// Attached here rather than at either call site so cmd/api and
+	// cmd/productionworker cannot disagree about whether uploaded templates are
+	// honoured - a worker rendering the embedded shape while the API reports the
+	// uploaded one would be a very quiet kind of wrong.
+	s.renderer = r.WithTemplateLoader(s.templateLoader())
 	s.modelEnqueuer = e
 }
 
@@ -174,6 +178,9 @@ func (s *Server) Router() *gin.Engine {
 	s.registerBatches(r)
 	s.registerFilament(r)
 	s.registerInventoryItems(r)
+	s.registerRegistry(r)
+	s.registerRegistryAuthoring(r)
+	s.registerDesignTemplates(r)
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)

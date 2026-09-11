@@ -10,7 +10,13 @@ and the template that rendered a plank is the one committed alongside the code
 that drove it.
 
 **The cost of that is drift.** Editing the master does not change what Tensor
-renders. When a master changes, copy it here and run the render tests - they
+renders. It has already happened once: these copies sat five days behind the
+masters, and the gap was only found by comparing file sizes. When you re-copy,
+render the same names from both versions and compare the vertex SETS rather than
+the files - OpenSCAD emits facets in a different order between runs, so identical
+geometry produces different bytes and a byte comparison cries wolf.
+
+When a master changes, copy it here and run the render tests - they
 measure the output geometry, so a template that stops producing a 200x50x40
 plank fails rather than quietly shipping the wrong size.
 

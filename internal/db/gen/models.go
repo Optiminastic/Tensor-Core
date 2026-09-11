@@ -136,6 +136,17 @@ type DesignPricing struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+type DesignTemplate struct {
+	ID          uuid.UUID
+	TemplateKey string
+	FileID      uuid.UUID
+	Version     int32
+	Status      string
+	UploadedBy  string
+	Notes       *string
+	CreatedAt   pgtype.Timestamptz
+}
+
 type DispatchOrder struct {
 	ID             uuid.UUID
 	OrderID        uuid.UUID
@@ -178,6 +189,7 @@ type InventoryItem struct {
 	Quantity  pgtype.Numeric
 	Unit      string
 	UnitPrice pgtype.Numeric
+	Code      *string
 	CreatedAt pgtype.Timestamptz
 	UpdatedAt pgtype.Timestamptz
 }
@@ -293,6 +305,50 @@ type Permission struct {
 	Description string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+}
+
+type Product struct {
+	ID        uuid.UUID
+	Code      string
+	Name      string
+	Kind      string
+	Status    string
+	Notes     *string
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
+type ProductOption struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	Code      string
+	Label     string
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
+type ProductOptionValue struct {
+	ID        uuid.UUID
+	OptionID  uuid.UUID
+	Code      string
+	Label     string
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
+type ProductVariant struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	Sku       *string
+	Name      string
+	Status    string
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
+type ProductVariantOption struct {
+	VariantID     uuid.UUID
+	OptionValueID uuid.UUID
 }
 
 type ProductionJob struct {
@@ -556,4 +612,23 @@ type UserRole struct {
 	AssignedBy *string
 	CreatedAt  pgtype.Timestamptz
 	UpdatedAt  pgtype.Timestamptz
+}
+
+type VariantBom struct {
+	ID              uuid.UUID
+	VariantID       uuid.UUID
+	InventoryItemID uuid.UUID
+	Quantity        pgtype.Numeric
+	CreatedAt       pgtype.Timestamptz
+}
+
+type VariantDesign struct {
+	ID          uuid.UUID
+	VariantID   uuid.UUID
+	Role        string
+	TemplateKey *string
+	DesignID    *uuid.UUID
+	Version     int32
+	Status      string
+	CreatedAt   pgtype.Timestamptz
 }

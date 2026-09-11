@@ -45,12 +45,34 @@ var ErrNoTemplate = errors.New("no personalisation template for this product")
 // than letting it hold a worker indefinitely.
 const DefaultTimeout = 180 * time.Second
 
+// TemplateLoader supplies a template's source from somewhere other than the
+// binary, so a shop can replace one without a deploy.
+//
+// Returning ok=false means "no override" and is the normal answer - the
+// renderer then falls back to the embedded copy, which is how this behaved
+// before overrides existed. An ERROR is different and is reported: it means an
+// override exists but could not be fetched, and quietly rendering the old shape
+// instead would print the wrong product while looking like success.
+type TemplateLoader func(ctx context.Context, key string) (source []byte, ok bool, err error)
+
 // Renderer runs OpenSCAD. Safe for concurrent use: every render works in its
 // own temporary directory and shares nothing but the configuration.
 type Renderer struct {
 	bin      string
 	assetDir string
 	timeout  time.Duration
+	loadTmpl TemplateLoader
+}
+
+// WithTemplateLoader returns a Renderer that prefers uploaded templates.
+//
+// A copy rather than a mutation: NewRenderer is called once at startup and the
+// result is shared across workers, so changing it in place would be a data race
+// against every render already running.
+func (r *Renderer) WithTemplateLoader(load TemplateLoader) *Renderer {
+	clone := *r
+	clone.loadTmpl = load
+	return &clone
 }
 
 // NewRenderer builds a Renderer. bin is the OpenSCAD executable (looked up on
@@ -121,9 +143,9 @@ func (r *Renderer) RenderPNG(ctx context.Context, template string, params map[st
 func (r *Renderer) render(
 	ctx context.Context, template string, params map[string]string, ext string, extra []string,
 ) ([]byte, error) {
-	source, err := templates.ReadFile("templates/" + template + ".scad")
+	source, err := r.templateSource(ctx, template)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrNoTemplate, template)
+		return nil, err
 	}
 
 	dir, err := os.MkdirTemp("", "personalise-*")
@@ -193,4 +215,26 @@ func lastLines(s string) string {
 		lines = lines[len(lines)-3:]
 	}
 	return strings.Join(lines, " | ")
+}
+
+// templateSource is the .scad to render: an uploaded override if there is one,
+// else the copy compiled into this binary.
+func (r *Renderer) templateSource(ctx context.Context, template string) ([]byte, error) {
+	if r.loadTmpl != nil {
+		source, ok, err := r.loadTmpl(ctx, template)
+		if err != nil {
+			// Deliberately fatal to this render. An override exists and could
+			// not be read, so falling back would print the shape the shop
+			// replaced - a wrong product that looks like a successful one.
+			return nil, fmt.Errorf("load uploaded template %s: %w", template, err)
+		}
+		if ok {
+			return source, nil
+		}
+	}
+	source, err := templates.ReadFile("templates/" + template + ".scad")
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrNoTemplate, template)
+	}
+	return source, nil
 }

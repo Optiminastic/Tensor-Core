@@ -46,8 +46,11 @@ func InventoryUnits() []string {
 }
 
 type inventoryItemResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Code is the stable handle a bill of materials points at, so a BOM line
+	// survives the shelf being renamed. Null until a part is used by a product.
+	Code      *string   `json:"code"`
 	Quantity  float64   `json:"quantity"`
 	Unit      string    `json:"unit"`
 	UnitPrice *float64  `json:"unit_price"`
@@ -62,6 +65,7 @@ func toInventoryItemResponse(i gen.InventoryItem) inventoryItemResponse {
 		CreatedAt: db.Time(i.CreatedAt), UpdatedAt: db.Time(i.UpdatedAt),
 	}
 	out.UnitPrice = db.NumFloatPtr(i.UnitPrice)
+	out.Code = i.Code
 	return out
 }
 
@@ -70,11 +74,16 @@ func toInventoryItemResponse(i gen.InventoryItem) inventoryItemResponse {
 // UnitPrice is a pointer so "not recorded" survives the round trip: binding it
 // as a plain float64 would turn an omitted price into ₹0, which reads as free
 // rather than unknown.
+//
+// Code is a pointer for a different reason: the Inventory dialog does not offer
+// the field at all, so an omitted code must leave an existing one alone rather
+// than clearing the handle every BOM points at. The queries COALESCE it.
 type upsertInventoryItemRequest struct {
 	Name      string   `json:"name" binding:"required"`
 	Quantity  float64  `json:"quantity" binding:"gte=0"`
 	Unit      string   `json:"unit" binding:"required"`
 	UnitPrice *float64 `json:"unit_price"`
+	Code      *string  `json:"code"`
 }
 
 func (s *Server) registerInventoryItems(r *gin.Engine) {
@@ -114,6 +123,7 @@ type validatedItem struct {
 	unit      string
 	quantity  float64
 	unitPrice *float64
+	code      *string
 }
 
 // bindInventoryItem parses and validates the dialog's payload, answering the
@@ -140,7 +150,35 @@ func bindInventoryItem(c *gin.Context) (validatedItem, bool) {
 		detail(c, http.StatusUnprocessableEntity, "A price cannot be negative.")
 		return validatedItem{}, false
 	}
-	return validatedItem{name: name, unit: unit, quantity: req.Quantity, unitPrice: req.UnitPrice}, true
+	code, ok := validItemCode(c, req.Code)
+	if !ok {
+		return validatedItem{}, false
+	}
+	return validatedItem{
+		name: name, unit: unit, quantity: req.Quantity,
+		unitPrice: req.UnitPrice, code: code,
+	}, true
+}
+
+// validItemCode normalises a part code, or nil when none was sent.
+//
+// Upper-cased and trimmed so "led-001", "LED-001 " and "Led-001" are one part.
+// A blank string is treated as absent rather than as an empty code: the Registry
+// form sends "" when the field is cleared, and storing that would create a row
+// that collides with every other blank one under the unique index.
+func validItemCode(c *gin.Context, raw *string) (*string, bool) {
+	if raw == nil {
+		return nil, true
+	}
+	code := strings.ToUpper(strings.TrimSpace(*raw))
+	if code == "" {
+		return nil, true
+	}
+	if len(code) > 64 {
+		detail(c, http.StatusUnprocessableEntity, "A part code is at most 64 characters.")
+		return nil, false
+	}
+	return &code, true
 }
 
 func (s *Server) upsertInventoryItem(c *gin.Context) {
@@ -153,6 +191,7 @@ func (s *Server) upsertInventoryItem(c *gin.Context) {
 		ID: uuid.New(), Name: req.name, Unit: req.unit,
 		Quantity:  req.quantity,
 		UnitPrice: req.unitPrice,
+		Code:      req.code,
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not save the inventory item.")
@@ -177,6 +216,7 @@ func (s *Server) updateInventoryItem(c *gin.Context) {
 		ID: id, Name: req.name, Unit: req.unit,
 		Quantity:  req.quantity,
 		UnitPrice: req.unitPrice,
+		Code:      req.code,
 	})
 	if isNoRows(err) {
 		detail(c, http.StatusNotFound, "That inventory item no longer exists.")
@@ -185,7 +225,10 @@ func (s *Server) updateInventoryItem(c *gin.Context) {
 	if isUniqueViolation(err) {
 		// Renaming onto another item would merge two shelves into one silently,
 		// losing whichever count was not kept.
-		detail(c, http.StatusConflict, "An item with that name is already on the shelf.")
+		// Either name or code - both are unique case-insensitively, and the
+		// message names both so the operator knows which field to change.
+		detail(c, http.StatusConflict,
+			"An item with that name or part code is already on the shelf.")
 		return
 	}
 	if err != nil {

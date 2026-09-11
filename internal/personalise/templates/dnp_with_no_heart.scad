@@ -301,7 +301,7 @@ HEART_W = 1.016;                         // HEART polygon spans ~1.016 x 1.0
 
 function gw_i(ch, i) = i >= len(W_TBL) ? 1.0
                      : (W_TBL[i][0] == ch ? W_TBL[i][1] : gw_i(ch, i + 1));
-function gw(ch)      = ch == PAD_CH ? HEART_W * HK : gw_i(ch, 0);
+function gw(ch)      = is_heart(ch) ? HEART_W * HK : gw_i(ch, 0);
 
 // ---------------------------------------------------------------------------
 function rep(s, n)    = n <= 0 ? "" : str(s, rep(s, n - 1));
@@ -317,6 +317,71 @@ function pad(s, n, m) =
 // a character nobody can type into a name, or a real space in "A K A SCHOOL"
 // turns into a heart - which is exactly what used to happen.
 PAD_CH = "	";
+
+// ---- hearts the customer TYPES into the name ------------------------------
+// An order can arrive as "TEAM<3LEADER" or "<3 TAMANNA<3" with a real heart
+// emoji where the <3 is. That heart has to become a heart slot, exactly like a
+// padding heart does. Two things make it harder than it looks.
+//
+// 1. The emoji is not one character. A heart emoji is U+2764 followed by
+//    U+FE0F, a VARIATION SELECTOR that draws nothing at all - and OpenSCAD
+//    still counts it, so len("TEAM<heart>LEADER") is 12, not 11. Left alone it
+//    takes a slot of its own, and because every blob is the INTERSECTION of the
+//    two names, an empty slot on one side DELETES the other side's letter. One
+//    invisible character silently eats a letter of the opposite name, and the
+//    plate looks like the font failed rather than like a bad string.
+//
+// 2. A typed heart is not a padding heart. PAD_CH marks a slot the customer
+//    left empty, and a slot that is padding on BOTH sides deliberately renders
+//    nothing. A heart the customer actually asked for must still render when
+//    the other name has one in the same slot, and must survive PAD_GLYPH="none".
+//
+// So a typed heart gets its own marker. Both markers draw the heart; only
+// PAD_CH counts as "empty".
+HEART_CH  = chr(1);               // a heart the customer typed. chr(1) is not
+                                  // something an order form can produce.
+
+// Every code point that means "put a heart here". Extend the list as new order
+// sources appear - anything anyone can paste should be in it.
+HEART_ORD = [
+    10084,                        // U+2764  heavy black heart - what phones and
+                                  //         Windows emoji picker actually send
+    9829,                         // U+2665  black heart suit
+    9825,                         // U+2661  white heart suit
+    10083,                        // U+2763  heavy heart exclamation
+    128147, 128148, 128149, 128150, 128151, 128152, 128153,   // U+1F493..1F499
+    128154, 128155, 128156, 128157, 128158, 128159,           // U+1F49A..1F49F
+    128420,                       // U+1F5A4 black heart
+    35                            // '#' - plain-ASCII stand-in, so an order
+                                  //       system that strips emoji can still
+                                  //       ask for a heart
+];
+
+// Code points to DELETE before anything is counted or laid out. Each of these
+// draws nothing but still occupies a slot, which is failure mode 1 above.
+DROP_ORD = [
+    65039,                        // U+FE0F  variation selector-16 (emoji style)
+    65038,                        // U+FE0E  variation selector-15 (text style)
+    8205,                         // U+200D  zero-width joiner
+    8203, 8204, 8206, 8207,       // zero-width space / non-joiner / LRM / RLM
+    8288,                         // U+2060  word joiner
+    127995, 127996, 127997, 127998, 127999    // skin-tone modifiers
+];
+
+function inord(v, a, i = 0) =
+    i >= len(a) ? false : (a[i] == v ? true : inord(v, a, i + 1));
+
+// Rewrite a typed name into the internal alphabet: drop the invisibles, fold
+// every flavour of heart onto HEART_CH, pass everything else through untouched.
+function norm(s, i = 0, acc = "") =
+    i >= len(s)                 ? acc
+  : inord(ord(s[i]), DROP_ORD)  ? norm(s, i + 1, acc)
+  : inord(ord(s[i]), HEART_ORD) ? norm(s, i + 1, str(acc, HEART_CH))
+  :                               norm(s, i + 1, str(acc, s[i]));
+
+// true for a heart of either origin - typed by the customer, or padding
+function is_heart(ch) = ch == PAD_CH || ch == HEART_CH;
+
 
 function strip(s, i = 0, acc = "") =
     i >= len(s) ? acc : strip(s, i + 1, s[i] == " " ? acc : str(acc, s[i]));
@@ -336,10 +401,22 @@ function spgap(s, j) =
     j <= 0 ? 0
     : max(0, SPACE_W - GAP) * (spcount(s, origidx(s, j)) - spcount(s, origidx(s, j - 1)));
 
-NAME_LS = strip(NAME_L);
-NAME_RS = strip(NAME_R);
+// Normalise first, THEN strip spaces. spgap() below measures spaces against
+// the normalised string, not the raw one: a raw name carrying a two-code-point
+// emoji has different indices, which would shift every word gap in the name.
+NAME_LN = norm(NAME_L);
+NAME_RN = norm(NAME_R);
+NAME_LS = strip(NAME_LN);
+NAME_RS = strip(NAME_RN);
 
 N     = min(max(len(NAME_LS), len(NAME_RS)), MAX_LETTERS);
+// Typed hearts take slots like any other glyph, so a name that fitted before can
+// stop fitting once hearts are added. Say so rather than truncating in silence.
+if (max(len(NAME_LS), len(NAME_RS)) > MAX_LETTERS)
+    echo(str("*** WARNING: ", max(len(NAME_LS), len(NAME_RS)), " slots needed but ",
+             "MAX_LETTERS=", MAX_LETTERS, ". The name is CUT SHORT. Hearts count ",
+             "as slots - drop one, or raise MAX_LETTERS and check the letters are ",
+             "still over MIN_LETTER wide."));
 L     = pad(NAME_LS, N, PAD_L);
 R     = pad(NAME_RS, N, PAD_R);
 
@@ -411,8 +488,8 @@ GAPU    = GAP / sqrt(2);                 // per-axis gap -> GAP along the plate
 
 function wL(i)   = SQ * wL1(i);
 function wR(i)   = SQ * wR1(i);
-function cumL(i) = i <= 0 ? 0 : cumL(i - 1) + wL(i - 1) + GAPU + spgap(NAME_L, i) / sqrt(2);
-function cumR(i) = i <= 0 ? 0 : cumR(i - 1) + wR(i - 1) + GAPU + spgap(NAME_R, i) / sqrt(2);
+function cumL(i) = i <= 0 ? 0 : cumL(i - 1) + wL(i - 1) + GAPU + spgap(NAME_LN, i) / sqrt(2);
+function cumR(i) = i <= 0 ? 0 : cumR(i - 1) + wR(i - 1) + GAPU + spgap(NAME_RN, i) / sqrt(2);
 function ctrL(i) = cumL(i) + wL(i) / 2;
 function ctrR(i) = cumR(i) + wR(i) / 2;
 
@@ -455,10 +532,13 @@ STEP    = W_ALONG + GAP;
 
 TOO_TIGHT = halfw(0) * 2 < MIN_LETTER;
 // only a problem while PAD_GLYPH is "none" - with a heart the slot is filled
-if (PAD_GLYPH == "none" && len(NAME_L) != len(NAME_R))
-    echo(str("*** WARNING: '", NAME_L, "' (", len(NAME_L), ") and '", NAME_R,
-             "' (", len(NAME_R), ") are different lengths. With PAD_GLYPH=none ",
-             "the ", abs(len(NAME_L) - len(NAME_R)),
+// Counted on the STRIPPED, NORMALISED names: a raw name carrying a heart emoji
+// is two code points longer than the slots it actually asks for, so the raw
+// lengths would report a mismatch that does not exist.
+if (PAD_GLYPH == "none" && len(NAME_LS) != len(NAME_RS))
+    echo(str("*** WARNING: '", NAME_L, "' (", len(NAME_LS), ") and '", NAME_R,
+             "' (", len(NAME_RS), ") are different lengths. With PAD_GLYPH=none ",
+             "the ", abs(len(NAME_LS) - len(NAME_RS)),
              " padding slot(s) are dropped and those letters will be MISSING. ",
              "Use dnp_two_heart.scad or dual_name.scad instead."));
 echo(str("letters=", N, "  gap=", GAP, "mm  mean letter width=",
@@ -501,8 +581,8 @@ SQ_ACROSS  = min(SQ_FIT / SHEAR, SQ_WIDE);
 // natural-width layout: the gap has to be pre-divided by the along-scale so it
 // lands on GAP once the squash is applied
 GAPU_F = (GAP / SQ_FIT) / sqrt(2);
-function cumLF(i) = i <= 0 ? 0 : cumLF(i - 1) + wL1(i - 1) + GAPU_F + spgap(NAME_L, i) / (SQ_FIT * sqrt(2));
-function cumRF(i) = i <= 0 ? 0 : cumRF(i - 1) + wR1(i - 1) + GAPU_F + spgap(NAME_R, i) / (SQ_FIT * sqrt(2));
+function cumLF(i) = i <= 0 ? 0 : cumLF(i - 1) + wL1(i - 1) + GAPU_F + spgap(NAME_LN, i) / (SQ_FIT * sqrt(2));
+function cumRF(i) = i <= 0 ? 0 : cumRF(i - 1) + wR1(i - 1) + GAPU_F + spgap(NAME_RN, i) / (SQ_FIT * sqrt(2));
 function ctrLF(i) = cumLF(i) + wL1(i) / 2;
 function ctrRF(i) = cumRF(i) + wR1(i) / 2;
 function alongF(i)  = (ctrLF(i) + ctrRF(i)) / sqrt(2);
@@ -567,13 +647,13 @@ module desc_clip() {
 }
 
 module heart_drop(ch) {
-    if (ch == PAD_CH && HEART_DROP > 0)
+    if (is_heart(ch) && HEART_DROP > 0)
         translate([0, -HEART_DROP]) scale(HK) children();
     else children();
 }
 
 module glyph_raw(ch) {
-    if (ch == PAD_CH) scale(LETTER_H * HEART_SCALE) polygon(HEART);
+    if (is_heart(ch)) scale(LETTER_H * HEART_SCALE) polygon(HEART);
     else text(ch, size = LETTER_H, font = FONT, halign = "center", valign = "baseline");
 }
 
@@ -649,10 +729,10 @@ module glyph2d(ch) {
     if (CONDENSE)
         // Order matters: fatten the glyph at its NATURAL width, then squeeze.
         scale([FUSION_MATCH ? 1 : SQ, 1])
-            bolden(ch != PAD_CH)
+            bolden(!is_heart(ch))
                 heart_drop(ch)
                     resize([0, LETTER_H], auto = true) desc_clip() glyph_raw(ch);
-    else bolden(ch != PAD_CH) heart_drop(ch) glyph_raw(ch);
+    else bolden(!is_heart(ch)) heart_drop(ch) glyph_raw(ch);
 }
 
 module glyph_sweep(ch) {

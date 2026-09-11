@@ -541,11 +541,17 @@ CREATE TABLE inventory_items (
     quantity   numeric(12, 3) NOT NULL DEFAULT 0,
     unit       varchar(32) NOT NULL,
     unit_price numeric(12, 2),
+    -- A stable handle a bill of materials points at, so a BOM line survives the
+    -- shelf being renamed - see migration 0069. Nullable: a code is only needed
+    -- once a part is actually used by a product.
+    code       varchar(64),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX uq_inventory_item_name
     ON inventory_items (lower(name));
+CREATE UNIQUE INDEX uq_inventory_item_code
+    ON inventory_items (lower(code)) WHERE code IS NOT NULL;
 
 -- The physical printer fleet - one row per physical unit, live print-state.
 -- Distinct from machine_profiles (the printer model/slicing profile).
@@ -702,3 +708,106 @@ CREATE TABLE production_job_events (
 );
 CREATE INDEX ix_job_events_job ON production_job_events (job_id, seq);
 CREATE INDEX ix_job_events_type ON production_job_events (event_type);
+
+-- The product registry: what a product IS, as against what happened to one.
+-- See migration 0070. Product -> Option -> Variant -> (Design, BOM); a variant
+-- is a COMBINATION of option values, never a product of its own.
+CREATE TABLE products (
+    id     uuid PRIMARY KEY,
+    code   varchar(32)  NOT NULL,
+    name   varchar(160) NOT NULL,
+    -- 'generated' (Tensor renders it) or 'uploaded' (somebody supplies a 3MF).
+    kind   varchar(16)  NOT NULL DEFAULT 'generated',
+    status varchar(16)  NOT NULL DEFAULT 'active',
+    notes  text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_products_code ON products (lower(code));
+
+CREATE TABLE product_options (
+    id         uuid PRIMARY KEY,
+    product_id uuid NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    code       varchar(32)  NOT NULL,
+    label      varchar(80)  NOT NULL,
+    position   integer      NOT NULL DEFAULT 0,
+    created_at timestamptz  NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_product_option_code ON product_options (product_id, lower(code));
+
+CREATE TABLE product_option_values (
+    id        uuid PRIMARY KEY,
+    option_id uuid NOT NULL REFERENCES product_options (id) ON DELETE CASCADE,
+    code      varchar(48) NOT NULL,
+    label     varchar(80) NOT NULL,
+    position  integer     NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_product_option_value_code
+    ON product_option_values (option_id, lower(code));
+
+CREATE TABLE product_variants (
+    id         uuid PRIMARY KEY,
+    product_id uuid NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    -- Nullable: nine live plank lines carry no SKU and are matched by name.
+    sku        varchar(128),
+    name       varchar(200) NOT NULL,
+    status     varchar(16)  NOT NULL DEFAULT 'active',
+    created_at timestamptz  NOT NULL DEFAULT now(),
+    updated_at timestamptz  NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_product_variant_sku
+    ON product_variants (lower(sku)) WHERE sku IS NOT NULL;
+CREATE INDEX ix_product_variants_product ON product_variants (product_id);
+
+CREATE TABLE product_variant_options (
+    variant_id      uuid NOT NULL REFERENCES product_variants (id) ON DELETE CASCADE,
+    option_value_id uuid NOT NULL REFERENCES product_option_values (id) ON DELETE CASCADE,
+    PRIMARY KEY (variant_id, option_value_id)
+);
+
+CREATE TABLE variant_designs (
+    id           uuid PRIMARY KEY,
+    variant_id   uuid NOT NULL REFERENCES product_variants (id) ON DELETE CASCADE,
+    -- 'body' is the product; 'base' is the light box it sits on.
+    role         varchar(24) NOT NULL DEFAULT 'body',
+    template_key varchar(64),
+    design_id    uuid REFERENCES designs (id) ON DELETE SET NULL,
+    version      integer     NOT NULL DEFAULT 1,
+    status       varchar(16) NOT NULL DEFAULT 'active',
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_variant_design_target CHECK (
+        (template_key IS NOT NULL AND design_id IS NULL)
+        OR (template_key IS NULL AND design_id IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX uq_variant_design_role
+    ON variant_designs (variant_id, role) WHERE status = 'active';
+
+CREATE TABLE variant_bom (
+    id                uuid PRIMARY KEY,
+    variant_id        uuid NOT NULL REFERENCES product_variants (id) ON DELETE CASCADE,
+    -- RESTRICT: deleting a part products are built from must fail loudly.
+    inventory_item_id uuid NOT NULL REFERENCES inventory_items (id) ON DELETE RESTRICT,
+    quantity          numeric(12, 3) NOT NULL,
+    created_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_variant_bom_item ON variant_bom (variant_id, inventory_item_id);
+
+-- An uploaded OpenSCAD template that overrides the embedded one - see migration
+-- 0071. No rows means the binary's own templates are used, which is how this
+-- behaved before the table existed.
+CREATE TABLE design_templates (
+    id           uuid PRIMARY KEY,
+    template_key varchar(64) NOT NULL,
+    file_id      uuid NOT NULL REFERENCES file_assets (id) ON DELETE RESTRICT,
+    version      integer     NOT NULL DEFAULT 1,
+    status       varchar(16) NOT NULL DEFAULT 'active',
+    uploaded_by  varchar(64) NOT NULL,
+    notes        varchar(500),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_design_template_active
+    ON design_templates (lower(template_key)) WHERE status = 'active';
+CREATE INDEX ix_design_templates_key
+    ON design_templates (lower(template_key), version DESC);

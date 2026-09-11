@@ -21,16 +21,21 @@ ORDER BY lower(name), id;
 -- reason - the latest entry is the current truth.
 -- The ::float8 casts match filament.sql: they make sqlc emit float64 rather
 -- than pgtype.Numeric, so a handler passes a plain number.
-INSERT INTO inventory_items (id, name, quantity, unit, unit_price)
+--
+-- code is COALESCEd rather than overwritten: restocking a part from the
+-- Inventory page must not blank the handle a bill of materials points at, and
+-- that page has no field for it. Only an explicit code replaces one.
+INSERT INTO inventory_items (id, name, quantity, unit, unit_price, code)
 VALUES (
     sqlc.arg('id'), sqlc.arg('name'), sqlc.arg('quantity')::float8,
-    sqlc.arg('unit'), sqlc.narg('unit_price')::float8
+    sqlc.arg('unit'), sqlc.narg('unit_price')::float8, sqlc.narg('code')
 )
 ON CONFLICT (lower(name)) DO UPDATE
 SET name       = EXCLUDED.name,
     quantity   = EXCLUDED.quantity,
     unit       = EXCLUDED.unit,
     unit_price = EXCLUDED.unit_price,
+    code       = COALESCE(EXCLUDED.code, inventory_items.code),
     updated_at = now()
 RETURNING *;
 
@@ -46,11 +51,16 @@ RETURNING *;
 -- A collision with another item's name is left to the unique index, so the
 -- handler can answer "you already have one of those" rather than silently
 -- merging two shelves.
+--
+-- code follows the same COALESCE rule as the upsert: the Inventory dialog does
+-- not offer the field, so an edit from there must leave an existing handle
+-- alone rather than clearing every BOM that points at it.
 UPDATE inventory_items SET
     name       = sqlc.arg('name'),
     quantity   = sqlc.arg('quantity')::float8,
     unit       = sqlc.arg('unit'),
     unit_price = sqlc.narg('unit_price')::float8,
+    code       = COALESCE(sqlc.narg('code'), code),
     updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
@@ -62,3 +72,7 @@ RETURNING *;
 -- of work done, so there is no history in it worth keeping once the shop stops
 -- carrying the item.
 DELETE FROM inventory_items WHERE id = @id;
+
+-- name: GetInventoryItemByCode :one
+-- One part by its stable handle, for resolving a bill of materials.
+SELECT * FROM inventory_items WHERE lower(code) = lower(sqlc.arg('code')::text);

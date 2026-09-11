@@ -28,8 +28,29 @@ func (q *Queries) DeleteInventoryItem(ctx context.Context, id uuid.UUID) (int64,
 	return result.RowsAffected(), nil
 }
 
+const getInventoryItemByCode = `-- name: GetInventoryItemByCode :one
+SELECT id, name, quantity, unit, unit_price, code, created_at, updated_at FROM inventory_items WHERE lower(code) = lower($1::text)
+`
+
+// One part by its stable handle, for resolving a bill of materials.
+func (q *Queries) GetInventoryItemByCode(ctx context.Context, code string) (InventoryItem, error) {
+	row := q.db.QueryRow(ctx, getInventoryItemByCode, code)
+	var i InventoryItem
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Quantity,
+		&i.Unit,
+		&i.UnitPrice,
+		&i.Code,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listInventoryItems = `-- name: ListInventoryItems :many
-SELECT id, name, quantity, unit, unit_price, created_at, updated_at FROM inventory_items
+SELECT id, name, quantity, unit, unit_price, code, created_at, updated_at FROM inventory_items
 ORDER BY lower(name), id
 `
 
@@ -53,6 +74,7 @@ func (q *Queries) ListInventoryItems(ctx context.Context) ([]InventoryItem, erro
 			&i.Quantity,
 			&i.Unit,
 			&i.UnitPrice,
+			&i.Code,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -72,9 +94,10 @@ UPDATE inventory_items SET
     quantity   = $2::float8,
     unit       = $3,
     unit_price = $4::float8,
+    code       = COALESCE($5, code),
     updated_at = now()
-WHERE id = $5
-RETURNING id, name, quantity, unit, unit_price, created_at, updated_at
+WHERE id = $6
+RETURNING id, name, quantity, unit, unit_price, code, created_at, updated_at
 `
 
 type UpdateInventoryItemParams struct {
@@ -82,6 +105,7 @@ type UpdateInventoryItemParams struct {
 	Quantity  float64
 	Unit      string
 	UnitPrice *float64
+	Code      *string
 	ID        uuid.UUID
 }
 
@@ -96,12 +120,17 @@ type UpdateInventoryItemParams struct {
 // A collision with another item's name is left to the unique index, so the
 // handler can answer "you already have one of those" rather than silently
 // merging two shelves.
+//
+// code follows the same COALESCE rule as the upsert: the Inventory dialog does
+// not offer the field, so an edit from there must leave an existing handle
+// alone rather than clearing every BOM that points at it.
 func (q *Queries) UpdateInventoryItem(ctx context.Context, arg UpdateInventoryItemParams) (InventoryItem, error) {
 	row := q.db.QueryRow(ctx, updateInventoryItem,
 		arg.Name,
 		arg.Quantity,
 		arg.Unit,
 		arg.UnitPrice,
+		arg.Code,
 		arg.ID,
 	)
 	var i InventoryItem
@@ -111,6 +140,7 @@ func (q *Queries) UpdateInventoryItem(ctx context.Context, arg UpdateInventoryIt
 		&i.Quantity,
 		&i.Unit,
 		&i.UnitPrice,
+		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -118,18 +148,19 @@ func (q *Queries) UpdateInventoryItem(ctx context.Context, arg UpdateInventoryIt
 }
 
 const upsertInventoryItem = `-- name: UpsertInventoryItem :one
-INSERT INTO inventory_items (id, name, quantity, unit, unit_price)
+INSERT INTO inventory_items (id, name, quantity, unit, unit_price, code)
 VALUES (
     $1, $2, $3::float8,
-    $4, $5::float8
+    $4, $5::float8, $6
 )
 ON CONFLICT (lower(name)) DO UPDATE
 SET name       = EXCLUDED.name,
     quantity   = EXCLUDED.quantity,
     unit       = EXCLUDED.unit,
     unit_price = EXCLUDED.unit_price,
+    code       = COALESCE(EXCLUDED.code, inventory_items.code),
     updated_at = now()
-RETURNING id, name, quantity, unit, unit_price, created_at, updated_at
+RETURNING id, name, quantity, unit, unit_price, code, created_at, updated_at
 `
 
 type UpsertInventoryItemParams struct {
@@ -138,6 +169,7 @@ type UpsertInventoryItemParams struct {
 	Quantity  float64
 	Unit      string
 	UnitPrice *float64
+	Code      *string
 }
 
 // Records an item, or restocks one already on the shelf.
@@ -153,6 +185,10 @@ type UpsertInventoryItemParams struct {
 // reason - the latest entry is the current truth.
 // The ::float8 casts match filament.sql: they make sqlc emit float64 rather
 // than pgtype.Numeric, so a handler passes a plain number.
+//
+// code is COALESCEd rather than overwritten: restocking a part from the
+// Inventory page must not blank the handle a bill of materials points at, and
+// that page has no field for it. Only an explicit code replaces one.
 func (q *Queries) UpsertInventoryItem(ctx context.Context, arg UpsertInventoryItemParams) (InventoryItem, error) {
 	row := q.db.QueryRow(ctx, upsertInventoryItem,
 		arg.ID,
@@ -160,6 +196,7 @@ func (q *Queries) UpsertInventoryItem(ctx context.Context, arg UpsertInventoryIt
 		arg.Quantity,
 		arg.Unit,
 		arg.UnitPrice,
+		arg.Code,
 	)
 	var i InventoryItem
 	err := row.Scan(
@@ -168,6 +205,7 @@ func (q *Queries) UpsertInventoryItem(ctx context.Context, arg UpsertInventoryIt
 		&i.Quantity,
 		&i.Unit,
 		&i.UnitPrice,
+		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
