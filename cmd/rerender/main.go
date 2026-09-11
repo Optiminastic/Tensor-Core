@@ -33,6 +33,12 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "report what would be queued without queueing it")
 	includePrinted := flag.Bool("include-printed", false,
 		"re-render completed jobs too - their model is the record a reprint would use")
+	// Without this, the only choice is "every queued job", which is the wrong
+	// tool for a change that affects one product: it rebuilds dozens of models
+	// that were already correct, and a job sitting in a locked batch has its
+	// file replaced underneath it.
+	match := flag.String("match", "",
+		"only jobs whose SKU or product name contains this, case-insensitive (e.g. \"photo frame\")")
 	flag.Parse()
 
 	_ = godotenv.Load("env/local.env")
@@ -58,12 +64,21 @@ func main() {
 	if *includePrinted {
 		where = "j.status IN ('queued', 'completed')"
 	}
+	// Matched against the SKU *or* the product name, because neither alone
+	// covers a family: nine plank lines and one photo frame carry no SKU at
+	// all and are identified by name.
+	args := []any{}
+	if *match != "" {
+		where += ` AND (coalesce(j.sku, '') ILIKE '%' || $1 || '%'
+		            OR coalesce(j.product_name, '') ILIKE '%' || $1 || '%')`
+		args = append(args, *match)
+	}
 	rows, err := store.Pool.Query(ctx, `
 		SELECT j.id, j.job_number
 		  FROM production_jobs j
 		  JOIN orders o ON o.id = j.order_id
 		 WHERE `+where+`
-		 ORDER BY COALESCE(o.placed_at, j.created_at), j.job_number`)
+		 ORDER BY COALESCE(o.placed_at, j.created_at), j.job_number`, args...)
 	if err != nil {
 		log.Fatalf("list jobs: %v", err)
 	}
