@@ -48,6 +48,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Before the pool opens, not after: a connection that has already prepared
+	// a statement against the old shape keeps its cached plan, so migrating
+	// afterwards would leave the first requests failing anyway.
+	//
+	// Fatal on failure rather than serving on. A binary whose schema did not
+	// apply is the exact state that answers every list endpoint with 500 and
+	// says nothing about why; refusing to start makes that visible in the
+	// deploy instead of in a customer-facing page.
+	if cfg.RunMigrations {
+		if err := db.Migrate(cfg.DatabaseURL); err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		if err := db.MigrateRiver(ctx, cfg.DatabaseURL); err != nil {
+			log.Fatalf("river migrate: %v", err)
+		}
+		log.Printf("migrations applied")
+	}
+
 	store, err := db.Open(ctx, cfg.DatabaseURL, db.Options{
 		MaxConns:         cfg.DBMaxConns,
 		MinConns:         cfg.DBMinConns,

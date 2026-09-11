@@ -273,6 +273,26 @@ type Settings struct {
 	// across a Tailscale relay, where the same call can take 11s or 58s.
 	BambuBuddyTimeoutSeconds int
 
+	// RunMigrations decides whether cmd/api applies pending migrations before
+	// it serves anything.
+	//
+	// True by default, because the alternative silently breaks production. The
+	// image ships /app/migrate, but ENTRYPOINT runs /app/api alone and the base
+	// is distroless - no shell, so the deploy cannot chain them. Every deploy
+	// therefore shipped a binary built from current code against whatever
+	// schema the database last had.
+	//
+	// That is not a slow drift, it is an outage: sqlc scans a fixed list of
+	// destinations, so a single missing or extra column makes every `SELECT *`
+	// fail instantly. GET /batches answered 500 in about a millisecond, with no
+	// log line, because migration 0068's five new columns were in the binary
+	// and not in the database.
+	//
+	// Set RUN_MIGRATIONS=false where a separate step owns the schema - a
+	// migration job in the deploy pipeline, or several API replicas that must
+	// not race each other to migrate.
+	RunMigrations bool
+
 	// RunProductionWorkers decides whether cmd/api consumes the production
 	// queues itself as well as serving HTTP.
 	//
@@ -451,6 +471,7 @@ func Load() Settings {
 		BambuErrorTTL:                    secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
 		FleetSyncIntervalSeconds:         intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
 		FleetSyncTimeoutMinutes:          intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
+		RunMigrations:                    boolEnvOr("RUN_MIGRATIONS", true),
 		RunProductionWorkers:             boolEnvOr("RUN_PRODUCTION_WORKERS", true),
 		OrderSyncIntervalMinutes:         intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
 		OrderSyncTimeoutMinutes:          intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
