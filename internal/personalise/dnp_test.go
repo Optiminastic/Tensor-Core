@@ -464,11 +464,11 @@ func TestPhotoFrameRendersAtItsOwnSize(t *testing.T) {
 			if got.Shape != FrameShape {
 				t.Errorf("shape = %+v, want %+v", got.Shape, FrameShape)
 			}
-			// Forced, not inherited: a frame has no hearts to offer, and a
-			// stray heart property must not pick a template whose margins are
-			// laid out for a plank.
-			if got.Template != templateNoHeart {
-				t.Errorf("template = %q, want %q", got.Template, templateNoHeart)
+			// Its own key, not the plank's. Forced rather than inherited too:
+			// a frame has no hearts to offer, and a stray heart property must
+			// not pick a template whose margins are laid out for a plank.
+			if got.Template != templateFrame {
+				t.Errorf("template = %q, want %q", got.Template, templateFrame)
 			}
 			if got.Hearts != 0 {
 				t.Errorf("hearts = %d, want 0", got.Hearts)

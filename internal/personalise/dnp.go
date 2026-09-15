@@ -27,6 +27,14 @@ const (
 	templateTwoHeart = "dnp_two_heart"
 	templateOneHeart = "dual_one_heart"
 	templateNoHeart  = "dnp_with_no_heart"
+	// templateFrame is the photo frame's own key. Its file is a copy of the
+	// no-heart plank's today, byte for byte - the frame is the same two names
+	// at a different finished size. It is a SEPARATE key all the same, because
+	// the two products will not stay identical: the day the frame's aperture or
+	// margins change, a shared key would have silently changed the plank too.
+	// A key per product is what lets one be replaced from the Designs tab
+	// without touching the other.
+	templateFrame = "dnpf_without_heart"
 )
 
 // The finished product size, in millimetres. Every plank ships at exactly this
@@ -142,7 +150,7 @@ func (p Params) ForProduct(sku, productName string) Params {
 	if !isFrame(sku, productName) {
 		return p
 	}
-	p.Template = templateNoHeart
+	p.Template = templateFrame
 	p.Hearts = 0
 	p.Shape = FrameShape
 	return p

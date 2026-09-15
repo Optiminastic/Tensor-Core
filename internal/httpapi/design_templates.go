@@ -56,7 +56,9 @@ type templateResponse struct {
 // Listed so the Designs tab can show a key that nobody has uploaded yet - a
 // page that only listed uploads would be empty on a fresh install and would
 // look like the shop had no designs at all.
-var embeddedTemplateKeys = []string{"dnp_with_no_heart", "dual_one_heart", "dnp_two_heart"}
+var embeddedTemplateKeys = []string{
+	"dnp_with_no_heart", "dual_one_heart", "dnp_two_heart", "dnpf_without_heart",
+}
 
 func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	g := r.Group("/registry/templates")
