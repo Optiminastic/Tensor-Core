@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -382,4 +383,63 @@ func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
 			t.Errorf("batchingBlockedReason = %v, want the filament wording", got)
 		}
 	})
+}
+
+// One order, five planks, five different pairs of names.
+//
+// This is the bug on T3DPS-115059: the four DNP-1 lines are indistinguishable
+// by SKU, so the order scan returned the first every time and NAVYA & KRISHNA
+// printed four times while APRAJITA, FARAH and CHANDNI never reached a plate.
+// The names were always on the jobs themselves - each carries the properties of
+// the line it was created from - so the renderer reads that instead.
+func TestJobLinePropertiesAreTheJobsOwnNames(t *testing.T) {
+	props := func(first, second string) []byte {
+		return []byte(`[{"name":"STEP 4-First Name-","value":"` + first +
+			`"},{"name":"STEP 5-Second Name","value":"` + second + `"}]`)
+	}
+	sku := "T3DPS-DNP-1"
+	for _, c := range []struct{ job, first, second string }{
+		{"JOB-115059", "NAVYA", "KRISHNA"},
+		{"JOB-115059-2", "APRAJITA", "AJAY"},
+		{"JOB-115059-4", "FARAH", "ABID"},
+		{"JOB-115059-5", "CHANDNI", "MILAN"},
+	} {
+		t.Run(c.job, func(t *testing.T) {
+			job := gen.ProductionJob{
+				ID: uuid.New(), JobNumber: c.job, Sku: &sku,
+				PersonalisationProperties: props(c.first, c.second),
+			}
+			got, ok := jobLineProperties(job)
+			if !ok {
+				t.Fatalf("%s carries properties but they were not read", c.job)
+			}
+			params, err := personalise.ParamsFromProperties(got)
+			if err != nil {
+				t.Fatalf("resolve params: %v", err)
+			}
+			if params.NameLeft != c.first || params.NameRight != c.second {
+				t.Errorf("%s rendered %q & %q, want %q & %q",
+					c.job, params.NameLeft, params.NameRight, c.first, c.second)
+			}
+		})
+	}
+}
+
+// Falling back is what keeps older jobs renderable: absent, empty and malformed
+// all mean "ask the order", never "fail this job".
+func TestJobLinePropertiesFallsBackWhenAbsent(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"nil", nil},
+		{"empty array", []byte("[]")},
+		{"malformed", []byte("{not json")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, ok := jobLineProperties(gen.ProductionJob{PersonalisationProperties: c.raw}); ok {
+				t.Error("reported properties where there are none to use")
+			}
+		})
+	}
 }

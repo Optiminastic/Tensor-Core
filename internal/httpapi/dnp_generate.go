@@ -257,6 +257,28 @@ func meshFromSTL(stl []byte) (orientation.Mesh, error) {
 func (s *Server) plankParamsForJob(
 	ctx context.Context, orderID uuid.UUID, job gen.ProductionJob,
 ) (personalise.Params, error) {
+	sku, product := deref(job.Sku), deref(job.ProductName)
+
+	// The job's OWN line first.
+	//
+	// An order carrying five planks carries five lines of the same SKU, each
+	// with its own two names - and the scan below, which matches on SKU or
+	// product name, cannot tell them apart: it returns the first every time. On
+	// T3DPS-115059 that printed NAVYA & KRISHNA four times while APRAJITA,
+	// FARAH and CHANDNI never reached a plate at all.
+	//
+	// The names were never lost. buildJobsForOrder snapshots each line's
+	// properties onto the job it creates, precisely so a job shows what it was
+	// made from; this reads that snapshot back. The scan stays as a fallback
+	// for jobs created before the column existed.
+	if props, ok := jobLineProperties(job); ok {
+		params, err := personalise.ParamsFromProperties(props)
+		if err != nil {
+			return personalise.Params{}, err
+		}
+		return params.ForProduct(sku, product), nil
+	}
+
 	order, err := s.store.Q.GetOrderByID(ctx, orderID)
 	if err != nil {
 		return personalise.Params{}, fmt.Errorf("load order: %w", err)
@@ -267,7 +289,6 @@ func (s *Server) plankParamsForJob(
 		return personalise.Params{}, fmt.Errorf("read the order's line items: %w", err)
 	}
 
-	sku, product := deref(job.Sku), deref(job.ProductName)
 	for _, li := range items {
 		if !sameLineItem(li, sku, product) {
 			continue
@@ -547,4 +568,24 @@ func (s *Server) confirmGeneratedPersonalisation(
 			"Personalisation confirmed by rendering: %s / %s, %d heart(s)",
 			params.NameLeft, params.NameRight, params.Hearts)),
 	})
+}
+
+// jobLineProperties is the personalisation the job was CREATED from, as stored
+// on the job itself.
+//
+// Reports false for a job that carries none - one created before the column
+// existed, or a line Shopify sent no properties for - so the caller can fall
+// back to reading the order rather than failing a job that is renderable.
+func jobLineProperties(job gen.ProductionJob) ([]production.LineProp, bool) {
+	if len(job.PersonalisationProperties) == 0 {
+		return nil, false
+	}
+	var props []production.LineProp
+	if err := json.Unmarshal(job.PersonalisationProperties, &props); err != nil {
+		return nil, false
+	}
+	if len(props) == 0 {
+		return nil, false
+	}
+	return props, true
 }
