@@ -216,8 +216,9 @@ func colourBedKey(j PlanJob) (string, bool) {
 }
 
 // NormalisedColourKey is the canonical form of a job's colour set: each colour
-// trimmed and uppercased, the set sorted, joined with "+". Empty when the job
-// records no colour at all, which is what makes a colourless job unbatchable.
+// put through CanonicalColourName, the set de-duplicated and sorted, joined
+// with "+". Empty when the job records no colour at all, which is what makes a
+// colourless job unbatchable.
 //
 // Sorted because the SET is what matters, not the order somebody wrote it in -
 // a job recording ["WHITE","BLUE"] belongs with one recording ["blue","white"].
@@ -230,10 +231,17 @@ func colourBedKey(j PlanJob) (string, bool) {
 // share a plate. One function, one definition.
 func NormalisedColourKey(colours []string) string {
 	out := make([]string, 0, len(colours))
+	seen := make(map[string]bool, len(colours))
 	for _, c := range colours {
-		if c = strings.TrimSpace(c); c != "" {
-			out = append(out, strings.ToUpper(c))
+		// De-duplicated AFTER aliasing, not before: a job recording both
+		// "BLUE" and "SKY BLUE" names one spool twice, and "BLUE+BLUE" would
+		// be a key no other job could match.
+		name := CanonicalColourName(c)
+		if name == "" || seen[name] {
+			continue
 		}
+		seen[name] = true
+		out = append(out, name)
 	}
 	if len(out) == 0 {
 		return ""

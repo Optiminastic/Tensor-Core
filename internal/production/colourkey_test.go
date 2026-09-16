@@ -33,6 +33,15 @@ func TestNormalisedColourKeyIgnoresOrderCaseAndSpacing(t *testing.T) {
 		// value, so a colourless job does not silently match a coloured one.
 		{"no colours", nil, ""},
 		{"only blanks", []string{"", "  "}, ""},
+
+		// One blue spool serves both names, so both must reach one bed. Before
+		// this, a sky blue job waited for three more of a colour the shop does
+		// not stock separately.
+		{"aliased name", []string{"SKY BLUE"}, "BLUE"},
+		{"aliased lower case", []string{"sky blue"}, "BLUE"},
+		{"aliased padded", []string{"  Sky   Blue  "}, "BLUE"},
+		{"alias and target together name one spool", []string{"BLUE", "SKY BLUE"}, "BLUE"},
+		{"alias does not swallow other colours", []string{"SKY BLUE", "WHITE"}, "BLUE+WHITE"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := NormalisedColourKey(c.colours); got != c.want {
@@ -64,5 +73,26 @@ func TestColourBedKeyIsBuiltFromTheNormalisedColourKey(t *testing.T) {
 	// A colourless job still has no bed, which is what ReasonNoColour reports.
 	if _, ok := colourBedKey(PlanJob{Material: "PLA", MachineFamily: "A2L"}); ok {
 		t.Error("a job recording no colour was given a bed key")
+	}
+}
+
+// The alias is a claim about which spool is loaded, so it must hold everywhere
+// a colour is compared - not just in the planner that happens to call it first.
+func TestCanonicalColourNameNormalisesAndAliases(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"BLUE", "BLUE"},
+		{"blue", "BLUE"},
+		{"  Gold  ", "GOLD"},
+		{"sky blue", "BLUE"},
+		{"SKY  BLUE", "BLUE"},
+		{"", ""},
+		{"   ", ""},
+		// Unaliased names pass through uppercased, never guessed at: baby pink
+		// is its own spool and must not collapse into pink.
+		{"baby pink", "BABY PINK"},
+	} {
+		if got := CanonicalColourName(c.in); got != c.want {
+			t.Errorf("CanonicalColourName(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

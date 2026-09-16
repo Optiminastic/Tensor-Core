@@ -15,12 +15,12 @@ package httpapi
 
 import (
 	"context"
-	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // BatchColour is one filament colour on a bed: the name the shop uses and the
@@ -46,7 +46,10 @@ func (s *Server) batchColoursFor(ctx context.Context, rows []gen.ListJobNumbersF
 		if r.BatchID == nil || r.Colour == nil {
 			continue
 		}
-		name := strings.ToUpper(strings.TrimSpace(*r.Colour))
+		// Canonicalised, so a bed holding both "BLUE" and "SKY BLUE" shows the
+		// one colour it will actually be printed in. Two chips for one spool
+		// would contradict the grouping that put those jobs together.
+		name := production.CanonicalColourName(*r.Colour)
 		if name == "" {
 			continue
 		}

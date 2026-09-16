@@ -13,6 +13,7 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 type filamentKey struct {
@@ -33,7 +34,11 @@ func filamentSplit(acc map[filamentKey]float64, material *string, colours []stri
 	}
 	per := totalGrams / float64(len(colours))
 	for _, c := range colours {
-		acc[filamentKey{Material: *material, Colour: c}] += per
+		// Canonicalised so the bucket a job is DEBITED from is the one the
+		// planner BEDDED it as: sky blue prints from the blue spool, and
+		// reserving against a "SKY BLUE" bucket that no shelf row carries
+		// would check stock that does not exist.
+		acc[filamentKey{Material: *material, Colour: production.CanonicalColourName(c)}] += per
 	}
 }
 

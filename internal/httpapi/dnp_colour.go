@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // BasePlateColour is the plank's body, white on every Dual Name Plank
@@ -44,15 +46,14 @@ var fallbackColours = map[string]string{
 	"gray":      "#808080",
 	"brown":     "#8B4513",
 
-	"black":    "#1A1A1A",
-	"blue":     "#1560BD",
-	"gold":     "#D4AF37",
-	"green":    "#2E9B3F",
-	"ivory":    "#FFFFF0",
-	"orange":   "#FF7518",
-	"purple":   "#7D3CB5",
-	"sky blue": "#87CEEB",
-	"yellow":   "#FFD400",
+	"black":  "#1A1A1A",
+	"blue":   "#1560BD",
+	"gold":   "#D4AF37",
+	"green":  "#2E9B3F",
+	"ivory":  "#FFFFF0",
+	"orange": "#FF7518",
+	"purple": "#7D3CB5",
+	"yellow": "#FFD400",
 }
 
 // errUnknownColour means the colour cannot be resolved to a swatch. The job is
@@ -67,7 +68,10 @@ var errUnknownColour = errors.New("unknown colour")
 // silently printing black lettering on a plank somebody ordered in pink is the
 // failure this exists to prevent.
 func (s *Server) resolveColourHex(ctx context.Context, colour string) (string, error) {
-	name := strings.TrimSpace(colour)
+	// Canonicalised first, so a colour the shop prints from another spool
+	// resolves to THAT spool's swatch: sky blue is the blue filament, and a
+	// model painted #87CEEB would describe a plank the shelf cannot print.
+	name := production.CanonicalColourName(colour)
 	if name == "" {
 		return "", errUnknownColour
 	}
