@@ -71,8 +71,8 @@ func (w *FleetSyncWorker) Work(ctx context.Context, job *river.Job[production.Sy
 	// The same trip to BambuBuddy answers a second question: which of the beds
 	// we sent have finished. This is the ONLY thing that tells Tensor a print is
 	// over, so it is also the only thing that releases a bed's planks to
-	// Assembly - and, on the way past, the first pass at which a queue entry
-	// exists to point at the machine that frees up soonest.
+	// Assembly. It used to choose a printer on the way past; which machine runs
+	// a plate is BambuBuddy's decision now, made against real AMS trays.
 	//
 	// After the refresh, not instead of it: a failed refresh is worth retrying
 	// on its own. Before the measurement pass below, so a bed that just finished
@@ -80,11 +80,10 @@ func (w *FleetSyncWorker) Work(ctx context.Context, job *river.Job[production.Sy
 	// rather than being counted there as a queue item that vanished.
 	prints := w.server.ReconcileFinishedPrints(ctx)
 	if prints.Completed > 0 || prints.Failed > 0 || prints.Unmatched > 0 ||
-		prints.Backfilled > 0 || prints.Repaired > 0 || prints.Assigned > 0 {
+		prints.Backfilled > 0 || prints.Repaired > 0 {
 		w.logger.Info("prints reconciled",
 			"considered", prints.Considered, "completed", prints.Completed,
 			"failed", prints.Failed, "backfilled", prints.Backfilled,
-			"assigned", prints.Assigned,
 			"repaired", prints.Repaired, "unmatched", prints.Unmatched)
 	}
 

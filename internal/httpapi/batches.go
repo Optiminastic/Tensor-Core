@@ -919,71 +919,79 @@ func (s *Server) buildMergedPlate(
 	// the customer's lettering - and flattening them here is what used to make
 	// a whole bed print in one anonymous colour.
 	partsByJob := map[string][]meshio.Part{}
-	coloured := true
 	for _, it := range items {
 		parts, herr := s.loadModelParts(ctx, it.job, it.file)
 		if herr != nil {
 			return plateResult{}, herr
 		}
-		partsByJob[it.job.ID.String()] = parts
+		// One colourless part used to cost the WHOLE bed its colours: a single
+		// plate-wide flag, and every plank was written into one anonymous
+		// binary STL - a plate carrying no project_settings.config, so
+		// BambuBuddy saw no declared AMS slots and offered one filament for the
+		// lot. Three customers' planks printed wrong because a fourth had no
+		// swatch.
+		//
+		// Named and refused instead. A generated plank can no longer reach here
+		// uncoloured - renderColouredPlank fails a job it cannot colour - so
+		// this is an operator's own upload with nothing recorded to print it
+		// in, and the bed holds until somebody says what colour it is.
 		for _, p := range parts {
 			if p.Colour == "" {
-				coloured = false
+				return plateResult{}, &httpErr{http.StatusConflict, fmt.Sprintf(
+					"%s has no colour recorded, so this bed cannot be built in colour.",
+					it.job.JobNumber)}
+			}
+		}
+		partsByJob[it.job.ID.String()] = parts
+	}
+
+	// One bed is one filament load, so the bed's material is every part's.
+	//
+	// Stamped from the job rows rather than read back out of the model files:
+	// the job is what the shelf and the design catalogue agree on, and a 3MF
+	// Tensor wrote is a copy of that fact, not a second source of it. Without
+	// this every plate declared PLA whatever it was made of - harmless while
+	// the shop prints only PLA, and a wrong spool request the day it does not.
+	if filament := production.FilamentType(deref(batchMaterialFromRows(jobs))); filament != "" {
+		for _, parts := range partsByJob {
+			for i := range parts {
+				parts[i].Material = filament
 			}
 		}
 	}
 
 	stem := plateFileStem(jobs, batchNumber)
 
-	// Every model knows its colours: write a 3MF that keeps them.
-	if coloured {
-		// Each plank is named for the order it belongs to, so the slicer's
-		// object list reads as a list of customers rather than "Object 1..4".
-		nameByJob := map[string]string{}
-		for _, it := range items {
-			if n := orderNumberFromJobNumber(it.job.JobNumber); n != "" {
-				nameByJob[it.job.ID.String()] = n
-			}
-		}
-		models := make([]meshio.PlacedModel, 0, len(placements))
-		for _, p := range placements {
-			models = append(models, meshio.PlacedModel{
-				Name:  nameByJob[p.RefID],
-				Parts: partsByJob[p.RefID], XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
-			})
-		}
-		data, bbox, err := meshio.Merge3MF(models)
-		if err != nil {
-			// Not fatal: the STL path below still produces a printable plate,
-			// just without colour. Losing the colour is much better than losing
-			// the bed.
-			obs.FromContext(ctx).Warn("could not merge the plate in colour, falling back to STL",
-				"batch", batchNumber, "error", err)
-		} else {
-			return plateResult{
-				data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercentOn(bed, units),
-				bbox: bbox, name: stem, ext: plate3MFExt, contentType: plate3MFContentType,
-			}, nil
+	// Each plank is named for the order it belongs to, so the slicer's object
+	// list reads as a list of customers rather than "Object 1..4".
+	nameByJob := map[string]string{}
+	for _, it := range items {
+		if n := orderNumberFromJobNumber(it.job.JobNumber); n != "" {
+			nameByJob[it.job.ID.String()] = n
 		}
 	}
-
-	// At least one model had no colour to carry - an operator's own upload, say.
-	// Binary STL, exactly as before, rather than a 3MF asserting a colour
-	// nobody chose.
-	flat := make([]meshio.Placed, 0, len(placements))
+	models := make([]meshio.PlacedModel, 0, len(placements))
 	for _, p := range placements {
-		var tris []orientation.Triangle
-		for _, part := range partsByJob[p.RefID] {
-			tris = append(tris, part.Triangles...)
-		}
-		flat = append(flat, meshio.Placed{
-			Triangles: tris, XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
+		models = append(models, meshio.PlacedModel{
+			Name:  nameByJob[p.RefID],
+			Parts: partsByJob[p.RefID], XOffsetMM: p.XOffsetMM, YOffsetMM: p.YOffsetMM, Rotated: p.Rotated,
 		})
 	}
-	data, bbox := meshio.MergeBinarySTL(batchNumber, flat)
+	data, bbox, err := meshio.Merge3MF(models)
+	if err != nil {
+		// No silent downgrade to a colourless STL.
+		//
+		// It used to warn and fall through, on the reasoning that losing the
+		// colour beats losing the bed. That trade was the wrong way round: a
+		// plate with no declared slots is not a lesser plate, it is four planks
+		// printed in whatever single filament the machine happens to hold, and
+		// nobody finds out until they come off the bed.
+		return plateResult{}, &httpErr{http.StatusConflict,
+			"Could not build this bed's plate in colour: " + err.Error()}
+	}
 	return plateResult{
 		data: data, unitsPerBed: len(units), utilisation: bedpack.UtilisationPercentOn(bed, units),
-		bbox: bbox, name: stem, ext: plateSTLExt, contentType: plateSTLContentType,
+		bbox: bbox, name: stem, ext: plate3MFExt, contentType: plate3MFContentType,
 	}, nil
 }
 

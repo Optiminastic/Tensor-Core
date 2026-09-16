@@ -24,6 +24,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/loadtemplates ./cm
 # never reaches a locked bed without this. Shipping one without the other means
 # fixing the models and still printing the old geometry.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/replate ./cmd/replate
+# unpinfamily clears the printer family stamped on jobs already in the queue.
+# The render path no longer stamps one, but the backlog still carries "A2L" and
+# would keep going to a fifth of the fleet until it cleared.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/unpinfamily ./cmd/unpinfamily
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
@@ -33,6 +37,7 @@ COPY --from=build /out/migrate /app/migrate
 COPY --from=build /out/rerender /app/rerender
 COPY --from=build /out/loadtemplates /app/loadtemplates
 COPY --from=build /out/replate /app/replate
+COPY --from=build /out/unpinfamily /app/unpinfamily
 EXPOSE 8001
 USER nonroot:nonroot
 

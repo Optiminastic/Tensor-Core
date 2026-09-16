@@ -238,14 +238,8 @@ func EnableModelGeneration(
 			"bin", cfg.OpenSCADBin)
 		return
 	}
-	if cfg.GeneratedMachineFamily == "" {
-		// Worth a warning rather than a refusal: the model still renders and
-		// attaches, the job simply stays held on profile_missing until a
-		// family is set, which is a one-line fix an operator can make.
-		logger.Warn("GENERATED_MACHINE_FAMILY is unset; rendered jobs will be " +
-			"held as profile_missing until it names the printer family planks run on")
-	}
 	server.EnableModelGeneration(renderer, enqueuer)
-	logger.Info("model generation enabled", "openscad", cfg.OpenSCADBin,
-		"machine_family", cfg.GeneratedMachineFamily)
+	// No machine family to report: a rendered job names no printer class, and
+	// which machine takes its bed is BambuBuddy's call.
+	logger.Info("model generation enabled", "openscad", cfg.OpenSCADBin)
 }

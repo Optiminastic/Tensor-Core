@@ -135,22 +135,30 @@ func TestApplyMatchAlwaysLeavesAPerUnitPrintTime(t *testing.T) {
 	})
 }
 
-// TestApplyMatchFlagsADesignWithNoPrinterProfile is the regression test for a
-// silent floor stall. A design whose machine_id is null contributes no machine
-// family (matchDesignForSKU only reads the profile when d.MachineID != nil), so
-// the job is unprintable: batchMachineFamily will not guess a family, the batch
-// is created with machine_id null, and ListApprovableDraftsForMachine - which
-// finds a machine's drafts *by* machine_id - can never return it.
+// TestApplyMatchLeavesAJobWithNoPrinterProfileBatchable pins the reversal of an
+// older rule, and the reason it could be reversed.
 //
-// Observed before this: 68 queued jobs sat across five Drafts that no machine
-// could pick up, while all three printers showed idle. Nothing errored anywhere;
-// the work simply stopped moving.
-func TestApplyMatchFlagsADesignWithNoPrinterProfile(t *testing.T) {
+// A job naming no machine family used to be flagged profile_missing and kept
+// out of batching, because "no family" meant no machine could be assigned:
+// batchMachineFamily will not guess one, so the bed was created with machine_id
+// null and ListApprovableDraftsForMachine - which finds a machine's drafts *by*
+// machine_id - could never return it. The symptom was 68 queued jobs across five
+// Drafts that no machine could pick up while every printer showed idle.
+//
+// What changed is what "unset" means. assignMachineForBatch now reads an empty
+// family as ANY online machine rather than none, so an unflagged job forms a bed
+// that every printer is offered. That is what a generated plank needs: it has no
+// design and never will, and pinning it to one family by configuration left five
+// of thirteen printers doing all the plank work.
+//
+// A stated family is still honoured exactly as before - the second subtest is
+// unchanged - so a design with a real printer profile still beds apart.
+func TestApplyMatchLeavesAJobWithNoPrinterProfileBatchable(t *testing.T) {
 	fileID := uuid.New()
 	family := "H2C"
 	nozzle := 0.4
 
-	t.Run("no profile is flagged", func(t *testing.T) {
+	t.Run("no profile is left batchable", func(t *testing.T) {
 		var p gen.InsertProductionJobParams
 		applyMatch(&p, production.MatchResult{Design: &production.DesignFacts{
 			Material: "PLA", PrintFileID: &fileID, // MachineFamily deliberately unset
@@ -159,9 +167,9 @@ func TestApplyMatchFlagsADesignWithNoPrinterProfile(t *testing.T) {
 		if p.MachineFamily != nil {
 			t.Fatalf("MachineFamily = %v, want nil for this fixture", *p.MachineFamily)
 		}
-		if p.IssueReason == nil || *p.IssueReason != production.IssueProfileMissing {
-			t.Errorf("IssueReason = %v, want %q; an unflagged job reaches ListBatchableJobs and forms a Draft no machine can ever be assigned to",
-				p.IssueReason, production.IssueProfileMissing)
+		if p.IssueReason != nil {
+			t.Errorf("IssueReason = %q, want nil; a job that names no printer family is offered to every online machine now, not held out of batching",
+				*p.IssueReason)
 		}
 	})
 

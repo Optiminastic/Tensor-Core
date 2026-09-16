@@ -237,18 +237,15 @@ func (s *Server) recordQueued(
 	if name := run.PrinterName(); name != "" {
 		note = "queued on " + name
 	}
-	// Point it at the machine that frees up soonest and holds its colours.
+	// Which printer runs it is BambuBuddy's decision, not Tensor's.
 	//
-	// Only possible when slicing has already produced a queue entry, which it
-	// usually has not - the run answers 202 while the slice is still going. The
-	// reconciliation pass picks up the rest, when it backfills queue_item_id
-	// from the queue; this is the fast path for a slice that finished quickly,
-	// not the only one.
-	if queueID != nil {
-		if chosen := s.assignQueuedItemToBestMachine(ctx, batch, jobs, int(*queueID)); chosen != "" {
-			note = chosen
-		}
-	}
+	// Tensor used to pick one here and pin the queue item to it - the machine
+	// that would be free soonest and already held the plate's colours. That
+	// rule was only as good as the fleet snapshot behind it, and it duplicated,
+	// less well, a decision BambuBuddy makes with the real AMS trays in front of
+	// it at the moment it slices. The plate declares the colours it needs (see
+	// meshio's project_settings.config); BambuBuddy matches them and asks for a
+	// spool to be loaded when nothing does.
 	log.Info("batch sliced and queued by BambuBuddy",
 		"batch", batch.BatchNumber, "file", uploaded.Filename,
 		"pipeline_run", run.ID, "printer", run.PrinterName())

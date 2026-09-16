@@ -136,12 +136,9 @@ func (s *Server) uploadJobModel(c *gin.Context) {
 			"job", id, "error", err)
 	}
 
-	// A manually supplied model has no design behind it either, so it hits the
-	// same profile_missing guard a generated one does.
-	if err := s.setGeneratedMachineFamily(ctx, id); err != nil {
-		obs.FromContext(ctx).Warn("could not set the machine family after an upload",
-			"job", id, "error", err)
-	}
+	// No family is stamped on an uploaded model either: it has geometry and a
+	// colour, which is everything BambuBuddy needs to place it on a printer.
+	// See GenerateModelForJob for why the family pin went away.
 
 	if err := recordJobEvent(ctx, s.store.Q, jobEvent{
 		JobID:     id,

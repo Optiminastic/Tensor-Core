@@ -233,16 +233,6 @@ type Settings struct {
 	// other pieces). Empty means a template that asks for one draws nothing
 	// rather than failing.
 	OpenSCADAssetDir string
-	// GeneratedMachineFamily is the printer family a rendered model runs on,
-	// e.g. "A2L", "H2C" or "P2S".
-	//
-	// Every other job takes its family from a matched design's machine
-	// profile. A generated model has no design, so without this it would be
-	// stamped 'profile_missing' and never reach a bed - the batch planner
-	// refuses to guess a family, deliberately. Empty leaves that guard in
-	// place and holds the job with an explanation, rather than picking a
-	// printer on the operator's behalf.
-	GeneratedMachineFamily string
 
 	// Caching for the two BambuBuddy reads on hot paths, now that live status
 	// is polled rather than fetched once per page load. Without these, upstream
@@ -465,7 +455,6 @@ func Load() Settings {
 		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
 		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
 		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
-		GeneratedMachineFamily:           envOr("GENERATED_MACHINE_FAMILY", ""),
 		BambuStatusTTL:                   secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
 		BambuPrinterIndexTTL:             secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
 		BambuErrorTTL:                    secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),

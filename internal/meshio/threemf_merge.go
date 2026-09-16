@@ -36,11 +36,13 @@ type PlacedModel struct {
 
 // Merge3MF places every model and writes the union as a single 3MF.
 //
-// Triangles are regrouped by colour, so the output has one object per distinct
-// colour on the bed rather than one per source part. That is what a slicer wants:
-// a bed of four planks becomes two objects - every base as one white body, every
-// set of lettering as one coloured body - which is two filament assignments
-// instead of eight.
+// Each model stays one product: a bed of four planks comes out as four
+// assemblies of two parts each, not as one white body and one coloured one.
+// Regrouping by colour was the earlier design and it is what the slicer makes
+// of the FILAMENTS - two slots for four planks, because extruders are assigned
+// per colour across the plate - but the objects themselves are kept apart so an
+// operator can see, move and remove a customer's plank as a single thing.
+// TestMerge3MFKeepsEachPlankAsOneProduct is what holds that.
 //
 // Also returns the assembled plate's bounding box, measured off the transformed
 // triangles rather than re-derived from the inputs, so it describes what was

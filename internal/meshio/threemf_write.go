@@ -81,7 +81,7 @@ func WriteModels3MF(models []Model) ([]byte, error) {
 		// itself writes - it reads these by path, and adding a declaration it
 		// does not expect is a change with no upside.
 		{bambuSettingsPath, plateModelSettings(models, plan)},
-		{projectSettingsPath, plateProjectSettings(models)},
+		{projectSettingsPath, plateProjectSettings(models, plan)},
 	} {
 		w, err := zw.Create(f.name)
 		if err != nil {
@@ -118,15 +118,45 @@ type objectPlan struct {
 
 func planObjects(models []Model) objectPlan {
 	plan := objectPlan{Extruder: map[string]int{}}
-	// Material ids take 1, so object ids start at 2.
-	next := 2
-	for _, m := range models {
-		ids := make([]int, 0, len(m.Parts))
+
+	// Slots are assigned from the multi-part models first, ids afterwards.
+	//
+	// Slot order used to follow placement order, which made "slot 1 is the
+	// plank body" true only by luck: a plank is built base-first, so the first
+	// part of the first model was the white base - unless the packer happened
+	// to place a single-part model first, and a single-part model carries the
+	// LETTERING colour. Then the bed declared the lettering as slot 1 and the
+	// body as slot 2, inverting what every other plate on the floor says.
+	//
+	// A multi-part model is the one that knows which of its colours is the
+	// body, so those are read first whatever order they print in.
+	assignSlots := func(m Model) {
 		for _, p := range m.Parts {
 			if _, seen := plan.Extruder[p.Colour]; !seen {
 				plan.Colours = append(plan.Colours, p.Colour)
 				plan.Extruder[p.Colour] = len(plan.Colours)
 			}
+		}
+	}
+	for _, m := range models {
+		if len(m.Parts) > 1 {
+			assignSlots(m)
+		}
+	}
+	for _, m := range models {
+		if len(m.Parts) <= 1 {
+			assignSlots(m)
+		}
+	}
+
+	// Ids stay in emission order: plateXML writes the objects in this order and
+	// model_settings.config addresses them by it.
+	//
+	// Material ids take 1, so object ids start at 2.
+	next := 2
+	for _, m := range models {
+		ids := make([]int, 0, len(m.Parts))
+		for range m.Parts {
 			ids = append(ids, next)
 			next++
 		}
@@ -218,8 +248,10 @@ func plateModelSettings(models []Model, plan objectPlan) string {
 // Slot order matches the extruder numbering, so slot 1 is whatever colour the
 // first part of the first model uses - the plank body, since a plank is built
 // base-first.
-func plateProjectSettings(models []Model) string {
-	plan := planObjects(models)
+// Takes the plan rather than recomputing it: the slot a colour is declared in
+// here has to be the extruder number the other two documents address it by, and
+// deriving that twice is exactly the drift objectPlan exists to prevent.
+func plateProjectSettings(models []Model, plan objectPlan) string {
 	material := map[string]string{}
 	for _, m := range models {
 		for _, p := range m.Parts {

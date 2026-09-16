@@ -39,9 +39,18 @@ type inRunLoad map[uuid.UUID]int
 func (s *Server) assignMachineForBatch(
 	ctx context.Context, family, material string, colours []string, pending inRunLoad,
 ) *uuid.UUID {
-	if family == "" {
-		return nil
-	}
+	// An empty family means ANY machine, not none.
+	//
+	// It used to mean none, and that was right while every job carried a family
+	// from its design's printer profile: a job with no profile was
+	// under-specified, and guessing a printer for it would slice a plate for a
+	// machine that might not take it. But a generated plank has no design and
+	// never will, and pinning those to one family by configuration left five of
+	// thirteen printers doing all the plank work.
+	//
+	// Nothing about a plate is class-specific here - bedpack packs every plate
+	// onto one 330mm bed - so a bed with no family stated is offered to every
+	// online machine, and BambuBuddy makes the real call when it slices.
 	rows, err := s.store.Q.ListFleetMachinesWithFamily(ctx)
 	if err != nil {
 		return nil
@@ -71,7 +80,10 @@ func (s *Server) assignMachineForBatch(
 		if r.ProfileStatus != nil && (*r.ProfileStatus == production.MachineOffline || *r.ProfileStatus == production.MachineMaintenance) {
 			continue
 		}
-		if r.ProfileFamily == nil || *r.ProfileFamily != family {
+		// Only when the bed states one. A stated family is still honoured
+		// exactly as before - a plate sliced for a class must reach that class -
+		// but an unstated one no longer excludes every machine in the fleet.
+		if family != "" && (r.ProfileFamily == nil || *r.ProfileFamily != family) {
 			continue
 		}
 		state := production.FleetMachineState{

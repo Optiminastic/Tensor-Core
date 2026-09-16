@@ -150,13 +150,17 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 		return fmt.Errorf("attach the model to job %s: %w", job.JobNumber, err)
 	}
 
-	// A generated model has no design, so nothing has told this job which
-	// printer family it runs on - and without that the planner keeps it out of
-	// batching however good its geometry is. Done after the file is attached
-	// so a job is never left claiming a family for a model that failed.
-	if err := s.setGeneratedMachineFamily(ctx, jobID); err != nil {
-		return err
-	}
+	// No printer family is stamped here any more.
+	//
+	// It used to be, because the planner refuses to bed a job with no family.
+	// But the value came from one setting - GENERATED_MACHINE_FAMILY, "A2L" in
+	// production - so every plank in the shop claimed the same class, five of
+	// thirteen printers did all the plank work, and eight stood idle.
+	//
+	// A plank is 200x50x40 on a 330mm bed: it fits any printer in the fleet,
+	// and which one runs it is BambuBuddy's decision, made against real AMS
+	// trays at the moment of slicing. An unstamped family now means "any
+	// machine" rather than "no machine" - see assignMachineForBatch.
 
 	// A model landed, so any previous failure is no longer true.
 	if err := s.store.Q.ClearJobModelError(ctx, jobID); err != nil {
@@ -181,7 +185,13 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 // object with its own material. That is the only way the colour reaches the
 // slicer.
 //
-// Falls back to a single uncoloured STL when the colour cannot be resolved.
+// A colour that cannot be resolved fails the job rather than building it
+// anyway. It used to fall back to a single uncoloured STL, which was worse than
+// it sounds: that render is PartAll - one mesh - so the plank came out with no
+// white base at all, and the job still reported success, cleared its issue and
+// went to a bed. One such job then took every plank beside it down to a
+// colourless plate. A job held with a named colour is a five-second fix; a bed
+// of planks in the wrong colour is scrap.
 // A plank in one colour is a product somebody can still inspect and fix; a
 // plank in a colour nobody chose is scrap, and a job that failed outright
 // helps nobody when the geometry was fine.
@@ -196,9 +206,22 @@ func (s *Server) renderColouredPlank(
 		if !errors.Is(err, errUnknownColour) {
 			return nil, err
 		}
-		log.Warn("no swatch for this colour; building a single-colour model instead",
-			"job", job.JobNumber, "colour", colour)
-		return s.renderer.RenderSTL(ctx, params.Template, params.ArgsForPart(personalise.PartAll))
+		// An unresolvable colour fails the job rather than building it plain.
+		//
+		// This used to log a warning and return a single UNCOLOURED model, and
+		// report success: the job then cleared its issue, reached a bed, and
+		// took every other plank on that bed down with it, because one part
+		// with no colour makes the whole plate a colourless STL that declares
+		// no AMS slots at all. That is how 103 of 141 planks printed with no
+		// colour (see fallbackColours).
+		//
+		// A job held with a named reason is recoverable - add the colour to
+		// fallbackColours, or sync the filament shelf - and it is visible on
+		// the issues board rather than silent. A plank in a colour nobody
+		// chose is scrap, and a whole bed of them is four times the scrap.
+		return nil, fmt.Errorf(
+			"no swatch for %q, so this plank cannot be built in colour; "+
+				"add the colour to the filament shelf or the built-in table", colour)
 	}
 
 	base, err := s.renderer.RenderSTL(ctx, params.Template, params.ArgsForPart(personalise.PartBase))
@@ -219,11 +242,15 @@ func (s *Server) renderColouredPlank(
 		return nil, fmt.Errorf("read the lettering: %w", err)
 	}
 
+	// The job's own material, not a default. It reaches BambuBuddy as
+	// filament_type in the plate's slot declaration, and a bed of PETG that
+	// declares PLA asks the AMS for the wrong spool.
+	material := deref(job.Material)
 	model, err := meshio.Write3MF([]meshio.Part{
 		// Named for what they are, because these are what an operator sees in
 		// the slicer's object list.
-		{Name: "Plate", Colour: BasePlateColour, Triangles: baseMesh.Triangles},
-		{Name: colour + " lettering", Colour: hex, Triangles: textMesh.Triangles},
+		{Name: "Plate", Colour: BasePlateColour, Material: material, Triangles: baseMesh.Triangles},
+		{Name: colour + " lettering", Colour: hex, Material: material, Triangles: textMesh.Triangles},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assemble the coloured model: %w", err)
@@ -496,35 +523,6 @@ func (s *Server) enqueueModelGeneration(ctx context.Context, jobs []gen.Producti
 		// again. Twenty such jobs exist on the live database.
 		log.Info("model render scheduled", "job", job.ID, "sku", deref(job.Sku))
 	}
-}
-
-// setGeneratedMachineFamily tells a rendered job which printer family it runs
-// on, clearing the 'profile_missing' guard that would otherwise keep it out of
-// batching for ever.
-//
-// Every other job inherits its family from a matched design's machine profile.
-// A generated model has no design, so the family has to be stated - and stated
-// by configuration rather than inferred here, because "which printer prints a
-// plank" is an operations decision, not something the geometry implies. A plank
-// is 200x50x40 and would physically fit any of the three families in the fleet.
-//
-// Unset is not an error to retry: the job keeps 'profile_missing', which is
-// exactly right - it is not printable until somebody says where.
-func (s *Server) setGeneratedMachineFamily(ctx context.Context, jobID uuid.UUID) error {
-	family := strings.TrimSpace(s.cfg.GeneratedMachineFamily)
-	if family == "" {
-		obs.FromContext(ctx).Warn(
-			"generated model has no machine family; the job stays held. "+
-				"Set GENERATED_MACHINE_FAMILY to the printer family planks run on",
-			"job", jobID)
-		return nil
-	}
-	if _, err := s.store.Q.SetProductionJobMachineFamily(ctx, gen.SetProductionJobMachineFamilyParams{
-		MachineFamily: &family, ID: jobID,
-	}); err != nil {
-		return fmt.Errorf("set the machine family on job %s: %w", jobID, err)
-	}
-	return nil
 }
 
 // confirmGeneratedPersonalisation marks a rendered job's personalisation as

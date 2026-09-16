@@ -1020,24 +1020,23 @@ func applyMatch(p *gen.InsertProductionJobParams, match production.MatchResult, 
 		reason := production.IssueSTLMissing
 		p.IssueReason = &reason
 	}
-	// A design with no printer profile (designs.machine_id is null, or its
-	// profile row would not load) yields a job with no machine family and no
-	// nozzle. Such a job is not merely under-specified, it is unprintable:
-	// batchMachineFamily refuses to guess a family for a bed, so any batch made
-	// only of these is created with machine_id null, and
-	// ListApprovableDraftsForMachine - which selects a machine's drafts by
-	// machine_id - can never see it. The batch sits in Draft for ever while the
-	// printers stand idle, which is exactly what was observed: 68 queued jobs
-	// across five Drafts that no machine could ever pick up.
+	// A job with no machine family is no longer flagged unprintable.
 	//
-	// Flagging it keeps it out of ListBatchableJobs (issue_reason IS NULL) and
-	// puts it in front of a human on the issues board, which is the same
-	// contract stl_missing above already follows: never drop the job, never let
-	// a job that cannot print reach batching.
-	if p.MachineFamily == nil {
-		reason := production.IssueProfileMissing
-		p.IssueReason = &reason
-	}
+	// It was, and the reasoning held at the time: batchMachineFamily refuses to
+	// guess a family, so a bed of familyless jobs was created with machine_id
+	// null and no machine could ever pick it up - 68 queued jobs sat across five
+	// Drafts while the printers stood idle.
+	//
+	// What changed is the meaning of "unset". assignMachineForBatch now reads an
+	// empty family as ANY online machine rather than none, matching how
+	// batchFamilyFromRows and pipelinesFor already widen rather than refuse.
+	// Nothing about a plate is class-specific - every plate is packed onto one
+	// 330mm bed - and which printer runs it is BambuBuddy's decision, made
+	// against real AMS trays when it slices.
+	//
+	// IssueProfileMissing stays in the taxonomy and stays settable by hand: an
+	// operator may still say a job is waiting on a printer profile. Nothing
+	// writes it automatically any more.
 }
 
 // --- PATCH --------------------------------------------------------------------
