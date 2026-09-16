@@ -19,6 +19,11 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migr
 # without a browser.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rerender ./cmd/rerender
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/loadtemplates ./cmd/loadtemplates
+# replate is rerender's other half. rerender rebuilds a job's MODEL; the bed's
+# merged plate is a snapshot taken when the bed formed, so a corrected model
+# never reaches a locked bed without this. Shipping one without the other means
+# fixing the models and still printing the old geometry.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/replate ./cmd/replate
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
@@ -27,6 +32,7 @@ COPY --from=build /out/seed /app/seed
 COPY --from=build /out/migrate /app/migrate
 COPY --from=build /out/rerender /app/rerender
 COPY --from=build /out/loadtemplates /app/loadtemplates
+COPY --from=build /out/replate /app/replate
 EXPOSE 8001
 USER nonroot:nonroot
 
