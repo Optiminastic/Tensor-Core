@@ -12,6 +12,7 @@
 //
 //	go run ./cmd/rerender -dry-run
 //	go run ./cmd/rerender
+//	go run ./cmd/rerender -job JOB-115059-2,JOB-115059-4
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -39,6 +41,20 @@ func main() {
 	// file replaced underneath it.
 	match := flag.String("match", "",
 		"only jobs whose SKU or product name contains this, case-insensitive (e.g. \"photo frame\")")
+	// Named jobs, whatever their status.
+	//
+	// -include-printed is the blunt version of this: it adds EVERY completed
+	// job, which for a live family is hundreds of renders at 30-45s each to
+	// correct the handful that are actually wrong. Naming the jobs is the
+	// precise version, and naming one is itself the statement that its status
+	// does not matter - the point is to correct the record a reprint and the
+	// job page are read from, for a plank that has already printed.
+	//
+	// The bed's merged plate is deliberately NOT rebuilt by this: cmd/replate
+	// skips completed beds, because their plate is the record of what was
+	// actually printed and rewriting it would erase the evidence.
+	jobNumbers := flag.String("job", "",
+		"re-render exactly these job numbers, comma-separated, whatever their status")
 	flag.Parse()
 
 	_ = godotenv.Load("env/local.env")
@@ -68,7 +84,12 @@ func main() {
 	// covers a family: nine plank lines and one photo frame carry no SKU at
 	// all and are identified by name.
 	args := []any{}
-	if *match != "" {
+	// Named jobs win outright: -job says which rows, so status and -match have
+	// nothing left to narrow.
+	if named := splitJobNumbers(*jobNumbers); len(named) > 0 {
+		where = "j.job_number = ANY($1::text[])"
+		args = append(args, named)
+	} else if *match != "" {
 		where += ` AND (coalesce(j.sku, '') ILIKE '%' || $1 || '%'
 		            OR coalesce(j.product_name, '') ILIKE '%' || $1 || '%')`
 		args = append(args, *match)
@@ -126,4 +147,16 @@ func main() {
 		queued++
 	}
 	fmt.Printf("queued %d renders\n", queued)
+}
+
+// splitJobNumbers reads the -job flag into job numbers, ignoring blanks so a
+// trailing comma or a stray space does not select nothing at all.
+func splitJobNumbers(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if n := strings.TrimSpace(part); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }
