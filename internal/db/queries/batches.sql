@@ -222,6 +222,21 @@ SELECT id FROM batches WHERE status = 'pending_approval' ORDER BY created_at ASC
 -- approved batch, which would strand a plate a machine is about to print.
 DELETE FROM batches WHERE id = ANY(sqlc.arg('batch_ids')::uuid[]) AND status = 'pending_approval';
 
+-- name: DeleteBatch :execrows
+-- Removes ONE bed, whatever its status - the guard lives in the handler, not
+-- here.
+--
+-- DeleteDraftBatches above is deliberately Draft-only because its caller is the
+-- planner, working from a list of ids it read moments earlier: a stale id there
+-- must not be able to delete an approved bed. This one is driven by a person
+-- looking at a specific batch, and the rules about which beds may go - never one
+-- that is printing, never one that has printed - are decisions with reasons that
+-- belong where they can be explained, next to the plate withdrawal and the
+-- filament release they order.
+--
+-- execrows so the caller can tell "deleted" from "already gone".
+DELETE FROM batches WHERE id = sqlc.arg('id');
+
 -- name: CountCommittedBatchesForMachine :one
 -- How many batches are already committed to a machine profile: approved and
 -- waiting ('open') plus whatever it is printing ('in_progress').

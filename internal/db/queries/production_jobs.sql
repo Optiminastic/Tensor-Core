@@ -604,6 +604,17 @@ UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE batch_id = ANY(sqlc.arg('batch_ids')::uuid[])
   AND batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval');
 
+-- name: ReleaseJobsFromBatch :exec
+-- Puts one bed's jobs back in the pool, whatever the bed's status.
+--
+-- UnassignJobsFromBatches above is Draft-guarded for the planner's sake. This is
+-- for deleting a bed on purpose: a locked bed's jobs are still real work that
+-- somebody is waiting for, and dropping the bed without freeing them would
+-- strand them - assigned to a batch that no longer exists, invisible to the
+-- planner, waiting for a plate nobody will ever print.
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE batch_id = sqlc.arg('batch_id');
+
 -- name: ListExcludedQueuedJobs :many
 -- Queued, unbatched jobs the planner will NOT see, and the facts needed to say
 -- why. The exact complement of ListBatchableJobs' eligibility bar, over the

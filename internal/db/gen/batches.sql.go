@@ -302,6 +302,30 @@ func (q *Queries) CountDraftBatchesPerMachine(ctx context.Context) ([]CountDraft
 	return items, nil
 }
 
+const deleteBatch = `-- name: DeleteBatch :execrows
+DELETE FROM batches WHERE id = $1
+`
+
+// Removes ONE bed, whatever its status - the guard lives in the handler, not
+// here.
+//
+// DeleteDraftBatches above is deliberately Draft-only because its caller is the
+// planner, working from a list of ids it read moments earlier: a stale id there
+// must not be able to delete an approved bed. This one is driven by a person
+// looking at a specific batch, and the rules about which beds may go - never one
+// that is printing, never one that has printed - are decisions with reasons that
+// belong where they can be explained, next to the plate withdrawal and the
+// filament release they order.
+//
+// execrows so the caller can tell "deleted" from "already gone".
+func (q *Queries) DeleteBatch(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBatch, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteDraftBatches = `-- name: DeleteDraftBatches :exec
 DELETE FROM batches WHERE id = ANY($1::uuid[]) AND status = 'pending_approval'
 `

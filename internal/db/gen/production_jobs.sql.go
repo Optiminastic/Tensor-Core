@@ -1932,6 +1932,23 @@ func (q *Queries) RankJobsForPriorityOrder(ctx context.Context, arg RankJobsForP
 	return result.RowsAffected(), nil
 }
 
+const releaseJobsFromBatch = `-- name: ReleaseJobsFromBatch :exec
+UPDATE production_jobs SET batch_id = NULL, updated_at = now()
+WHERE batch_id = $1
+`
+
+// Puts one bed's jobs back in the pool, whatever the bed's status.
+//
+// UnassignJobsFromBatches above is Draft-guarded for the planner's sake. This is
+// for deleting a bed on purpose: a locked bed's jobs are still real work that
+// somebody is waiting for, and dropping the bed without freeing them would
+// strand them - assigned to a batch that no longer exists, invisible to the
+// planner, waiting for a plate nobody will ever print.
+func (q *Queries) ReleaseJobsFromBatch(ctx context.Context, batchID *uuid.UUID) error {
+	_, err := q.db.Exec(ctx, releaseJobsFromBatch, batchID)
+	return err
+}
+
 const removeJobFromBatch = `-- name: RemoveJobFromBatch :one
 UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE id = $1 AND batch_id = $2
