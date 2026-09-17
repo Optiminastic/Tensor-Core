@@ -404,6 +404,7 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.POST("/from-order/:order_id", s.guards.RequirePermission(auth.ProductionCreate.Key()), s.createJobsFromOrder)
 	g.POST("/:id/personalisation", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.validatePersonalisation)
 	g.POST("/:id/print-file", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.setPrintFile)
+	g.POST("/:id/rerender", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.rerenderProductionJob)
 	s.registerJobModelUpload(g)
 	g.POST("/:id/fail", s.guards.RequirePermission(auth.ProductionFail.Key()), s.failProductionJob)
 	g.POST("/:id/assembly", s.guards.RequirePermission(auth.AssemblySubmit.Key()), s.submitAssembly)
