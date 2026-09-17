@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Pipeline is one saved slicing configuration.
@@ -216,6 +217,37 @@ func (c *Client) RunPipeline(ctx context.Context, pipeline Pipeline, libraryFile
 		return PipelineRun{}, fmt.Errorf("bambubuddy run pipeline: decode response: %w", err)
 	}
 	return out, nil
+}
+
+// ListRunsForPipeline returns a pipeline's runs, newest first.
+//
+// The way to find out what a run turned into. RunPipeline answers 202 with the
+// run barely started - no sliced file, no queue entry - so anything that needs
+// the queue entry has to come back and look, and this is the only endpoint that
+// reports one. There is no GET for a single run.
+func (c *Client) ListRunsForPipeline(ctx context.Context, pipelineID int) ([]PipelineRun, error) {
+	var out struct {
+		Runs []PipelineRun `json:"runs"`
+	}
+	path := fmt.Sprintf("/api/v1/slicer-pipelines/%d/runs", pipelineID)
+	if err := c.get(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return out.Runs, nil
+}
+
+// Finished reports whether this run has stopped changing.
+//
+// A run that failed will never produce a queue entry, so waiting for one is
+// waiting forever. Status strings are BambuBuddy's; anything unrecognised
+// counts as still working, because giving up early on a run that was merely
+// slow is the more expensive mistake.
+func (r PipelineRun) Finished() bool {
+	switch strings.ToLower(strings.TrimSpace(r.Status)) {
+	case "failed", "error", "cancelled", "canceled":
+		return true
+	}
+	return r.ErrorMessage != nil && strings.TrimSpace(*r.ErrorMessage) != ""
 }
 
 // joinReasons renders a list of issues as one sentence.

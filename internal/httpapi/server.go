@@ -55,6 +55,13 @@ type Server struct {
 	// leadership. Nil until EnableBatchDispatchQueue is called.
 	dispatchEnqueuer *production.DispatchEnqueuer
 
+	// pinEnqueuer schedules the follow-up that ties a sent plate to the printer
+	// an operator chose, once BambuBuddy has finished slicing it. Nil until
+	// EnableQueuePinQueue is called, in which case a plate is queued but left
+	// for BambuBuddy to place - the send still works, the choice is just not
+	// honoured, and the response says so.
+	pinEnqueuer *production.QueuePinEnqueuer
+
 	// lastEventRefresh debounces the fleet refresh a pushed BambuBuddy event
 	// triggers, so a burst of events does not become a burst of full fleet
 	// reads. See refreshFleetAfterEvent.
@@ -137,6 +144,12 @@ func (s *Server) EnableProductionQueue(jobs *production.JobCreationEnqueuer, bat
 // bed also schedules the pass that takes it to a printer.
 func (s *Server) EnableBatchDispatchQueue(e *production.DispatchEnqueuer) {
 	s.dispatchEnqueuer = e
+}
+
+// EnableQueuePinQueue attaches the enqueuer that pins a sent plate to the
+// printer an operator picked, once it has been sliced.
+func (s *Server) EnableQueuePinQueue(e *production.QueuePinEnqueuer) {
+	s.pinEnqueuer = e
 }
 
 // EnableModelGeneration turns on rendering personalised models from an order's

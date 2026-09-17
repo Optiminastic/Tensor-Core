@@ -1527,6 +1527,37 @@ func (q *Queries) RecordBatchPrintOutcome(ctx context.Context, arg RecordBatchPr
 	return i, err
 }
 
+const releaseBatchAfterFailedPrint = `-- name: ReleaseBatchAfterFailedPrint :exec
+UPDATE batches SET
+    queue_item_id   = NULL,
+    pipeline_run_id = NULL,
+    print_outcome   = NULL,
+    print_error     = NULL,
+    print_error_at  = NULL,
+    updated_at      = now()
+WHERE id = $1
+`
+
+// Puts a bed back where it can be sent again after a print that did not finish.
+//
+// A cancelled or failed print used to leave queue_item_id and pipeline_run_id
+// set, and those two are exactly what SendBatchToPrinter's double-send guard
+// reads: "either identifier means it has been dispatched". So a bed somebody
+// cancelled on the printer could never be sent from Tensor again. It sat in the
+// Queue tab with a greyed-out button and a red "Not sent: userCancelled" -
+// stranded, with no way forward but editing the database.
+//
+// The guard is right; what was wrong is leaving the ids behind when the thing
+// they point at is over. A cancelled print is not a dispatched plate.
+//
+// print_outcome goes too, because RecordBatchPrintOutcome claims a bed exactly
+// once by testing it for null: left set, the next real print of this bed could
+// never be recorded.
+func (q *Queries) ReleaseBatchAfterFailedPrint(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, releaseBatchAfterFailedPrint, id)
+	return err
+}
+
 const reopenBatchForReplanning = `-- name: ReopenBatchForReplanning :one
 UPDATE batches SET
     status                   = 'pending_approval',

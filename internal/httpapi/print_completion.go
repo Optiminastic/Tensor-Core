@@ -256,12 +256,27 @@ func (s *Server) completePrintedBatch(
 	return true
 }
 
-// recordFailedPrint records a failure without releasing anything.
+// recordFailedPrint puts a bed back where it can be sent again.
 //
-// A failed plate is not finished goods. The bed keeps its status - a failure is
-// "still locked, and here is why" rather than a lifecycle state - and the
-// operator gets BambuBuddy's own wording on the Batches list, where print_error
-// is already rendered.
+// A failed or cancelled plate is not finished goods. The bed keeps its status -
+// a failure is "still locked" rather than a lifecycle state - but it must also
+// stop looking dispatched, and that is what this used to get wrong.
+//
+// It recorded the reason and left queue_item_id and pipeline_run_id set. Those
+// two are exactly what SendBatchToPrinter's double-send guard reads, so a print
+// somebody cancelled at the machine could never be sent from Tensor again: the
+// bed sat in the Queue tab with a greyed-out button and a red "Not sent:
+// userCancelled" against it, and the only way forward was editing the database.
+// Seven beds were stranded that way.
+//
+// The guard is right; leaving the ids behind was not. A cancelled print is not a
+// dispatched plate. So the bed is released - ids, outcome and error all cleared -
+// and the reason lives in the log, where it explains what happened without
+// standing in the way of printing it again.
+//
+// Safe against reprocessing: ListBatchesInFlight requires one of those two ids,
+// so a released bed leaves the reconciliation set rather than being claimed
+// again on the next pass.
 //
 // Notably it does NOT call FailProductionJob per plank. That mints a reprint for
 // every job on the bed and debits waste per job; a whole-plate failure is
@@ -277,8 +292,12 @@ func (s *Server) recordFailedPrint(
 	if reason == "" {
 		reason = fmt.Sprintf("The print %s on BambuBuddy.", a.Status)
 	}
-	s.recordPrintError(ctx, b.ID, reason)
-	obs.FromContext(ctx).Warn("a bed's print did not finish",
+	if err := s.store.Q.ReleaseBatchAfterFailedPrint(ctx, b.ID); err != nil {
+		obs.FromContext(ctx).Error("could not release a bed after a failed print",
+			"batch", b.BatchNumber, "error", err)
+		return false
+	}
+	obs.FromContext(ctx).Warn("a bed's print did not finish; it can be sent again",
 		"batch", b.BatchNumber, "archive", a.ID, "outcome", a.Status, "reason", reason)
 	return true
 }

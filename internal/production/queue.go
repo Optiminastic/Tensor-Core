@@ -301,6 +301,77 @@ func (e *OrderSyncEnqueuer) Enqueue(ctx context.Context, brandSlug string) error
 	return err
 }
 
+// QueuePinQueueName keeps the pin retries off every other queue.
+//
+// Its own queue because a pin SPENDS ITS TIME WAITING: the queue entry it
+// pins does not exist until BambuBuddy has finished slicing, which is minutes
+// for a full bed. Sharing the dispatch queue would let one plate's wait block
+// every other plate's send.
+const QueuePinQueueName = "queue_pin"
+
+// pinMaxAttempts spans a slow slice.
+//
+// River's exponential backoff reaches roughly half an hour by the tenth
+// attempt, which comfortably outlasts slicing a four-plank plate. Past that the
+// job stops and the plate stays queued but unpinned - BambuBuddy places it
+// itself, which is the old behaviour rather than a failure.
+const pinMaxAttempts = 10
+
+// PinQueueItemArgs ties an already-queued plate to the printer an operator
+// chose.
+//
+// This exists because BambuBuddy has no single call for "slice this and put it
+// on THAT machine". A pipeline run targets a printer CLASS, and the queue entry
+// it produces - the only thing carrying a printer_id - does not exist until the
+// slice finishes. So the choice is made in two moves, and the second one has to
+// wait.
+//
+// It waits HERE, in a background job, rather than in the HTTP request that sent
+// the plate. Holding a request open for a slice would time out in the browser
+// long before the entry appeared, and an operator would be told the send failed
+// when it had not.
+//
+// Carries the BambuBuddy printer id rather than Tensor's machine row: the
+// resolution from serial to printer id happens at send time, while the fleet
+// index is warm, and a job that outlives the request should not depend on it
+// still being resolvable later. MachineName rides along only for the log.
+type PinQueueItemArgs struct {
+	BatchID       uuid.UUID `json:"batch_id"`
+	PipelineID    int       `json:"pipeline_id"`
+	PipelineRunID int       `json:"pipeline_run_id"`
+	PrinterID     int       `json:"printer_id"`
+	MachineName   string    `json:"machine_name"`
+}
+
+func (PinQueueItemArgs) Kind() string { return "pin_queue_item" }
+
+// InsertOpts routes the pin to its own queue and bounds the wait.
+func (PinQueueItemArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueuePinQueueName, MaxAttempts: pinMaxAttempts}
+}
+
+// QueuePinEnqueuer schedules the pin that follows a send.
+type QueuePinEnqueuer struct{ client *river.Client[pgx.Tx] }
+
+// NewQueuePinEnqueuer builds an enqueuer for queue-item pinning.
+func NewQueuePinEnqueuer(client *river.Client[pgx.Tx]) *QueuePinEnqueuer {
+	return &QueuePinEnqueuer{client: client}
+}
+
+// Enqueue schedules one pin.
+//
+// Not transactional, and not fatal if it fails: the plate is already in
+// BambuBuddy's queue by the time this runs. A pin that never happens means the
+// plate prints on some printer of the right class instead of the chosen one -
+// worth reporting, never worth failing the send over.
+func (e *QueuePinEnqueuer) Enqueue(ctx context.Context, args PinQueueItemArgs) error {
+	if e == nil || e.client == nil {
+		return nil
+	}
+	_, err := e.client.Insert(ctx, args, nil)
+	return err
+}
+
 // DispatchEnqueuer inserts dispatch passes into River.
 //
 // The pass also runs on a periodic tick, but a tick only fires on the River

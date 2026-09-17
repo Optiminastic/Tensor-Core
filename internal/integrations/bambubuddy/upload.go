@@ -157,6 +157,25 @@ type QueueOptions struct {
 	RequirePreviousSuccess bool
 	// AutoOffAfter powers the printer down when the print finishes.
 	AutoOffAfter bool
+	// AMSMapping assigns the plate's declared filament slots to the printer's
+	// AMS trays, in the plate's own slot order: entry i is the tray index for
+	// the plate's filament i.
+	//
+	// Tensor can state this rather than guess it, because Tensor WRITES the
+	// slot order - project_settings.config in the merged plate declares the
+	// base colour first and the lettering second (see internal/meshio). Left
+	// nil, BambuBuddy maps the slots itself, which is the right default for a
+	// plate somebody uploaded by hand and the wrong one for a bed whose colours
+	// Tensor already knows.
+	AMSMapping []int
+	// RequiredFilamentTypes is what the plate needs loaded, for BambuBuddy's
+	// own eligibility check to refuse a printer that cannot run it.
+	RequiredFilamentTypes []string
+	// SkipFilamentCheck sends the plate even when that check fails.
+	// Deliberately exposed and deliberately left false by callers: the shop's
+	// rule is that a bed whose colours no printer holds WAITS, and forcing past
+	// the check is how a blue plate prints in whatever was already loaded.
+	SkipFilamentCheck bool
 }
 
 // QueueForPrinting adds a library file to the print queue with the given
@@ -189,6 +208,18 @@ func (c *Client) QueueForPrinting(ctx context.Context, libraryFileID int, opts Q
 		payload["target_model"] = opts.TargetModel
 	} else if opts.PrinterID > 0 {
 		payload["printer_id"] = opts.PrinterID
+	}
+	// Omitted entirely when empty rather than sent as null: BambuBuddy reads an
+	// absent mapping as "work it out yourself", which is what every plate sent
+	// before this relied on.
+	if len(opts.AMSMapping) > 0 {
+		payload["ams_mapping"] = opts.AMSMapping
+	}
+	if len(opts.RequiredFilamentTypes) > 0 {
+		payload["required_filament_types"] = opts.RequiredFilamentTypes
+	}
+	if opts.SkipFilamentCheck {
+		payload["skip_filament_check"] = true
 	}
 
 	body, err := json.Marshal(payload)

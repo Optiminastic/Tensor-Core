@@ -119,6 +119,13 @@ func main() {
 	// timeout cancelled the import halfway and lost thirty-five orders.
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(riverClient))
 
+	// Pinning a sent plate to the printer an operator chose. Wired HERE as well
+	// as in the worker because this is the process the Queue button talks to:
+	// without it s.pinEnqueuer is nil at send time, the pin is never scheduled,
+	// and BambuBuddy quietly places the plate wherever it likes - which is the
+	// behaviour the chooser exists to replace.
+	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(riverClient))
+
 	// The API enqueues renders (a manual retry from the jobs page) but never
 	// runs them; cmd/productionworker is where the OpenSCAD subprocess lives.
 	if cfg.OpenSCADBin != "" {

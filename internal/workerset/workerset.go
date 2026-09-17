@@ -91,6 +91,12 @@ func Start(
 	// consumes if the flag is flipped without a redeploy.
 	river.AddWorker(workers, httpapi.NewDispatchWorker(server, logger))
 
+	// Tying a sent plate to the printer somebody chose. Registered
+	// unconditionally: these jobs are enqueued by an operator pressing Queue,
+	// not by a flag, so a queue nothing consumes would mean the machine choice
+	// silently never takes effect.
+	river.AddWorker(workers, httpapi.NewQueuePinWorker(server, logger))
+
 	// Pulling Shopify orders. Registered unconditionally: this is the only
 	// path an order takes into Tensor, and a queue nothing consumes would mean
 	// pressing Sync reports success and imports nothing.
@@ -122,6 +128,10 @@ func Start(
 			// uploading multi-megabyte plates over the printer host's link, and
 			// two passes at once would race to approve the same bed.
 			production.DispatchBatchQueueName: {MaxWorkers: 1},
+			// Pins waiting on a slice. More than one at a time because each
+			// spends its life asleep between retries, and two operators sending
+			// two beds must not queue behind each other.
+			production.QueuePinQueueName: {MaxWorkers: 2},
 			// One at a time: a pull is minutes of Shopify round trips and order
 			// upserts, and two running together would race to write the same
 			// rows for no gain - Shopify is the bottleneck, not Tensor.
@@ -141,6 +151,7 @@ func Start(
 	)
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(client))
 	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(client, debounce))
+	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(client))
 	EnableModelGeneration(server, cfg, production.NewModelGenEnqueuer(client), logger)
 
 	// Slicing needs its own insert-only client: a consuming client validates

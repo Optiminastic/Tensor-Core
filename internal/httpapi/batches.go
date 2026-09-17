@@ -157,6 +157,11 @@ func (s *Server) registerBatches(r *gin.Engine) {
 	g.PATCH("/:id", s.guards.RequirePermission(auth.BatchManage.Key()), s.patchBatch)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.BatchRead.Key()), s.previewBatch)
 	g.POST("/:id/approve", s.guards.RequirePermission(auth.BatchManage.Key()), s.approveBatch)
+	// Queueing a bed is now a choice an operator makes, not one Tensor makes
+	// for them: queue-options reports which printers hold the bed's colours,
+	// and queue sends it to the one they picked.
+	g.GET("/:id/queue-options", s.guards.RequirePermission(auth.BatchRead.Key()), s.batchQueueOptions)
+	g.POST("/:id/queue", s.guards.RequirePermission(auth.BatchManage.Key()), s.queueBatchToMachine)
 	g.POST("/:id/rebuild", s.guards.RequirePermission(auth.BatchManage.Key()), s.rebuildBatchModels)
 	g.POST("/:id/reprint", s.guards.RequirePermission(auth.BatchManage.Key()), s.reprintBatchJobs)
 	g.DELETE("/:id", s.guards.RequirePermission(auth.BatchManage.Key()), s.deleteBatch)
