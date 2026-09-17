@@ -129,6 +129,8 @@ func (s *Server) reprintBatchJobs(c *gin.Context) {
 	}
 	actor := currentUserID(c)
 
+	// make, not var: a nil slice marshals as null, and the caller parses this as
+	// an array. See batch_rebuild.go for the same trap sprung.
 	pairs := make([]reprintPair, 0, len(chosen))
 	clones := make([]uuid.UUID, 0, len(chosen))
 	for _, jobID := range chosen {

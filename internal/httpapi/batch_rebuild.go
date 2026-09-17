@@ -89,7 +89,14 @@ func (s *Server) rebuildBatchModels(c *gin.Context) {
 		return
 	}
 
-	out := batchRebuildResponse{BatchNumber: batch.BatchNumber, Checked: len(jobs)}
+	// Empty slices, not nil: Go marshals a nil slice as null, and a caller
+	// parsing "the jobs it rebuilt" against an array type chokes on null - which
+	// is exactly how a request that worked perfectly read as a failure on the
+	// Batches page.
+	out := batchRebuildResponse{
+		BatchNumber: batch.BatchNumber, Checked: len(jobs),
+		Queued: []rebuiltJob{}, Correct: []string{}, Skipped: []rebuiltJob{},
+	}
 	for _, job := range jobs {
 		state, reason := s.modelAgreesWithOrder(ctx, job)
 		switch state {
