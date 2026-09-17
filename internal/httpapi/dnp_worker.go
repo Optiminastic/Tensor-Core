@@ -83,5 +83,10 @@ func (w *ModelGenWorker) Work(ctx context.Context, job *river.Job[production.Gen
 	w.logger.Info("model generation done", "job", jobID)
 	// The model just cleared this job's stl_missing, so it is batchable now.
 	w.server.triggerBatchPlanIfThresholdMet(ctx)
+	// And if this job sits on a bed, that bed's plate is now older than its
+	// models. Re-plating here rather than at the end of the request that asked
+	// for the rebuild is what makes a four-plank bed one act: the last render to
+	// land is the one that merges, and the three before it do nothing.
+	w.server.replateBatchAfterRender(ctx, jobID)
 	return nil
 }

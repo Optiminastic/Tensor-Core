@@ -13,7 +13,7 @@ import (
 
 const getFileAsset = `-- name: GetFileAsset :one
 SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
-       bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
+       bbox_x_mm, bbox_y_mm, bbox_z_mm, render_params, created_at
 FROM file_assets WHERE id = $1
 `
 
@@ -31,6 +31,7 @@ func (q *Queries) GetFileAsset(ctx context.Context, id uuid.UUID) (FileAsset, er
 		&i.BboxXMm,
 		&i.BboxYMm,
 		&i.BboxZMm,
+		&i.RenderParams,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -38,7 +39,7 @@ func (q *Queries) GetFileAsset(ctx context.Context, id uuid.UUID) (FileAsset, er
 
 const getFileAssetByStorageKey = `-- name: GetFileAssetByStorageKey :one
 SELECT id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
-       bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
+       bbox_x_mm, bbox_y_mm, bbox_z_mm, render_params, created_at
 FROM file_assets WHERE storage_key = $1 ORDER BY created_at DESC LIMIT 1
 `
 
@@ -60,6 +61,7 @@ func (q *Queries) GetFileAssetByStorageKey(ctx context.Context, storageKey strin
 		&i.BboxXMm,
 		&i.BboxYMm,
 		&i.BboxZMm,
+		&i.RenderParams,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -69,31 +71,37 @@ const insertFileAsset = `-- name: InsertFileAsset :one
 
 INSERT INTO file_assets (
     id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
-    bbox_x_mm, bbox_y_mm, bbox_z_mm
+    bbox_x_mm, bbox_y_mm, bbox_z_mm, render_params
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
-    $8::float8, $9::float8, $10::float8
+    $8::float8, $9::float8, $10::float8,
+    $11
 )
 RETURNING id, filename, content_type, size_bytes, storage_key, is_template, uploaded_by,
-          bbox_x_mm, bbox_y_mm, bbox_z_mm, created_at
+          bbox_x_mm, bbox_y_mm, bbox_z_mm, render_params, created_at
 `
 
 type InsertFileAssetParams struct {
-	ID          uuid.UUID
-	Filename    string
-	ContentType string
-	SizeBytes   int64
-	StorageKey  string
-	IsTemplate  bool
-	UploadedBy  string
-	BboxXMm     *float64
-	BboxYMm     *float64
-	BboxZMm     *float64
+	ID           uuid.UUID
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	StorageKey   string
+	IsTemplate   bool
+	UploadedBy   string
+	BboxXMm      *float64
+	BboxYMm      *float64
+	BboxZMm      *float64
+	RenderParams []byte
 }
 
 // File assets (uploaded models, photos, generated plates). Numeric bbox columns
 // cast to float8 so handlers work in float64; nullable bboxes stay pointers.
+//
+// render_params is what a generated model was built from - template, hearts and
+// both names. Null on an uploaded file and on anything rendered before 0073, so
+// a reader treats absent as "unknown" rather than "correct".
 func (q *Queries) InsertFileAsset(ctx context.Context, arg InsertFileAssetParams) (FileAsset, error) {
 	row := q.db.QueryRow(ctx, insertFileAsset,
 		arg.ID,
@@ -106,6 +114,7 @@ func (q *Queries) InsertFileAsset(ctx context.Context, arg InsertFileAssetParams
 		arg.BboxXMm,
 		arg.BboxYMm,
 		arg.BboxZMm,
+		arg.RenderParams,
 	)
 	var i FileAsset
 	err := row.Scan(
@@ -119,6 +128,7 @@ func (q *Queries) InsertFileAsset(ctx context.Context, arg InsertFileAssetParams
 		&i.BboxXMm,
 		&i.BboxYMm,
 		&i.BboxZMm,
+		&i.RenderParams,
 		&i.CreatedAt,
 	)
 	return i, err

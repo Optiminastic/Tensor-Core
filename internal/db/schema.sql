@@ -275,6 +275,11 @@ CREATE TABLE file_assets (
     bbox_x_mm    numeric(10, 2),
     bbox_y_mm    numeric(10, 2),
     bbox_z_mm    numeric(10, 2),
+    -- What a generated model was built from: template, heart count and both
+    -- names as given to OpenSCAD. Null on an uploaded file, and on anything
+    -- rendered before 0073 - see that migration for why the filename could not
+    -- answer this.
+    render_params jsonb,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX ix_file_assets_uploaded_by ON file_assets (uploaded_by);

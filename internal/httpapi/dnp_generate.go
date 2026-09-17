@@ -397,6 +397,23 @@ func (s *Server) storeGeneratedModel(
 	// the file list can tell one plank from another without opening them.
 	filename := fmt.Sprintf("%s-%s-%s%s", job.JobNumber, params.NameLeft, params.NameRight, ext)
 
+	// And the inputs themselves, beside the file.
+	//
+	// The filename is for reading, not for checking: it carries no heart count,
+	// and the names cannot be parsed back out of it reliably because a customer's
+	// name may hold the same hyphen it separates on. Recording the arguments the
+	// render was actually given turns "is this model still what the order says?"
+	// into a comparison instead of a guess - which is what let a bed print NAVYA
+	// & KRISHNA four times against three other customers' orders without
+	// anything in the database disagreeing with itself.
+	renderParams, err := json.Marshal(storedRenderParams{
+		Template: params.Template, Hearts: params.Hearts,
+		NameLeft: params.NameLeft, NameRight: params.NameRight,
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("record what this model was built from: %w", err)
+	}
+
 	fileID := uuid.New()
 	if _, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
 		ID: fileID, Filename: filename, ContentType: contentType,
@@ -405,6 +422,7 @@ func (s *Server) storeGeneratedModel(
 		// background process built rather than a person uploaded.
 		UploadedBy: "system",
 		BboxXMm:    &x, BboxYMm: &y, BboxZMm: &z,
+		RenderParams: renderParams,
 	}); err != nil {
 		return uuid.Nil, fmt.Errorf("record the rendered model: %w", err)
 	}
@@ -586,4 +604,18 @@ func jobLineProperties(job gen.ProductionJob) ([]production.LineProp, bool) {
 		return nil, false
 	}
 	return props, true
+}
+
+// storedRenderParams is what a generated model was built from, written beside
+// the file as file_assets.render_params.
+//
+// Deliberately its own small struct rather than personalise.Params: that type
+// carries a Shape and grows with the renderer, and this is a record on disk that
+// other code compares against. Adding a field here is a decision about what
+// "the same model" means, which is worth making on purpose.
+type storedRenderParams struct {
+	Template  string `json:"template"`
+	Hearts    int    `json:"hearts"`
+	NameLeft  string `json:"name_left"`
+	NameRight string `json:"name_right"`
 }

@@ -170,17 +170,18 @@ type FilamentInventory struct {
 }
 
 type FileAsset struct {
-	ID          uuid.UUID
-	Filename    string
-	ContentType string
-	SizeBytes   int64
-	StorageKey  string
-	IsTemplate  bool
-	UploadedBy  string
-	BboxXMm     pgtype.Numeric
-	BboxYMm     pgtype.Numeric
-	BboxZMm     pgtype.Numeric
-	CreatedAt   pgtype.Timestamptz
+	ID           uuid.UUID
+	Filename     string
+	ContentType  string
+	SizeBytes    int64
+	StorageKey   string
+	IsTemplate   bool
+	UploadedBy   string
+	BboxXMm      pgtype.Numeric
+	BboxYMm      pgtype.Numeric
+	BboxZMm      pgtype.Numeric
+	RenderParams []byte
+	CreatedAt    pgtype.Timestamptz
 }
 
 type InventoryItem struct {

@@ -157,6 +157,8 @@ func (s *Server) registerBatches(r *gin.Engine) {
 	g.PATCH("/:id", s.guards.RequirePermission(auth.BatchManage.Key()), s.patchBatch)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.BatchRead.Key()), s.previewBatch)
 	g.POST("/:id/approve", s.guards.RequirePermission(auth.BatchManage.Key()), s.approveBatch)
+	g.POST("/:id/rebuild", s.guards.RequirePermission(auth.BatchManage.Key()), s.rebuildBatchModels)
+	g.POST("/:id/reprint", s.guards.RequirePermission(auth.BatchManage.Key()), s.reprintBatchJobs)
 	g.GET("/:id/compatible-jobs", s.guards.RequirePermission(auth.BatchManage.Key()), s.listCompatibleJobs)
 	g.POST("/:id/jobs", s.guards.RequirePermission(auth.BatchManage.Key()), s.addJobsToBatch)
 	g.DELETE("/:id/jobs/:jobId", s.guards.RequirePermission(auth.BatchManage.Key()), s.removeJobFromBatch)
