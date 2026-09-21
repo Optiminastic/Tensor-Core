@@ -110,3 +110,52 @@ func coloursOf(trays []loadedTray) []string {
 	}
 	return out
 }
+
+// An AMS unit reports whatever id it likes - the AMS Lite on this shop's A2L
+// printers reports 6 - and the sticker on the machine says "AMS 1". Labelling
+// from the raw id sent an operator looking for AMS 7 on a printer with one unit.
+func TestTrayLabelNumbersUnitsByPositionNotByReportedID(t *testing.T) {
+	m := machineHolding(`[
+		{"colour":"#FFFFFF","type":"PLA","ams_id":6,"tray_id":0},
+		{"colour":"#2850E0","type":"PLA","ams_id":6,"tray_id":3}
+	]`)
+
+	got := traysFor(m)
+	if len(got) != 2 {
+		t.Fatalf("traysFor returned %d trays, want 2", len(got))
+	}
+	if got[0].Label != "AMS 1 · slot 1" {
+		t.Errorf("label = %q, want %q - one unit is AMS 1 whatever id it reports",
+			got[0].Label, "AMS 1 · slot 1")
+	}
+	if got[1].Label != "AMS 1 · slot 4" {
+		t.Errorf("label = %q, want %q - slots count from one on the machine",
+			got[1].Label, "AMS 1 · slot 4")
+	}
+	// The mapping still uses the REAL ids, which is what BambuBuddy expects.
+	if idx, ok := amsSlotIndex(decodeTrays(m)[1]); !ok || idx != 27 {
+		t.Errorf("ams index = %d, want 27 (6*4+3) - the label must not change the mapping", idx)
+	}
+}
+
+func TestTrayLabelNumbersASecondUnitTwo(t *testing.T) {
+	m := machineHolding(`[
+		{"colour":"#FFFFFF","type":"PLA","ams_id":0,"tray_id":0},
+		{"colour":"#2850E0","type":"PLA","ams_id":1,"tray_id":2}
+	]`)
+
+	got := traysFor(m)
+	if got[0].Label != "AMS 1 · slot 1" || got[1].Label != "AMS 2 · slot 3" {
+		t.Errorf("labels = %q, %q; want AMS 1 · slot 1 and AMS 2 · slot 3",
+			got[0].Label, got[1].Label)
+	}
+}
+
+// A tray whose position was never recorded gets no label, so the dialog shows
+// its colour instead of inventing a slot to walk to.
+func TestTrayLabelIsEmptyWhenThePositionIsUnknown(t *testing.T) {
+	m := machineHolding(`[{"colour":"#FFFFFF","type":"PLA"}]`)
+	if got := traysFor(m); len(got) != 1 || got[0].Label != "" {
+		t.Errorf("label = %q, want empty for a tray with no recorded position", got[0].Label)
+	}
+}

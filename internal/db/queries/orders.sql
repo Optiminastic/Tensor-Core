@@ -163,3 +163,16 @@ WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
   AND (sqlc.narg('source')::text IS NULL OR source = sqlc.narg('source'))
 ORDER BY imported_at DESC, id DESC;
 
+
+-- name: ListOrderLineProducts :many
+-- Every order's line items, reduced to what decides whether a product is one
+-- Tensor generates: the SKU and the product name.
+--
+-- Deliberately not filtered in SQL. Whether a line is a generated product is
+-- IsGeneratedProduct's decision - it matches SKU segments AND substrings of the
+-- product name - and expressing that in SQL would be a second copy of the rule
+-- that drifts from the first. The caller applies it in Go.
+SELECT li.order_id, li.sku, li.product_name
+FROM order_line_items li
+JOIN orders o ON o.id = li.order_id
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));

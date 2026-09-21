@@ -52,6 +52,11 @@ type productionJobResponse struct {
 	// drift - a product the two disagreed about would either wait for an
 	// approval that never comes or a render that never runs.
 	ModelStatus string `json:"model_status"`
+	// IsGenerated is true for a product Tensor renders itself - a Dual Name
+	// Plank and its siblings. Computed here for the same reason ModelStatus is:
+	// IsGeneratedProduct matches SKU segments and product-name substrings, and
+	// a second copy of that rule in TypeScript would drift from this one.
+	IsGenerated bool `json:"is_generated"`
 	// ModelError is why a generated model could not be built, in the
 	// renderer's own words. Null unless ModelStatus is "failed".
 	ModelError *string `json:"model_error"`
@@ -291,6 +296,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
 		FilamentGramsRequired: db.NumFloatPtr(j.FilamentGramsRequired), PrintFileID: uuidPtrStr(j.PrintFileID),
 		ModelStatus:               modelStatusOf(j),
+		IsGenerated:               IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)),
 		ModelError:                reportableModelError(j),
 		VariantTitle:              j.VariantTitle,
 		PersonalisationProperties: rawJSON(j.PersonalisationProperties, "[]"),

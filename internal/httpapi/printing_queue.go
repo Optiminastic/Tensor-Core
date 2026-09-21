@@ -12,6 +12,7 @@ package httpapi
 // wrong is worse than one that says it cannot reach the printer host.
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
@@ -40,24 +41,43 @@ type queueItemResponse struct {
 	FilamentUsedGrams float64  `json:"filament_used_grams"`
 	FilamentType      string   `json:"filament_type"`
 	FilamentColours   []string `json:"filament_colours"`
-	EstimatedCost     *float64 `json:"estimated_cost"`
-	NozzleDiameter    *float64 `json:"nozzle_diameter"`
-	LayerHeight       *float64 `json:"layer_height"`
-	BedType           string   `json:"bed_type"`
-	SlicedForModel    string   `json:"sliced_for_model"`
-	BatchName         string   `json:"batch_name"`
-	CreatedBy         string   `json:"created_by"`
-	CreatedAt         string   `json:"created_at"`
-	StartedAt         string   `json:"started_at"`
-	CompletedAt       string   `json:"completed_at"`
+	// Filaments is the same colours with the shop's name for each, where it has
+	// one. The swatch alone says a plate needs two colours; it does not say
+	// WHICH, and "the gold one" is how the floor talks about a spool.
+	//
+	// Read from the SLICED file, so these are the colours that will actually
+	// print rather than the ones anybody intended.
+	Filaments      []queueItemFilament `json:"filaments"`
+	EstimatedCost  *float64            `json:"estimated_cost"`
+	NozzleDiameter *float64            `json:"nozzle_diameter"`
+	LayerHeight    *float64            `json:"layer_height"`
+	BedType        string              `json:"bed_type"`
+	SlicedForModel string              `json:"sliced_for_model"`
+	BatchName      string              `json:"batch_name"`
+	CreatedBy      string              `json:"created_by"`
+	CreatedAt      string              `json:"created_at"`
+	StartedAt      string              `json:"started_at"`
+	CompletedAt    string              `json:"completed_at"`
 	// Why this item is not moving, and why it failed. Both are BambuBuddy's
 	// own wording - Tensor has no better explanation to offer.
 	WaitingReason string `json:"waiting_reason"`
 	ErrorMessage  string `json:"error_message"`
 }
 
+// queueItemFilament is one colour a queued plate will print in.
+type queueItemFilament struct {
+	Hex string `json:"hex"`
+	// Name is empty when no colour has been mapped to this hex. The hex still
+	// shows - an unnamed colour is a gap in the colour map, not a reason to
+	// hide what the plate is going to do.
+	Name string `json:"name"`
+}
+
 func (s *Server) listPrintingQueue(c *gin.Context) {
 	ctx := c.Request.Context()
+
+	// One read of the colour map for the whole queue.
+	names := s.colourNamesByHex(ctx)
 	if !s.bambu.Configured() {
 		detail(c, http.StatusConflict, "BambuBuddy is not configured on this service.")
 		return
@@ -77,7 +97,7 @@ func (s *Server) listPrintingQueue(c *gin.Context) {
 
 	out := make([]queueItemResponse, 0, len(items))
 	for _, it := range items {
-		out = append(out, queueItemDTO(it))
+		out = append(out, queueItemDTO(it, names))
 	}
 
 	// Waiting work first, then by queue position: an operator opens this to see
@@ -100,7 +120,7 @@ func isWaitingStatus(status string) bool {
 	return status == bambubuddy.QueuePending || status == bambubuddy.QueuePrinting
 }
 
-func queueItemDTO(it bambubuddy.QueueItem) queueItemResponse {
+func queueItemDTO(it bambubuddy.QueueItem, names map[string]string) queueItemResponse {
 	return queueItemResponse{
 		ID: it.ID, Position: it.Position, Status: it.Status, Name: it.Name(),
 		PrinterID: it.PrinterID, PrinterName: it.PrinterName,
@@ -109,6 +129,7 @@ func queueItemDTO(it bambubuddy.QueueItem) queueItemResponse {
 		FilamentUsedGrams: it.FilamentUsedGrams,
 		FilamentType:      it.FilamentType,
 		FilamentColours:   it.Colours(),
+		Filaments:         namedFilaments(it.Colours(), names),
 		EstimatedCost:     it.EstimatedCost,
 		NozzleDiameter:    it.NozzleDiameter,
 		LayerHeight:       it.LayerHeight,
@@ -189,4 +210,44 @@ func (s *Server) registerPrintingQueue(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.MachineRead.Key()), s.listPrintingQueue)
 	g.GET("/thumbnail/:kind/:id",
 		s.guards.RequirePermission(auth.MachineRead.Key()), s.printingQueueThumbnail)
+}
+
+// namedFilaments pairs each colour a plate needs with the shop's word for it.
+func namedFilaments(colours []string, names map[string]string) []queueItemFilament {
+	out := make([]queueItemFilament, 0, len(colours))
+	for _, raw := range colours {
+		hex, ok := normaliseHex(raw)
+		if !ok {
+			// Keep it anyway: a colour the plate declares is a fact about the
+			// print, whether or not Tensor can parse it.
+			out = append(out, queueItemFilament{Hex: raw})
+			continue
+		}
+		out = append(out, queueItemFilament{Hex: hex, Name: names[hex]})
+	}
+	return out
+}
+
+// colourNamesByHex is the reverse of the colour map: what the shop calls each
+// hex its printers report.
+//
+// Built once per request rather than per item, because a queue of thirty plates
+// would otherwise read the same table thirty times.
+func (s *Server) colourNamesByHex(ctx context.Context) map[string]string {
+	identities, err := s.colourIdentities(ctx)
+	if err != nil {
+		obs.FromContext(ctx).Warn("could not read the colour map for the queue", "error", err)
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(identities))
+	for _, id := range identities {
+		for _, hex := range id.Hexes {
+			// First name wins: ListColourMap orders primaries first, so a hex
+			// claimed by two colours reads as the one it is primary for.
+			if _, taken := out[hex]; !taken {
+				out[hex] = id.Name
+			}
+		}
+	}
+	return out
 }

@@ -70,8 +70,17 @@ type queueSlot struct {
 
 // queueTray is one AMS slot, with where it is as well as what is in it.
 type queueTray struct {
-	Hex            string  `json:"hex"`
-	Type           string  `json:"type"`
+	Hex  string `json:"hex"`
+	Type string `json:"type"`
+	// Label is where this spool is, in the numbering printed ON THE MACHINE:
+	// "AMS 1 - slot 4".
+	//
+	// Computed here rather than in the browser because only this side can see
+	// the whole machine. An AMS unit reports an id of its own choosing - the AMS
+	// Lite on this shop's A2L printers reports 6 - so labelling from the raw id
+	// would send an operator looking for "AMS 7" on a printer that has one unit.
+	// Position in the machine's own sorted list is what matches the sticker.
+	Label          string  `json:"label"`
 	AmsID          *int    `json:"ams_id"`
 	TrayID         *int    `json:"tray_id"`
 	RemainingGrams float64 `json:"remaining_grams"`
@@ -85,6 +94,19 @@ type queueTray struct {
 func traysFor(m gen.Machine) []queueTray {
 	trays := decodeTrays(m)
 	sortTrays(trays)
+
+	// Number the AMS units by the order they appear, not by the id they report.
+	// One unit is always "AMS 1" whatever it calls itself.
+	unitNumber := map[int]int{}
+	for _, t := range trays {
+		if t.AmsID == nil {
+			continue
+		}
+		if _, seen := unitNumber[*t.AmsID]; !seen {
+			unitNumber[*t.AmsID] = len(unitNumber) + 1
+		}
+	}
+
 	out := make([]queueTray, 0, len(trays))
 	for _, t := range trays {
 		hex, ok := normaliseHex(t.Colour)
@@ -92,11 +114,33 @@ func traysFor(m gen.Machine) []queueTray {
 			continue
 		}
 		out = append(out, queueTray{
-			Hex: hex, Type: t.Type, AmsID: t.AmsID, TrayID: t.TrayID,
+			Hex: hex, Type: t.Type, Label: trayLabel(t, unitNumber),
+			AmsID: t.AmsID, TrayID: t.TrayID,
 			RemainingGrams: t.RemainingGrams,
 		})
 	}
 	return out
+}
+
+// trayLabel is where a spool is, as the machine's own labelling has it.
+//
+// Empty when the position was never recorded, so the caller shows the colour
+// rather than inventing a location - a wrong slot number sends somebody to the
+// wrong spool, which is worse than no slot number at all.
+func trayLabel(t loadedTray, unitNumber map[int]int) string {
+	if t.AmsID == nil || t.TrayID == nil {
+		return ""
+	}
+	// Bambu's external spool holder, which is not an AMS slot at all.
+	if *t.TrayID == amsExternalSpool {
+		return "external spool"
+	}
+	unit, ok := unitNumber[*t.AmsID]
+	if !ok {
+		unit = 1
+	}
+	// Both ids count from zero; the machine's own labels count from one.
+	return fmt.Sprintf("AMS %d · slot %d", unit, *t.TrayID+1)
 }
 
 // queueMachine is one printer and whether it can take this bed.

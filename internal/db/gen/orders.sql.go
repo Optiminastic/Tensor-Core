@@ -169,6 +169,46 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 	return i, err
 }
 
+const listOrderLineProducts = `-- name: ListOrderLineProducts :many
+SELECT li.order_id, li.sku, li.product_name
+FROM order_line_items li
+JOIN orders o ON o.id = li.order_id
+WHERE ($1::text IS NULL OR o.source = $1)
+`
+
+type ListOrderLineProductsRow struct {
+	OrderID     uuid.UUID
+	Sku         *string
+	ProductName string
+}
+
+// Every order's line items, reduced to what decides whether a product is one
+// Tensor generates: the SKU and the product name.
+//
+// Deliberately not filtered in SQL. Whether a line is a generated product is
+// IsGeneratedProduct's decision - it matches SKU segments AND substrings of the
+// product name - and expressing that in SQL would be a second copy of the rule
+// that drifts from the first. The caller applies it in Go.
+func (q *Queries) ListOrderLineProducts(ctx context.Context, source *string) ([]ListOrderLineProductsRow, error) {
+	rows, err := q.db.Query(ctx, listOrderLineProducts, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrderLineProductsRow{}
+	for rows.Next() {
+		var i ListOrderLineProductsRow
+		if err := rows.Scan(&i.OrderID, &i.Sku, &i.ProductName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOrders = `-- name: ListOrders :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
 WHERE ($1::text IS NULL OR source = $1)

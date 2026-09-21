@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
@@ -235,6 +237,30 @@ func (s *Server) listOrders(c *gin.Context) {
 	// parameter rather than its own route: Gin cannot register a static
 	// /orders/without-jobs alongside the existing /orders/:id wildcard, it
 	// panics at startup.
+	// ?dnp=false lists the orders that contain something Tensor does NOT
+	// generate. On a floor that is mostly Dual Name Planks those are the ones
+	// needing a person: a model to upload, a part to pick, a decision to make.
+	if c.Query("dnp") == "false" {
+		ids, err := s.orderIDsWithNonGeneratedItems(ctx, source)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list orders.")
+			return
+		}
+		rows, err := s.store.Q.ListOrders(ctx, gen.ListOrdersParams{Source: source, Search: searchParam(c)})
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list orders.")
+			return
+		}
+		out := make([]orderResponse, 0, len(ids))
+		for _, o := range rows {
+			if ids[o.ID] {
+				out = append(out, orderDTO(o))
+			}
+		}
+		c.JSON(http.StatusOK, out)
+		return
+	}
+
 	if c.Query("has_jobs") == "false" {
 		rows, err := s.store.Q.ListOrdersWithoutJobs(ctx, source)
 		if err != nil {
@@ -305,4 +331,30 @@ func (s *Server) getOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, orderDetailResponse{
 		orderResponse: orderDTO(o), LineItems: json.RawMessage(o.LineItems), Products: products,
 	})
+}
+
+// orderIDsWithNonGeneratedItems is the set of orders holding at least one line
+// Tensor does not generate.
+//
+// "At least one", not "all": a mixed order still needs somebody to deal with
+// the part that is not a plank, and hiding it because the rest is automated is
+// how that part gets forgotten.
+//
+// The rule itself stays in IsGeneratedProduct. This reads the lines and applies
+// it, rather than the SQL trying to express "SKU segment or product-name
+// substring" - a second copy of that rule would drift from the first.
+func (s *Server) orderIDsWithNonGeneratedItems(
+	ctx context.Context, source *string,
+) (map[uuid.UUID]bool, error) {
+	lines, err := s.store.Q.ListOrderLineProducts(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]bool)
+	for _, li := range lines {
+		if !IsGeneratedProduct(deref(li.Sku), li.ProductName) {
+			out[li.OrderID] = true
+		}
+	}
+	return out, nil
 }
