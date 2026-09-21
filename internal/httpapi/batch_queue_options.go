@@ -1,17 +1,19 @@
 package httpapi
 
-// Which machines can take this bed, and what the ones that cannot are missing.
+// What this bed needs, what each printer holds, and where.
 //
-// The shop's rule, stated plainly: a printer may run a bed only if it already
-// holds every colour that bed needs. Not "close enough", not "load it later" -
-// a bed whose colours nobody has loaded WAITS. Printing a plank in whatever was
-// already in the machine is scrap, and scrap is worse than a bed sitting still.
+// This does not decide anything. It reports what is true - the slots the plate
+// declares, and the spool sitting in every tray of every printer - and a person
+// binds one to the other. That is deliberately the opposite of the automatic
+// picker it replaces, which scored the fleet and sent the plate wherever it
+// judged best.
 //
-// So this does not choose anything. It reports what is true - the bed's colours,
-// each machine's loaded colours, and the difference - and a person chooses. That
-// is deliberately the opposite of the automatic picker this replaces, which
-// scored the fleet and sent the plate wherever it judged best; the shop wanted
-// the decision back.
+// It deliberately does NOT try to work out which tray is "blue". An AMS reports
+// a colour as a bare hex with no name, an order names one in words, and nothing
+// reconciles the two reliably - 11 of the 14 hexes loaded on this fleet appear
+// in no catalogue at all. Tensor showing both swatches and letting the operator
+// say "that one" is honest; Tensor guessing and being wrong prints a plank in a
+// colour nobody ordered.
 //
 // Read from Tensor's own mirror of the fleet rather than from BambuBuddy: the
 // sync writes every printer's AMS trays into machines.filaments (see
@@ -21,10 +23,8 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -40,13 +40,13 @@ type queueOptionsResponse struct {
 	// Colours is what the bed needs loaded, name and swatch together: an
 	// operator thinks in "blue", the printer answers in "#1560BD", and the
 	// dialog has to speak both.
-	Colours  []queueColour  `json:"colours"`
+	Colours []queueColour `json:"colours"`
+	// Slots are what the PLATE declares, in its own order - the thing the
+	// operator actually binds to trays. Read from the file rather than derived
+	// from the jobs, because the order is meshio's rule (the plank body takes
+	// slot 1) and the jobs do not know it.
+	Slots    []queueSlot    `json:"slots"`
 	Machines []queueMachine `json:"machines"`
-	// ColoursVerified is false when Tensor cannot compare the bed's colours
-	// against what the printers hold - see colourMatchingPossible. Every machine
-	// is then offered, and the dialog says why the list is unfiltered rather
-	// than presenting a guess as a rule.
-	ColoursVerified bool `json:"colours_verified"`
 	// Note says why nothing is offered when nothing is, rather than leaving a
 	// blank dropdown to be interpreted.
 	Note string `json:"note"`
@@ -55,6 +55,48 @@ type queueOptionsResponse struct {
 type queueColour struct {
 	Name string `json:"name"`
 	Hex  string `json:"hex"`
+}
+
+// queueSlot is one filament slot the plate asks for.
+type queueSlot struct {
+	Index int    `json:"index"`
+	Hex   string `json:"hex"`
+	// Name is Tensor's word for the colour when it has one, for the operator's
+	// benefit. Empty is normal and not a problem: the swatch is the thing being
+	// matched, and the hex is shown beside it.
+	Name     string `json:"name"`
+	Material string `json:"material"`
+}
+
+// queueTray is one AMS slot, with where it is as well as what is in it.
+type queueTray struct {
+	Hex            string  `json:"hex"`
+	Type           string  `json:"type"`
+	AmsID          *int    `json:"ams_id"`
+	TrayID         *int    `json:"tray_id"`
+	RemainingGrams float64 `json:"remaining_grams"`
+}
+
+// traysFor renders a machine's slots for the dialog.
+//
+// A tray whose colour cannot be read is dropped rather than shown blank: an
+// empty swatch beside a slot number reads as "this slot is empty", which is a
+// different and wrong statement.
+func traysFor(m gen.Machine) []queueTray {
+	trays := decodeTrays(m)
+	sortTrays(trays)
+	out := make([]queueTray, 0, len(trays))
+	for _, t := range trays {
+		hex, ok := normaliseHex(t.Colour)
+		if !ok {
+			continue
+		}
+		out = append(out, queueTray{
+			Hex: hex, Type: t.Type, AmsID: t.AmsID, TrayID: t.TrayID,
+			RemainingGrams: t.RemainingGrams,
+		})
+	}
+	return out
 }
 
 // queueMachine is one printer and whether it can take this bed.
@@ -70,9 +112,19 @@ type queueMachine struct {
 	// Loaded is every colour in this printer's AMS right now, as hexes - the
 	// dialog draws them as swatches beside the name.
 	Loaded []string `json:"loaded"`
+	// Trays is the same filament with its physical position attached, so the
+	// dialog can say "AMS 1, slot 2" and an operator can walk to that slot.
+	// Loaded stays because it answers the simpler question the swatch row asks.
+	Trays []queueTray `json:"trays"`
+	// SuggestedSlotTrays is the tray to use for each plate slot, in slot order,
+	// as ams_mapping integers. Nearest colour, so the dialog opens on the
+	// obvious answer - and it is only a default, shown beside both swatches for
+	// the operator to correct.
+	SuggestedSlotTrays []int `json:"suggested_slot_trays"`
 	// Missing names the bed's colours this printer does not hold, by name
-	// rather than by hex: "does not hold BLUE" is something an operator can act
-	// on, "#1560BD" is something they have to look up.
+	// rather than by hex. Only populated when the colour map can say what a
+	// colour is; empty otherwise, because a guess dressed as a fact is worse
+	// than silence.
 	Missing  []string `json:"missing"`
 	Eligible bool     `json:"eligible"`
 	// Suggested marks the one printer the dialog should offer first - the
@@ -83,7 +135,7 @@ type queueMachine struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// batchQueueOptions lists the machines that could print this bed.
+// batchQueueOptions reports what the bed needs and what each printer holds.
 func (s *Server) batchQueueOptions(c *gin.Context) {
 	id, ok := parseUUIDParam(c, "id")
 	if !ok {
@@ -110,10 +162,11 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 		BatchNumber: batch.BatchNumber,
 		Status:      batch.Status,
 		Colours:     []queueColour{},
+		Slots:       []queueSlot{},
 		Machines:    []queueMachine{},
 	}
-
 	out.Colours = s.queueColoursFor(ctx, jobs)
+	out.Slots = s.queueSlotsFor(ctx, batch)
 
 	rows, err := s.store.Q.ListFleetMachines(ctx)
 	if err != nil {
@@ -121,31 +174,37 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 		return
 	}
 
-	out.ColoursVerified = s.colourMatchingPossible(ctx)
+	// Named colours, when the shop has recorded any. Used to label a slot and
+	// to say what a machine is missing - never to decide anything, so an empty
+	// map costs a label rather than the ability to send.
+	identities, err := s.colourIdentities(ctx)
+	if err != nil {
+		obs.FromContext(ctx).Warn("could not read the colour map", "error", err)
+	}
+	nameSlots(out.Slots, identities)
 
 	eligible := 0
 	for _, m := range rows {
 		machine := queueMachine{
 			ID: m.ID.String(), Name: m.Name, Model: deref(m.Model), Status: m.Status,
-			Loaded: loadedColours(m), Missing: []string{},
+			Loaded: loadedColours(m), Trays: traysFor(m),
+			Missing: []string{}, SuggestedSlotTrays: []int{},
 		}
 		switch {
 		case m.Status == production.FleetMachineOff:
 			machine.Reason = "this printer is off"
-		case !out.ColoursVerified:
-			// Offered, because Tensor cannot honestly say otherwise - see
-			// colourMatchingPossible. The swatches are still shown on both
-			// sides, so the operator can do the comparison Tensor cannot.
-			machine.Eligible = true
-			eligible++
+		case len(machine.Trays) < len(out.Slots):
+			// The one refusal that needs no colour knowledge at all, and the one
+			// that matters most: a plate with more slots than the machine has
+			// spools cannot be mapped, and truncating the mapping would print
+			// the lettering in the body colour.
+			machine.Reason = fmt.Sprintf("holds %d %s; this bed needs %d",
+				len(machine.Trays), plural(len(machine.Trays), "spool"), len(out.Slots))
 		default:
+			machine.Eligible = true
+			machine.SuggestedSlotTrays = suggestSlotTrays(out.Slots, machine.Trays)
 			machine.Missing = missingColours(out.Colours, machine.Loaded)
-			if len(machine.Missing) == 0 {
-				machine.Eligible = true
-				eligible++
-			} else {
-				machine.Reason = "does not hold " + strings.Join(machine.Missing, ", ")
-			}
+			eligible++
 		}
 		out.Machines = append(out.Machines, machine)
 	}
@@ -157,51 +216,119 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	switch {
 	case len(out.Machines) == 0:
 		out.Note = "No machines are known yet. Sync the fleet from BambuBuddy first."
-	case !out.ColoursVerified:
-		out.Note = "Tensor cannot check which colours these printers hold - the filament shelf " +
-			"has never been synced, and an AMS reports a colour only as a hex code. " +
-			"Compare the swatches yourself before sending."
+	case len(out.Slots) == 0:
+		out.Note = "This bed's plate declares no filament. Rebuild the bed before sending it."
 	case eligible == 0:
-		out.Note = "No printer currently holds every colour this bed needs. Load a spool, then try again."
+		out.Note = "No printer has enough spools loaded for this bed yet."
 	}
 	c.JSON(http.StatusOK, out)
 }
 
-// colourMatchingPossible reports whether Tensor can tell what a printer holds.
+// queueSlotsFor reads the slots the bed's plate declares.
 //
-// Today it cannot, unless the filament shelf has been synced, and the reason is
-// worth writing down because the answer looks like a bug either way.
-//
-// An order names a colour in words - "BLUE", "SKY BLUE". An AMS reports one as a
-// bare hex and nothing else: tray_sub_brands is empty and there is no name field
-// on any tray in this fleet. filament_inventory is the only table that holds
-// both, because the sync records BambuBuddy's own swatch against the colour
-// name. With it empty, resolveColourHex falls back to the built-in table in
-// dnp_colour.go, whose hexes are NOT the ones these printers report - it calls
-// blue #1560BD where the AMS says #2850E0.
-//
-// Comparing those would mark every printer ineligible for every coloured bed,
-// which reads as "the fleet is full" rather than "Tensor does not know". So the
-// check reports what it can prove, and the dialog says the rest.
-//
-// A failure counts as "cannot check" rather than "can": a lost connection must
-// not silently turn into a colour rule nobody can see being applied.
-func (s *Server) colourMatchingPossible(ctx context.Context) bool {
-	keys, err := s.store.Q.ListFilamentKeys(ctx)
-	if err != nil {
-		obs.FromContext(ctx).Warn("could not read the filament shelf for the queue dialog", "error", err)
-		return false
+// Empty when the plate cannot be read, which the caller reports rather than
+// treating as an error: an operator opening the dialog should be told the bed
+// needs rebuilding, not shown a stack trace.
+func (s *Server) queueSlotsFor(ctx context.Context, batch gen.Batch) []queueSlot {
+	if s.storage == nil {
+		return []queueSlot{}
 	}
-	return len(keys) > 0
+	plate, err := s.plateFileFor(ctx, batch)
+	if err != nil {
+		return []queueSlot{}
+	}
+	slots, err := s.plateSlots(ctx, plate)
+	if err != nil {
+		obs.FromContext(ctx).Info("could not read the plate's slots for the queue dialog",
+			"batch", batch.BatchNumber, "error", err)
+		return []queueSlot{}
+	}
+	out := make([]queueSlot, 0, len(slots))
+	for i, slot := range slots {
+		out = append(out, queueSlot{Index: i, Hex: slot.Colour, Material: slot.Material})
+	}
+	return out
 }
 
-// queueColoursFor is the bed's colours, by name and by swatch.
+// nameSlots labels each slot with the shop's word for its colour, where there
+// is one. Purely for reading; nothing downstream depends on it.
+func nameSlots(slots []queueSlot, identities []colourIdentity) {
+	byHex := map[string]string{}
+	for _, id := range identities {
+		for _, hex := range id.Hexes {
+			byHex[hex] = id.Name
+		}
+	}
+	for i := range slots {
+		if name, ok := byHex[slots[i].Hex]; ok {
+			slots[i].Name = name
+			continue
+		}
+		// The plank body is the one slot Tensor can always name, because it
+		// writes it itself.
+		if slots[i].Hex == BasePlateColour {
+			slots[i].Name = "plank body"
+		}
+	}
+}
+
+// suggestSlotTrays proposes a tray for each slot, by nearest colour.
 //
-// Shared with the send path deliberately: the dialog's list and the check that
-// refuses a machine must be built the same way, or the dialog offers a printer
-// the server then rejects. A name with no swatch is kept rather than dropped -
-// it still has to be shown, and resolveColourHex already normalises what it
-// returns to "#RRGGBB".
+// A DEFAULT, not a decision: it is shown beside both swatches with the tray
+// named, and one click changes it. Nearest is the right rule for that, and the
+// wrong rule for anything that prints without being looked at - which is why
+// the send takes the operator's answer rather than recomputing this.
+//
+// Each tray is offered once, so two slots never land on one spool.
+func suggestSlotTrays(slots []queueSlot, trays []queueTray) []int {
+	out := make([]int, 0, len(slots))
+	used := map[int]bool{}
+	for _, slot := range slots {
+		best, bestDistance := -1, 0
+		for i, tray := range trays {
+			if used[i] {
+				continue
+			}
+			d, ok := nearestColourDistance(slot.Hex, []string{tray.Hex})
+			if !ok {
+				continue
+			}
+			if best < 0 || d < bestDistance {
+				best, bestDistance = i, d
+			}
+		}
+		if best < 0 {
+			out = append(out, amsSlotUnused)
+			continue
+		}
+		used[best] = true
+		out = append(out, trayAmsIndex(trays[best]))
+	}
+	return out
+}
+
+// trayAmsIndex is the ams_mapping integer for a tray the dialog offered.
+func trayAmsIndex(t queueTray) int {
+	if t.AmsID == nil || t.TrayID == nil {
+		return amsSlotUnused
+	}
+	return *t.AmsID*traysPerAMS + *t.TrayID
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
+}
+
+// queueColoursFor is the bed's colours by name, with a swatch where Tensor has
+// one.
+//
+// Job-derived and therefore incomplete by design: it knows the lettering
+// colours an order asked for, not the plank body Tensor adds itself. The SLOTS
+// are the authoritative list - see queueSlotsFor - and this exists to label the
+// dialog in the operator's own vocabulary.
 func (s *Server) queueColoursFor(ctx context.Context, jobs []gen.ProductionJob) []queueColour {
 	out := make([]queueColour, 0, 4)
 	for _, name := range planColoursFromJobs(jobs) {
@@ -214,23 +341,39 @@ func (s *Server) queueColoursFor(ctx context.Context, jobs []gen.ProductionJob) 
 	return out
 }
 
+// missingColours names the bed's colours a machine does not hold.
+//
+// Advisory now, not a gate: the operator binds slots to trays explicitly, so
+// this only annotates the dropdown. A colour with no resolvable hex is skipped
+// rather than reported missing - saying a printer lacks a colour Tensor cannot
+// describe is not information.
+func missingColours(needed []queueColour, loaded []string) []string {
+	have := map[string]bool{}
+	for _, hex := range loaded {
+		have[hex] = true
+	}
+	missing := make([]string, 0, len(needed))
+	for _, colour := range needed {
+		if colour.Hex == "" {
+			continue
+		}
+		if !have[colour.Hex] {
+			missing = append(missing, colour.Name)
+		}
+	}
+	return missing
+}
+
 // suggestMachine picks the printer to offer first, or -1 when none fits.
 //
-// Nearest colour, not exact, and that difference is deliberate. An exact match
-// is the right rule for REFUSING a machine - see missingColours, where being
-// approximately right means printing a plank in the wrong colour. It is the
-// wrong rule for a default, because the hexes an order resolves to and the hexes
-// an AMS reports come from different sources and rarely agree to the byte (the
-// shop's blue is #1560BD, the spool in the tray says #2850E0). Refusing to
-// suggest anything unless they match exactly would leave the dropdown on "Pick a
-// printer" every single time.
+// Nearest colour, not exact, and only ever a default. The operator sees both
+// sets of swatches and the tray each slot will print from before sending, so a
+// poor suggestion costs one click - while refusing to suggest anything unless
+// the hexes matched exactly would leave the dropdown empty every time, because
+// the hexes an order resolves to and the hexes an AMS reports come from
+// different sources and rarely agree to the byte.
 //
-// A wrong suggestion costs nothing: it is pre-selected, both sets of swatches
-// are on screen beside it, and changing it is one click. A wrong refusal costs a
-// bed nobody can send.
-//
-// Idle beats busy at equal colour distance, because the point of choosing a
-// machine is getting the plate printed sooner.
+// Idle beats busy at equal distance: the point of choosing is printing sooner.
 func suggestMachine(machines []queueMachine, colours []queueColour) int {
 	best, bestScore := -1, 0
 	for i, m := range machines {
@@ -250,9 +393,6 @@ func suggestMachine(machines []queueMachine, colours []queueColour) int {
 		if !matched {
 			continue
 		}
-		// Busy machines are ranked behind idle ones by a margin wider than any
-		// colour distance can reach, so colour still decides between two idle
-		// printers and never loses to a marginally closer busy one.
 		if m.Status != production.FleetMachineIdle {
 			score += busyPenalty
 		}
@@ -298,56 +438,4 @@ func rgbOf(hex string) (r, g, b int, ok bool) {
 		return 0, 0, 0, false
 	}
 	return rr, gg, bb, true
-}
-
-// loadedColours is the hexes in one machine's AMS, as the fleet sync last saw
-// them. Shape written by filamentsJSON (bambubuddy_sync.go).
-func loadedColours(m gen.Machine) []string {
-	var trays []struct {
-		Colour string `json:"colour"`
-		Type   string `json:"type"`
-	}
-	if err := json.Unmarshal(m.Filaments, &trays); err != nil {
-		return []string{}
-	}
-	seen := map[string]bool{}
-	out := make([]string, 0, len(trays))
-	for _, t := range trays {
-		hex, ok := normaliseHex(t.Colour)
-		if !ok || seen[hex] {
-			continue
-		}
-		seen[hex] = true
-		out = append(out, hex)
-	}
-	return out
-}
-
-// missingColours names the bed's colours this machine does not hold.
-//
-// Matched on hex, never on name: the spool in the tray reports a colour, not a
-// word, and "Sky Blue" is printed from the BLUE spool (see CanonicalColourName)
-// - so comparing names would call a machine that holds exactly the right
-// filament ineligible.
-//
-// Exact, never nearest. Sky Blue (#87CEEB) sits closer to a loaded #46A8F9 than
-// Blue (#1560BD) does, so any tolerance loose enough to accept the right spool
-// also accepts the wrong one - which is how a plank prints in a colour nobody
-// ordered.
-//
-// A colour with no hex cannot be matched either way. It is reported missing:
-// Tensor cannot say the machine holds it, and guessing yes is the answer that
-// prints scrap.
-func missingColours(needed []queueColour, loaded []string) []string {
-	have := map[string]bool{}
-	for _, hex := range loaded {
-		have[hex] = true
-	}
-	missing := make([]string, 0, len(needed))
-	for _, colour := range needed {
-		if colour.Hex == "" || !have[colour.Hex] {
-			missing = append(missing, colour.Name)
-		}
-	}
-	return missing
 }

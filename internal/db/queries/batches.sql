@@ -621,3 +621,27 @@ WHERE id = sqlc.arg('id');
 SELECT * FROM batches
 WHERE print_outcome = 'completed' AND status <> 'completed'
 ORDER BY print_finished_at ASC NULLS LAST;
+
+-- name: SetBatchSliceJob :exec
+-- Records the slice Tensor is waiting on, and clears any previous failure.
+--
+-- This is what marks the bed as dispatched during the minutes between asking
+-- for a slice and a queue item existing. Without it the double-send guards see
+-- an idle bed and the plate is sent again.
+UPDATE batches SET
+    bambu_slice_job_id = sqlc.narg('bambu_slice_job_id'),
+    print_error        = NULL,
+    print_error_at     = NULL,
+    updated_at         = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ClearBatchSliceJob :exec
+-- Forgets the slice, so the bed can be sent again.
+--
+-- Used when a slice fails: the bed is still locked and still has a plate, and
+-- leaving the job id set would make it permanently un-sendable while nothing in
+-- BambuBuddy was ever going to finish.
+UPDATE batches SET
+    bambu_slice_job_id = NULL,
+    updated_at         = now()
+WHERE id = sqlc.arg('id');

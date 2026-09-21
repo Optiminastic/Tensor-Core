@@ -62,11 +62,18 @@ var errUnknownColour = errors.New("unknown colour")
 
 // resolveColourHex maps a colour name to "#RRGGBB".
 //
-// The filament shelf wins, because it is the colour that will actually be
-// loaded into the printer. The built-in table is consulted only when the shelf
-// has nothing, and an unrecognised name is an error rather than a default -
-// silently printing black lettering on a plank somebody ordered in pink is the
-// failure this exists to prevent.
+// The colour map wins, because it is the only source that describes the spool
+// PHYSICALLY IN A MACHINE: an operator stood in front of the printer and
+// confirmed that this hex is what the shop calls blue. The filament shelf comes
+// next, then the built-in table, and an unrecognised name is an error rather
+// than a default - silently printing black lettering on a plank somebody
+// ordered in pink is the failure this exists to prevent.
+//
+// The map outranks the SHELF, not merely the built-in table, and that ordering
+// is the point of it. The shelf's colour_hex is BambuBuddy's catalogue swatch,
+// and the catalogue is exactly what these printers disagree with: it calls blue
+// #1560BD while every blue spool in this fleet reports #2850E0. Declaring the
+// catalogue value is what made BambuBuddy refuse plate after plate.
 func (s *Server) resolveColourHex(ctx context.Context, colour string) (string, error) {
 	// Canonicalised first, so a colour the shop prints from another spool
 	// resolves to THAT spool's swatch: sky blue is the blue filament, and a
@@ -76,18 +83,67 @@ func (s *Server) resolveColourHex(ctx context.Context, colour string) (string, e
 		return "", errUnknownColour
 	}
 
-	if hex, err := s.store.Q.GetColourHexByName(ctx, name); err == nil && hex != nil {
-		if normalised, ok := normaliseHex(*hex); ok {
-			return normalised, nil
-		}
-	} else if err != nil && !isNoRows(err) {
+	mapped, err := s.mappedColourHex(ctx, name)
+	if err != nil {
 		return "", err
 	}
-
-	if hex, ok := fallbackColours[strings.ToLower(name)]; ok {
+	shelf, err := s.shelfColourHex(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if hex, ok := pickColourHex(mapped, shelf, name); ok {
 		return hex, nil
 	}
 	return "", errUnknownColour
+}
+
+// pickColourHex is the precedence rule, kept pure so it can be tested without a
+// database: operator-confirmed spool, then the synced shelf, then the built-in
+// table.
+//
+// A candidate that is present but unreadable falls through to the next source
+// rather than failing the render. A malformed row is a data-entry problem, and
+// holding a job over one when a perfectly good answer sits behind it would turn
+// a typo into a stopped bed.
+func pickColourHex(mapped, shelf *string, canonicalName string) (string, bool) {
+	for _, candidate := range []*string{mapped, shelf} {
+		if candidate == nil {
+			continue
+		}
+		if normalised, ok := normaliseHex(*candidate); ok {
+			return normalised, true
+		}
+	}
+	if hex, ok := fallbackColours[strings.ToLower(canonicalName)]; ok {
+		return hex, true
+	}
+	return "", false
+}
+
+// mappedColourHex is the operator-confirmed swatch for a canonical colour name,
+// or nil when nobody has recorded one.
+func (s *Server) mappedColourHex(ctx context.Context, name string) (*string, error) {
+	hex, err := s.store.Q.GetColourMapPrimaryHex(ctx, name)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &hex, nil
+}
+
+// shelfColourHex is the synced filament shelf's swatch, or nil when the shelf
+// has no row or no hex for this colour.
+func (s *Server) shelfColourHex(ctx context.Context, name string) (*string, error) {
+	hex, err := s.store.Q.GetColourHexByName(ctx, name)
+	if err != nil {
+		if isNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return hex, nil
 }
 
 // normaliseHex accepts the forms BambuBuddy stores and returns "#RRGGBB".

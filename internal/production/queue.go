@@ -372,6 +372,57 @@ func (e *QueuePinEnqueuer) Enqueue(ctx context.Context, args PinQueueItemArgs) e
 	return err
 }
 
+// QueueSlicedPlateArgs waits for a slice to finish, then queues the result on
+// the printer an operator chose.
+//
+// The wait is the reason this is a job rather than part of the request. Tensor
+// asks BambuBuddy to slice a plate with a specific printer's presets and spool
+// colours; that answers 202 and finishes minutes later. Only the finished slice
+// has a library file id, and only a queue item can carry printer_id - so the
+// binding to a machine can only happen after the slice, and an HTTP request
+// cannot be held open that long.
+//
+// It carries the mapping it was built from, not just the ids, so the worker can
+// check that the spools have not moved while the slice ran. Sending a plate
+// whose slot 2 now points at a different colour is the failure this whole path
+// exists to prevent, and it would be invisible.
+type QueueSlicedPlateArgs struct {
+	BatchID     uuid.UUID `json:"batch_id"`
+	SliceJobID  int       `json:"slice_job_id"`
+	PrinterID   int       `json:"printer_id"`
+	MachineID   uuid.UUID `json:"machine_id"`
+	MachineName string    `json:"machine_name"`
+	// AmsMapping is the tray serving each plate slot, in slot order.
+	AmsMapping []int `json:"ams_mapping"`
+	// TrayHexes is what each of those trays held when the slice was requested.
+	TrayHexes []string `json:"tray_hexes"`
+}
+
+func (QueueSlicedPlateArgs) Kind() string { return "queue_sliced_plate" }
+
+// InsertOpts routes it to the pin queue and bounds the wait. River's backoff
+// reaches roughly half an hour by the tenth attempt, which outlasts slicing a
+// full bed; past that the worker gives up and says so on the batch.
+func (QueueSlicedPlateArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: QueuePinQueueName, MaxAttempts: pinMaxAttempts}
+}
+
+// QueueSlicedPlateEnqueuer schedules the queueing that follows a slice.
+type QueueSlicedPlateEnqueuer struct{ client *river.Client[pgx.Tx] }
+
+func NewQueueSlicedPlateEnqueuer(client *river.Client[pgx.Tx]) *QueueSlicedPlateEnqueuer {
+	return &QueueSlicedPlateEnqueuer{client: client}
+}
+
+// Enqueue schedules one wait-then-queue.
+func (e *QueueSlicedPlateEnqueuer) Enqueue(ctx context.Context, args QueueSlicedPlateArgs) error {
+	if e == nil || e.client == nil {
+		return nil
+	}
+	_, err := e.client.Insert(ctx, args, nil)
+	return err
+}
+
 // DispatchEnqueuer inserts dispatch passes into River.
 //
 // The pass also runs on a periodic tick, but a tick only fires on the River

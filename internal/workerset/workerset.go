@@ -97,6 +97,11 @@ func Start(
 	// silently never takes effect.
 	river.AddWorker(workers, httpapi.NewQueuePinWorker(server, logger))
 
+	// Waiting for a slice, then queueing the result on the printer an operator
+	// chose. Registered unconditionally for the same reason as the pin worker:
+	// these jobs come from somebody pressing Queue, not from a flag.
+	river.AddWorker(workers, httpapi.NewSliceQueueWorker(server, logger))
+
 	// Pulling Shopify orders. Registered unconditionally: this is the only
 	// path an order takes into Tensor, and a queue nothing consumes would mean
 	// pressing Sync reports success and imports nothing.
@@ -152,6 +157,7 @@ func Start(
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(client))
 	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(client, debounce))
 	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(client))
+	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(client))
 	EnableModelGeneration(server, cfg, production.NewModelGenEnqueuer(client), logger)
 
 	// Slicing needs its own insert-only client: a consuming client validates

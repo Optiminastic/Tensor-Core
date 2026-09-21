@@ -255,17 +255,17 @@ func statusReason(s bambubuddy.Status) *string {
 }
 
 // filamentsJSON renders the AMS trays that actually hold filament, in the shape
-// the fleet DTO already uses.
+// machine_trays.go reads back.
 //
 // remain is a percentage (0-100) and is -1 when the spool carries no RFID tag,
 // so it is only reported when the printer genuinely knows.
+//
+// The AMS and tray ids are recorded, not just the colour. Without them Tensor
+// knows a printer holds blue but not WHICH slot holds it, and an ams_mapping -
+// the thing that tells BambuBuddy which spool prints which part of the plate -
+// cannot be built at all.
 func filamentsJSON(s bambubuddy.Status) []byte {
-	type loaded struct {
-		Colour         string  `json:"colour"`
-		Type           string  `json:"type"`
-		RemainingGrams float64 `json:"remaining_grams"`
-	}
-	out := make([]loaded, 0, 4)
+	out := make([]loadedTray, 0, 4)
 	for _, ams := range s.AMS {
 		for _, t := range ams.Trays {
 			if !t.Exists || strings.TrimSpace(t.Type) == "" {
@@ -276,11 +276,17 @@ func filamentsJSON(s bambubuddy.Status) []byte {
 				// A full Bambu spool is 1kg; remain is the percentage left.
 				grams = float64(t.Remain) * 10
 			}
-			out = append(out, loaded{
+			amsID, trayID := ams.ID, t.ID
+			out = append(out, loadedTray{
 				Colour: hexColour(t.Colour), Type: t.Type, RemainingGrams: grams,
+				AmsID: &amsID, TrayID: &trayID, TrayInfoIdx: t.InfoIdx,
 			})
 		}
 	}
+	// Ordered by physical position, so the array means the same thing twice
+	// running and an operator reading "AMS 1, slot 2" off the screen can walk
+	// to that slot.
+	sortTrays(out)
 	raw, err := json.Marshal(out)
 	if err != nil {
 		return []byte("[]")

@@ -132,3 +132,82 @@ func TestDeclaredMaterialReachesEverySlot(t *testing.T) {
 		}
 	}
 }
+
+// ReadPlateSlots must agree with what plateProjectSettings wrote, because the
+// send path uses it to decide which spool each slot prints from. If the reader
+// and the writer disagree about order, the plate is sliced with the lettering
+// colour in the body's slot - which looks like a successful send and prints an
+// inside-out plank.
+func TestReadPlateSlotsRoundTripsTheWrittenDeclaration(t *testing.T) {
+	data, _, err := Merge3MF([]PlacedModel{
+		{Name: "T3DPS-1", Parts: plank("#2850E0")},
+		{Name: "T3DPS-2", Parts: plank("#2850E0"), XOffsetMM: 100},
+	})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	slots, err := ReadPlateSlots(data)
+	if err != nil {
+		t.Fatalf("ReadPlateSlots: %v", err)
+	}
+
+	_, colours := slotsOf(t, data)
+	if len(slots) != len(colours) {
+		t.Fatalf("read %d slots but the plate declares %d (%v)", len(slots), len(colours), colours)
+	}
+	for i, want := range colours {
+		if slots[i].Colour != want {
+			t.Errorf("slot %d reads %q, but the plate declares %q", i+1, slots[i].Colour, want)
+		}
+	}
+	if len(slots) == 0 || slots[0].Colour != "#FFFFFF" {
+		t.Errorf("slot 1 = %v, want the #FFFFFF plank body - the rule planObjects "+
+			"applies and nothing outside meshio knows", slots)
+	}
+	for i, s := range slots {
+		if s.Material == "" {
+			t.Errorf("slot %d has no material; a slicer cannot act on an empty filament type", i+1)
+		}
+	}
+}
+
+// The reader has to agree with the writer in the awkward case too, not just the
+// tidy one: a single-part upload placed first still leaves the body in slot 1.
+func TestReadPlateSlotsKeepsTheBodyFirstWhenAnUploadIsPlacedFirst(t *testing.T) {
+	upload := []Part{{Name: "Uploaded", Colour: "#1560BD", Triangles: box(0, 0, 0, 40, 40, 10)}}
+
+	data, _, err := Merge3MF([]PlacedModel{
+		{Name: "T3DPS-1", Parts: upload},
+		{Name: "T3DPS-2", Parts: plank("#1560BD"), XOffsetMM: 100},
+	})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	slots, err := ReadPlateSlots(data)
+	if err != nil {
+		t.Fatalf("ReadPlateSlots: %v", err)
+	}
+	if len(slots) != 2 || slots[0].Colour != "#FFFFFF" {
+		t.Errorf("slots = %v, want the #FFFFFF base in slot 1", slots)
+	}
+}
+
+// A file that states no filament requirements is a real thing - an operator can
+// upload a 3MF from anywhere - and it is the CALLER's job to refuse it with a
+// reason. Returning an error here would turn "this file says nothing" into
+// "this file is broken".
+func TestReadPlateSlotsReportsNoSlotsRatherThanFailing(t *testing.T) {
+	data, err := WriteModels3MF([]Model{{Name: "Plank", Parts: plank("#1560BD")}})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := ReadPlateSlots(data); err != nil {
+		t.Fatalf("ReadPlateSlots on a normal plate: %v", err)
+	}
+
+	if _, err := ReadPlateSlots([]byte("not a zip")); err == nil {
+		t.Error("ReadPlateSlots accepted something that is not a 3MF")
+	}
+}

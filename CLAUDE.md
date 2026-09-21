@@ -104,5 +104,31 @@ One Postgres, two migration tools. The goose baseline is idempotent and never to
 
 `user_roles.user_id` holds a Better Auth user id with **no foreign key** - an orphaned row is harmless.
 
+## Running it locally
+
+`docker compose up -d --build` - the API and BOTH workers, matching the three
+services that run on the server (tensor-api, tensor-production-worker,
+tensor-slice-worker).
+
+`cmd/api` starts the whole production pipeline ITSELF unless
+`RUN_PRODUCTION_WORKERS=false`. Run it beside the worker containers with that
+unset and you get two complete sets of workers consuming the same queues against
+the same database - correct, because River locks each job to one worker, but
+twice the load. A single order sync enqueuing ~1600 job-creation jobs was then
+enough to starve `/brands` past the frontend's 5s timeout and leave the
+dashboard blank with no error on screen.
+
+So `env/local.env` sets `RUN_PRODUCTION_WORKERS=false`: the API serves HTTP, the
+containers consume the queues. `cmd/productionworker` ignores that flag by
+design - it exists to consume.
+
+Configuration is `env/local.env` for every binary, on the host and in the
+containers alike (`.env` is NOT read by any of them - a value set only there
+looks applied and is not). Two values cannot be right on both sides and are
+overridden in docker-compose.yml: OPENSCAD_BIN, which is a Windows path on the
+host and the Debian package in the image, and FAKE_SLICE, which is true on the
+host because Windows cannot run Bambu Studio and false in the slice worker,
+which can.
+
 ## After changes
 Run `gofmt -w internal cmd`, `go vet ./...`, and `go test ./...` (with `TENSOR_TEST_DB` set for the integration suite) - all must be green before done.

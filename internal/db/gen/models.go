@@ -39,6 +39,7 @@ type Batch struct {
 	CreatedAt                   pgtype.Timestamptz
 	UpdatedAt                   pgtype.Timestamptz
 	PipelineRunID               *int32
+	BambuSliceJobID             *int32
 	ArchiveID                   *int32
 	PrintOutcome                *string
 	PrintStartedAt              pgtype.Timestamptz
@@ -77,6 +78,18 @@ type BrandConnection struct {
 	ConnectedBy       *string
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
+}
+
+type ColourMap struct {
+	ID          uuid.UUID
+	ColourName  string
+	Hex         string
+	IsPrimary   bool
+	Note        *string
+	ConfirmedBy *string
+	ConfirmedAt pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
 }
 
 type CostAssumptionSet struct {

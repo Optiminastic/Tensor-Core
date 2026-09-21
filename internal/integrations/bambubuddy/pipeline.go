@@ -37,6 +37,14 @@ type Pipeline struct {
 	// for, e.g. "H2C". Null on one pinned to a specific printer.
 	TargetModelClass *string `json:"target_model_class"`
 	TargetPrinterID  *int    `json:"target_printer_id"`
+
+	// The presets this pipeline slices with. Tensor reads them and passes them
+	// straight back on a direct slice, so the slicer configuration lives in
+	// BambuBuddy only - duplicating it here is how two sources of truth start
+	// disagreeing about what an A2L plate should look like.
+	PrinterPreset   *PresetVal  `json:"printer_preset"`
+	ProcessPreset   *PresetVal  `json:"process_preset"`
+	FilamentPresets []PresetVal `json:"filament_presets"`
 }
 
 // ListPipelines returns every configured pipeline.

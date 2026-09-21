@@ -42,6 +42,10 @@ func (s *Server) registerFilament(r *gin.Engine) {
 	// Mirrors BambuBuddy's shelf into Tensor's per-material buckets. Manage,
 	// not read: it rewrites stock figures.
 	g.POST("/sync", s.guards.RequirePermission(auth.FilamentManage.Key()), s.syncFilamentInventory)
+	// What a colour NAME means to the printers - see colour_map.go. It lives
+	// under filament because that is what it describes, and because the floor
+	// already has the filament permissions.
+	s.registerColourMap(g)
 }
 
 func (s *Server) listFilament(c *gin.Context) {

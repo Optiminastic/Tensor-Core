@@ -498,6 +498,10 @@ CREATE TABLE batches (
     -- when the run is accepted (202), before any queue entry exists - see
     -- migration 0066.
     pipeline_run_id                 integer,
+    -- The slice BambuBuddy is running for this bed right now, before any
+    -- queue item exists. See migration 0075: without it a bed mid-slice
+    -- looks undispatched and can be sent - and printed - twice.
+    bambu_slice_job_id              integer,
     -- What actually happened on the printer, from BambuBuddy's archive - see
     -- migration 0068. print_outcome is null until a print resolves and is the
     -- idempotency key for the write that resolves it. The actual_* pair sits
@@ -535,6 +539,30 @@ CREATE TABLE filament_inventory (
 );
 CREATE UNIQUE INDEX uq_filament_material_colour
     ON filament_inventory (material, COALESCE(colour, ''));
+
+-- What a colour NAME means to the printers that have to print it. See migration
+-- 0074: an order says "BLUE", an AMS reports only a hex, and nothing else holds
+-- both. A name accepts many hexes (thirteen printers do not agree on blue) with
+-- exactly one primary - the swatch used for rendering and for the dialog.
+--
+-- Separate from filament_inventory.colour_hex on purpose: the spool sync
+-- overwrites that column and deletes its row when the shelf stops reporting the
+-- colour, either of which would silently discard an operator's confirmation.
+CREATE TABLE colour_map (
+    id           uuid PRIMARY KEY,
+    colour_name  varchar(64) NOT NULL,
+    hex          varchar(7) NOT NULL,
+    is_primary   boolean NOT NULL DEFAULT false,
+    note         text,
+    confirmed_by varchar(255),
+    confirmed_at timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_colour_map_pair
+    ON colour_map (lower(trim(colour_name)), upper(hex));
+CREATE UNIQUE INDEX uq_colour_map_primary
+    ON colour_map (lower(trim(colour_name))) WHERE is_primary;
 
 -- Everything on the shelf that is not filament: boxes, inserts, cards, tape.
 -- Separate from filament_inventory because that table is keyed

@@ -123,6 +123,9 @@ type Tray struct {
 	Exists   bool   `json:"exists"`
 	Remain   int    `json:"remain"`
 	SubBrand string `json:"tray_sub_brands"`
+	// InfoIdx is BambuBuddy's filament id for what is in the slot. Carried for
+	// configuring a slot later; it is not part of an ams_mapping.
+	InfoIdx string `json:"tray_info_idx"`
 }
 
 // AMS is one filament unit and its slots.

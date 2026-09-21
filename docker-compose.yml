@@ -1,0 +1,68 @@
+# The whole backend, locally: the API and BOTH workers, in one command.
+#
+#   docker compose up -d --build        # API + production worker + slice worker
+#   docker compose up -d productionworker sliceworker   # workers only (API via `go run`)
+#   docker compose logs -f              # what they are doing
+#
+# This mirrors what runs on the server, where the same three images are three
+# Coolify services (tensor-api, tensor-production-worker, tensor-slice-worker).
+# Running only the API locally is the state this file exists to end: without the
+# workers nothing renders a model, nothing plans a bed, nothing slices a plate
+# and nothing pins a sent plate to the printer an operator chose - the queue
+# simply fills up and no error ever says why.
+#
+# Configuration is env/local.env, the same file each binary loads on the host.
+# It is gitignored and excluded by .dockerignore, so it is mounted at run time
+# and never baked into an image. Only the values that CANNOT be right on both
+# sides are overridden per service below.
+#
+# The database (Neon), object storage (AWS) and BambuBuddy are all reachable
+# from inside these containers as they are from the host - BambuBuddy included,
+# over its tailnet name, because Docker Desktop routes container traffic through
+# the host's network stack and so through Tailscale.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tensor-api
+    env_file: [env/local.env]
+    ports: ["8001:8001"]
+    restart: unless-stopped
+
+  productionworker:
+    build:
+      context: .
+      dockerfile: productionworker.Dockerfile
+    image: tensor-production-worker
+    env_file: [env/local.env]
+    environment:
+      # env/local.env points at the Windows OpenSCAD for host runs. In here it
+      # is the Debian package, and getting this wrong is quiet: the worker
+      # reports model generation disabled at startup and every personalised job
+      # waits for a manual upload rather than failing.
+      OPENSCAD_BIN: /usr/bin/openscad
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 2G}
+
+  sliceworker:
+    build:
+      context: .
+      dockerfile: sliceworker.Dockerfile
+    image: tensor-slice-worker
+    env_file: [env/local.env]
+    environment:
+      # The whole point of running this in a container. env/local.env sets
+      # FAKE_SLICE=true because a Windows host cannot run Bambu Studio; here it
+      # can, so fabricated metrics would waste a working slicer.
+      FAKE_SLICE: "false"
+      BAMBU_ROOT: /opt/bambu/squashfs-root
+    restart: unless-stopped
+    # Slicing is CPU-bound and SLICE_CONCURRENCY runs that many at once.
+    # Uncapped, one burst of batches starves everything else on the box.
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 4G}
