@@ -1301,17 +1301,19 @@ func (q *Queries) ListDraftBatchJobIDs(ctx context.Context) ([]ListDraftBatchJob
 }
 
 const listJobNumbersForBatches = `-- name: ListJobNumbersForBatches :many
-SELECT j.batch_id, j.job_number, j.colour, j.priority
+SELECT j.batch_id, j.job_number, j.colour, j.priority, o.order_number
 FROM production_jobs j
+LEFT JOIN orders o ON o.id = j.order_id
 WHERE j.batch_id = ANY($1::uuid[])
 ORDER BY j.job_number
 `
 
 type ListJobNumbersForBatchesRow struct {
-	BatchID   *uuid.UUID
-	JobNumber string
-	Colour    *string
-	Priority  int32
+	BatchID     *uuid.UUID
+	JobNumber   string
+	Colour      *string
+	Priority    int32
+	OrderNumber *string
 }
 
 // Each batch's jobs, by job number.
@@ -1319,8 +1321,15 @@ type ListJobNumbersForBatchesRow struct {
 // For the Batches table's Jobs column, which shows WHICH orders are on a bed
 // rather than how many jobs it holds - "114556 114557 114558" answers the
 // question an operator actually has, where "4" does not. The order number is
-// read back out of the job number (JOB-114556), the same way the merged plate is
-// named, so the column and the file the operator downloads always agree.
+// taken from the ORDER the job belongs to, falling back to reading it out of
+// the job number (JOB-114556) for a job with no order.
+//
+// Reading it out of the job number alone was true only by convention: an
+// imported job is numbered after its order, so JOB-115251 belongs to
+// T3DPS-115251. A reprint is numbered from a sequence instead, so it showed as
+// "1000005" - a number belonging to no order, on a bed whose whole purpose was
+// to reprint somebody's plank. The order is on the job; asking it is both
+// correct and no harder.
 //
 // Only the columns the decorated columns need: this is asked for a whole page
 // of batches at once, and they have no use for a job's full row. priority comes
@@ -1341,6 +1350,7 @@ func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.
 			&i.JobNumber,
 			&i.Colour,
 			&i.Priority,
+			&i.OrderNumber,
 		); err != nil {
 			return nil, err
 		}

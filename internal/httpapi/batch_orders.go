@@ -15,6 +15,7 @@ package httpapi
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -98,7 +99,7 @@ func orderNumbersByBatch(rows []gen.ListJobNumbersForBatchesRow) map[uuid.UUID][
 		if r.BatchID == nil {
 			continue
 		}
-		number := orderNumberFromJobNumber(r.JobNumber)
+		number := orderTagFor(r.OrderNumber, r.JobNumber)
 		if number == "" {
 			continue
 		}
@@ -158,7 +159,7 @@ func priorityOrderNumbersByBatch(rows []gen.ListJobNumbersForBatchesRow) map[uui
 		if r.BatchID == nil || r.Priority >= NormalRank {
 			continue
 		}
-		number := orderNumberFromJobNumber(r.JobNumber)
+		number := orderTagFor(r.OrderNumber, r.JobNumber)
 		if number == "" {
 			continue
 		}
@@ -201,4 +202,43 @@ func batchIDsOf(rows []gen.Batch) []uuid.UUID {
 		ids = append(ids, b.ID)
 	}
 	return ids
+}
+
+// orderTagFor is the order identifier shown on a bed's row.
+//
+// The order's own number, reduced to its digits so the column reads the way it
+// always has - T3DPS-115251 as "115251". Falls back to reading the job number
+// for a job belonging to no order, which is how a hand-added plank or an older
+// reprint still gets a tag.
+//
+// Deriving it from the job number alone was true only by convention: an
+// imported job is numbered after its order, and a reprint is numbered from a
+// sequence, so a reprinted plank was tagged with a number belonging to no
+// order at all.
+func orderTagFor(orderNumber *string, jobNumber string) string {
+	if orderNumber != nil {
+		if tag := digitsOfOrderNumber(*orderNumber); tag != "" {
+			return tag
+		}
+	}
+	return orderNumberFromJobNumber(jobNumber)
+}
+
+// digitsOfOrderNumber takes the numeric part of a store order number.
+//
+// Empty when there is no digit-only segment, so a store numbering its orders
+// some other way falls through to the job number rather than showing a
+// fragment of a format this does not understand.
+func digitsOfOrderNumber(orderNumber string) string {
+	trimmed := strings.TrimSpace(orderNumber)
+	if trimmed == "" {
+		return ""
+	}
+	if i := strings.LastIndex(trimmed, "-"); i >= 0 {
+		trimmed = trimmed[i+1:]
+	}
+	if trimmed == "" || !allDigits(trimmed) {
+		return ""
+	}
+	return trimmed
 }
