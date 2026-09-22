@@ -636,6 +636,44 @@ func (q *Queries) ListApprovableDraftsForMachine(ctx context.Context, arg ListAp
 	return items, nil
 }
 
+const listBatchIdentityForIDs = `-- name: ListBatchIdentityForIDs :many
+SELECT id, status, batch_number, manual FROM batches WHERE id = ANY($1::uuid[])
+`
+
+type ListBatchIdentityForIDsRow struct {
+	ID          uuid.UUID
+	Status      string
+	BatchNumber string
+	Manual      bool
+}
+
+// Status AND number for a set of beds, for a list that has to NAME the bed a
+// product is sitting on rather than just classify it.
+func (q *Queries) ListBatchIdentityForIDs(ctx context.Context, ids []uuid.UUID) ([]ListBatchIdentityForIDsRow, error) {
+	rows, err := q.db.Query(ctx, listBatchIdentityForIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBatchIdentityForIDsRow{}
+	for rows.Next() {
+		var i ListBatchIdentityForIDsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.BatchNumber,
+			&i.Manual,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBatchStatusesForIDs = `-- name: ListBatchStatusesForIDs :many
 SELECT id, status FROM batches WHERE id = ANY($1::uuid[])
 `

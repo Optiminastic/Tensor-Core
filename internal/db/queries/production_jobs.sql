@@ -752,3 +752,36 @@ RETURNING id, job_number;
 -- finished with it.
 SELECT count(*) FROM production_jobs
 WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
+
+-- name: ListJobsForCustomBatch :many
+-- Every product from an order nobody has shipped yet, whether or not it can be
+-- moved onto a bed right now.
+--
+-- Deliberately WIDER than ListReplannableJobs, which answers "what may the
+-- planner rearrange" and so returns only what is free. This answers the
+-- question a person asks while looking at the orders page: where are my
+-- forty-three unfulfilled orders? Most of their planks are on locked beds or
+-- flagged for attention, and a dialog that silently omitted them left somebody
+-- counting rows and wondering what had gone wrong.
+--
+-- So it returns them all and carries the facts needed to say why each one is or
+-- is not available: the bed it sits on, that bed's status, and whether a person
+-- built it. Availability itself is decided in Go, where the reason can be
+-- written in words.
+--
+-- Ordered by when the CUSTOMER placed the order, oldest first, matching the
+-- planner - jobs created by one import share a created_at to the microsecond,
+-- so ordering on that would list a ninety-order import arbitrarily.
+-- j.* alone, so this returns production_jobs rows rather than a bespoke shape.
+-- The bed's status and number are read separately by id: two small queries
+-- beat a joined row that has to be copied field by field back into a job,
+-- where a column added later would silently arrive as a zero value.
+SELECT j.* FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
+LEFT JOIN orders o ON o.id = j.order_id
+WHERE j.status = 'queued'
+  AND j.quantity > 0
+  -- A job with no order is a reprint or a hand-added plank: it belongs to
+  -- nobody's shipment and is always still outstanding.
+  AND (o.id IS NULL OR o.fulfillment_status <> 'fulfilled')
+ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;

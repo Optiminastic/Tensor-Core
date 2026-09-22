@@ -1200,6 +1200,124 @@ func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]P
 	return items, nil
 }
 
+const listJobsForCustomBatch = `-- name: ListJobsForCustomBatch :many
+SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+LEFT JOIN batches b ON b.id = j.batch_id
+LEFT JOIN orders o ON o.id = j.order_id
+WHERE j.status = 'queued'
+  AND j.quantity > 0
+  -- A job with no order is a reprint or a hand-added plank: it belongs to
+  -- nobody's shipment and is always still outstanding.
+  AND (o.id IS NULL OR o.fulfillment_status <> 'fulfilled')
+ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC
+`
+
+// Every product from an order nobody has shipped yet, whether or not it can be
+// moved onto a bed right now.
+//
+// Deliberately WIDER than ListReplannableJobs, which answers "what may the
+// planner rearrange" and so returns only what is free. This answers the
+// question a person asks while looking at the orders page: where are my
+// forty-three unfulfilled orders? Most of their planks are on locked beds or
+// flagged for attention, and a dialog that silently omitted them left somebody
+// counting rows and wondering what had gone wrong.
+//
+// So it returns them all and carries the facts needed to say why each one is or
+// is not available: the bed it sits on, that bed's status, and whether a person
+// built it. Availability itself is decided in Go, where the reason can be
+// written in words.
+//
+// Ordered by when the CUSTOMER placed the order, oldest first, matching the
+// planner - jobs created by one import share a created_at to the microsecond,
+// so ordering on that would list a ninety-order import arbitrarily.
+// j.* alone, so this returns production_jobs rows rather than a bespoke shape.
+// The bed's status and number are read separately by id: two small queries
+// beat a joined row that has to be copied field by field back into a job,
+// where a column added later would silently arrive as a zero value.
+func (q *Queries) ListJobsForCustomBatch(ctx context.Context) ([]ProductionJob, error) {
+	rows, err := q.db.Query(ctx, listJobsForCustomBatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductionJob{}
+	for rows.Next() {
+		var i ProductionJob
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.FinishingStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.VariantTitle,
+			&i.PersonalisationProperties,
+			&i.ModelError,
+			&i.ModelErrorAt,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductionJobs = `-- name: ListProductionJobs :many
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,

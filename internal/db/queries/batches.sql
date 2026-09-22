@@ -25,6 +25,11 @@ SELECT * FROM batches WHERE id = $1;
 -- GetBatchByID call for every job on a list endpoint.
 SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 
+-- name: ListBatchIdentityForIDs :many
+-- Status AND number for a set of beds, for a list that has to NAME the bed a
+-- product is sitting on rather than just classify it.
+SELECT id, status, batch_number, manual FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
+
 -- name: ListBatches :many
 -- Newest batch first, by the batch's own number.
 --

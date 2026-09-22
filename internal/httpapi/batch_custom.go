@@ -47,6 +47,16 @@ type batchableJob struct {
 	// ColourLabel is what to show beside the swatch: the bed's colour in the
 	// order's own words.
 	ColourLabel string `json:"colour_label"`
+	// Available reports whether this product can be put on a bed right now.
+	// False ones are still listed, because the question somebody opens this
+	// dialog with is "where are my unfulfilled orders" and an omitted row
+	// answers it with silence.
+	Available bool `json:"available"`
+	// UnavailableReason says why not, in words. Empty when available.
+	UnavailableReason string `json:"unavailable_reason"`
+	// OnBed names the bed this product already sits on, so "locked" has
+	// somewhere to point.
+	OnBed string `json:"on_bed"`
 }
 
 // listBatchableJobs returns every product from an unfulfilled order that could
@@ -69,25 +79,93 @@ type batchableJob struct {
 // by accident.
 func (s *Server) listBatchableJobs(c *gin.Context) {
 	ctx := c.Request.Context()
-	rows, err := s.store.Q.ListReplannableJobs(ctx)
+	jobs, err := s.store.Q.ListJobsForCustomBatch(ctx)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the jobs waiting to be batched.")
+		detail(c, http.StatusInternalServerError, "Could not read the products waiting.")
+		return
+	}
+	beds, err := s.bedsHolding(ctx, jobs)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the beds those products are on.")
 		return
 	}
 
-	dtos := s.productionJobsDTO(ctx, rows)
+	dtos := s.productionJobsDTO(ctx, jobs)
 	out := batchableJobsResponse{
 		Jobs:        make([]batchableJob, 0, len(dtos)),
 		UnitsPerBed: s.bedUnitCap(),
 	}
 	for i, dto := range dtos {
+		// The zero row when the product is on no bed, which unavailableBecause
+		// reads as "not on one" rather than "on an unreadable one".
+		var bed gen.ListBatchIdentityForIDsRow
+		if jobs[i].BatchID != nil {
+			bed = beds[*jobs[i].BatchID]
+		}
+		reason := unavailableBecause(jobs[i], bed)
 		out.Jobs = append(out.Jobs, batchableJob{
 			productionJobResponse: dto,
-			CompatibilityKey:      compatibilityKeyString(rows[i]),
-			ColourLabel:           jobColourKey(rows[i]),
+			CompatibilityKey:      compatibilityKeyString(jobs[i]),
+			ColourLabel:           jobColourKey(jobs[i]),
+			Available:             reason == "",
+			UnavailableReason:     reason,
+			OnBed:                 bed.BatchNumber,
 		})
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// bedsHolding reads the beds these products sit on, by id.
+//
+// One query for the whole list rather than one per product, and separate from
+// the job query so that one can return production_jobs rows unchanged.
+func (s *Server) bedsHolding(
+	ctx context.Context, jobs []gen.ProductionJob,
+) (map[uuid.UUID]gen.ListBatchIdentityForIDsRow, error) {
+	out := map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}
+	ids := dedupeIDs(jobs, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.store.Q.ListBatchIdentityForIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r
+	}
+	return out, nil
+}
+
+// unavailableBecause explains why a product cannot go on a bed right now, or
+// returns empty when it can.
+//
+// The same rules the create path enforces, said in words rather than enforced
+// in silence. Ordered most-actionable first: a hold and a flag are somebody's
+// to clear, whereas "already on a locked bed" is simply how the floor works.
+func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow) string {
+	switch {
+	case j.Held:
+		return "on hold"
+	case j.IssueReason != nil:
+		return "needs attention: " + *j.IssueReason
+	case j.PersonalisationStatus != production.PersonalisationValidated &&
+		j.PersonalisationStatus != production.PersonalisationNotRequired:
+		return "personalisation not checked yet"
+	case j.BatchID == nil:
+		return ""
+	case bed.Status == production.BatchPendingApproval:
+		// A Draft is a proposal, so its planks can be rearranged - including
+		// off another hand-built bed, which is one person moving their own
+		// work rather than the planner overruling it.
+		return ""
+	case bed.Status == "":
+		// The bed vanished between the two reads. Treating an unknown bed as
+		// movable would be the one guess here that prints something.
+		return "on a bed Tensor cannot read"
+	default:
+		return "already on a locked bed"
+	}
 }
 
 type createCustomBatchRequest struct {
