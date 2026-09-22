@@ -176,3 +176,12 @@ SELECT li.order_id, li.sku, li.product_name
 FROM order_line_items li
 JOIN orders o ON o.id = li.order_id
 WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));
+
+-- name: ListOrderNumbersForIDs :many
+-- The order number for each of a set of order ids.
+--
+-- For lists of jobs, which name the order a plank belongs to. That was read
+-- out of the JOB number, which holds only by convention - an imported job is
+-- numbered after its order - and stops holding for a job numbered from a
+-- sequence, which then displayed a number belonging to no order at all.
+SELECT id, order_number FROM orders WHERE id = ANY(sqlc.arg('ids')::uuid[]);

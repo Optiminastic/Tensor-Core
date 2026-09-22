@@ -209,6 +209,41 @@ func (q *Queries) ListOrderLineProducts(ctx context.Context, source *string) ([]
 	return items, nil
 }
 
+const listOrderNumbersForIDs = `-- name: ListOrderNumbersForIDs :many
+SELECT id, order_number FROM orders WHERE id = ANY($1::uuid[])
+`
+
+type ListOrderNumbersForIDsRow struct {
+	ID          uuid.UUID
+	OrderNumber string
+}
+
+// The order number for each of a set of order ids.
+//
+// For lists of jobs, which name the order a plank belongs to. That was read
+// out of the JOB number, which holds only by convention - an imported job is
+// numbered after its order - and stops holding for a job numbered from a
+// sequence, which then displayed a number belonging to no order at all.
+func (q *Queries) ListOrderNumbersForIDs(ctx context.Context, ids []uuid.UUID) ([]ListOrderNumbersForIDsRow, error) {
+	rows, err := q.db.Query(ctx, listOrderNumbersForIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrderNumbersForIDsRow{}
+	for rows.Next() {
+		var i ListOrderNumbersForIDsRow
+		if err := rows.Scan(&i.ID, &i.OrderNumber); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOrders = `-- name: ListOrders :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
 WHERE ($1::text IS NULL OR source = $1)

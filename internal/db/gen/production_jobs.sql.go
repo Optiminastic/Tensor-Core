@@ -2163,6 +2163,40 @@ func (q *Queries) RemoveJobFromBatch(ctx context.Context, arg RemoveJobFromBatch
 	return i, err
 }
 
+const requeueFinishedJob = `-- name: RequeueFinishedJob :exec
+UPDATE production_jobs SET
+    status           = 'queued',
+    qc_status        = 'pending',
+    packaging_status = 'pending',
+    assembly_status  = CASE WHEN assembly_status = 'not_required'
+                            THEN assembly_status ELSE 'pending' END,
+    updated_at       = now()
+WHERE id = $1 AND status = 'completed'
+`
+
+// Puts a finished plank back in the queue so it can be printed again.
+//
+// The same job, not a copy. A reprint elsewhere in the service mints a new row
+// because it is recording a FAILURE - the original really did print, badly, and
+// that has to stay on the record. This is somebody deliberately putting a plank
+// back on a bed, and they want the job they already have: its number, its
+// order, its model, its personalisation. A second row would leave the floor
+// reconciling two job numbers for one plank.
+//
+// Its stages reset with it. A plank about to be printed again has not passed
+// the QC it passed last time, and leaving qc_status on 'passed' would carry a
+// verdict about a plank that no longer exists onto one not yet made.
+// assembly_status keeps 'not_required', which is a fact about the product
+// rather than about this print.
+//
+// Guarded on completed: this is not a general-purpose way to un-finish a job,
+// and a caller that reaches it with anything else has a bug worth failing on
+// rather than a row worth rewriting.
+func (q *Queries) RequeueFinishedJob(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, requeueFinishedJob, id)
+	return err
+}
+
 const setJobModelError = `-- name: SetJobModelError :exec
 UPDATE production_jobs SET
     model_error    = $1,

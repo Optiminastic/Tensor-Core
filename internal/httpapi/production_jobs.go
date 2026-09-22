@@ -23,9 +23,13 @@ import (
 // productionJobResponse is the API shape of a production job. machine_* are resolved via the
 // job's batch and stay null until the batching phase.
 type productionJobResponse struct {
-	ID                    string   `json:"id"`
-	JobNumber             string   `json:"job_number"`
-	OrderID               *string  `json:"order_id"`
+	ID        string  `json:"id"`
+	JobNumber string  `json:"job_number"`
+	OrderID   *string `json:"order_id"`
+	// OrderNumber is the store's own number for that order, e.g. T3DPS-115251.
+	// Sent so a list does not have to read it out of the job number, which
+	// holds only for jobs numbered after their order.
+	OrderNumber           *string  `json:"order_number"`
 	BatchID               *string  `json:"batch_id"`
 	Description           string   `json:"description"`
 	Quantity              int32    `json:"quantity"`
@@ -360,10 +364,16 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 		}
 	}
 	dispatchedOrderIDs := map[uuid.UUID]bool{}
+	orderNumberByID := map[uuid.UUID]string{}
 	if len(orderIDs) > 0 {
 		if ids, err := s.store.Q.ListDispatchedOrderIDs(ctx, orderIDs); err == nil {
 			for _, id := range ids {
 				dispatchedOrderIDs[id] = true
+			}
+		}
+		if numbers, err := s.store.Q.ListOrderNumbersForIDs(ctx, orderIDs); err == nil {
+			for _, o := range numbers {
+				orderNumberByID[o.ID] = o.OrderNumber
 			}
 		}
 	}
@@ -378,7 +388,13 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 			}
 		}
 		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
-		out = append(out, productionJobDTO(j, batchStatus, dispatched, colourGates))
+		dto := productionJobDTO(j, batchStatus, dispatched, colourGates)
+		if j.OrderID != nil {
+			if number, ok := orderNumberByID[*j.OrderID]; ok {
+				dto.OrderNumber = &number
+			}
+		}
+		out = append(out, dto)
 	}
 	return out
 }

@@ -310,7 +310,7 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 	// A finished plank is reprinted rather than moved: its row records a print
 	// that really happened, and putting it on another bed would rewrite that
 	// into a print that has not happened yet.
-	ids, reprinted, err := s.idsToBed(ctx, jobs)
+	ids, requeued, err := s.idsToBed(ctx, jobs)
 	if err != nil {
 		writeStatusError(c, err, "Could not prepare the chosen products.")
 		return
@@ -325,9 +325,9 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		return
 	}
 
-	if reprinted > 0 {
-		obs.FromContext(ctx).Info("hand-built bed includes reprints",
-			"batch", batch.BatchNumber, "reprints", reprinted)
+	if requeued > 0 {
+		obs.FromContext(ctx).Info("hand-built bed reprints finished planks",
+			"batch", batch.BatchNumber, "requeued", requeued)
 	}
 	s.rebuildSourceBeds(ctx, c, sources)
 
@@ -392,64 +392,34 @@ func planksBeingMoved(jobs []gen.ProductionJob) []gen.ProductionJob {
 	return out
 }
 
-// idsToBed resolves each chosen product to the job that will actually print.
+// idsToBed resolves each chosen product to the job that will print it, putting
+// any finished one back in the queue on the way.
 //
-// A queued job prints itself. A completed one cannot - it has already printed,
-// and its row is the record of that - so a reprint is minted carrying the same
-// geometry and slicing snapshot, and THAT goes on the bed. The original keeps
-// its history, which is the whole reason for not simply re-queueing it.
+// The SAME job every time. Minting a copy was the obvious-looking move and the
+// wrong one: it left the floor with two job numbers for one plank, the new one
+// numbered from a sequence so it matched neither the order nor anything on the
+// packing slip. The job already exists, carries the model, the order, the
+// personalisation and the customer - all of which a copy has to be trusted to
+// reproduce correctly.
 //
-// Returns how many were reprints, for the log: a bed that silently contains
-// three new jobs is worth being able to account for afterwards.
+// What does change is the finished job's stage, because a plank about to be
+// printed again is not a printed plank. See RequeueFinishedJob.
 func (s *Server) idsToBed(
 	ctx context.Context, jobs []gen.ProductionJob,
 ) ([]uuid.UUID, int, error) {
 	ids := make([]uuid.UUID, 0, len(jobs))
-	reprints := 0
+	requeued := 0
 	for _, j := range jobs {
-		if j.Status != production.StatusCompleted {
-			ids = append(ids, j.ID)
-			continue
+		if j.Status == production.StatusCompleted {
+			if err := s.store.Q.RequeueFinishedJob(ctx, j.ID); err != nil {
+				return nil, 0, statusErr(http.StatusInternalServerError,
+					fmt.Sprintf("Could not put %s back in the queue.", j.JobNumber))
+			}
+			requeued++
 		}
-		clone, err := s.reprintOf(ctx, j)
-		if err != nil {
-			return nil, 0, err
-		}
-		ids = append(ids, clone)
-		reprints++
+		ids = append(ids, j.ID)
 	}
-	return ids, reprints, nil
-}
-
-// reprintOf mints a fresh queued job from a finished one.
-//
-// In a transaction with the job-number sequence and the two events, matching
-// every other reprint path in the service, so a failure leaves neither a number
-// consumed for a job that does not exist nor a job with no trail explaining
-// where it came from.
-func (s *Server) reprintOf(ctx context.Context, src gen.ProductionJob) (uuid.UUID, error) {
-	var out uuid.UUID
-	err := s.store.InTx(ctx, func(q *gen.Queries) error {
-		number, err := q.NextJobNumber(ctx)
-		if err != nil {
-			return err
-		}
-		clone, err := q.InsertProductionJob(ctx, reprintParamsFor(src, src.Quantity, number))
-		if err != nil {
-			return err
-		}
-		out = clone.ID
-		return recordJobEvent(ctx, q, jobEvent{
-			JobID: src.ID, EventType: production.EventReprintCreated,
-			Reason: "rebedded by hand", RelatedJobID: &clone.ID,
-			Metadata: map[string]any{"job_number": clone.JobNumber},
-		})
-	})
-	if err != nil {
-		return uuid.Nil, statusErr(http.StatusInternalServerError,
-			fmt.Sprintf("Could not create a reprint of %s.", src.JobNumber))
-	}
-	return out, nil
+	return ids, requeued, nil
 }
 
 // eligibleJobsFor loads the chosen jobs and refuses any that may not be batched.
