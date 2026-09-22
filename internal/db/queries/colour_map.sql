@@ -42,7 +42,14 @@ ON CONFLICT (lower(trim(colour_name)), upper(hex)) DO UPDATE SET
 RETURNING *;
 
 -- name: UpdateColourMapEntry :one
+-- Corrects a recorded spool: its value, its note, or which colour it belongs to.
+--
+-- colour_name moves the spool to another colour. is_primary is deliberately not
+-- settable here - a single UPDATE cannot demote the colour's previous primary
+-- in the same breath, and two primaries violate the partial unique index. The
+-- handler promotes through SetColourMapPrimary instead.
 UPDATE colour_map SET
+    colour_name  = COALESCE(sqlc.narg('colour_name'), colour_name),
     hex          = COALESCE(upper(sqlc.narg('hex')::text), hex),
     note         = COALESCE(sqlc.narg('note'), note),
     confirmed_by = COALESCE(sqlc.narg('confirmed_by'), confirmed_by),

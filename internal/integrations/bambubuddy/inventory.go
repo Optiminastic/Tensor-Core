@@ -81,3 +81,33 @@ func (c *Client) ListSpools(ctx context.Context) ([]Spool, error) {
 	}
 	return out, nil
 }
+
+// CatalogueColour is one manufacturer's name for one filament colour.
+//
+// BambuBuddy ships a catalogue of these - 638 entries across a dozen brands -
+// and it is the only place a bare hex acquires a name without somebody typing
+// one. #D3B7A7 is Bambu Lab's "Latte Brown", which is a far better starting
+// point for "what do we call this spool" than the nearest colour Tensor happens
+// to know already.
+//
+// It names only what a manufacturer registered: six of this fleet's fifteen
+// loaded hexes are in it, the rest being generic spools that report tray_type
+// PLA, an empty tray_sub_brands and the catch-all filament id GFL99. So it is a
+// strong suggestion, never an answer - the operator still confirms.
+type CatalogueColour struct {
+	ID           int    `json:"id"`
+	Manufacturer string `json:"manufacturer"`
+	ColorName    string `json:"color_name"`
+	HexColor     string `json:"hex_color"`
+	Material     string `json:"material"`
+	IsDefault    bool   `json:"is_default"`
+}
+
+// ListColourCatalogue returns every colour BambuBuddy can name.
+func (c *Client) ListColourCatalogue(ctx context.Context) ([]CatalogueColour, error) {
+	var out []CatalogueColour
+	if err := c.get(ctx, "/api/v1/inventory/colors", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}

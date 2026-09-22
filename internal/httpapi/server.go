@@ -97,6 +97,11 @@ type Server struct {
 	// than opted into per-process (as permission freshness is) because there is
 	// no process for which caching these two reads is wrong.
 	bambuCache *bambuCache
+	// colourNames caches BambuBuddy's shipped catalogue of manufacturers'
+	// colour names, which is what turns a bare AMS hex into "Latte Brown".
+	// Separate from bambuCache because it is a reference table on an hourly
+	// TTL, not live machine state on a five-second one.
+	colourNames *colourCatalogue
 
 	planMu          sync.Mutex
 	lastPlannedPool string
@@ -120,6 +125,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		bambuCache: newBambuCache(
 			cfg.BambuPrinterIndexTTL, cfg.BambuStatusTTL, cfg.BambuErrorTTL,
 		),
+		colourNames: newColourCatalogue(time.Hour),
 	}
 }
 

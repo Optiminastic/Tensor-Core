@@ -147,24 +147,33 @@ func (q *Queries) SetColourMapPrimary(ctx context.Context, id uuid.UUID) error {
 
 const updateColourMapEntry = `-- name: UpdateColourMapEntry :one
 UPDATE colour_map SET
-    hex          = COALESCE(upper($1::text), hex),
-    note         = COALESCE($2, note),
-    confirmed_by = COALESCE($3, confirmed_by),
+    colour_name  = COALESCE($1, colour_name),
+    hex          = COALESCE(upper($2::text), hex),
+    note         = COALESCE($3, note),
+    confirmed_by = COALESCE($4, confirmed_by),
     confirmed_at = now(),
     updated_at   = now()
-WHERE id = $4
+WHERE id = $5
 RETURNING id, colour_name, hex, is_primary, note, confirmed_by, confirmed_at, created_at, updated_at
 `
 
 type UpdateColourMapEntryParams struct {
+	ColourName  *string
 	Hex         *string
 	Note        *string
 	ConfirmedBy *string
 	ID          uuid.UUID
 }
 
+// Corrects a recorded spool: its value, its note, or which colour it belongs to.
+//
+// colour_name moves the spool to another colour. is_primary is deliberately not
+// settable here - a single UPDATE cannot demote the colour's previous primary
+// in the same breath, and two primaries violate the partial unique index. The
+// handler promotes through SetColourMapPrimary instead.
 func (q *Queries) UpdateColourMapEntry(ctx context.Context, arg UpdateColourMapEntryParams) (ColourMap, error) {
 	row := q.db.QueryRow(ctx, updateColourMapEntry,
+		arg.ColourName,
 		arg.Hex,
 		arg.Note,
 		arg.ConfirmedBy,
