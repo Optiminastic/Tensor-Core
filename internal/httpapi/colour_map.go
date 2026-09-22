@@ -28,6 +28,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -101,6 +102,9 @@ func (s *Server) registerColourMap(g *gin.RouterGroup) {
 	// A read of the fleet, so it needs no manage permission - but it is the
 	// page an operator opens BEFORE confirming anything.
 	g.GET("/colour-map/loaded", s.guards.RequirePermission(auth.FilamentRead.Key()), s.listLoadedColours)
+	// Refreshing reads BambuBuddy and writes the fleet mirror, so it is guarded
+	// as a change even though what it returns is a list.
+	g.POST("/colour-map/refresh", s.guards.RequirePermission(auth.FilamentManage.Key()), s.refreshLoadedColours)
 	g.POST("/colour-map", s.guards.RequirePermission(auth.FilamentManage.Key()), s.upsertColourMap)
 	g.PATCH("/colour-map/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.patchColourMap)
 	g.DELETE("/colour-map/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.deleteColourMap)
@@ -276,6 +280,37 @@ func (s *Server) deleteColourMap(c *gin.Context) {
 // listUnmappedColours reports every spool loaded in the fleet that Tensor cannot
 // name, newest problem first: the colours held by the most machines.
 func (s *Server) listLoadedColours(c *gin.Context) {
+	s.respondLoadedColours(c)
+}
+
+// refreshLoadedColours asks the printers what they are holding, right now.
+//
+// The list is normally read from machines.filaments, which the fleet sync
+// refreshes every sixty seconds. That is fine for a page somebody is reading
+// and wrong for the moment they have just walked over and changed a spool:
+// they come back, see the old colour, and have no way to tell whether Tensor
+// is behind or the AMS did not register the swap.
+//
+// So this goes and asks. It runs the same sync the worker does - the mirror is
+// what the queue picker ranks on, so refreshing only this page's copy would
+// leave the two disagreeing - and never prunes, because a printer briefly
+// unreachable is not one somebody has removed from the shop.
+func (s *Server) refreshLoadedColours(c *gin.Context) {
+	ctx := c.Request.Context()
+	if !s.bambu.Configured() {
+		detail(c, http.StatusConflict, "BambuBuddy is not configured on this service.")
+		return
+	}
+	if _, err := s.RefreshFleetFromBambuBuddy(ctx); err != nil {
+		// Answer with the mirror anyway rather than nothing. A partial read is
+		// still more than an empty page, and the spools that did report are
+		// still nameable.
+		obs.FromContext(ctx).Warn("could not refresh the fleet before listing colours", "error", err)
+	}
+	s.respondLoadedColours(c)
+}
+
+func (s *Server) respondLoadedColours(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	machines, err := s.store.Q.ListFleetMachines(ctx)
