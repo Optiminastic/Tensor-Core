@@ -58,6 +58,14 @@ type batchableJob struct {
 	// OnBed names the bed this product already sits on, so "locked" has
 	// somewhere to point.
 	OnBed string `json:"on_bed"`
+	// Reprint marks a product that has already been printed. Choosing it makes
+	// a NEW job rather than moving this one, because this row is the record of
+	// a print that really happened and rewriting it would falsify history.
+	Reprint bool `json:"reprint"`
+	// FinishedStage says where an already-printed plank actually is - waiting
+	// for QC, to be packed, to be dispatched - so "print it again" is a
+	// deliberate choice rather than the only visible option.
+	FinishedStage string `json:"finished_stage"`
 	// BedLocked marks a product whose bed is approved. Taking it off one is
 	// allowed and is not free: that bed's plate comes out of BambuBuddy's
 	// queue and its filament is given back before it is rebuilt without this
@@ -117,6 +125,8 @@ func (s *Server) listBatchableJobs(c *gin.Context) {
 			UnavailableReason:     reason,
 			OnBed:                 bed.BatchNumber,
 			BedLocked:             bed.Status == production.BatchOpen,
+			Reprint:               jobs[i].Status == production.StatusCompleted,
+			FinishedStage:         finishedStageOf(jobs[i]),
 		})
 	}
 	c.JSON(http.StatusOK, out)
@@ -162,7 +172,12 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 	case j.Status == production.StatusFailed:
 		return "failed - reprint it from the job"
 	case j.Status == production.StatusCompleted:
-		return finishedStage(j)
+		// Offered, not refused. The plank printed, and its order is still
+		// outstanding - which is exactly the case somebody is looking at when
+		// they ask why. Choosing it prints another one, which is sometimes
+		// what is wanted and never what the record should claim happened, so
+		// the create path mints a reprint rather than moving this row.
+		return ""
 	case j.Status != production.StatusQueued:
 		return "printing now"
 	case j.BatchID == nil:
@@ -200,6 +215,13 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 // answer is almost never "print it again". The plank exists; it is waiting for
 // somebody to check or pack it, and putting it on a bed would print a second
 // copy of something already made. So it is named, not offered.
+func finishedStageOf(j gen.ProductionJob) string {
+	if j.Status != production.StatusCompleted {
+		return ""
+	}
+	return finishedStage(j)
+}
+
 func finishedStage(j gen.ProductionJob) string {
 	switch {
 	case j.QcStatus == production.QcFailed:
@@ -285,9 +307,13 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		return
 	}
 
-	ids := make([]uuid.UUID, 0, len(jobs))
-	for _, j := range jobs {
-		ids = append(ids, j.ID)
+	// A finished plank is reprinted rather than moved: its row records a print
+	// that really happened, and putting it on another bed would rewrite that
+	// into a print that has not happened yet.
+	ids, reprinted, err := s.idsToBed(ctx, jobs)
+	if err != nil {
+		writeStatusError(c, err, "Could not prepare the chosen products.")
+		return
 	}
 	if err := s.store.Q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{
 		BatchID: &batch.ID, JobIds: ids,
@@ -299,6 +325,10 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		return
 	}
 
+	if reprinted > 0 {
+		obs.FromContext(ctx).Info("hand-built bed includes reprints",
+			"batch", batch.BatchNumber, "reprints", reprinted)
+	}
 	s.rebuildSourceBeds(ctx, c, sources)
 
 	updated, ok := s.recomputeBatchPlate(ctx, c, batch)
@@ -343,6 +373,66 @@ func (s *Server) rebuildSourceBeds(ctx context.Context, c *gin.Context, sources 
 			return
 		}
 	}
+}
+
+// idsToBed resolves each chosen product to the job that will actually print.
+//
+// A queued job prints itself. A completed one cannot - it has already printed,
+// and its row is the record of that - so a reprint is minted carrying the same
+// geometry and slicing snapshot, and THAT goes on the bed. The original keeps
+// its history, which is the whole reason for not simply re-queueing it.
+//
+// Returns how many were reprints, for the log: a bed that silently contains
+// three new jobs is worth being able to account for afterwards.
+func (s *Server) idsToBed(
+	ctx context.Context, jobs []gen.ProductionJob,
+) ([]uuid.UUID, int, error) {
+	ids := make([]uuid.UUID, 0, len(jobs))
+	reprints := 0
+	for _, j := range jobs {
+		if j.Status != production.StatusCompleted {
+			ids = append(ids, j.ID)
+			continue
+		}
+		clone, err := s.reprintOf(ctx, j)
+		if err != nil {
+			return nil, 0, err
+		}
+		ids = append(ids, clone)
+		reprints++
+	}
+	return ids, reprints, nil
+}
+
+// reprintOf mints a fresh queued job from a finished one.
+//
+// In a transaction with the job-number sequence and the two events, matching
+// every other reprint path in the service, so a failure leaves neither a number
+// consumed for a job that does not exist nor a job with no trail explaining
+// where it came from.
+func (s *Server) reprintOf(ctx context.Context, src gen.ProductionJob) (uuid.UUID, error) {
+	var out uuid.UUID
+	err := s.store.InTx(ctx, func(q *gen.Queries) error {
+		number, err := q.NextJobNumber(ctx)
+		if err != nil {
+			return err
+		}
+		clone, err := q.InsertProductionJob(ctx, reprintParamsFor(src, src.Quantity, number))
+		if err != nil {
+			return err
+		}
+		out = clone.ID
+		return recordJobEvent(ctx, q, jobEvent{
+			JobID: src.ID, EventType: production.EventReprintCreated,
+			Reason: "rebedded by hand", RelatedJobID: &clone.ID,
+			Metadata: map[string]any{"job_number": clone.JobNumber},
+		})
+	})
+	if err != nil {
+		return uuid.Nil, statusErr(http.StatusInternalServerError,
+			fmt.Sprintf("Could not create a reprint of %s.", src.JobNumber))
+	}
+	return out, nil
 }
 
 // eligibleJobsFor loads the chosen jobs and refuses any that may not be batched.
@@ -419,14 +509,16 @@ func batchableNow(j gen.ProductionJob) error {
 	// products can be moved onto a bed somebody is building by hand. Which
 	// beds are still proposals is checked in refuseCommittedBeds, which can
 	// see their status; this row cannot.
-	case j.Status != production.StatusQueued:
-		return fmt.Errorf("%s is %s, so it cannot go on a bed", j.JobNumber, j.Status)
 	// The raw quantity, not jobQuantity, which clamps a zero up to one. A
 	// split job's original row stays at zero once every unit has been peeled
 	// off into its own rows; clamping would offer that spent row as one more
 	// plank to print.
 	case j.Quantity <= 0:
 		return fmt.Errorf("%s has nothing left to print", j.JobNumber)
+	case j.Status == production.StatusFailed:
+		return fmt.Errorf("%s failed; reprint it from the job rather than re-bedding it", j.JobNumber)
+	case j.Status != production.StatusQueued && j.Status != production.StatusCompleted:
+		return fmt.Errorf("%s is %s, so it cannot go on a bed", j.JobNumber, j.Status)
 	case j.Held:
 		return fmt.Errorf("%s is on hold", j.JobNumber)
 	case j.IssueReason != nil:
