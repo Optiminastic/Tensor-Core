@@ -96,10 +96,6 @@ func TestBatchableNowRefusesWhatThePlannerWouldRefuse(t *testing.T) {
 	reason := "stl_missing"
 	flagged.IssueReason = &reason
 
-	taken := batchableJobRow("JOB-TAKEN", `["BLUE"]`)
-	batchID := uuid.New()
-	taken.BatchID = &batchID
-
 	spent := batchableJobRow("JOB-SPENT", `["BLUE"]`)
 	spent.Quantity = 0
 
@@ -112,7 +108,6 @@ func TestBatchableNowRefusesWhatThePlannerWouldRefuse(t *testing.T) {
 	}{
 		{held, "on hold"},
 		{flagged, "stl_missing"},
-		{taken, "already on a bed"},
 		{spent, "nothing left"},
 		{unchecked, "personalisation"},
 	} {
@@ -133,6 +128,21 @@ func TestBatchableNowRefusesWhatThePlannerWouldRefuse(t *testing.T) {
 func TestBatchableNowAcceptsAnOrdinaryQueuedJob(t *testing.T) {
 	if err := batchableNow(batchableJobRow("JOB-1", `["BLUE"]`)); err != nil {
 		t.Fatalf("an ordinary queued job was refused: %v", err)
+	}
+}
+
+// Being on a bed is deliberately NOT a refusal here. On a floor that plans
+// continuously almost everything queued is on some Draft within minutes, and a
+// Draft is a proposal - its planks can be rearranged. Which beds are still
+// proposals is decided by refuseCommittedBeds, which can read their status;
+// this row carries a batch id and not the status, so it cannot.
+func TestBatchableNowAcceptsAJobSittingOnABed(t *testing.T) {
+	onABed := batchableJobRow("JOB-DRAFT", `["BLUE"]`)
+	batchID := uuid.New()
+	onABed.BatchID = &batchID
+
+	if err := batchableNow(onABed); err != nil {
+		t.Fatalf("a job on a bed was refused outright: %v - a Draft's planks can be moved", err)
 	}
 }
 

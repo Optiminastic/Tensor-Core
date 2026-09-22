@@ -47,7 +47,7 @@ WITH used AS (
     SELECT j.id, j.quantity FROM production_jobs j
       LEFT JOIN batches b ON b.id = j.batch_id
      WHERE j.id = ANY($3::uuid[])
-       AND (j.batch_id IS NULL OR b.status = 'pending_approval')
+       AND (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
 ), adding AS (
     SELECT coalesce(sum(quantity), 0)::int AS n FROM movable
 )
@@ -1508,7 +1508,7 @@ const listReplannableJobs = `-- name: ListReplannableJobs :many
 SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
@@ -1540,6 +1540,9 @@ ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC
 // essentially arbitrary sequence. placed_at falls back to created_at for a job
 // with no linked order (a reprint, a manually-added job), which keeps those in
 // their own arrival order rather than sorting them all to the front.
+// b.manual excludes a bed somebody built by hand. Its jobs sit on a Draft, so
+// without this they would be reconsidered, the bed dissolved and the planks
+// handed back out - undoing a person's deliberate arrangement on a timer.
 func (q *Queries) ListReplannableJobs(ctx context.Context) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listReplannableJobs)
 	if err != nil {
@@ -1750,7 +1753,7 @@ const listUnbatchedJobsByUrgency = `-- name: ListUnbatchedJobsByUrgency :many
 SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
@@ -1776,6 +1779,9 @@ ORDER BY j.priority ASC, COALESCE(o.placed_at, j.created_at) ASC, j.job_number A
 // MORE URGENT), then the customer's placed_at within each rank. Written here
 // rather than sorted in Go so the top-up and the planner cannot come to
 // different conclusions about who is next.
+// b.manual excludes a bed somebody built by hand. Its jobs sit on a Draft, so
+// without this they would be reconsidered, the bed dissolved and the planks
+// handed back out - undoing a person's deliberate arrangement on a timer.
 func (q *Queries) ListUnbatchedJobsByUrgency(ctx context.Context) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listUnbatchedJobsByUrgency)
 	if err != nil {

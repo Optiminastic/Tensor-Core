@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -48,15 +49,27 @@ type batchableJob struct {
 	ColourLabel string `json:"colour_label"`
 }
 
-// listBatchableJobs returns every job eligible to be put on a bed by hand.
+// listBatchableJobs returns every product from an unfulfilled order that could
+// go on a bed.
 //
-// The same pool the planner draws from, so a job the planner would refuse -
-// held, flagged, personalisation unresolved - is not offered here either. A
+// The planner's own pool: products not yet on a bed, PLUS products sitting in a
+// Draft. The second half is the important one. On a floor that plans
+// continuously almost everything queued is already on some Draft within
+// minutes, so a list of only the unbatched is empty nearly all the time - which
+// is exactly what this dialog showed, while the screen behind it was full of
+// Draft beds somebody wanted to rearrange.
+//
+// A Draft is a proposal: no filament is reserved and no plate is promised, so
+// its products are free to be moved. Approved and beyond are absent, and stay
+// absent - moving a product off a bed whose filament is spoken for and whose
+// plate is already sliced is a different and much more expensive act.
+//
+// Held, flagged and unvalidated products are excluded here as they are there. A
 // dialog that let somebody pick a held job would be offering to overrule a hold
 // by accident.
 func (s *Server) listBatchableJobs(c *gin.Context) {
 	ctx := c.Request.Context()
-	rows, err := s.store.Q.ListBatchableJobs(ctx)
+	rows, err := s.store.Q.ListReplannableJobs(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the jobs waiting to be batched.")
 		return
@@ -121,6 +134,11 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 	// until somebody locks it, and locking is what reserves the filament.
 	batch, err := s.store.Q.InsertBatch(ctx, gen.InsertBatchParams{
 		ID: uuid.New(), BatchNumber: number, Status: production.BatchPendingApproval,
+		// Built by a person, so the planner leaves it alone. Without this it
+		// would be dissolved on the next planning run - a seven-minute timer
+		// plus several events - and its planks redistributed, with nothing on
+		// screen to say why the bed had gone.
+		Manual: true,
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not create the batch.")
@@ -131,6 +149,10 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 	for _, j := range jobs {
 		ids = append(ids, j.ID)
 	}
+	// Noted before the move, because afterwards nothing records where these
+	// products came from.
+	sources := dedupeIDs(jobs, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+
 	if err := s.store.Q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{
 		BatchID: &batch.ID, JobIds: ids,
 	}); err != nil {
@@ -141,11 +163,58 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		return
 	}
 
+	s.tidyDraftsLeftBehind(ctx, sources, batch.ID)
+
 	updated, ok := s.recomputeBatchPlate(ctx, c, batch)
 	if !ok {
 		return
 	}
 	c.JSON(http.StatusCreated, batchDTO(updated))
+}
+
+// tidyDraftsLeftBehind repairs the Drafts these products were taken from.
+//
+// A bed describes the plate built from the products on it - its utilisation,
+// its print time, its merged plate file. Take one away and all three describe a
+// bed that no longer exists, so each source is rebuilt from what it still has.
+// A source emptied completely is deleted: an empty Draft is a row that looks
+// like work and is not, and the planner would propose it again from scratch
+// anyway.
+//
+// Best-effort, and deliberately after the new bed exists. The products have
+// already moved; failing the request now would report a failure for something
+// that succeeded, and leave the caller unsure whether to try again.
+func (s *Server) tidyDraftsLeftBehind(ctx context.Context, sources []uuid.UUID, built uuid.UUID) {
+	log := obs.FromContext(ctx)
+	for _, id := range sources {
+		if id == built {
+			continue
+		}
+		remaining, err := s.store.Q.ListJobsForBatch(ctx, &id)
+		if err != nil {
+			log.Warn("could not re-read a bed products were taken from", "batch", id, "error", err)
+			continue
+		}
+		if len(remaining) == 0 {
+			if _, err := s.store.Q.DeleteBatch(ctx, id); err != nil {
+				log.Warn("could not remove an emptied draft bed", "batch", id, "error", err)
+			}
+			continue
+		}
+		// Its plate, utilisation and print time all describe a bed that no
+		// longer exists, and the machine scheduler ranks load on that print
+		// time - so they are cleared rather than left to mislead. The planner
+		// owns this bed and rebuilds it properly on its next run, which the
+		// trigger below asks for.
+		if _, err := s.store.Q.UpdateBatchDerivedMetrics(ctx, gen.UpdateBatchDerivedMetricsParams{
+			ID: id,
+		}); err != nil {
+			log.Warn("could not clear a source bed's stale plate", "batch", id, "error", err)
+		}
+	}
+	if len(sources) > 0 {
+		s.triggerBatchPlan(ctx)
+	}
 }
 
 // eligibleJobsFor loads the chosen jobs and refuses any that may not be batched.
@@ -178,7 +247,43 @@ func (s *Server) eligibleJobsFor(ctx context.Context, raw []string) ([]gen.Produ
 		}
 		out = append(out, job)
 	}
+	if err := s.refuseCommittedBeds(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// refuseCommittedBeds refuses any product already on a bed that is past Draft.
+//
+// batchableNow cannot answer this: the job row carries a batch id and not that
+// batch's status, and the difference is the whole rule. Taking a plank off a
+// proposal costs nothing; taking one off a locked bed strands reserved filament
+// and a plate that has already been sliced around the gap it leaves.
+//
+// One query for the whole selection rather than one per product.
+func (s *Server) refuseCommittedBeds(ctx context.Context, jobs []gen.ProductionJob) error {
+	ids := dedupeIDs(jobs, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := s.store.Q.ListBatchStatusesForIDs(ctx, ids)
+	if err != nil {
+		return statusErr(http.StatusInternalServerError, "Could not check the beds those products are on.")
+	}
+	status := make(map[uuid.UUID]string, len(rows))
+	for _, r := range rows {
+		status[r.ID] = r.Status
+	}
+	for _, j := range jobs {
+		if j.BatchID == nil {
+			continue
+		}
+		if st := status[*j.BatchID]; st != production.BatchPendingApproval {
+			return statusErr(http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s is on a bed that has already been locked, so it cannot be moved", j.JobNumber))
+		}
+	}
+	return nil
 }
 
 // batchableNow mirrors ListBatchableJobs' WHERE clause, job by job.
@@ -188,8 +293,10 @@ func (s *Server) eligibleJobsFor(ctx context.Context, raw []string) ([]gen.Produ
 // is wrong with it, which "that job is not eligible" would not.
 func batchableNow(j gen.ProductionJob) error {
 	switch {
-	case j.BatchID != nil:
-		return fmt.Errorf("%s is already on a bed", j.JobNumber)
+	// Being on a bed is NOT a refusal here: a Draft is a proposal and its
+	// products can be moved onto a bed somebody is building by hand. Which
+	// beds are still proposals is checked in refuseCommittedBeds, which can
+	// see their status; this row cannot.
 	case j.Status != production.StatusQueued:
 		return fmt.Errorf("%s is %s, so it cannot go on a bed", j.JobNumber, j.Status)
 	// The raw quantity, not jobQuantity, which clamps a zero up to one. A

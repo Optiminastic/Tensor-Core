@@ -512,7 +512,10 @@ SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_numbe
 SELECT j.* FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+-- b.manual excludes a bed somebody built by hand. Its jobs sit on a Draft, so
+-- without this they would be reconsidered, the bed dissolved and the planks
+-- handed back out - undoing a person's deliberate arrangement on a timer.
+WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
@@ -558,7 +561,10 @@ WHERE order_id = sqlc.arg('order_id') AND priority > sqlc.arg('rank')::int;
 SELECT j.* FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE (j.batch_id IS NULL OR b.status = 'pending_approval')
+-- b.manual excludes a bed somebody built by hand. Its jobs sit on a Draft, so
+-- without this they would be reconsidered, the bed dissolved and the planks
+-- handed back out - undoing a person's deliberate arrangement on a timer.
+WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
   AND j.status = 'queued'
   AND j.quantity > 0
   AND j.personalisation_status IN ('validated', 'not_required')
@@ -588,7 +594,7 @@ WITH used AS (
     SELECT j.id, j.quantity FROM production_jobs j
       LEFT JOIN batches b ON b.id = j.batch_id
      WHERE j.id = ANY(sqlc.arg('job_ids')::uuid[])
-       AND (j.batch_id IS NULL OR b.status = 'pending_approval')
+       AND (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
 ), adding AS (
     SELECT coalesce(sum(quantity), 0)::int AS n FROM movable
 )

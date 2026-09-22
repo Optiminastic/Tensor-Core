@@ -26,6 +26,7 @@ type Batch struct {
 	BedUtilizationPercent       pgtype.Numeric
 	PackingStrategy             *string
 	FilamentReserved            bool
+	Manual                      bool
 	PlateSlicedAt               pgtype.Timestamptz
 	PlateSliceError             *string
 	PrintError                  *string

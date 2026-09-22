@@ -474,6 +474,10 @@ CREATE TABLE batches (
     -- Set true the moment approveBatch debits filament stock, so a lost race
     -- against the pending_approval-only guard can't double-reserve.
     filament_reserved               boolean NOT NULL DEFAULT false,
+    -- Built by a person, so the planner leaves it alone. It dissolves and
+    -- rebuilds every Draft it proposed; this marks the ones it did not. See
+    -- migration 0078.
+    manual                          boolean NOT NULL DEFAULT false,
     -- Set when the merged plate itself was sliced (see 0036). While NULL,
     -- total_print_time_minutes is batchTimeFromJobs' MAX-of-jobs
     -- approximation rather than a measurement of this actual bed.

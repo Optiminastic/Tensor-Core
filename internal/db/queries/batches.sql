@@ -6,12 +6,13 @@
 INSERT INTO batches (
     id, batch_number, machine_id, status, material_shortage, units_per_bed,
     total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams,
-    bed_utilization_percent, packing_strategy
+    bed_utilization_percent, packing_strategy, manual
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('batch_number'), sqlc.narg('machine_id'), sqlc.arg('status'),
     sqlc.arg('material_shortage'), sqlc.narg('units_per_bed'), sqlc.narg('total_print_time_minutes'),
     sqlc.narg('effective_time_per_unit_minutes')::float8, sqlc.narg('total_filament_grams')::float8,
-    sqlc.narg('bed_utilization_percent')::float8, sqlc.narg('packing_strategy')
+    sqlc.narg('bed_utilization_percent')::float8, sqlc.narg('packing_strategy'),
+    sqlc.arg('manual')
 )
 RETURNING *;
 
@@ -220,7 +221,13 @@ SELECT id FROM batches WHERE status = 'pending_approval' ORDER BY created_at ASC
 -- Removes dissolved Drafts. The status predicate is the real guard, not
 -- decoration: it makes a stale or wrong id list incapable of deleting an
 -- approved batch, which would strand a plate a machine is about to print.
-DELETE FROM batches WHERE id = ANY(sqlc.arg('batch_ids')::uuid[]) AND status = 'pending_approval';
+-- manual = false is the second guard, and the one that protects a person's
+-- work: a hand-built bed is a Draft like any other, and without this the
+-- planner would dissolve it on its next run and redistribute its planks.
+DELETE FROM batches
+WHERE id = ANY(sqlc.arg('batch_ids')::uuid[])
+  AND status = 'pending_approval'
+  AND manual = false;
 
 -- name: DeleteBatch :execrows
 -- Removes ONE bed, whatever its status - the guard lives in the handler, not
