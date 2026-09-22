@@ -213,3 +213,35 @@ func TestALockedBedsProductIsStillOffered(t *testing.T) {
 		}
 	}
 }
+
+// Four printed planks on finished beds could not be reprinted together,
+// because each bed was judged for editability and a finished bed cannot be
+// edited - beds nothing was going to change.
+func TestPlanksBeingMovedExcludesOnesThatWillBeReprinted(t *testing.T) {
+	printed := batchableJobRow("JOB-115082", `["BLUE"]`)
+	printed.Status = production.StatusCompleted
+	finishedBed := uuid.New()
+	printed.BatchID = &finishedBed
+
+	queued := batchableJobRow("JOB-115090", `["BLUE"]`)
+	draftBed := uuid.New()
+	queued.BatchID = &draftBed
+
+	got := planksBeingMoved([]gen.ProductionJob{printed, queued})
+	if len(got) != 1 {
+		t.Fatalf("planksBeingMoved returned %d, want only the queued one", len(got))
+	}
+	if got[0].JobNumber != "JOB-115090" {
+		t.Errorf("kept %s, want the queued plank", got[0].JobNumber)
+	}
+}
+
+func TestPlanksBeingMovedKeepsEveryUnprintedPlank(t *testing.T) {
+	jobs := []gen.ProductionJob{
+		batchableJobRow("JOB-1", `["BLUE"]`),
+		batchableJobRow("JOB-2", `["BLUE"]`),
+	}
+	if got := planksBeingMoved(jobs); len(got) != 2 {
+		t.Fatalf("planksBeingMoved dropped a queued plank: %d of 2", len(got))
+	}
+}

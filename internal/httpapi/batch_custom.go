@@ -375,6 +375,23 @@ func (s *Server) rebuildSourceBeds(ctx context.Context, c *gin.Context, sources 
 	}
 }
 
+// planksBeingMoved is the chosen products that will actually leave a bed.
+//
+// A finished plank is reprinted rather than moved - a new job is minted and the
+// original stays where it is - so its bed is never touched. Separating the two
+// matters because the bed a finished plank sits on is itself finished, and a
+// finished bed cannot be edited: treating it as a source refused the whole
+// request over beds nothing was going to change.
+func planksBeingMoved(jobs []gen.ProductionJob) []gen.ProductionJob {
+	out := make([]gen.ProductionJob, 0, len(jobs))
+	for _, j := range jobs {
+		if j.Status != production.StatusCompleted {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
 // idsToBed resolves each chosen product to the job that will actually print.
 //
 // A queued job prints itself. A completed one cannot - it has already printed,
@@ -478,7 +495,14 @@ func (s *Server) eligibleJobsFor(ctx context.Context, raw []string) ([]gen.Produ
 // what beginBatchEdit does. A bed that is PRINTING or DONE cannot: those record
 // what physically happened to a plate.
 func (s *Server) sourceBeds(ctx context.Context, jobs []gen.ProductionJob) ([]gen.Batch, error) {
-	ids := dedupeIDs(jobs, func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
+	// Only the planks actually being MOVED. A finished one is reprinted - a new
+	// job is minted and the original stays exactly where it is - so its bed is
+	// never touched and must not be judged as though it were. Judging it
+	// refused the whole request, because the bed a finished plank sits on is
+	// itself finished, and a finished bed cannot be edited: four printed planks
+	// could not be reprinted together because of beds nothing was going to
+	// change.
+	ids := dedupeIDs(planksBeingMoved(jobs), func(j gen.ProductionJob) *uuid.UUID { return j.BatchID })
 	if len(ids) == 0 {
 		return nil, nil
 	}
