@@ -25,12 +25,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/meshio"
 	"github.com/Optiminastic/tensor-core/internal/obs"
-	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // queueOptionsResponse is what the Queue dialog draws.
@@ -47,6 +48,10 @@ type queueOptionsResponse struct {
 	// slot 1) and the jobs do not know it.
 	Slots    []queueSlot    `json:"slots"`
 	Machines []queueMachine `json:"machines"`
+	// AutoReason is one line explaining the printer Tensor chose, shown beside
+	// it so the choice can be read rather than merely accepted. Empty when no
+	// printer can take the bed.
+	AutoReason string `json:"auto_reason"`
 	// Note says why nothing is offered when nothing is, rather than leaving a
 	// blank dropdown to be interpreted.
 	Note string `json:"note"`
@@ -212,12 +217,6 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	out.Colours = s.queueColoursFor(ctx, jobs)
 	out.Slots = s.queueSlotsFor(ctx, batch)
 
-	rows, err := s.store.Q.ListFleetMachines(ctx)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the fleet.")
-		return
-	}
-
 	// Named colours, when the shop has recorded any. Used to label a slot and
 	// to say what a machine is missing - never to decide anything, so an empty
 	// map costs a label rather than the ability to send.
@@ -227,34 +226,40 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	}
 	nameSlots(out.Slots, identities)
 
+	// Tensor's own answer to "which printer", worked out here rather than left
+	// to the operator's eye. The dialog still opens, still shows every machine
+	// and still lets any of them be chosen - what changes is that the obvious
+	// one is already selected, with its spools already bound.
+	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots))
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the fleet.")
+		return
+	}
+	sortOptions(options)
+
 	eligible := 0
-	for _, m := range rows {
+	for _, o := range options {
+		m := o.Machine
+		loaded, trays := loadedColours(m), traysFor(m)
 		machine := queueMachine{
 			ID: m.ID.String(), Name: m.Name, Model: deref(m.Model), Status: m.Status,
-			Loaded: loadedColours(m), Trays: traysFor(m),
-			Missing: []string{}, SuggestedSlotTrays: []int{},
+			Loaded: loaded, Trays: trays,
+			Missing:  missingColours(out.Colours, loaded),
+			Eligible: o.Eligible, Reason: o.Refusal,
+			// Nearest colour, as a starting point for a machine the operator
+			// deliberately overrides to. It is a guess and it is offered as
+			// one; the checked binding below replaces it wherever there is one.
+			SuggestedSlotTrays: suggestSlotTrays(out.Slots, trays),
 		}
-		switch {
-		case m.Status == production.FleetMachineOff:
-			machine.Reason = "this printer is off"
-		case len(machine.Trays) < len(out.Slots):
-			// The one refusal that needs no colour knowledge at all, and the one
-			// that matters most: a plate with more slots than the machine has
-			// spools cannot be mapped, and truncating the mapping would print
-			// the lettering in the body colour.
-			machine.Reason = fmt.Sprintf("holds %d %s; this bed needs %d",
-				len(machine.Trays), plural(len(machine.Trays), "spool"), len(out.Slots))
-		default:
-			machine.Eligible = true
-			machine.SuggestedSlotTrays = suggestSlotTrays(out.Slots, machine.Trays)
-			machine.Missing = missingColours(out.Colours, machine.Loaded)
+		if o.Eligible {
+			machine.SuggestedSlotTrays = o.SlotTrays
 			eligible++
 		}
+		if o.Eligible && m.ID == plan.Machine.ID {
+			machine.Suggested = true
+			out.AutoReason = plan.Reason
+		}
 		out.Machines = append(out.Machines, machine)
-	}
-
-	if i := suggestMachine(out.Machines, out.Colours); i >= 0 {
-		out.Machines[i].Suggested = true
 	}
 
 	switch {
@@ -263,9 +268,48 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	case len(out.Slots) == 0:
 		out.Note = "This bed's plate declares no filament. Rebuild the bed before sending it."
 	case eligible == 0:
-		out.Note = "No printer has enough spools loaded for this bed yet."
+		out.Note = noPrinterNote(options)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// plateSlotsOf narrows the dialog's slots back to what the plate declared.
+//
+// queueSlot carries a name and an index for rendering; the picker wants only
+// the two facts the file states, and reading them off the same list keeps the
+// dialog and the decision looking at one plate.
+func plateSlotsOf(slots []queueSlot) []meshio.Slot {
+	out := make([]meshio.Slot, 0, len(slots))
+	for _, s := range slots {
+		out = append(out, meshio.Slot{Colour: s.Hex, Material: s.Material})
+	}
+	return out
+}
+
+// noPrinterNote explains a fleet that can take nothing, in terms of the fix.
+//
+// "No printer can take this bed" is true and useless. The causes need different
+// people to do different things - map a colour, load a spool, or simply wait -
+// so the note names whichever one accounts for the fleet.
+func noPrinterNote(options []machineOption) string {
+	var unmapped, loadable int
+	for _, o := range options {
+		switch {
+		case strings.Contains(o.Refusal, "confirmed as"):
+			unmapped++
+		case strings.Contains(o.Refusal, "does not hold"):
+			loadable++
+		}
+	}
+	switch {
+	case unmapped > 0:
+		return "No spool has been confirmed as one of this bed's colours. " +
+			"Map it under Inventory, then queue this bed."
+	case loadable > 0:
+		return "No printer has this bed's colours loaded. Load a spool, or wait for one to free up."
+	default:
+		return "No printer can take this bed yet."
+	}
 }
 
 // queueSlotsFor reads the slots the bed's plate declares.
@@ -407,48 +451,6 @@ func missingColours(needed []queueColour, loaded []string) []string {
 	}
 	return missing
 }
-
-// suggestMachine picks the printer to offer first, or -1 when none fits.
-//
-// Nearest colour, not exact, and only ever a default. The operator sees both
-// sets of swatches and the tray each slot will print from before sending, so a
-// poor suggestion costs one click - while refusing to suggest anything unless
-// the hexes matched exactly would leave the dropdown empty every time, because
-// the hexes an order resolves to and the hexes an AMS reports come from
-// different sources and rarely agree to the byte.
-//
-// Idle beats busy at equal distance: the point of choosing is printing sooner.
-func suggestMachine(machines []queueMachine, colours []queueColour) int {
-	best, bestScore := -1, 0
-	for i, m := range machines {
-		if !m.Eligible || len(m.Loaded) == 0 {
-			continue
-		}
-		score := 0
-		matched := true
-		for _, c := range colours {
-			d, ok := nearestColourDistance(c.Hex, m.Loaded)
-			if !ok {
-				matched = false
-				break
-			}
-			score += d
-		}
-		if !matched {
-			continue
-		}
-		if m.Status != production.FleetMachineIdle {
-			score += busyPenalty
-		}
-		if best < 0 || score < bestScore {
-			best, bestScore = i, score
-		}
-	}
-	return best
-}
-
-// busyPenalty outranks any possible colour distance (3 * 255^2 per colour).
-const busyPenalty = 1 << 24
 
 // nearestColourDistance is how far the closest loaded spool is from want, as a
 // squared RGB distance. Reports false when either side cannot be read.

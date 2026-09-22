@@ -630,10 +630,28 @@ ORDER BY print_finished_at ASC NULLS LAST;
 -- an idle bed and the plate is sent again.
 UPDATE batches SET
     bambu_slice_job_id = sqlc.narg('bambu_slice_job_id'),
+    -- The physical printer, recorded at the same moment and for the same
+    -- reason: from here until a queue item exists, this row is the only
+    -- evidence that work is heading for that unit.
+    fleet_machine_id   = sqlc.narg('fleet_machine_id'),
     print_error        = NULL,
     print_error_at     = NULL,
     updated_at         = now()
 WHERE id = sqlc.arg('id');
+
+-- name: CountBedsInFlightPerFleetMachine :many
+-- Beds already sent to a printer that BambuBuddy's queue cannot see yet.
+--
+-- A bed is in flight from the moment its slice is requested until a queue item
+-- exists for it, which is minutes. Rank without this and five beds queued in
+-- those minutes all go to the same printer, because each one is ranked against
+-- a fleet that still looks idle.
+SELECT fleet_machine_id, count(*) AS beds
+FROM batches
+WHERE fleet_machine_id IS NOT NULL
+  AND bambu_slice_job_id IS NOT NULL
+  AND queue_item_id IS NULL
+GROUP BY fleet_machine_id;
 
 -- name: ClearBatchSliceJob :exec
 -- Forgets the slice, so the bed can be sent again.

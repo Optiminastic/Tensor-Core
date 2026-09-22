@@ -132,15 +132,22 @@ LIMIT sqlc.arg('row_limit');
 -- on what it is doing, but Tensor is the authority on what it was asked to do,
 -- and a sync that overwrote both would lose the link between a running print
 -- and the batch it belongs to.
+--
+-- remaining_minutes IS written here, and is not a contradiction: it is the
+-- printer's own report of what is left on whatever it is running, which is
+-- squarely "what it is doing". It exists because the scheduler needs a per-unit
+-- answer to "when does this free up" and had none - see migration 0076.
 INSERT INTO machines (
     id, machine_id, name, image_url, status, status_reason, filaments,
-    current_layer, total_layers, model, location, ip_address, nozzle_count
+    current_layer, total_layers, model, location, ip_address, nozzle_count,
+    remaining_minutes, remaining_observed_at
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('machine_id'), sqlc.arg('name'), sqlc.narg('image_url'),
     sqlc.arg('status'), sqlc.narg('status_reason'), sqlc.arg('filaments'),
     sqlc.narg('current_layer'), sqlc.narg('total_layers'),
     sqlc.narg('model'), sqlc.narg('location'), sqlc.narg('ip_address'),
-    sqlc.narg('nozzle_count')
+    sqlc.narg('nozzle_count'),
+    sqlc.narg('remaining_minutes'), sqlc.narg('remaining_observed_at')
 )
 ON CONFLICT (machine_id) DO UPDATE SET
     name          = EXCLUDED.name,
@@ -156,6 +163,12 @@ ON CONFLICT (machine_id) DO UPDATE SET
     location      = EXCLUDED.location,
     ip_address    = EXCLUDED.ip_address,
     nozzle_count  = EXCLUDED.nozzle_count,
+    -- Overwritten unconditionally, including back to NULL, for the same reason
+    -- as status_reason: a printer that has finished must stop reporting "40
+    -- minutes left", or it looks permanently busy and the scheduler routes
+    -- every bed around a machine that is standing idle.
+    remaining_minutes     = EXCLUDED.remaining_minutes,
+    remaining_observed_at = EXCLUDED.remaining_observed_at,
     updated_at    = now()
 RETURNING *;
 

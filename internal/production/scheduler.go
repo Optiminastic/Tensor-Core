@@ -15,9 +15,19 @@ import (
 // FleetMachineState is the live print state of one physical fleet machine, as
 // far as the scheduler needs to know it.
 type FleetMachineState struct {
-	MachineID             uuid.UUID
+	MachineID uuid.UUID
+	// PrintStartedAt and BatchTotalTimeMinutes are what Tensor ASKED this unit
+	// to run. Written only when Tensor itself started the print, so on a fleet
+	// driven through BambuBuddy they are usually both nil.
 	PrintStartedAt        *time.Time
 	BatchTotalTimeMinutes *int
+	// RemainingMinutes is what the PRINTER last said was left on whatever it is
+	// running, and RemainingObservedAt is when it said so. Preferred over the
+	// pair above, because it needs nobody to have told Tensor about the print:
+	// it is true of a plate an operator queued in BambuBuddy directly, which is
+	// most of them.
+	RemainingMinutes    *int
+	RemainingObservedAt *time.Time
 }
 
 // QueuedBatch is one batch already queued (open/in_progress) on a machine,
@@ -31,16 +41,36 @@ type QueuedBatch struct {
 // full time (queued batches run FCFS, one at a time, after the current print).
 func MachineFreeAt(now time.Time, m FleetMachineState, queued []QueuedBatch) time.Time {
 	freeAt := now
-	if m.PrintStartedAt != nil && m.BatchTotalTimeMinutes != nil {
-		remaining := time.Duration(*m.BatchTotalTimeMinutes)*time.Minute - now.Sub(*m.PrintStartedAt)
-		if remaining > 0 {
-			freeAt = now.Add(remaining)
-		}
+	if remaining := remainingPrint(now, m); remaining > 0 {
+		freeAt = now.Add(remaining)
 	}
 	for _, b := range queued {
 		freeAt = freeAt.Add(time.Duration(b.TotalPrintTimeMinutes) * time.Minute)
 	}
 	return freeAt
+}
+
+// remainingPrint is how much of the current print is left, or <= 0 for a
+// machine that is not printing.
+//
+// The printer's own report wins over Tensor's record of what it asked for. Both
+// are read the same way - a duration minus how long ago it was true - so an
+// observation that has gone stale DECAYS rather than needing a freshness
+// threshold: "40 minutes left", seen an hour ago, is already zero by this
+// arithmetic. That is the honest reading and it needs no configuration.
+//
+// Decay is optimistic for a printer that has since started something new, and
+// deliberately so: the alternative is withholding a machine on the strength of
+// an hour-old number. A printer Tensor cannot reach is excluded a step earlier
+// anyway, by fleetStatus flipping it to "off".
+func remainingPrint(now time.Time, m FleetMachineState) time.Duration {
+	if m.RemainingMinutes != nil && m.RemainingObservedAt != nil {
+		return time.Duration(*m.RemainingMinutes)*time.Minute - now.Sub(*m.RemainingObservedAt)
+	}
+	if m.PrintStartedAt != nil && m.BatchTotalTimeMinutes != nil {
+		return time.Duration(*m.BatchTotalTimeMinutes)*time.Minute - now.Sub(*m.PrintStartedAt)
+	}
+	return 0
 }
 
 // MachineCandidate is one machine the scheduler is choosing between, already

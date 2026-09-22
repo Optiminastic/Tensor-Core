@@ -90,6 +90,10 @@ func (s *Server) assignMachineForBatch(
 			MachineID:             r.ID,
 			PrintStartedAt:        db.TimePtr(r.PrintStartedAt),
 			BatchTotalTimeMinutes: int32PtrToIntPtr(r.BatchTotalTimeMinutes),
+			// What the printer itself reports, which is the only one of the two
+			// that is ever populated on a fleet driven through BambuBuddy.
+			RemainingMinutes:    int32PtrToIntPtr(r.RemainingMinutes),
+			RemainingObservedAt: db.TimePtr(r.RemainingObservedAt),
 		}
 		queued := s.queuedBatchLoad(ctx, r.ID)
 		candidates = append(candidates, production.MachineCandidate{

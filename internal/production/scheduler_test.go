@@ -286,3 +286,83 @@ func TestIdleRecencyBreaksExactTies(t *testing.T) {
 		t.Error("an exact tie did not go to the longest-idle machine")
 	}
 }
+
+// The printer's own report is what the fleet sync can actually supply. The
+// pair above is written only when Tensor itself started the print, which on a
+// BambuBuddy-driven floor is almost never - so before this existed, every
+// machine read "free now" and ranking on availability ranked on nothing.
+func TestMachineFreeAtPrefersWhatThePrinterReports(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	observed := now.Add(-5 * time.Minute)
+	remaining := 45
+
+	freeAt := MachineFreeAt(now, FleetMachineState{
+		RemainingMinutes: &remaining, RemainingObservedAt: &observed,
+	}, nil)
+
+	want := now.Add(40 * time.Minute)
+	if !freeAt.Equal(want) {
+		t.Fatalf("free at %s, want %s - 45 minutes seen 5 minutes ago is 40 minutes", freeAt, want)
+	}
+}
+
+// A reading that has gone stale decays on its own arithmetic, so there is no
+// freshness threshold to configure and no way to forget to apply one.
+func TestMachineFreeAtLetsAStaleObservationDecayToFree(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	observed := now.Add(-3 * time.Hour)
+	remaining := 40
+
+	freeAt := MachineFreeAt(now, FleetMachineState{
+		RemainingMinutes: &remaining, RemainingObservedAt: &observed,
+	}, nil)
+
+	if !freeAt.Equal(now) {
+		t.Fatalf("free at %s, want now - an hours-old '40 minutes left' is not a "+
+			"smaller number, it has simply expired", freeAt)
+	}
+}
+
+// Tensor's own record still answers for a print Tensor started, so the
+// simulator and the manual PATCH path keep working.
+func TestMachineFreeAtFallsBackToWhatTensorAskedFor(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-10 * time.Minute)
+	total := 30
+
+	freeAt := MachineFreeAt(now, FleetMachineState{
+		PrintStartedAt: &startedAt, BatchTotalTimeMinutes: &total,
+	}, nil)
+
+	if want := now.Add(20 * time.Minute); !freeAt.Equal(want) {
+		t.Fatalf("free at %s, want %s", freeAt, want)
+	}
+}
+
+// Half an observation is no observation: a remaining time with no timestamp
+// cannot be aged, and treating it as if it were seen just now would pin a
+// machine as busy forever.
+func TestMachineFreeAtIgnoresARemainingTimeWithNoObservationTime(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	remaining := 40
+
+	freeAt := MachineFreeAt(now, FleetMachineState{RemainingMinutes: &remaining}, nil)
+
+	if !freeAt.Equal(now) {
+		t.Fatalf("free at %s, want now", freeAt)
+	}
+}
+
+func TestMachineFreeAtAddsQueuedBatchesAfterTheReportedPrint(t *testing.T) {
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	observed := now
+	remaining := 20
+
+	freeAt := MachineFreeAt(now, FleetMachineState{
+		RemainingMinutes: &remaining, RemainingObservedAt: &observed,
+	}, []QueuedBatch{{TotalPrintTimeMinutes: 30}})
+
+	if want := now.Add(50 * time.Minute); !freeAt.Equal(want) {
+		t.Fatalf("free at %s, want %s", freeAt, want)
+	}
+}

@@ -13,9 +13,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/obs"
@@ -93,6 +95,10 @@ func (s *Server) syncFleet(ctx context.Context, opts syncFleetOptions) (SyncFlee
 		// cannot currently reach is still part of the fleet - it is simply
 		// off, which is exactly what the status column is for.
 		status, statusErr := s.bambu.GetStatus(ctx, p.ID)
+		// Stamped per printer, not once for the pass: reading fourteen printers
+		// takes long enough that a single timestamp would date the last one's
+		// countdown by the time the first one's was written.
+		observedAt := time.Now()
 		if statusErr != nil {
 			log.Warn("bambubuddy status unavailable, recording the printer as off",
 				"printer", p.Name, "error", statusErr)
@@ -123,6 +129,12 @@ func (s *Server) syncFleet(ctx context.Context, opts syncFleetOptions) (SyncFlee
 			// 100%, which reads as stuck rather than done.
 			CurrentLayer: layerPtr(status, status.Printing()),
 			TotalLayers:  totalLayerPtr(status, status.Printing()),
+			// How long this unit is busy for. The scheduler had no per-printer
+			// answer to that and ranked the whole fleet as free; this is the
+			// number it needs, and the sync has been fetching and discarding it
+			// on every pass since the integration was written.
+			RemainingMinutes:    remainingMinutesPtr(status),
+			RemainingObservedAt: db.Timestamptz(observedAtPtr(status, observedAt)),
 		})
 		if err != nil {
 			return out, fmt.Errorf("upsert machine %s: %w", code, err)
@@ -304,6 +316,37 @@ func hexColour(c string) string {
 		c = c[:6] // drop the alpha byte
 	}
 	return "#" + strings.ToUpper(c)
+}
+
+// remainingMinutesPtr is what the printer says is left on the plate it is
+// running, or nil when it is not running one.
+//
+// Nil rather than zero when idle, and the upsert writes that nil through: a
+// machine that keeps reporting the last print's remaining time looks
+// permanently busy, and the scheduler would route every bed around a printer
+// standing free. Same rule as status_reason.
+//
+// A running printer that reports nothing useful (0 or less) also yields nil.
+// "Zero minutes left" and "no estimate yet" arrive identically over the wire,
+// and reading the second as the first would call a machine free the instant it
+// started a six-hour plate.
+func remainingMinutesPtr(s bambubuddy.Status) *int32 {
+	if !s.Printing() || s.RemainingTime <= 0 {
+		return nil
+	}
+	v := int32(s.RemainingTime)
+	return &v
+}
+
+// observedAtPtr timestamps the reading, so a reader can age it.
+//
+// Paired with remainingMinutesPtr and nil whenever it is: the two are read
+// together and half an observation cannot be aged at all.
+func observedAtPtr(s bambubuddy.Status, now time.Time) *time.Time {
+	if remainingMinutesPtr(s) == nil {
+		return nil
+	}
+	return &now
 }
 
 func layerPtr(s bambubuddy.Status, printing bool) *int32 {

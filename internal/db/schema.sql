@@ -502,6 +502,10 @@ CREATE TABLE batches (
     -- queue item exists. See migration 0075: without it a bed mid-slice
     -- looks undispatched and can be sent - and printed - twice.
     bambu_slice_job_id              integer,
+    -- Which PHYSICAL printer this bed was sent to. batches.machine_id is a
+    -- machine_profiles id - a class shared by up to five units - so it cannot
+    -- answer this. See migration 0077.
+    fleet_machine_id                uuid REFERENCES machines (id) ON DELETE SET NULL,
     -- What actually happened on the printer, from BambuBuddy's archive - see
     -- migration 0068. print_outcome is null until a print resolves and is the
     -- idempotency key for the write that resolves it. The actual_* pair sits
@@ -515,6 +519,7 @@ CREATE TABLE batches (
 );
 CREATE UNIQUE INDEX uq_batches_batch_number ON batches (batch_number);
 CREATE INDEX ix_batches_queue_item ON batches (queue_item_id) WHERE queue_item_id IS NOT NULL;
+CREATE INDEX ix_batches_fleet_machine ON batches (fleet_machine_id) WHERE fleet_machine_id IS NOT NULL;
 CREATE INDEX ix_batches_archive ON batches (archive_id) WHERE archive_id IS NOT NULL;
 CREATE INDEX ix_batches_unsliced ON batches (created_at DESC) WHERE plate_sliced_at IS NULL;
 CREATE INDEX ix_batches_created ON batches (created_at DESC, id DESC);
@@ -608,6 +613,13 @@ CREATE TABLE machines (
     machine_profile_id       uuid REFERENCES machine_profiles (id) ON DELETE SET NULL,
     -- HMS text from the printer explaining an 'error' status; null otherwise.
     status_reason            text,
+    -- What the printer says is left on the plate it is running, and when it
+    -- said it. Distinct from print_started_at/batch_total_time_minutes above,
+    -- which record what Tensor ASKED this unit to run; these are what it
+    -- reports. Readers fence on the observation time - a remaining time from an
+    -- unreachable printer is a lie, not a smaller number. See migration 0076.
+    remaining_minutes        integer,
+    remaining_observed_at    timestamptz,
     -- What the printer is, as BambuBuddy reports it - see migration 0062.
     model                    varchar(64),
     location                 varchar(255),

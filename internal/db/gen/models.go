@@ -40,6 +40,7 @@ type Batch struct {
 	UpdatedAt                   pgtype.Timestamptz
 	PipelineRunID               *int32
 	BambuSliceJobID             *int32
+	FleetMachineID              *uuid.UUID
 	ArchiveID                   *int32
 	PrintOutcome                *string
 	PrintStartedAt              pgtype.Timestamptz
@@ -223,6 +224,8 @@ type Machine struct {
 	TotalWasteGrams       pgtype.Numeric
 	MachineProfileID      *uuid.UUID
 	StatusReason          *string
+	RemainingMinutes      *int32
+	RemainingObservedAt   pgtype.Timestamptz
 	Model                 *string
 	Location              *string
 	IpAddress             *string

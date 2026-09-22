@@ -61,7 +61,7 @@ func (s *Server) fleetMachineDTO(ctx context.Context, m gen.Machine) fleetMachin
 		Filaments:      s.computeLiveFilaments(ctx, m),
 		CurrentBatchID: currentBatchID, CurrentLayer: m.CurrentLayer, TotalLayers: m.TotalLayers,
 		BatchTotalTimeMinutes: m.BatchTotalTimeMinutes, PrintStartedAt: startedAt,
-		RemainingSeconds: remainingSeconds(m.BatchTotalTimeMinutes, startedAt),
+		RemainingSeconds: remainingSeconds(m),
 		TotalWasteGrams:  db.NumFloat(m.TotalWasteGrams),
 		CreatedAt:        db.Time(m.CreatedAt), UpdatedAt: db.Time(m.UpdatedAt),
 	}
@@ -124,19 +124,39 @@ func (s *Server) computeLiveFilaments(ctx context.Context, m gen.Machine) json.R
 	return data
 }
 
-// remainingSeconds computes a live countdown from a total duration and a start
-// time, floored at zero. Returns nil when either input is missing (nothing is
-// printing) rather than a stale stored number.
-func remainingSeconds(totalMinutes *int32, startedAt *time.Time) *int64 {
-	if totalMinutes == nil || startedAt == nil {
+// remainingSeconds computes a live countdown, floored at zero, preferring the
+// printer's own report over Tensor's record of what it asked for.
+//
+// Both inputs are read the same way - a duration, minus how long ago it was
+// true - so an observation that has gone stale counts down to zero on its own
+// rather than needing a freshness rule. Nil when nothing is printing, rather
+// than a stale stored number.
+//
+// The printer's report is preferred because Tensor's pair is written only when
+// Tensor itself started the print. On this fleet that is never: the countdown
+// this function feeds was null on all fourteen machines before the sync began
+// recording what the printers say.
+func remainingSeconds(m gen.Machine) *int64 {
+	remaining, ok := remainingPrintSeconds(m)
+	if !ok {
 		return nil
 	}
-	total := time.Duration(*totalMinutes) * time.Minute
-	remaining := int64((total - time.Since(*startedAt)).Seconds())
 	if remaining < 0 {
 		remaining = 0
 	}
 	return &remaining
+}
+
+func remainingPrintSeconds(m gen.Machine) (int64, bool) {
+	if observed := db.TimePtr(m.RemainingObservedAt); m.RemainingMinutes != nil && observed != nil {
+		total := time.Duration(*m.RemainingMinutes) * time.Minute
+		return int64((total - time.Since(*observed)).Seconds()), true
+	}
+	if startedAt := db.TimePtr(m.PrintStartedAt); m.BatchTotalTimeMinutes != nil && startedAt != nil {
+		total := time.Duration(*m.BatchTotalTimeMinutes) * time.Minute
+		return int64((total - time.Since(*startedAt)).Seconds()), true
+	}
+	return 0, false
 }
 
 func (s *Server) registerFleetMachines(r *gin.Engine) {

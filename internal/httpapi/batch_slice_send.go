@@ -153,6 +153,11 @@ func (s *Server) sendBatchToMachine(
 	sliceJobID := int32(job.JobID)
 	if err := s.store.Q.SetBatchSliceJob(ctx, gen.SetBatchSliceJobParams{
 		ID: batch.ID, BambuSliceJobID: &sliceJobID,
+		// The physical printer, not the profile. Until a queue item exists this
+		// row is the only record that this bed is on its way to this unit -
+		// which is what keeps the next bed from being ranked against a fleet
+		// that still looks idle.
+		FleetMachineID: &machine.ID,
 	}); err != nil {
 		log.Warn("could not record the slice job", "batch", batch.BatchNumber, "error", err)
 	}
