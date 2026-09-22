@@ -171,6 +171,16 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 		// The bed vanished between the two reads. Treating an unknown bed as
 		// movable would be the one guess here that prints something.
 		return "on a bed Tensor cannot read"
+	case bed.Manual:
+		// Somebody put this plank on a bed deliberately, so it is settled -
+		// the same courtesy the planner is already made to extend. Offering it
+		// again would let one hand-built bed be quietly emptied to fill
+		// another, and a list that keeps offering what you just chose is
+		// tiresome to work through.
+		//
+		// Undone by removing it from that bed, which is where the decision was
+		// made and where it should be reversed.
+		return "already on a custom bed"
 	}
 	// Draft AND Locked, matching editableBatch. A locked bed is not final:
 	// editing one takes its plate back out of BambuBuddy's queue and gives its

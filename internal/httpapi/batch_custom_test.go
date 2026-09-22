@@ -167,3 +167,49 @@ func TestCompatibilityKeyStringSeparatesWhatCannotShareABed(t *testing.T) {
 		t.Error("PLA and PETG produced the same key")
 	}
 }
+
+func bedRow(status string, number string, manual bool) gen.ListBatchIdentityForIDsRow {
+	return gen.ListBatchIdentityForIDsRow{ID: uuid.New(), Status: status, BatchNumber: number, Manual: manual}
+}
+
+// Once a plank is on a hand-built bed it is settled. Offering it again would
+// let one custom bed be quietly emptied to fill another, and a list that keeps
+// offering what you just chose is tiresome to work through.
+func TestAProductOnACustomBedIsNotOfferedAgain(t *testing.T) {
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	batchID := uuid.New()
+	job.BatchID = &batchID
+
+	got := unavailableBecause(job, bedRow(production.BatchPendingApproval, "BATCH-1000500", true))
+	if got != "already on a custom bed" {
+		t.Fatalf("reason = %q, want it to be unavailable", got)
+	}
+}
+
+// A planner-made Draft is a proposal, so its planks are still free to move.
+func TestAProductOnAPlannedDraftIsStillOffered(t *testing.T) {
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	batchID := uuid.New()
+	job.BatchID = &batchID
+
+	if got := unavailableBecause(job, bedRow(production.BatchPendingApproval, "BATCH-1000501", false)); got != "" {
+		t.Fatalf("reason = %q, want a planned Draft's plank to stay available", got)
+	}
+}
+
+// A locked bed can still give a plank up - editing one gives its filament back
+// and takes its plate out of the queue first. Only printing and done cannot.
+func TestALockedBedsProductIsStillOffered(t *testing.T) {
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	batchID := uuid.New()
+	job.BatchID = &batchID
+
+	if got := unavailableBecause(job, bedRow(production.BatchOpen, "BATCH-1000502", false)); got != "" {
+		t.Fatalf("reason = %q, want a locked bed's plank to remain movable", got)
+	}
+	for _, settled := range []string{production.BatchInProgress, production.BatchCompleted} {
+		if got := unavailableBecause(job, bedRow(settled, "BATCH-1000503", false)); got == "" {
+			t.Errorf("a %s bed's plank was offered as movable", settled)
+		}
+	}
+}
