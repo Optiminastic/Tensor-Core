@@ -17,26 +17,34 @@ package httpapi
 // client-controlled, so the dropdown is a convenience and never the rule.
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
 type queueBatchRequest struct {
 	// MachineID is a Tensor machines row, not a BambuBuddy printer id. The
 	// browser has no business knowing BambuBuddy's numbering, and the serial on
 	// that row is what resolves to it.
-	MachineID string `json:"machine_id" binding:"required"`
+	//
+	// OPTIONAL, and normally absent. Left out, Tensor chooses the printer
+	// itself - the one that frees up soonest among those whose AMS actually
+	// holds this bed's colours - which is the whole point of the Queue button.
+	// Sent, it overrides that choice, which is what a person standing at a
+	// particular machine needs.
+	MachineID string `json:"machine_id"`
 	// SlotTrays names the spool that prints each plate slot, in the plate's own
 	// slot order, as ams_mapping integers.
 	//
-	// The operator picks these in the dialog, looking at the bed's swatches and
-	// the printer's trays side by side. Tensor deliberately does not work them
-	// out: an AMS reports a colour as a bare hex with no name, and 11 of the 14
-	// hexes on this fleet appear in no catalogue, so any automatic answer would
-	// be a guess that prints.
+	// Also optional, and bound by Tensor when absent. Supplying it without a
+	// machine is meaningless - an ams_mapping only means something against the
+	// printer it indexes - so the two travel together or not at all.
 	SlotTrays []int `json:"slot_trays"`
 
 	// There is deliberately no "send anyway" flag.
@@ -71,15 +79,13 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// An empty body is the ordinary case: press Queue, Tensor decides.
 	var req queueBatchRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		detail(c, http.StatusUnprocessableEntity, "Pick a machine to send this batch to.")
-		return
-	}
-	machineID, err := uuid.Parse(strings.TrimSpace(req.MachineID))
-	if err != nil {
-		detail(c, http.StatusUnprocessableEntity, "That is not a valid machine.")
-		return
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			detail(c, http.StatusUnprocessableEntity, "Could not read that request.")
+			return
+		}
 	}
 	if !s.filesReady(c) {
 		return
@@ -88,12 +94,6 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 
 	if !s.bambu.Configured() {
 		detail(c, http.StatusConflict, "BambuBuddy is not configured on this service.")
-		return
-	}
-
-	machine, err := s.store.Q.GetFleetMachine(ctx, machineID)
-	if err != nil {
-		dbError(c, err, "That machine does not exist.", "Could not load the machine.")
 		return
 	}
 
@@ -112,14 +112,63 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 		return
 	}
 
-	// No colour pre-check here any more. The authoritative one is in
-	// mapSlotsToTrays, which reads the PLATE's own declared slots rather than
-	// re-deriving them from the jobs - and so catches what this missed, notably
+	machine, slotTrays, err := s.targetFor(ctx, batch, req)
+	if err != nil {
+		writeStatusError(c, err, "Could not choose a printer for this batch.")
+		return
+	}
+
+	// No colour pre-check here. The authoritative one is assignmentsFromChoice,
+	// which reads the PLATE's own declared slots rather than re-deriving them
+	// from the jobs - and so catches what a job-derived check missed, notably
 	// the white plank body that queueColoursFor omits entirely.
-	resp, err := s.sendBatchToMachine(ctx, batch, machine, req.SlotTrays, currentUserID(c))
+	resp, err := s.sendBatchToMachine(ctx, batch, machine, slotTrays, currentUserID(c))
 	if err != nil {
 		writeStatusError(c, err, "Could not send the batch to that printer.")
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// targetFor resolves which printer prints this bed, and on which spools.
+//
+// Two ways in. Normally nothing is named and Tensor picks, which is what the
+// Queue button does. When a machine IS named the operator has overridden the
+// choice, and their slot binding is taken as given - they are standing at the
+// machine and can see what is in it, which is a better source than anything
+// Tensor can read.
+func (s *Server) targetFor(
+	ctx context.Context, batch gen.Batch, req queueBatchRequest,
+) (gen.Machine, []int, error) {
+	if named := strings.TrimSpace(req.MachineID); named != "" {
+		machineID, err := uuid.Parse(named)
+		if err != nil {
+			return gen.Machine{}, nil, statusErr(http.StatusUnprocessableEntity,
+				"That is not a valid machine.")
+		}
+		machine, err := s.store.Q.GetFleetMachine(ctx, machineID)
+		if err != nil {
+			return gen.Machine{}, nil, statusErr(http.StatusNotFound, "That machine does not exist.")
+		}
+		return machine, req.SlotTrays, nil
+	}
+
+	slots := s.queueSlotsFor(ctx, batch)
+	if len(slots) == 0 {
+		return gen.Machine{}, nil, statusErr(http.StatusConflict,
+			"This bed's plate declares no filament. Rebuild the bed before sending it.")
+	}
+	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots))
+	if err != nil {
+		return gen.Machine{}, nil, statusErr(http.StatusBadGateway, "Could not read the fleet.")
+	}
+	if plan.Reason == "" {
+		// Refused, not fallen back. Sending a bed to a printer that cannot
+		// print its colours is the failure this whole path exists to prevent,
+		// so the answer names what is missing instead.
+		return gen.Machine{}, nil, statusErr(http.StatusConflict, noPrinterNote(options))
+	}
+	obs.FromContext(ctx).Info("chose a printer for a bed",
+		"batch", batch.BatchNumber, "printer", plan.Machine.Name, "why", plan.Reason)
+	return plan.Machine, plan.SlotTrays, nil
 }
