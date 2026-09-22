@@ -153,6 +153,11 @@ func (s *Server) registerBatches(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.BatchRead.Key()), s.listBatches)
 	g.POST("", s.guards.RequirePermission(auth.BatchManage.Key()), s.createBatch)
 	g.POST("/auto-create", s.guards.RequirePermission(auth.BatchManage.Key()), s.autoCreateBatches)
+	// Building a bed by hand: the pool to choose from, and the bed itself. Both
+	// behind batch:manage - choosing what prints together IS managing batches,
+	// whoever the chooser is.
+	g.GET("/batchable-jobs", s.guards.RequirePermission(auth.BatchManage.Key()), s.listBatchableJobs)
+	g.POST("/custom", s.guards.RequirePermission(auth.BatchManage.Key()), s.createCustomBatch)
 	g.GET("/:id", s.guards.RequirePermission(auth.BatchRead.Key()), s.getBatch)
 	g.PATCH("/:id", s.guards.RequirePermission(auth.BatchManage.Key()), s.patchBatch)
 	g.GET("/:id/preview", s.guards.RequirePermission(auth.BatchRead.Key()), s.previewBatch)
