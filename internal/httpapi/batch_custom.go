@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -30,112 +31,201 @@ import (
 )
 
 // batchableJobsResponse is the pool a hand-built bed is chosen from.
-type batchableJobsResponse struct {
-	Jobs []batchableJob `json:"jobs"`
+// batchableOrdersResponse is the pool a hand-built bed is chosen from.
+//
+// ORDERS, not jobs. The person building a bed is looking at an orders page and
+// thinking "these four customers are waiting"; a list of JOB-1000008 makes them
+// translate. The job is what actually goes on the plate, so it is still what is
+// sent - it is simply not what is shown.
+type batchableOrdersResponse struct {
+	Orders []batchableOrder `json:"orders"`
 	// UnitsPerBed is how many products one plate holds, so the dialog can count
 	// places rather than making somebody guess when to stop.
 	UnitsPerBed int `json:"units_per_bed"`
 }
 
-type batchableJob struct {
-	productionJobResponse
-	// CompatibilityKey is an opaque string: two jobs may share a bed exactly
+// batchableOrder is one customer's planks of one colour, waiting.
+//
+// Grouped by order AND compatibility, not by order alone. An order can hold a
+// blue plank and a gold one, and those cannot share a plate - so offering "this
+// order" as a single thing would offer a bed that cannot be printed. Two rows
+// for that order is honest and rare.
+type batchableOrder struct {
+	OrderNumber string `json:"order_number"`
+	// JobIDs are the planks this row stands for, and what is actually sent when
+	// it is chosen. The dialog never shows them.
+	JobIDs []string `json:"job_ids"`
+	// Products names what was ordered, for the row - one entry per plank.
+	Products []string `json:"products"`
+	// Units is how many places on the bed this row takes.
+	Units int `json:"units"`
+	// CompatibilityKey is an opaque string: two rows may share a bed exactly
 	// when theirs match. Computed here rather than rebuilt in the browser
 	// because it folds in NormalisedColourKey, and a second implementation of
 	// that in another language is a rule that will drift - quietly, and into a
 	// plate that prints in the wrong colour.
 	CompatibilityKey string `json:"compatibility_key"`
-	// ColourLabel is what to show beside the swatch: the bed's colour in the
-	// order's own words.
-	ColourLabel string `json:"colour_label"`
-	// Available reports whether this product can be put on a bed right now.
-	// False ones are still listed, because the question somebody opens this
-	// dialog with is "where are my unfulfilled orders" and an omitted row
-	// answers it with silence.
-	Available bool `json:"available"`
-	// UnavailableReason says why not, in words. Empty when available.
+	ColourLabel      string `json:"colour_label"`
+	// Available reports whether these planks can go on a bed right now. False
+	// ones are still listed, because the question somebody opens this dialog
+	// with is "where are my unfulfilled orders" and an omitted row answers it
+	// with silence.
+	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason"`
-	// OnBed names the bed this product already sits on, so "locked" has
-	// somewhere to point.
+	// OnBed names the bed these planks already sit on.
 	OnBed string `json:"on_bed"`
-	// Reprint marks a product that has already been printed. Choosing it makes
-	// a NEW job rather than moving this one, because this row is the record of
-	// a print that really happened and rewriting it would falsify history.
+	// BedLocked marks planks on an approved bed. Taking one off is allowed and
+	// is not free: that bed's plate comes out of BambuBuddy's queue and its
+	// filament is given back before it is rebuilt without them.
+	BedLocked bool `json:"bed_locked"`
+	// Reprint marks planks that have already printed. Choosing them puts the
+	// same jobs back in the queue, which prints a second copy.
 	Reprint bool `json:"reprint"`
 	// FinishedStage says where an already-printed plank actually is - waiting
-	// for QC, to be packed, to be dispatched - so "print it again" is a
+	// for QC, to be packed, to be dispatched - so "print it again" reads as a
 	// deliberate choice rather than the only visible option.
 	FinishedStage string `json:"finished_stage"`
-	// BedLocked marks a product whose bed is approved. Taking it off one is
-	// allowed and is not free: that bed's plate comes out of BambuBuddy's
-	// queue and its filament is given back before it is rebuilt without this
-	// plank. Worth saying before the click, not after.
-	BedLocked bool `json:"bed_locked"`
 }
 
-// listBatchableJobs returns every product from an unfulfilled order that could
-// go on a bed.
+// listBatchableJobs returns every unfulfilled order that could go on a bed.
 //
-// The planner's own pool: products not yet on a bed, PLUS products sitting in a
-// Draft. The second half is the important one. On a floor that plans
-// continuously almost everything queued is already on some Draft within
-// minutes, so a list of only the unbatched is empty nearly all the time - which
-// is exactly what this dialog showed, while the screen behind it was full of
-// Draft beds somebody wanted to rearrange.
+// Only orders nobody has shipped, and only planks whose model already exists:
+// this dialog arranges work that is ready, and a plank with no model has
+// nothing to put on a plate. Those appear with that as their reason rather than
+// vanishing, because "where is my order" deserves an answer either way.
 //
-// A Draft is a proposal: no filament is reserved and no plate is promised, so
-// its products are free to be moved. Approved and beyond are absent, and stay
-// absent - moving a product off a bed whose filament is spoken for and whose
-// plate is already sliced is a different and much more expensive act.
-//
-// Held, flagged and unvalidated products are excluded here as they are there. A
-// dialog that let somebody pick a held job would be offering to overrule a hold
-// by accident.
+// Held, flagged and unvalidated planks are excluded exactly as the planner
+// excludes them. A dialog that let somebody pick a held job would be offering
+// to overrule a hold by accident.
 func (s *Server) listBatchableJobs(c *gin.Context) {
 	ctx := c.Request.Context()
 	jobs, err := s.store.Q.ListJobsForCustomBatch(ctx)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the products waiting.")
+		detail(c, http.StatusInternalServerError, "Could not read the orders waiting.")
 		return
 	}
 	beds, err := s.bedsHolding(ctx, jobs)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the beds those products are on.")
+		detail(c, http.StatusInternalServerError, "Could not read the beds those orders are on.")
+		return
+	}
+	numbers, err := s.orderNumbersFor(ctx, jobs)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the orders.")
 		return
 	}
 
-	dtos := s.productionJobsDTO(ctx, jobs)
-	out := batchableJobsResponse{
-		Jobs:        make([]batchableJob, 0, len(dtos)),
+	out := batchableOrdersResponse{
+		Orders:      groupByOrder(jobs, beds, numbers),
 		UnitsPerBed: s.bedUnitCap(),
-	}
-	for i, dto := range dtos {
-		// The zero row when the product is on no bed, which unavailableBecause
-		// reads as "not on one" rather than "on an unreadable one".
-		var bed gen.ListBatchIdentityForIDsRow
-		if jobs[i].BatchID != nil {
-			bed = beds[*jobs[i].BatchID]
-		}
-		reason := unavailableBecause(jobs[i], bed)
-		out.Jobs = append(out.Jobs, batchableJob{
-			productionJobResponse: dto,
-			CompatibilityKey:      compatibilityKeyString(jobs[i]),
-			ColourLabel:           jobColourKey(jobs[i]),
-			Available:             reason == "",
-			UnavailableReason:     reason,
-			OnBed:                 bed.BatchNumber,
-			BedLocked:             bed.Status == production.BatchOpen,
-			Reprint:               jobs[i].Status == production.StatusCompleted,
-			FinishedStage:         finishedStageOf(jobs[i]),
-		})
 	}
 	c.JSON(http.StatusOK, out)
 }
 
-// bedsHolding reads the beds these products sit on, by id.
+// orderNumbersFor reads the store's number for each job's order, in one query.
+func (s *Server) orderNumbersFor(
+	ctx context.Context, jobs []gen.ProductionJob,
+) (map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]string{}
+	ids := dedupeIDs(jobs, func(j gen.ProductionJob) *uuid.UUID { return j.OrderID })
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.store.Q.ListOrderNumbersForIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.OrderNumber
+	}
+	return out, nil
+}
+
+// groupByOrder collapses planks into one row per order and colour.
 //
-// One query for the whole list rather than one per product, and separate from
-// the job query so that one can return production_jobs rows unchanged.
+// A row is available only when every plank in it is. They are the same order in
+// the same colour, so they go on a bed together or not at all, and a row that
+// was half-pickable would need explaining twice.
+func groupByOrder(
+	jobs []gen.ProductionJob,
+	beds map[uuid.UUID]gen.ListBatchIdentityForIDsRow,
+	numbers map[uuid.UUID]string,
+) []batchableOrder {
+	type groupKey struct {
+		order  uuid.UUID
+		compat string
+	}
+	index := map[groupKey]int{}
+	out := make([]batchableOrder, 0, len(jobs))
+
+	for _, j := range jobs {
+		var bed gen.ListBatchIdentityForIDsRow
+		if j.BatchID != nil {
+			bed = beds[*j.BatchID]
+		}
+		var orderID uuid.UUID
+		if j.OrderID != nil {
+			orderID = *j.OrderID
+		}
+		key := groupKey{order: orderID, compat: compatibilityKeyString(j)}
+
+		at, seen := index[key]
+		if !seen {
+			at = len(out)
+			index[key] = at
+			out = append(out, batchableOrder{
+				OrderNumber:      orderTagFor(orderNumberPtr(numbers, j.OrderID), j.JobNumber),
+				CompatibilityKey: key.compat,
+				ColourLabel:      jobColourKey(j),
+				Available:        true,
+				OnBed:            bed.BatchNumber,
+				BedLocked:        bed.Status == production.BatchOpen,
+			})
+		}
+		row := &out[at]
+		row.JobIDs = append(row.JobIDs, j.ID.String())
+		row.Products = append(row.Products, deref(j.ProductName))
+		row.Units += int(jobQuantity(j.Quantity))
+		if j.Status == production.StatusCompleted {
+			row.Reprint = true
+			row.FinishedStage = finishedStage(j)
+		}
+		// One unavailable plank makes the row unavailable: these go on a bed
+		// together or not at all.
+		if reason := unavailableBecause(j, bed); reason != "" && row.Available {
+			row.Available = false
+			row.UnavailableReason = reason
+		}
+	}
+
+	// Unavailable last, then most planks first - a customer waiting on three is
+	// worth filling a bed with before one waiting on a single plank.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Available != out[j].Available {
+			return out[i].Available
+		}
+		if out[i].Units != out[j].Units {
+			return out[i].Units > out[j].Units
+		}
+		return out[i].OrderNumber < out[j].OrderNumber
+	})
+	return out
+}
+
+func orderNumberPtr(numbers map[uuid.UUID]string, orderID *uuid.UUID) *string {
+	if orderID == nil {
+		return nil
+	}
+	if n, ok := numbers[*orderID]; ok {
+		return &n
+	}
+	return nil
+}
+
+// bedsHolding reads the beds these planks sit on, by id.
+//
+// One query for the whole list rather than one per plank, and separate from the
+// job query so that one can return production_jobs rows unchanged.
 func (s *Server) bedsHolding(
 	ctx context.Context, jobs []gen.ProductionJob,
 ) (map[uuid.UUID]gen.ListBatchIdentityForIDsRow, error) {
@@ -154,7 +244,7 @@ func (s *Server) bedsHolding(
 	return out, nil
 }
 
-// unavailableBecause explains why a product cannot go on a bed right now, or
+// unavailableBecause explains why a plank cannot go on a bed right now, or
 // returns empty when it can.
 //
 // The same rules the create path enforces, said in words rather than enforced
@@ -169,14 +259,16 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 	case j.PersonalisationStatus != production.PersonalisationValidated &&
 		j.PersonalisationStatus != production.PersonalisationNotRequired:
 		return "personalisation not checked yet"
+	case j.PrintFileID == nil:
+		// The model is what goes on the plate. Without one there is nothing to
+		// arrange, and a bed built around it would fail at plate-merge time
+		// with a message about a file rather than about this order.
+		return "no 3D model yet"
 	case j.Status == production.StatusFailed:
 		return "failed - reprint it from the job"
 	case j.Status == production.StatusCompleted:
-		// Offered, not refused. The plank printed, and its order is still
-		// outstanding - which is exactly the case somebody is looking at when
-		// they ask why. Choosing it prints another one, which is sometimes
-		// what is wanted and never what the record should claim happened, so
-		// the create path mints a reprint rather than moving this row.
+		// Offered. The plank printed and its order is still outstanding, which
+		// is exactly the case somebody is looking at when they ask why.
 		return ""
 	case j.Status != production.StatusQueued:
 		return "printing now"
@@ -187,12 +279,7 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 		// movable would be the one guess here that prints something.
 		return "on a bed Tensor cannot read"
 	case bed.Manual:
-		// Somebody put this plank on a bed deliberately, so it is settled -
-		// the same courtesy the planner is already made to extend. Offering it
-		// again would let one hand-built bed be quietly emptied to fill
-		// another, and a list that keeps offering what you just chose is
-		// tiresome to work through.
-		//
+		// Somebody put this plank on a bed deliberately, so it is settled.
 		// Undone by removing it from that bed, which is where the decision was
 		// made and where it should be reversed.
 		return "already on a custom bed"
@@ -213,19 +300,11 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 //
 // This is the question "the batch is done but the order is not" - and the
 // answer is almost never "print it again". The plank exists; it is waiting for
-// somebody to check or pack it, and putting it on a bed would print a second
-// copy of something already made. So it is named, not offered.
-func finishedStageOf(j gen.ProductionJob) string {
-	if j.Status != production.StatusCompleted {
-		return ""
-	}
-	return finishedStage(j)
-}
-
+// somebody to check or pack it.
 func finishedStage(j gen.ProductionJob) string {
 	switch {
 	case j.QcStatus == production.QcFailed:
-		return "failed QC - reprint it from the job"
+		return "failed QC"
 	case j.QcStatus == production.QcPending:
 		return "printed, waiting for QC"
 	case j.PackagingStatus == production.PackagingPending:

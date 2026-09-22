@@ -12,8 +12,12 @@ import (
 
 func batchableJobRow(number string, colours string) gen.ProductionJob {
 	material := "PLA"
+	// A model, because a plank without one has nothing to put on a plate and is
+	// refused before any other rule is reached.
+	model := uuid.New()
 	return gen.ProductionJob{
-		ID: uuid.New(), JobNumber: number,
+		PrintFileID: &model,
+		ID:          uuid.New(), JobNumber: number,
 		Status:                production.StatusQueued,
 		Quantity:              1,
 		PersonalisationStatus: production.PersonalisationNotRequired,
@@ -243,5 +247,18 @@ func TestPlanksBeingMovedKeepsEveryUnprintedPlank(t *testing.T) {
 	}
 	if got := planksBeingMoved(jobs); len(got) != 2 {
 		t.Fatalf("planksBeingMoved dropped a queued plank: %d of 2", len(got))
+	}
+}
+
+// The model is what goes on the plate. Without one there is nothing to
+// arrange, and a bed built around it would fail at plate-merge time with a
+// message about a missing file rather than about this order.
+func TestAPlankWithNoModelIsNotOffered(t *testing.T) {
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	job.PrintFileID = nil
+
+	got := unavailableBecause(job, gen.ListBatchIdentityForIDsRow{})
+	if got != "no 3D model yet" {
+		t.Fatalf("reason = %q, want it refused for having no model", got)
 	}
 }
