@@ -779,8 +779,11 @@ WHERE batch_id = $1 AND status NOT IN ('completed', 'failed');
 SELECT j.* FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
-WHERE j.status = 'queued'
-  AND j.quantity > 0
+-- Every status, not only queued. A printed plank on an order nobody has
+-- shipped is exactly what somebody is looking for when they ask why an order
+-- is still outstanding, and the answer - "waiting for QC" - belongs in this
+-- list rather than being an absence they have to interpret.
+WHERE j.quantity > 0
   -- A job with no order is a reprint or a hand-added plank: it belongs to
   -- nobody's shipment and is always still outstanding.
   AND (o.id IS NULL OR o.fulfillment_status <> 'fulfilled')
