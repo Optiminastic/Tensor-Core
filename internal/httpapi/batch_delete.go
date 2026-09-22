@@ -72,8 +72,12 @@ func (s *Server) deleteBatch(c *gin.Context) {
 
 	// Withdraws the plate from BambuBuddy's queue and gives back any filament
 	// this bed reserved. A no-op on a Draft, which has neither.
+	// The reason travels intact: beginBatchEdit knows things this handler does
+	// not - which printer is busy with the plate, whether BambuBuddy refused -
+	// and wrapping that in "could not release the batch" tells an operator
+	// nothing they can act on.
 	if err := s.beginBatchEdit(ctx, batch); err != nil {
-		writeStatusError(c, err, "Could not release the batch before deleting it.")
+		writeStatusError(c, err, "Could not take this batch's plate out of the printer queue.")
 		return
 	}
 

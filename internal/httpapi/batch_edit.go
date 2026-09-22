@@ -23,7 +23,9 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -135,8 +137,23 @@ func (s *Server) withdrawFromPrinterQueue(ctx context.Context, batch gen.Batch) 
 		log.Warn("could not read a bed's queue item before editing it",
 			"batch", batch.BatchNumber, "queue_item", itemID, "error", err)
 	} else if item.Status == bambubuddy.QueuePrinting {
-		return statusErr(http.StatusConflict,
-			"This batch's plate is printing on a machine right now, so its jobs cannot be changed.")
+		// Named, and with the printer, because this refusal reaches an operator
+		// through several different buttons - edit, add, delete - and "its jobs
+		// cannot be changed" answers only one of them. What they need to know
+		// is which machine is busy with it and that waiting is the remedy.
+		//
+		// Tensor's own status still reads Locked here: a bed becomes
+		// in_progress when the fleet sync notices the print started, which is
+		// up to a minute behind BambuBuddy. So the row can say Locked while the
+		// plate is already laying plastic, and this is the only place that
+		// knows.
+		where := strings.TrimSpace(item.PrinterName)
+		if where == "" {
+			where = "a machine"
+		}
+		return statusErr(http.StatusConflict, fmt.Sprintf(
+			"%s's plate is printing on %s right now. Wait for it to finish, or stop it in BambuBuddy first.",
+			batch.BatchNumber, where))
 	}
 
 	if err := s.bambu.RemoveQueueItem(ctx, itemID); err != nil {
