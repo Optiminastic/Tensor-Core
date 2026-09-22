@@ -262,3 +262,44 @@ func TestAPlankWithNoModelIsNotOffered(t *testing.T) {
 		t.Fatalf("reason = %q, want it refused for having no model", got)
 	}
 }
+
+// An order somebody has just built a bed for is a question they have already
+// answered. Leaving it on screen invited answering it twice, and a list that
+// keeps offering back what you just chose is tiresome to work through.
+func TestPlanksOnAHandBuiltBedLeaveThePool(t *testing.T) {
+	custom, planned := uuid.New(), uuid.New()
+	onCustom := batchableJobRow("JOB-1", `["BLUE"]`)
+	onCustom.BatchID = &custom
+	onPlanned := batchableJobRow("JOB-2", `["BLUE"]`)
+	onPlanned.BatchID = &planned
+	loose := batchableJobRow("JOB-3", `["BLUE"]`)
+
+	beds := map[uuid.UUID]gen.ListBatchIdentityForIDsRow{
+		custom:  {ID: custom, Status: production.BatchPendingApproval, Manual: true},
+		planned: {ID: planned, Status: production.BatchPendingApproval},
+	}
+
+	got := stillToPlace([]gen.ProductionJob{onCustom, onPlanned, loose}, beds)
+	if len(got) != 2 {
+		t.Fatalf("stillToPlace kept %d planks, want 2", len(got))
+	}
+	for _, j := range got {
+		if j.JobNumber == "JOB-1" {
+			t.Error("a plank already on a hand-built bed was offered again")
+		}
+	}
+}
+
+// A planner-made Draft is a proposal, so its planks stay in the pool.
+func TestPlanksOnAPlannedDraftStayInThePool(t *testing.T) {
+	planned := uuid.New()
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	job.BatchID = &planned
+
+	beds := map[uuid.UUID]gen.ListBatchIdentityForIDsRow{
+		planned: {ID: planned, Status: production.BatchPendingApproval},
+	}
+	if got := stillToPlace([]gen.ProductionJob{job}, beds); len(got) != 1 {
+		t.Fatal("a plank on a planned Draft was dropped from the pool")
+	}
+}

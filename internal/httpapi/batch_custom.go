@@ -116,7 +116,7 @@ func (s *Server) listBatchableJobs(c *gin.Context) {
 	}
 
 	out := batchableOrdersResponse{
-		Orders:      groupByOrder(jobs, beds, numbers),
+		Orders:      groupByOrder(stillToPlace(jobs, beds), beds, numbers),
 		UnitsPerBed: s.bedUnitCap(),
 	}
 	c.JSON(http.StatusOK, out)
@@ -139,6 +139,29 @@ func (s *Server) orderNumbersFor(
 		out[r.ID] = r.OrderNumber
 	}
 	return out, nil
+}
+
+// stillToPlace drops the planks somebody has already put on a bed by hand.
+//
+// Not greyed with a reason, as the other exclusions are: gone. The rest of this
+// list answers "where is my order" and is worth showing even when it cannot be
+// picked, but an order somebody has just built a bed for is a question they
+// have already answered - leaving it on screen invites them to answer it twice,
+// and a list that keeps offering back what you just chose is tiresome to work
+// through.
+//
+// Undone by deleting that bed, which is where the decision was made.
+func stillToPlace(
+	jobs []gen.ProductionJob, beds map[uuid.UUID]gen.ListBatchIdentityForIDsRow,
+) []gen.ProductionJob {
+	out := make([]gen.ProductionJob, 0, len(jobs))
+	for _, j := range jobs {
+		if j.BatchID != nil && beds[*j.BatchID].Manual {
+			continue
+		}
+		out = append(out, j)
+	}
+	return out
 }
 
 // groupByOrder collapses planks into one row per order and colour.
@@ -278,11 +301,6 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 		// The bed vanished between the two reads. Treating an unknown bed as
 		// movable would be the one guess here that prints something.
 		return "on a bed Tensor cannot read"
-	case bed.Manual:
-		// Somebody put this plank on a bed deliberately, so it is settled.
-		// Undone by removing it from that bed, which is where the decision was
-		// made and where it should be reversed.
-		return "already on a custom bed"
 	}
 	// Draft AND Locked, matching editableBatch. A locked bed is not final:
 	// editing one takes its plate back out of BambuBuddy's queue and gives its
