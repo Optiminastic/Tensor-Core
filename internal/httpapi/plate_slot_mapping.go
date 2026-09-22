@@ -230,15 +230,64 @@ func bindOneSlot(
 // DISAGREE, so it is consulted for exactly that.
 func acceptedHexes(wanted string, identities []colourIdentity) map[string]bool {
 	out := map[string]bool{wanted: true}
-	for _, id := range identities {
-		if !slices.Contains(id.Hexes, wanted) {
-			continue
-		}
-		for _, h := range id.Hexes {
-			out[h] = true
+	for _, name := range coloursMeaning(wanted, identities) {
+		for _, id := range identities {
+			if id.Name == name {
+				for _, h := range id.Hexes {
+					out[h] = true
+				}
+			}
 		}
 	}
 	return out
+}
+
+// coloursMeaning is every shop colour this plate hex could be naming.
+//
+// Two ways a hex acquires a name, and the second is the one that matters for
+// beds already on the floor.
+//
+// The map may simply list it - somebody confirmed a spool reporting this exact
+// value. Or the hex may be one the BUILT-IN table produced, which is what every
+// plate built before the colour map existed carries: a GOLD bed from last week
+// declares #D4AF37 because that is what fallbackColours says gold is, and no
+// printer reports it, because the real spools are #D3C5A3 and #D3B7A7.
+//
+// Without the second rule those beds can never be queued, however carefully
+// their colour is mapped - the map reconciles the spools with each other while
+// the plate sits outside the conversation, asking for a colour that only ever
+// existed in a lookup table. Reading the built-in table backwards recovers the
+// word the plate was rendered FROM, and the map answers for the word.
+func coloursMeaning(wanted string, identities []colourIdentity) []string {
+	var names []string
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for _, id := range identities {
+		if slices.Contains(id.Hexes, wanted) {
+			add(id.Name)
+		}
+	}
+	add(fallbackNameFor(wanted))
+	return names
+}
+
+// fallbackNameFor reads the built-in colour table backwards: which colour word
+// would have produced this hex, before anybody mapped anything.
+//
+// Empty when the hex is not one of the built-ins, which is the common case for
+// a spool - those come from printers, and this table never described a printer.
+func fallbackNameFor(hex string) string {
+	for name, candidate := range fallbackColours {
+		if strings.EqualFold(candidate, hex) {
+			return production.CanonicalColourName(name)
+		}
+	}
+	return ""
 }
 
 // materialsAgree compares the plate's plastic with the tray's.

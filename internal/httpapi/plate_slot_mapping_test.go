@@ -399,3 +399,68 @@ func TestAnOperatorsChoiceIsNotSecondGuessedByTheColourMap(t *testing.T) {
 		t.Fatalf("an operator's explicit choice was refused: %v", err)
 	}
 }
+
+// The bed on the floor right now. GOLD is mapped to the two spools the
+// printers actually report, #D3C5A3 and #D3B7A7 - but the plate was built
+// before the map existed, so it declares #D4AF37, the built-in table's idea of
+// gold, which no printer has ever held.
+//
+// Matching the plate's hex against the map alone leaves that bed unqueueable
+// forever, however carefully gold is mapped: the map reconciles the spools with
+// each other while the plate asks for a colour that only existed in a lookup
+// table.
+func TestAPlateBuiltBeforeTheMapStillFindsItsColour(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#D4AF37", "PLA")}
+	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3C5A3", "PLA")}
+	gold := []colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}}
+
+	got, err := bindPlateToTrays(slots, trays, gold)
+	if err != nil {
+		t.Fatalf("a GOLD bed was refused by a printer holding a confirmed gold spool: %v", err)
+	}
+	if want := []int{0, 1}; !slices.Equal(got, want) {
+		t.Errorf("binding = %v, want %v", got, want)
+	}
+}
+
+// The same rule must not turn the built-in table back into a matcher. #D4AF37
+// means GOLD only because somebody mapped GOLD; with nothing mapped there is
+// still no spool confirmed as gold, and the bed refuses.
+func TestALegacyHexWithNothingMappedIsStillARefusal(t *testing.T) {
+	_, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#D4AF37", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
+		nil,
+	)
+	var unserved slotUnservedError
+	if !errors.As(err, &unserved) || unserved.Reason != slotUnmapped {
+		t.Fatalf("err = %v, want the unmapped refusal", err)
+	}
+}
+
+// And it must not let one colour's built-in hex reach another colour's spools.
+func TestALegacyHexOnlyReachesItsOwnColoursSpools(t *testing.T) {
+	// #1560BD is the built-in BLUE. GOLD is mapped; BLUE is not.
+	_, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#1560BD", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
+		[]colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}},
+	)
+	if err == nil {
+		t.Fatal("a BLUE plate bound to a GOLD spool")
+	}
+}
+
+func TestFallbackNameForReadsTheBuiltInTableBackwards(t *testing.T) {
+	cases := map[string]string{
+		"#D4AF37": "GOLD",
+		"#1560BD": "BLUE",
+		"#E4002B": "RED",
+		"#2850E0": "", // a real spool, never a built-in
+	}
+	for hex, want := range cases {
+		if got := fallbackNameFor(hex); got != want {
+			t.Errorf("fallbackNameFor(%s) = %q, want %q", hex, got, want)
+		}
+	}
+}
