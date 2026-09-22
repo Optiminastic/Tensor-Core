@@ -115,7 +115,7 @@ func assignmentsFromChoice(
 		tray, ok := byIndex[amsIndex]
 		if !ok {
 			return nil, fmt.Errorf(
-				"slot %d was given a spool this printer does not have loaded; reopen the dialog and pick again",
+				"slot %d was given a spool this printer does not have loaded; it may have been changed since",
 				i+1)
 		}
 		if used[amsIndex] {

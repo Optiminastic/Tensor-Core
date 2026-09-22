@@ -91,10 +91,9 @@ func (s *Server) sendBatchToMachine(
 	// would otherwise be mapped to the colour it used to hold.
 	trays := s.liveTraysFor(ctx, machine)
 
-	// The operator's own answer, checked rather than recomputed. Tensor knows
-	// which tray holds which hex; only the person at the machine knows which of
-	// those hexes is the blue this order meant.
-	assignments, err := assignmentsFromChoice(slots, trays, slotTrays)
+	assignments, err := s.bindSlots(ctx, slots, liveBinding{
+		Trays: trays, Chosen: slotTrays, MachineName: machine.Name,
+	})
 	if err != nil {
 		return out, statusErr(http.StatusConflict, err.Error())
 	}
@@ -183,6 +182,56 @@ func (s *Server) sendBatchToMachine(
 		"slice_job", job.JobID, "colours", trayColoursOf(assignments),
 		"ams_mapping", amsMappingOf(assignments))
 	return out, nil
+}
+
+// liveBinding is what bindSlots weighs: the printer's trays as they are right
+// now, whatever the operator chose, and the machine's name for the refusal.
+type liveBinding struct {
+	Trays []loadedTray
+	// Chosen is the operator's own slot-to-tray answer, empty when Tensor is
+	// deciding.
+	Chosen      []int
+	MachineName string
+}
+
+// bindSlots decides which spool prints each slot, against the trays the printer
+// is holding RIGHT NOW.
+//
+// Two callers, two rules, and the difference matters.
+//
+// An operator who named a machine also named the spools, and their answer is
+// checked rather than recomputed: they are standing at the printer, and if they
+// say the third tray is the blue this order meant, that beats anything Tensor
+// can read.
+//
+// Nobody named anything, so Tensor chose the printer - and it must bind here,
+// through the colour map, against these live trays. Not reuse the binding that
+// picked the machine: THAT was computed from machines.filaments, a mirror up to
+// a sync interval old, and a mapping is a list of tray POSITIONS. A spool
+// swapped in the last minute leaves those positions valid and their contents
+// wrong, so the plate would be sliced declaring whatever now sits in slot 3 and
+// print the lettering in it. Re-binding here asks the colour map whether what
+// is actually loaded is still this bed's colour, and refuses when it is not.
+func (s *Server) bindSlots(
+	ctx context.Context, slots []meshio.Slot, in liveBinding,
+) ([]slotAssignment, error) {
+	trays, chosen, name := in.Trays, in.Chosen, in.MachineName
+	if len(chosen) > 0 {
+		return assignmentsFromChoice(slots, trays, chosen)
+	}
+
+	identities, err := s.colourIdentities(ctx)
+	if err != nil {
+		// Only exact hex matches will bind without it, which is a refusal for
+		// most beds rather than a wrong print. Say so rather than proceeding
+		// with a weaker rule nobody asked for.
+		return nil, fmt.Errorf("could not read the colour map, so this bed cannot be matched to a printer")
+	}
+	bound, err := bindPlateToTrays(slots, trays, identities)
+	if err != nil {
+		return nil, fmt.Errorf("%s no longer holds this bed's colours: %w", name, err)
+	}
+	return assignmentsFromChoice(slots, trays, bound)
 }
 
 // prepareBatchForQueue locks a Draft and reports whether it did.

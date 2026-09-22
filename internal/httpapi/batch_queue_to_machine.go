@@ -170,5 +170,12 @@ func (s *Server) targetFor(
 	}
 	obs.FromContext(ctx).Info("chose a printer for a bed",
 		"batch", batch.BatchNumber, "printer", plan.Machine.Name, "why", plan.Reason)
-	return plan.Machine, plan.SlotTrays, nil
+
+	// The machine, but deliberately NOT the binding that picked it. That was
+	// computed from machines.filaments, a mirror up to a sync interval old, and
+	// a binding is a list of tray POSITIONS: a spool swapped since the last
+	// sync leaves the positions valid and their contents wrong. sendBatchToMachine
+	// re-binds through the colour map against the trays the printer is holding
+	// when the plate is actually sliced.
+	return plan.Machine, nil, nil
 }

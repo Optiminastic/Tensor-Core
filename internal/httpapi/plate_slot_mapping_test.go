@@ -354,3 +354,48 @@ func TestBindPlateToTraysProducesABindingAssignmentsFromChoiceAccepts(t *testing
 		t.Errorf("filament colours = %v, want the spools' own hexes", got)
 	}
 }
+
+// The hole this closes. The machine is chosen from machines.filaments, a mirror
+// up to a sync interval old, and a binding is a list of tray POSITIONS - so a
+// spool swapped in that minute leaves the positions valid and their contents
+// wrong. Re-running the binding against the live trays refuses; re-using the
+// stale one would have sliced the bed declaring whatever now sits in that slot,
+// and printed the lettering in it.
+func TestABindingFromStaleTraysIsRefusedWhenTheSpoolHasChanged(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#2850E0", "PLA")}
+	mirror := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#2850E0", "PLA")}
+
+	stale, err := bindPlateToTrays(slots, mirror, nil)
+	if err != nil {
+		t.Fatalf("binding against the mirror: %v", err)
+	}
+
+	// Somebody pulled the blue out of slot 2 and put red in.
+	live := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#F72323", "PLA")}
+
+	// The stale binding still validates, because those tray positions exist -
+	// which is exactly why validating it is not enough.
+	if _, err := assignmentsFromChoice(slots, live, stale); err != nil {
+		t.Fatalf("expected the stale mapping to still look valid, got %v", err)
+	}
+	// Re-binding through the colour map catches it.
+	if _, err := bindPlateToTrays(slots, live, nil); err == nil {
+		t.Fatal("re-binding accepted a printer that no longer holds this bed's blue")
+	}
+}
+
+// And the operator's own answer is still taken as given: they are standing at
+// the machine, and a spool Tensor cannot name is one they can see.
+func TestAnOperatorsChoiceIsNotSecondGuessedByTheColourMap(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#D4AF37", "PLA")}
+	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3B7A7", "PLA")}
+
+	// GOLD is unmapped, so Tensor would refuse this bed on its own.
+	if _, err := bindPlateToTrays(slots, trays, nil); err == nil {
+		t.Fatal("expected an unmapped gold to be refused automatically")
+	}
+	// The operator says slot 2 prints from the second tray, and that stands.
+	if _, err := assignmentsFromChoice(slots, trays, []int{0, 1}); err != nil {
+		t.Fatalf("an operator's explicit choice was refused: %v", err)
+	}
+}
