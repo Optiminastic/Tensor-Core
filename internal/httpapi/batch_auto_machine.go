@@ -159,6 +159,22 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	case r.MachineProfileID == nil:
 		opt.Refusal = "this printer has no slicing profile yet; run a fleet sync"
 		return opt
+	case r.StatusReason != nil:
+		// A printer whose last print FAILED is recorded as idle, deliberately:
+		// it is connected, at 0%, and BambuBuddy's own UI calls it ready. That
+		// is the right answer for batching - withholding it there took five of
+		// thirteen machines out of planning over something that had already
+		// happened.
+		//
+		// It is the wrong answer HERE. Idle is the best score this picker can
+		// give, so a machine that fails every plate was ranked the most
+		// available on the floor and handed bed after bed. One gold plate went
+		// to the same printer five times while its Z axis could not home.
+		//
+		// Self-clearing: the sync writes this back to NULL as soon as the
+		// printer leaves FAILED, so clearing the plate is all it takes.
+		opt.Refusal = strings.TrimSuffix(strings.ToLower(*r.StatusReason), ".")
+		return opt
 	case r.ProfileStatus != nil && *r.ProfileStatus == production.MachineOffline:
 		opt.Refusal = "this printer is marked offline"
 		return opt

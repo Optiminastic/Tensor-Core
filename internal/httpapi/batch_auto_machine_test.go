@@ -2,11 +2,15 @@ package httpapi
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 func option(serial string, eligible bool, freeIn time.Duration, items int) machineOption {
@@ -205,5 +209,58 @@ func TestLiveFleetPlacesAGoldBedOnlyThroughTheMap(t *testing.T) {
 	mapped := []colourIdentity{{Name: "GOLD", Hexes: []string{"#D4AF37", "#D3B7A7"}}}
 	if got := eligibleCount(slots, mapped); got != 1 {
 		t.Errorf("%d printers can print a gold bed once GOLD is mapped, want 1", got)
+	}
+}
+
+// The bug that sent one gold plate to the same printer five times.
+//
+// A printer whose last print FAILED is recorded as idle - correct for batching,
+// because withholding it there took five of thirteen machines out of planning
+// over something that had already happened. But idle is the BEST score this
+// picker can give, so a machine failing every plate ranked as the most
+// available on the floor. A5 could not home its Z axis and kept being chosen.
+func TestAPrinterWhoseLastPrintFailedIsNotChosen(t *testing.T) {
+	reason := "The last print failed - check the plate is clear before the next one."
+	row := gen.ListFleetMachinesWithFamilyRow{
+		ID: uuid.New(), MachineID: "A5", Name: "A5",
+		Status:       production.FleetMachineIdle,
+		StatusReason: &reason,
+	}
+	profile := uuid.New()
+	row.MachineProfileID = &profile
+
+	s := &Server{}
+	got := s.weighMachine(weighInputs{
+		Row: row, Now: time.Now(),
+		Sliceable: func(string) string { return "" },
+	})
+
+	if got.Eligible {
+		t.Fatal("a printer that just failed a print was offered as available")
+	}
+	if !strings.Contains(got.Refusal, "last print failed") {
+		t.Errorf("refusal = %q, want it to say the last print failed", got.Refusal)
+	}
+}
+
+// And it comes back on its own: the sync clears status_reason the moment the
+// printer leaves FAILED, so clearing the plate is all it takes.
+func TestAPrinterIsOfferedAgainOnceItsFailureClears(t *testing.T) {
+	profile := uuid.New()
+	row := gen.ListFleetMachinesWithFamilyRow{
+		ID: uuid.New(), MachineID: "A5", Name: "A5",
+		Status: production.FleetMachineIdle, MachineProfileID: &profile,
+		Filaments: []byte(`[{"colour":"#FFFFFF","type":"PLA","ams_id":0,"tray_id":0}]`),
+	}
+
+	s := &Server{}
+	got := s.weighMachine(weighInputs{
+		Row: row, Now: time.Now(),
+		Slots:     []meshio.Slot{{Colour: "#FFFFFF", Material: "PLA"}},
+		Sliceable: func(string) string { return "" },
+	})
+
+	if !got.Eligible {
+		t.Fatalf("a healthy idle printer was refused: %q", got.Refusal)
 	}
 }
