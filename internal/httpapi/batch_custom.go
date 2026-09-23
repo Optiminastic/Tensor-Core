@@ -412,13 +412,25 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		writeStatusError(c, err, "Could not prepare the chosen products.")
 		return
 	}
-	if err := s.store.Q.AssignJobsToBatch(ctx, gen.AssignJobsToBatchParams{
+	moved, err := s.store.Q.MoveJobsToBatch(ctx, gen.MoveJobsToBatchParams{
 		BatchID: &batch.ID, JobIds: ids,
-	}); err != nil {
-		// The empty batch is left behind rather than deleted: it is visible,
-		// harmless and deletable, whereas a failed cleanup would hide the fact
-		// that anything went wrong at all.
+	})
+	if err != nil {
+		s.discardEmptyBatch(ctx, batch)
 		detail(c, http.StatusInternalServerError, "Could not put the chosen products on the batch.")
+		return
+	}
+	// A partial move is a failure, not a smaller bed. It means something
+	// claimed a plank between the dialog being read and this request - another
+	// operator's bed, an approval - and half of somebody's deliberate
+	// arrangement is not what they asked for.
+	//
+	// Checked at all because the silent version WAS the bug: the query refused
+	// every plank, moved nothing, and this reported a new bed holding nothing.
+	if int(moved) != len(ids) {
+		s.discardEmptyBatch(ctx, batch)
+		detail(c, http.StatusConflict,
+			"Some of those products were claimed by another bed while you were choosing. Reopen the dialog and pick again.")
 		return
 	}
 
@@ -517,6 +529,19 @@ func (s *Server) idsToBed(
 		ids = append(ids, j.ID)
 	}
 	return ids, requeued, nil
+}
+
+// discardEmptyBatch removes a bed that was created and never filled.
+//
+// Best-effort, and deliberate: an empty Draft looks like work, sits in the
+// pending list and invites somebody to wonder what happened to it. Leaving it
+// was the earlier choice here and it left exactly that - a bed with no jobs, no
+// plate and no explanation.
+func (s *Server) discardEmptyBatch(ctx context.Context, batch gen.Batch) {
+	if _, err := s.store.Q.DeleteBatch(ctx, batch.ID); err != nil {
+		obs.FromContext(ctx).Warn("could not remove a bed that was never filled",
+			"batch", batch.BatchNumber, "error", err)
+	}
 }
 
 // eligibleJobsFor loads the chosen jobs and refuses any that may not be batched.

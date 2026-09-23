@@ -2012,6 +2012,45 @@ func (q *Queries) LockOrderForJobCreation(ctx context.Context, orderID string) e
 	return err
 }
 
+const moveJobsToBatch = `-- name: MoveJobsToBatch :execrows
+UPDATE production_jobs SET batch_id = $1, updated_at = now()
+WHERE id = ANY($2::uuid[])
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches
+                        WHERE status IN ('pending_approval', 'open')))
+`
+
+type MoveJobsToBatchParams struct {
+	BatchID *uuid.UUID
+	JobIds  []uuid.UUID
+}
+
+// Puts jobs on a bed somebody is building by hand, including jobs taken off a
+// LOCKED bed.
+//
+// AssignJobsToBatch, which the planner uses, allows only unassigned jobs and
+// jobs on a Draft - and rightly: the planner writes from a pool it read moments
+// earlier, so without that guard a plan could steal the contents of a plate
+// whose filament is reserved and which a machine is about to print.
+//
+// A person choosing a plank is not that. They can see the bed they are taking
+// it from, and the caller has already released it properly: its plate is out of
+// BambuBuddy's queue and its filament given back (beginBatchEdit), and it is
+// rebuilt from what remains afterwards (finishBatchEdit). Only in_progress and
+// completed stay untouchable, because those record what physically happened to
+// a plate.
+//
+// :execrows, not :exec. The silent version was the bug this replaces: every
+// plank was refused by the Draft-only guard, nothing moved, and the caller
+// happily reported a new bed holding nothing at all.
+func (q *Queries) MoveJobsToBatch(ctx context.Context, arg MoveJobsToBatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, moveJobsToBatch, arg.BatchID, arg.JobIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const nextJobNumber = `-- name: NextJobNumber :one
 SELECT ('JOB-' || nextval('production_job_number_seq')::text)::text AS job_number
 `

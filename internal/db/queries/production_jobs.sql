@@ -816,3 +816,28 @@ UPDATE production_jobs SET
                             THEN assembly_status ELSE 'pending' END,
     updated_at       = now()
 WHERE id = sqlc.arg('id') AND status = 'completed';
+
+-- name: MoveJobsToBatch :execrows
+-- Puts jobs on a bed somebody is building by hand, including jobs taken off a
+-- LOCKED bed.
+--
+-- AssignJobsToBatch, which the planner uses, allows only unassigned jobs and
+-- jobs on a Draft - and rightly: the planner writes from a pool it read moments
+-- earlier, so without that guard a plan could steal the contents of a plate
+-- whose filament is reserved and which a machine is about to print.
+--
+-- A person choosing a plank is not that. They can see the bed they are taking
+-- it from, and the caller has already released it properly: its plate is out of
+-- BambuBuddy's queue and its filament given back (beginBatchEdit), and it is
+-- rebuilt from what remains afterwards (finishBatchEdit). Only in_progress and
+-- completed stay untouchable, because those record what physically happened to
+-- a plate.
+--
+-- :execrows, not :exec. The silent version was the bug this replaces: every
+-- plank was refused by the Draft-only guard, nothing moved, and the caller
+-- happily reported a new bed holding nothing at all.
+UPDATE production_jobs SET batch_id = sqlc.arg('batch_id'), updated_at = now()
+WHERE id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches
+                        WHERE status IN ('pending_approval', 'open')));
