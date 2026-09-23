@@ -145,6 +145,24 @@ func (s *Server) ReconcileFinishedPrints(ctx context.Context) PrintReconcileOutc
 			}
 		}
 
+		// Skipped never ran, so there is no archive to look for and no failure
+		// to record against a print that did not happen. BambuBuddy gates a
+		// printer after a failure and passes over everything queued for it
+		// until somebody presses Resume - so the bed is released with that as
+		// its reason and can be sent again once the gate is clear.
+		//
+		// Before the archive lookup because the lookup would answer "unmatched"
+		// and log a naming-convention warning, which is a true statement about
+		// the wrong thing: nothing has drifted, the plate simply never printed.
+		if b.QueueItemID != nil {
+			if item, ok := queueByID[*b.QueueItemID]; ok && item.Status == bambubuddy.QueueSkipped {
+				if s.releaseSkippedBatch(ctx, b, item) {
+					out.Failed++
+				}
+				continue
+			}
+		}
+
 		archive, ok := s.archiveForBatch(b, key, archiveByID, archiveByPlate)
 		if !ok {
 			out.Unmatched++
@@ -354,10 +372,41 @@ func (s *Server) repairResolvedBatches(ctx context.Context) int {
 	return repaired
 }
 
+// releaseSkippedBatch frees a bed whose plate BambuBuddy passed over.
+//
+// Until this existed, a gated printer stranded a bed silently: the queue item
+// was neither running nor finished, so reconcile waited on it forever, and
+// Tensor showed a bed sent to a printer that would never take it with nothing
+// on screen to say why. The gate is BambuBuddy's, the plate is untouched, and
+// the only thing missing was somebody being told.
+func (s *Server) releaseSkippedBatch(
+	ctx context.Context, b gen.ListBatchesInFlightRow, item bambubuddy.QueueItem,
+) bool {
+	where := strings.TrimSpace(item.PrinterName)
+	if where == "" {
+		where = "that printer"
+	}
+	s.recordPrintError(ctx, b.ID, fmt.Sprintf(
+		"%s skipped this plate: it is blocked by an earlier print failure. "+
+			"Clear the fault, press Resume after failure in BambuBuddy, then send this bed again.",
+		where))
+
+	// The queue item is spent, so the bed is sendable again once the printer is
+	// released. Left set, the double-send guard would refuse it forever.
+	if err := s.store.Q.ClearBatchSliceJob(ctx, b.ID); err != nil {
+		obs.FromContext(ctx).Warn("could not release a bed whose plate was skipped",
+			"batch", b.BatchNumber, "error", err)
+	}
+	obs.FromContext(ctx).Warn("a printer skipped a bed's plate; it is blocked after an earlier failure",
+		"batch", b.BatchNumber, "printer", where)
+	return true
+}
+
 // finishedQueueStatus reports whether BambuBuddy's queue considers an item done.
 func finishedQueueStatus(status string) bool {
 	switch status {
-	case bambubuddy.QueueCompleted, bambubuddy.QueueCancelled, bambubuddy.QueueFailed:
+	case bambubuddy.QueueCompleted, bambubuddy.QueueCancelled, bambubuddy.QueueFailed,
+		bambubuddy.QueueSkipped:
 		return true
 	}
 	return false

@@ -18,6 +18,8 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
+
+	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 )
 
 // bambuFleetStub serves the two endpoints the reconciliation reads.
@@ -269,5 +271,36 @@ func TestIntegrationABedStillInTheQueueIsNotResolved(t *testing.T) {
 	}
 	if b := reloadBatch(t, store, batchID); b.QueueItemID == nil || *b.QueueItemID != 88 {
 		t.Errorf("queue_item_id = %v, want 88", b.QueueItemID)
+	}
+}
+
+// BambuBuddy gates a printer after a print fails and passes over everything
+// queued for it until somebody presses Resume. Tensor did not know the word,
+// so a skipped plate was neither running nor finished: reconcile waited on it
+// forever, and a bed sat sent to a printer that would never take it with
+// nothing on screen to say why.
+func TestASkippedPlateCountsAsFinished(t *testing.T) {
+	if !finishedQueueStatus(bambubuddy.QueueSkipped) {
+		t.Fatal("a skipped plate is still treated as in flight, so its bed waits forever")
+	}
+}
+
+func TestTheOtherTerminalStatusesStillCount(t *testing.T) {
+	for _, s := range []string{
+		bambubuddy.QueueCompleted, bambubuddy.QueueCancelled, bambubuddy.QueueFailed,
+	} {
+		if !finishedQueueStatus(s) {
+			t.Errorf("%q is no longer treated as finished", s)
+		}
+	}
+}
+
+// A plate that is waiting or printing must NOT be reconciled: doing so would
+// close out a bed that is still on a machine.
+func TestWorkStillInFlightIsNotTreatedAsFinished(t *testing.T) {
+	for _, s := range []string{bambubuddy.QueuePending, bambubuddy.QueuePrinting} {
+		if finishedQueueStatus(s) {
+			t.Errorf("%q was treated as finished", s)
+		}
 	}
 }

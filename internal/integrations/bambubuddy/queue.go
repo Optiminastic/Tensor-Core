@@ -26,6 +26,10 @@ const (
 	QueueCompleted = "completed"
 	QueueCancelled = "cancelled"
 	QueueFailed    = "failed"
+	// QueueSkipped is BambuBuddy passing a plate over: after a print fails it
+	// gates that printer and skips what is queued for it until somebody presses
+	// Resume. The plate never ran and never will until the gate is cleared.
+	QueueSkipped = "skipped"
 )
 
 // QueueItem is one plate in BambuBuddy's queue.
