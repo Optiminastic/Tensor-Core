@@ -17,6 +17,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -332,6 +333,10 @@ func finishedStage(j gen.ProductionJob) string {
 	}
 }
 
+// errPlanksClaimed marks the one in-transaction failure that is somebody
+// else's doing rather than a fault, so the caller can say so in those terms.
+var errPlanksClaimed = errors.New("planks claimed by another bed")
+
 type createCustomBatchRequest struct {
 	JobIDs []string `json:"job_ids"`
 }
@@ -407,37 +412,53 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 	// A finished plank is reprinted rather than moved: its row records a print
 	// that really happened, and putting it on another bed would rewrite that
 	// into a print that has not happened yet.
-	ids, requeued, err := s.idsToBed(ctx, jobs)
-	if err != nil {
-		writeStatusError(c, err, "Could not prepare the chosen products.")
-		return
+	ids := make([]uuid.UUID, 0, len(jobs))
+	for _, j := range jobs {
+		ids = append(ids, j.ID)
 	}
-	moved, err := s.store.Q.MoveJobsToBatch(ctx, gen.MoveJobsToBatchParams{
-		BatchID: &batch.ID, JobIds: ids,
-	})
-	if err != nil {
+
+	// The move and the requeue together, or neither.
+	//
+	// They were two steps, and a finished plank was put back in the queue
+	// BEFORE the move that might refuse it. When the move moved nothing, the
+	// requeue stood: planks on a completed bed were left reading "queued", the
+	// bed's own record said it had printed, and the reprint action then refused
+	// them - "only a job that is printing or printed can be failed" - because
+	// by then that was true.
+	if err := s.store.InTx(ctx, func(q *gen.Queries) error {
+		moved, err := q.MoveJobsToBatch(ctx, gen.MoveJobsToBatchParams{
+			BatchID: &batch.ID, JobIds: ids,
+		})
+		if err != nil {
+			return err
+		}
+		// A partial move is a failure, not a smaller bed. It means something
+		// claimed a plank between the dialog being read and this request, and
+		// half of somebody's deliberate arrangement is not what they asked for.
+		if int(moved) != len(ids) {
+			return errPlanksClaimed
+		}
+		// Only now, when the planks are certainly on this bed.
+		for _, j := range jobs {
+			if j.Status != production.StatusCompleted {
+				continue
+			}
+			if err := q.RequeueFinishedJob(ctx, j.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		s.discardEmptyBatch(ctx, batch)
+		if errors.Is(err, errPlanksClaimed) {
+			detail(c, http.StatusConflict,
+				"Some of those products were claimed by another bed while you were choosing. Reopen the dialog and pick again.")
+			return
+		}
 		detail(c, http.StatusInternalServerError, "Could not put the chosen products on the batch.")
 		return
 	}
-	// A partial move is a failure, not a smaller bed. It means something
-	// claimed a plank between the dialog being read and this request - another
-	// operator's bed, an approval - and half of somebody's deliberate
-	// arrangement is not what they asked for.
-	//
-	// Checked at all because the silent version WAS the bug: the query refused
-	// every plank, moved nothing, and this reported a new bed holding nothing.
-	if int(moved) != len(ids) {
-		s.discardEmptyBatch(ctx, batch)
-		detail(c, http.StatusConflict,
-			"Some of those products were claimed by another bed while you were choosing. Reopen the dialog and pick again.")
-		return
-	}
 
-	if requeued > 0 {
-		obs.FromContext(ctx).Info("hand-built bed reprints finished planks",
-			"batch", batch.BatchNumber, "requeued", requeued)
-	}
 	s.rebuildSourceBeds(ctx, c, sources)
 
 	updated, ok := s.recomputeBatchPlate(ctx, c, batch)
@@ -499,36 +520,6 @@ func planksBeingMoved(jobs []gen.ProductionJob) []gen.ProductionJob {
 		}
 	}
 	return out
-}
-
-// idsToBed resolves each chosen product to the job that will print it, putting
-// any finished one back in the queue on the way.
-//
-// The SAME job every time. Minting a copy was the obvious-looking move and the
-// wrong one: it left the floor with two job numbers for one plank, the new one
-// numbered from a sequence so it matched neither the order nor anything on the
-// packing slip. The job already exists, carries the model, the order, the
-// personalisation and the customer - all of which a copy has to be trusted to
-// reproduce correctly.
-//
-// What does change is the finished job's stage, because a plank about to be
-// printed again is not a printed plank. See RequeueFinishedJob.
-func (s *Server) idsToBed(
-	ctx context.Context, jobs []gen.ProductionJob,
-) ([]uuid.UUID, int, error) {
-	ids := make([]uuid.UUID, 0, len(jobs))
-	requeued := 0
-	for _, j := range jobs {
-		if j.Status == production.StatusCompleted {
-			if err := s.store.Q.RequeueFinishedJob(ctx, j.ID); err != nil {
-				return nil, 0, statusErr(http.StatusInternalServerError,
-					fmt.Sprintf("Could not put %s back in the queue.", j.JobNumber))
-			}
-			requeued++
-		}
-		ids = append(ids, j.ID)
-	}
-	return ids, requeued, nil
 }
 
 // discardEmptyBatch removes a bed that was created and never filled.
