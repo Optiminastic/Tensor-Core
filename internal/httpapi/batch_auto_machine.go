@@ -46,6 +46,14 @@ type machineOption struct {
 	Eligible     bool
 	// Refusal says why not, in words an operator can act on.
 	Refusal string
+	// HoldsColours is whether this printer's trays could have printed the bed,
+	// regardless of whether it was allowed to. Recorded on REFUSED printers on
+	// purpose: "A2 was the only printer holding this bed's colours" and "A5
+	// holds them too but its last print failed" are different situations, and
+	// only the second one is worth walking over to the machine about. The bind
+	// is pure arithmetic over trays already in hand, so knowing this for every
+	// printer costs nothing.
+	HoldsColours bool
 }
 
 // queuePlan is the chosen printer and how to print the bed on it.
@@ -90,6 +98,23 @@ func (s *Server) rankMachinesForPlate(
 	ctx context.Context, slots []meshio.Slot, bed bedColours,
 ) ([]machineOption, error) {
 	log := obs.FromContext(ctx)
+
+	// Read the fleet from the printers themselves before ranking, rather than
+	// trusting the minute-old mirror. Somebody pressing Queue has usually just
+	// changed something - swapped a spool, cleared a failed plate - and the
+	// whole complaint this answers is "a free machine with the right colours
+	// was skipped", which a stale row produces exactly.
+	//
+	// Refresh, never the full sync: syncFleet's prune path ends in
+	// DeleteFleetMachinesNotIn, and a button press is not a reason to risk
+	// deleting a printer on one partial read.
+	//
+	// Best-effort. A refresh that fails leaves the mirror as it was, which is
+	// what ranking used to run on anyway - degraded, not wrong. Refusing to
+	// rank because a status read timed out would strand the bed.
+	if _, err := s.RefreshFleetFromBambuBuddy(ctx); err != nil {
+		log.Warn("could not refresh the fleet before ranking; using the last sync", "error", err)
+	}
 
 	rows, err := s.store.Q.ListFleetMachinesWithFamily(ctx)
 	if err != nil {
@@ -152,6 +177,21 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	machine := fleetMachineOf(r)
 	opt := machineOption{Machine: machine}
 
+	// The colour gate, run before the status checks so that HoldsColours is
+	// known for every printer including the ones about to be refused. Pure
+	// arithmetic over trays already fetched - no I/O - so it is free to ask.
+	// The REFUSAL order below is untouched: a printer that is off says it is
+	// off, not that its spools are wrong.
+	//
+	// Ranked on the mirrored machines.filaments column, which
+	// rankMachinesForPlate has just refreshed from the printers themselves, so
+	// it is as live as one round of status reads can make it. Two live
+	// re-checks still stand downstream - assignmentsFromChoice on send, and the
+	// slice worker's trayCheck before anything is queued - because a spool can
+	// always be swapped between the ranking and the slice.
+	slotTrays, bindErr := bindPlateToTrays(in.Slots, decodeTrays(machine), in.Identities, in.Bed)
+	opt.HoldsColours = bindErr == nil
+
 	switch {
 	case r.Status == production.FleetMachineOff:
 		opt.Refusal = "this printer is off"
@@ -193,18 +233,8 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 		return opt
 	}
 
-	// The colour gate. Ranked on the mirrored machines.filaments column rather
-	// than a live AMS read: ranking fourteen printers would be fourteen calls
-	// through the tunnel for one dialog, and the mirror is at most one sync
-	// interval stale. Two live re-checks already stand downstream -
-	// assignmentsFromChoice when the operator presses Send, and the slice
-	// worker's trayCheck before anything is queued - so staleness here costs a
-	// clear refusal, never a wrong-coloured print. Do not "improve" this into a
-	// live read.
-	trays := decodeTrays(machine)
-	slotTrays, err := bindPlateToTrays(in.Slots, trays, in.Identities, in.Bed)
-	if err != nil {
-		opt.Refusal = err.Error()
+	if bindErr != nil {
+		opt.Refusal = bindErr.Error()
 		return opt
 	}
 
@@ -276,26 +306,62 @@ func beats(a, b machineOption) bool {
 
 // chosenReason is the line shown beside the choice.
 //
-// Says when the printer is free and how many others could have taken the bed,
-// because "why this one" is the first thing anybody asks and the honest answer
-// is usually "the others were busy" or "any of four would have done".
+// Three things, because between them they answer every form of "why that one?"
+// an operator actually asks: when this printer comes free, how many others
+// could have taken the bed, and - the one that was missing - which printers
+// hold the right spools but were not allowed to have it.
+//
+// That last clause is the whole point. Two gold beds went to A2 in nineteen
+// minutes and it looked arbitrary; the truth was that A2 was the only working
+// printer on the floor with gold loaded, because A5 had gold too and was
+// locked out after failing a print. Nothing on screen said so, so the fleet
+// looked like a scheduling bug.
 func chosenReason(won machineOption, all []machineOption) string {
 	var eligible int
+	blocked := make([]string, 0, 4)
 	for _, o := range all {
-		if o.Eligible {
+		switch {
+		case o.Eligible:
 			eligible++
+		case o.HoldsColours && o.Refusal != "":
+			blocked = append(blocked, fmt.Sprintf("%s (%s)", o.Machine.Name, o.Refusal))
 		}
 	}
+	sort.Strings(blocked)
 
 	when := "free now"
 	if wait := time.Until(won.FreeAt).Round(time.Minute); wait > 0 {
 		when = fmt.Sprintf("free in about %s", humanMinutes(wait))
 	}
+
+	var head string
 	if eligible <= 1 {
-		return fmt.Sprintf("%s and the only printer holding this bed's colours", when)
+		head = fmt.Sprintf("%s and the only printer holding this bed's colours", when)
+	} else {
+		head = fmt.Sprintf("%s, and holds this bed's colours - %d other %s could also take it",
+			when, eligible-1, plural(eligible-1, "printer"))
 	}
-	return fmt.Sprintf("%s, and holds this bed's colours - %d other %s could also take it",
-		when, eligible-1, plural(eligible-1, "printer"))
+	if len(blocked) == 0 {
+		return head
+	}
+	// Named, not counted. "1 other printer holds these colours" sends somebody
+	// to the Machine Management page to work out which; naming it and saying
+	// why sends them to the machine.
+	return fmt.Sprintf("%s. %s also %s this bed's colours but %s unavailable: %s",
+		head,
+		plural2(len(blocked), "One other printer", "Other printers"),
+		plural2(len(blocked), "holds", "hold"),
+		plural2(len(blocked), "it is", "they are"),
+		strings.Join(blocked, "; "))
+}
+
+// plural2 picks between two whole phrasings. English does not inflect these
+// regularly enough for the suffix-adding plural() to reach them.
+func plural2(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func humanMinutes(d time.Duration) string {

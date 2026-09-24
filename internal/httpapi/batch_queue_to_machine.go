@@ -70,6 +70,13 @@ type queueBatchResponse struct {
 	// set - unlike the old path, where it was whatever BambuBuddy decided.
 	Pinned bool   `json:"pinned"`
 	Note   string `json:"note"`
+	// ChoiceReason is why THIS printer, in one line, and is empty when the
+	// operator named the machine themselves - there is no choice to justify.
+	//
+	// It existed before this and was only ever written to the log. Removing the
+	// queue dialog took away its one display, so the automatic pick became
+	// unexplainable at exactly the moment it stopped being a human's.
+	ChoiceReason string `json:"choice_reason,omitempty"`
 }
 
 // queueBatchToMachine locks the bed if needed, then sends it to be sliced for
@@ -112,7 +119,7 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 		return
 	}
 
-	machine, slotTrays, err := s.targetFor(ctx, batch, req)
+	target, err := s.targetFor(ctx, batch, req)
 	if err != nil {
 		writeStatusError(c, err, "Could not choose a printer for this batch.")
 		return
@@ -122,11 +129,12 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 	// which reads the PLATE's own declared slots rather than re-deriving them
 	// from the jobs - and so catches what a job-derived check missed, notably
 	// the white plank body that queueColoursFor omits entirely.
-	resp, err := s.sendBatchToMachine(ctx, batch, machine, slotTrays, currentUserID(c))
+	resp, err := s.sendBatchToMachine(ctx, batch, target.Machine, target.SlotTrays, currentUserID(c))
 	if err != nil {
 		writeStatusError(c, err, "Could not send the batch to that printer.")
 		return
 	}
+	resp.ChoiceReason = target.Reason
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -137,44 +145,52 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 // choice, and their slot binding is taken as given - they are standing at the
 // machine and can see what is in it, which is a better source than anything
 // Tensor can read.
+// queueTarget is where a bed is going and why.
+type queueTarget struct {
+	Machine   gen.Machine
+	SlotTrays []int
+	// Reason is empty when the operator named the machine.
+	Reason string
+}
+
 func (s *Server) targetFor(
 	ctx context.Context, batch gen.Batch, req queueBatchRequest,
-) (gen.Machine, []int, error) {
+) (queueTarget, error) {
 	if named := strings.TrimSpace(req.MachineID); named != "" {
 		machineID, err := uuid.Parse(named)
 		if err != nil {
-			return gen.Machine{}, nil, statusErr(http.StatusUnprocessableEntity,
+			return queueTarget{}, statusErr(http.StatusUnprocessableEntity,
 				"That is not a valid machine.")
 		}
 		machine, err := s.store.Q.GetFleetMachine(ctx, machineID)
 		if err != nil {
-			return gen.Machine{}, nil, statusErr(http.StatusNotFound, "That machine does not exist.")
+			return queueTarget{}, statusErr(http.StatusNotFound, "That machine does not exist.")
 		}
-		return machine, req.SlotTrays, nil
+		return queueTarget{Machine: machine, SlotTrays: req.SlotTrays}, nil
 	}
 
 	slots := s.queueSlotsFor(ctx, batch)
 	if len(slots) == 0 {
-		return gen.Machine{}, nil, statusErr(http.StatusConflict,
+		return queueTarget{}, statusErr(http.StatusConflict,
 			"This bed's plate declares no filament. Rebuild the bed before sending it.")
 	}
 	// The bed's own colours, so a plate whose hex predates the colour map is
 	// still recognised by the word the order used.
 	jobs, err := s.store.Q.ListJobsForBatch(ctx, &batch.ID)
 	if err != nil {
-		return gen.Machine{}, nil, statusErr(http.StatusInternalServerError,
+		return queueTarget{}, statusErr(http.StatusInternalServerError,
 			"Could not read the batch's jobs.")
 	}
 	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots),
 		bedColoursOf(s.queueColoursFor(ctx, jobs)))
 	if err != nil {
-		return gen.Machine{}, nil, statusErr(http.StatusBadGateway, "Could not read the fleet.")
+		return queueTarget{}, statusErr(http.StatusBadGateway, "Could not read the fleet.")
 	}
 	if plan.Reason == "" {
 		// Refused, not fallen back. Sending a bed to a printer that cannot
 		// print its colours is the failure this whole path exists to prevent,
 		// so the answer names what is missing instead.
-		return gen.Machine{}, nil, statusErr(http.StatusConflict, noPrinterNote(options))
+		return queueTarget{}, statusErr(http.StatusConflict, noPrinterNote(options))
 	}
 	obs.FromContext(ctx).Info("chose a printer for a bed",
 		"batch", batch.BatchNumber, "printer", plan.Machine.Name, "why", plan.Reason)
@@ -185,5 +201,5 @@ func (s *Server) targetFor(
 	// sync leaves the positions valid and their contents wrong. sendBatchToMachine
 	// re-binds through the colour map against the trays the printer is holding
 	// when the plate is actually sliced.
-	return plan.Machine, nil, nil
+	return queueTarget{Machine: plan.Machine, Reason: plan.Reason}, nil
 }

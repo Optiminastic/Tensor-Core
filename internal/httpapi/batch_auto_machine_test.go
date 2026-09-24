@@ -264,3 +264,58 @@ func TestAPrinterIsOfferedAgainOnceItsFailureClears(t *testing.T) {
 		t.Fatalf("a healthy idle printer was refused: %q", got.Refusal)
 	}
 }
+
+// blockedOption is a printer that could have printed the bed and was not
+// allowed to - the A5 case: gold in its trays, locked out after a failed print.
+func blockedOption(serial, refusal string) machineOption {
+	o := option(serial, false, 0, 0)
+	o.HoldsColours = true
+	o.Refusal = refusal
+	return o
+}
+
+func TestChosenReasonNamesAPrinterThatHoldsTheColoursButIsBlocked(t *testing.T) {
+	// The exact situation that made two gold beds land on one printer look
+	// like a scheduling bug: A2 was genuinely the only machine allowed to take
+	// them, because the only other one holding gold had failed its last print.
+	won := option("A2", true, 8*time.Minute, 0)
+	got := chosenReason(won, []machineOption{
+		won,
+		blockedOption("A5", "the last print failed - check the plate is clear before the next one"),
+		option("H1", false, 0, 0), // no gold: must not be mentioned at all
+	})
+
+	if !strings.Contains(got, "the only printer holding this bed's colours") {
+		t.Errorf("should still say it was the only eligible printer: %q", got)
+	}
+	if !strings.Contains(got, "A5") || !strings.Contains(got, "the last print failed") {
+		t.Errorf("should name A5 and why it was unavailable: %q", got)
+	}
+	if strings.Contains(got, "H1") {
+		t.Errorf("H1 does not hold the colours and must not be offered as a near miss: %q", got)
+	}
+}
+
+func TestChosenReasonSaysNothingAboutPrintersThatCouldNotPrintTheBedAnyway(t *testing.T) {
+	won := option("A2", true, 0, 0)
+	got := chosenReason(won, []machineOption{won, option("H1", false, 0, 0)})
+	if want := "free now and the only printer holding this bed's colours"; got != want {
+		t.Errorf("reason = %q, want %q", got, want)
+	}
+}
+
+func TestChosenReasonPluralisesSeveralBlockedPrinters(t *testing.T) {
+	won := option("A2", true, 0, 0)
+	got := chosenReason(won, []machineOption{
+		won,
+		blockedOption("A5", "this printer is off"),
+		blockedOption("A4", "this printer is in maintenance"),
+	})
+	if !strings.Contains(got, "Other printers also hold this bed's colours but they are unavailable") {
+		t.Errorf("plural phrasing wrong: %q", got)
+	}
+	// Sorted, so the same fleet state always reads the same way.
+	if strings.Index(got, "A4") > strings.Index(got, "A5") {
+		t.Errorf("blocked printers should be named in a stable order: %q", got)
+	}
+}
