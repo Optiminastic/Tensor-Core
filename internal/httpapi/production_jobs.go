@@ -601,6 +601,17 @@ func (s *Server) createProductionJob(c *gin.Context) {
 // River worker (job_creation_worker.go) can ack without retrying.
 var errJobsAlreadyCreated = errors.New("production jobs already exist for this order")
 
+// ErrOrderOutsideRun says the order is not work for the print floor.
+//
+// A normal outcome, not a failure, and distinguished from "built nothing"
+// because the two read identically to a caller and do not mean remotely the
+// same thing. Returning (nil, nil) for both made every skipped order look like
+// an order that should have produced jobs and did not: the worker logged a
+// WARN for each, and with ~1,450 historical orders re-examined on every
+// ten-minute sync that was 5,798 of the last 7,236 lines in the production
+// log. Real errors were invisible underneath it.
+var ErrOrderOutsideRun = errors.New("this order is outside the current production run")
+
 func (s *Server) createJobsFromOrder(c *gin.Context) {
 	orderID, ok := parseUUIDParam(c, "order_id")
 	if !ok {
@@ -612,6 +623,12 @@ func (s *Server) createJobsFromOrder(c *gin.Context) {
 		switch {
 		case errors.Is(err, errJobsAlreadyCreated):
 			detail(c, http.StatusConflict, "Production jobs have already been created for this order.")
+		case errors.Is(err, ErrOrderOutsideRun):
+			// Used to answer 201 with an empty list, which reads as "created
+			// nothing, successfully" and tells nobody why. It is not a server
+			// fault either, so it must not fall through to the 500 below.
+			detail(c, http.StatusUnprocessableEntity,
+				"This order is outside the current production run, so there is nothing to build from it.")
 		case isNoRows(err):
 			detail(c, http.StatusNotFound, "That order does not exist.")
 		default:
@@ -638,9 +655,10 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	// run does not cover is a normal outcome, not a failure to retry: River
 	// would otherwise back off and retry it five times before giving up.
 	if !ShouldCreateJobs(order) {
-		obs.FromContext(ctx).Info("order is outside this production run; no jobs created",
-			"order", order.OrderNumber)
-		return nil, nil
+		// Sentinel rather than a log line here: the caller knows whether this
+		// is worth saying out loud, and the worker short-circuits on it the
+		// same way it does for errJobsAlreadyCreated.
+		return nil, fmt.Errorf("%s: %w", order.OrderNumber, ErrOrderOutsideRun)
 	}
 
 	// A fast path only: it skips buildJobsForOrder's per-line design lookups on

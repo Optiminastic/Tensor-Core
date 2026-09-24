@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"strings"
@@ -138,6 +139,11 @@ func main() {
 	totalJobs := 0
 	for _, oid := range orderIDs {
 		jobs, err := server.CreateJobsForOrder(ctx, oid)
+		// An order outside the production run is the ordinary answer for most
+		// of the seed set, not a failure worth a line each.
+		if errors.Is(err, httpapi.ErrOrderOutsideRun) {
+			continue
+		}
 		if err != nil {
 			log.Printf("create jobs for order %s: %v", oid, err)
 			continue

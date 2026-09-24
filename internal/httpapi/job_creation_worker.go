@@ -42,11 +42,23 @@ func NewJobCreationWorker(server *Server, logger *slog.Logger) *JobCreationWorke
 // backoff, matching SliceWorker's convention.
 func (w *JobCreationWorker) Work(ctx context.Context, job *river.Job[production.CreateJobsArgs]) error {
 	orderID := job.Args.OrderID
-	w.logger.Info("job creation start", "order", orderID, "attempt", job.Attempt)
+	// Debug, not Info: this fires for every order the sync re-examines, and
+	// "done" already carries everything "start" did plus the outcome. The pair
+	// doubled a log that was already the loudest thing on the worker.
+	w.logger.Debug("job creation start", "order", orderID, "attempt", job.Attempt)
 
 	jobs, err := w.server.CreateJobsForOrder(ctx, orderID)
 	if errors.Is(err, errJobsAlreadyCreated) {
-		w.logger.Info("job creation skipped: jobs already exist", "order", orderID)
+		w.logger.Debug("job creation skipped: jobs already exist", "order", orderID)
+		return nil
+	}
+	// Not work for the print floor. Acked, never retried, and said at Debug
+	// because it is the ordinary answer for most of the order history on every
+	// sync - and because returning here also skips the batch-replan trigger
+	// below, which was logging "replan skipped, below threshold" once per
+	// order for the same reason.
+	if errors.Is(err, ErrOrderOutsideRun) {
+		w.logger.Debug("order is outside this production run", "order", orderID)
 		return nil
 	}
 	if err != nil {
@@ -68,8 +80,13 @@ func (w *JobCreationWorker) Work(ctx context.Context, job *river.Job[production.
 	// Zero jobs is a success as far as River is concerned, but it means an
 	// order arrived with no line items to build from - worth a line in the log,
 	// because the order will otherwise sit forever looking merely un-batched.
+	//
+	// This is now a genuine anomaly again. It used to fire for every order
+	// outside the production run as well, which is the ordinary case, so a
+	// warning that should be rare was the bulk of the log and meant nothing.
 	if len(jobs) == 0 {
 		w.logger.Warn("job creation produced no jobs", "order", orderID)
+		return nil
 	}
 
 	w.logger.Info("job creation done", "order", orderID, "jobs", len(jobs))
