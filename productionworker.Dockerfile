@@ -44,18 +44,47 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 FROM debian:12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
-# openscad 2021.01, which is what bookworm ships and what the templates are
-# written for - dnp_with_no_heart.scad and its siblings carry an explicit note
-# that 2021.01 has no textmetrics() and size their own text instead. A newer
-# AppImage would be a change of renderer under models that already print
-# correctly, so the distro package is the conservative choice, not a compromise.
+# OpenSCAD, pinned to an exact build.
 #
-# There is no openscad-nogui in Debian or Ubuntu - it does not exist in either
-# archive - so this is the GUI package. It pulls Qt in, and that is only image
-# size: STL export with -o needs no display, and runs here with none.
+# This was bookworm's openscad 2021.01 - the conservative choice, because the
+# templates are WRITTEN for it: dnp_with_no_heart.scad and its siblings carry a
+# hardcoded W_TBL of glyph widths measured by extruding each letter, precisely
+# "because OpenSCAD 2021.01 has no textmetrics()". Changing the renderer under
+# models that already print correctly is the risk here, and it is not
+# theoretical - rendering the same plank on both versions moves the LETTERING
+# bounding box by ~0.22mm (the base plate is byte-identical).
+#
+# 2026.09.12 is taken for one reason: it can export 3MF with colour
+# (-O export-3mf/color-mode=model) and, with --enable lazy-union, as one object
+# per colour. That is what allows ONE render instead of the two that
+# dnp_generate.go does today. It does NOT remove meshio.Write3MF - OpenSCAD
+# writes neither Metadata/model_settings.config (Bambu's extruder assignment,
+# which is the only thing Bambu reads) nor project_settings.config (the slot
+# declaration behind ams_mapping).
+#
+# Pinned to a dated snapshot, never "latest": these are nightly builds, and a
+# renderer that changes under the templates on a rebuild is the whole hazard
+# described above happening silently.
+#
+# AppImage rather than a package because no distro ships anything this recent.
+# Extracted rather than run in place - mounting an AppImage needs FUSE, which a
+# container does not have; --appimage-extract needs nothing.
+ARG OPENSCAD_VERSION=2026.09.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openscad ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+      ca-certificates curl \
+      libgl1 libglu1-mesa libegl1 libfontconfig1 libfreetype6 libharfbuzz0b \
+      libglib2.0-0 libx11-6 libxext6 libxrender1 libxi6 libxkbcommon0 \
+      libdbus-1-3 libzip4 \
+ && curl -fsSL -o /tmp/openscad.AppImage \
+      "https://files.openscad.org/snapshots/OpenSCAD-${OPENSCAD_VERSION}-x86_64.AppImage" \
+ && chmod +x /tmp/openscad.AppImage \
+ && cd /opt && /tmp/openscad.AppImage --appimage-extract > /dev/null \
+ && mv squashfs-root openscad \
+ && printf '#!/bin/sh\nexec /opt/openscad/AppRun "$@"\n' > /usr/local/bin/openscad \
+ && chmod 0755 /usr/local/bin/openscad \
+ && rm /tmp/openscad.AppImage \
+ && apt-get purge -y curl && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender

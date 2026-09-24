@@ -39,10 +39,12 @@ services:
     env_file: [env/local.env]
     environment:
       # env/local.env points at the Windows OpenSCAD for host runs. In here it
-      # is the Debian package, and getting this wrong is quiet: the worker
+      # is the extracted AppImage, and getting this wrong is quiet: the worker
       # reports model generation disabled at startup and every personalised job
       # waits for a manual upload rather than failing.
-      OPENSCAD_BIN: /usr/bin/openscad
+      #
+      # /usr/local/bin, not /usr/bin: this is no longer the distro package.
+      OPENSCAD_BIN: /usr/local/bin/openscad
     restart: unless-stopped
     deploy:
       resources:
