@@ -87,6 +87,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && mv squashfs-root openscad \
  && printf '#!/bin/sh\nexec /opt/openscad/AppRun "$@"\n' > /usr/local/bin/openscad \
  && chmod 0755 /usr/local/bin/openscad \
+ `# /usr/bin/openscad too, because that is where the Debian package used to` \
+ `# put it and OPENSCAD_BIN is set per DEPLOYMENT, not by this repo. Coolify` \
+ `# carried /usr/bin/openscad, so dropping the package silently disabled` \
+ `# rendering on prod: Renderer.Available() just returns false and the worker` \
+ `# holds every personalised job for a manual upload. It does not crash, and` \
+ `# nothing on the floor says why. A symlink costs nothing and makes the env` \
+ `# var's value stop mattering.` \
+ && ln -sf /usr/local/bin/openscad /usr/bin/openscad \
  && rm /tmp/openscad.AppImage \
  && apt-get purge -y curl && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
