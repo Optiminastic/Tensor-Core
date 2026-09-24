@@ -104,9 +104,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # so the font is not a preference - it is the thing those numbers describe. A
 # different face makes the auto-fit squeeze by the wrong amount.
 #
-# The file is NOT in the repo (.gitignore excludes it): Segoe UI ships with
-# Windows and is not redistributable. Whoever builds the image supplies a font
-# they are licensed for - see fonts/README.md for the alternatives.
+# The file IS committed, deliberately. The image is built from the repo by
+# Coolify, so a font that is not in the repo is a font prod does not have -
+# and a prod worker without it renders every plank thin while reporting
+# success. Segoe UI ships with Windows and its licence does not contemplate
+# redistribution in a container image; that was raised and accepted as a
+# business decision. fonts/README.md records the free alternatives if it ever
+# has to come back out.
 COPY fonts/ /usr/share/fonts/truetype/tensor/
 RUN fc-cache -f > /dev/null \
  && fc-match "Segoe UI Black" | tee /tmp/font-check \

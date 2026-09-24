@@ -5,10 +5,15 @@ entry in them was measured from that face. Whatever is in this directory is
 installed into the production-worker image and becomes what actually gets
 printed.
 
-**The font files themselves are not committed.** `.gitignore` excludes them, and
-the reason is licensing, not tidiness: Segoe UI ships with Windows and is not
-redistributable in a container image. Whoever builds the image supplies a font
-they are licensed to use.
+**`seguibl.ttf` is committed, deliberately.** The worker image is built from
+this repo by Coolify, so a font that is not in the repo is a font production
+does not have — and a worker without it renders every plank thin while
+reporting success.
+
+That decision has a cost worth stating plainly: Segoe UI ships with Windows and
+its licence does not contemplate redistribution inside a container image. This
+was raised and accepted as a business decision, not overlooked. The
+alternatives below remain available if it ever has to come back out.
 
 ## Why this directory has to exist at all
 
