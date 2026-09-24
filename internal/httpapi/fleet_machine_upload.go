@@ -145,9 +145,21 @@ func (s *Server) uploadToPrinter(c *gin.Context) {
 	queued := true
 	queueNote := ""
 	opts := bambubuddy.QueueOptions{
-		TargetModel:            s.printerModelFor(ctx, machine),
-		InsertAtTop:            true,
-		RequirePreviousSuccess: true,
+		TargetModel: s.printerModelFor(ctx, machine),
+		InsertAtTop: true,
+		// Deliberately NOT requiring the previous print to have succeeded.
+		//
+		// It reads as prudence and behaves as a trap. BambuBuddy holds the
+		// whole queue behind one failure and skips what is waiting, so a single
+		// bad first layer stops a printer taking work until somebody notices
+		// and presses Resume - and the skip is silent from Tensor's side.
+		// That is how this floor lost a shift: A4 sat idle with two jobs
+		// skipped and nothing on screen saying so.
+		//
+		// The shop would rather the next plate ran. A printer that genuinely
+		// cannot print will fail that plate too, visibly, which is a better
+		// signal than a queue quietly not moving.
+		RequirePreviousSuccess: false,
 		AutoOffAfter:           false,
 	}
 	if opts.TargetModel == "" {

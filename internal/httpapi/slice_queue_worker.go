@@ -109,6 +109,12 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 		// that the check passes honestly; forcing past it would reinstate the
 		// failure this path exists to remove.
 		SkipFilamentCheck: false,
+		// Stated rather than left to the zero value, because the opposite is
+		// the tempting choice and it is wrong here: BambuBuddy holds the entire
+		// queue behind one failed print and skips what is waiting, so a single
+		// bad first layer stops the printer silently. A bed that cannot print
+		// will fail on its own and say so.
+		RequirePreviousSuccess: false,
 	})
 	if err != nil {
 		return w.retryOrGiveUp(ctx, job, fmt.Errorf("queue sliced plate on %s: %w", a.MachineName, err))
