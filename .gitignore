@@ -12,3 +12,8 @@
 # OS
 .DS_Store
 /env
+# Licensed font files for the worker image - see fonts/README.md.
+# The templates need them; the repo must not redistribute them.
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc

@@ -73,6 +73,11 @@ ARG OPENSCAD_VERSION=2026.09.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl \
       libgl1 libglu1-mesa libegl1 libfontconfig1 libfreetype6 libharfbuzz0b \
+      `# fontconfig, not just libfontconfig1: fc-cache is what makes a font in` \
+      `# fonts/ visible to OpenSCAD at all, and fc-match is how the build` \
+      `# checks it landed. The old image got these free with the openscad` \
+      `# package, which this no longer installs.` \
+      fontconfig \
       libglib2.0-0 libx11-6 libxext6 libxrender1 libxi6 libxkbcommon0 \
       libdbus-1-3 libzip4 \
  && curl -fsSL -o /tmp/openscad.AppImage \
@@ -85,6 +90,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm /tmp/openscad.AppImage \
  && apt-get purge -y curl && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+
+# The font the templates actually name.
+#
+# Without this the image renders planks with two thirds of the lettering
+# missing, and reports success. fontconfig does not fail on a missing family,
+# it SUBSTITUTES: in this image `Segoe UI Black` resolved to DejaVu Sans, and
+# the two produced byte-identical output - 11,301 mm3 of lettering against the
+# 33,676 mm3 the real face gives. That is the difference between the planks on
+# the floor and the thin ones a re-render produced.
+#
+# Every W_TBL entry in the templates is a glyph width measured from this face,
+# so the font is not a preference - it is the thing those numbers describe. A
+# different face makes the auto-fit squeeze by the wrong amount.
+#
+# The file is NOT in the repo (.gitignore excludes it): Segoe UI ships with
+# Windows and is not redistributable. Whoever builds the image supplies a font
+# they are licensed for - see fonts/README.md for the alternatives.
+COPY fonts/ /usr/share/fonts/truetype/tensor/
+RUN fc-cache -f > /dev/null \
+ && fc-match "Segoe UI Black" | tee /tmp/font-check \
+ && grep -qi "seguibl\|Segoe" /tmp/font-check \
+    || echo "WARNING: Segoe UI Black is NOT installed - lettering will render ~66% thin"
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
