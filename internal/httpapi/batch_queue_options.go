@@ -230,7 +230,7 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	// to the operator's eye. The dialog still opens, still shows every machine
 	// and still lets any of them be chosen - what changes is that the obvious
 	// one is already selected, with its spools already bound.
-	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots))
+	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots), bedColoursOf(out.Colours))
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the fleet.")
 		return

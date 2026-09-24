@@ -158,7 +158,7 @@ func liveFleetTrays() map[string][]loadedTray {
 func eligibleCount(slots []meshio.Slot, identities []colourIdentity) int {
 	var n int
 	for _, trays := range liveFleetTrays() {
-		if _, err := bindPlateToTrays(slots, trays, identities); err == nil {
+		if _, err := bindPlateToTrays(slots, trays, identities, bedColours{}); err == nil {
 			n++
 		}
 	}
@@ -184,7 +184,7 @@ func TestLiveFleetCannotPlaceABlueBedUntilBlueIsMapped(t *testing.T) {
 		t.Fatalf("%d printers accepted a blue bed with an empty colour map, want 0", got)
 	}
 
-	_, err := bindPlateToTrays(slots, liveFleetTrays()["P2S-1"], nil)
+	_, err := bindPlateToTrays(slots, liveFleetTrays()["P2S-1"], nil, bedColours{})
 	var unserved slotUnservedError
 	if !errors.As(err, &unserved) || unserved.Reason != slotUnmapped {
 		t.Fatalf("refusal = %v, want the unmapped one - the fix is a colour-map row, "+

@@ -91,8 +91,17 @@ func (s *Server) sendBatchToMachine(
 	// would otherwise be mapped to the colour it used to hold.
 	trays := s.liveTraysFor(ctx, machine)
 
+	// The bed's own colours travel with it. Without them the live re-bind here
+	// judges the plate purely on the hex baked into it, so a bed locked before
+	// its colour was mapped is refused at the last step - after the machine was
+	// chosen, on the same fleet that had just accepted it.
+	bedJobs, err := s.store.Q.ListJobsForBatch(ctx, &batch.ID)
+	if err != nil {
+		return out, statusErr(http.StatusInternalServerError, "Could not read the batch's jobs.")
+	}
 	assignments, err := s.bindSlots(ctx, slots, liveBinding{
 		Trays: trays, Chosen: slotTrays, MachineName: machine.Name,
+		Bed: bedColoursOf(s.queueColoursFor(ctx, bedJobs)),
 	})
 	if err != nil {
 		return out, statusErr(http.StatusConflict, err.Error())
@@ -192,6 +201,9 @@ type liveBinding struct {
 	// deciding.
 	Chosen      []int
 	MachineName string
+	// Bed is what the ORDER asked for, which rescues a plate whose hex was
+	// baked in before its colour was mapped.
+	Bed bedColours
 }
 
 // bindSlots decides which spool prints each slot, against the trays the printer
@@ -227,7 +239,7 @@ func (s *Server) bindSlots(
 		// with a weaker rule nobody asked for.
 		return nil, fmt.Errorf("could not read the colour map, so this bed cannot be matched to a printer")
 	}
-	bound, err := bindPlateToTrays(slots, trays, identities)
+	bound, err := bindPlateToTrays(slots, trays, identities, in.Bed)
 	if err != nil {
 		return nil, fmt.Errorf("%s no longer holds this bed's colours: %w", name, err)
 	}

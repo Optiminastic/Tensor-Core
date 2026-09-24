@@ -163,7 +163,7 @@ func assignmentsFromChoice(
 // Nearest-colour survives in one place: ordering the trays that already
 // qualify, so the closest of two confirmed BLUE spools is the one used.
 func bindPlateToTrays(
-	slots []meshio.Slot, trays []loadedTray, identities []colourIdentity,
+	slots []meshio.Slot, trays []loadedTray, identities []colourIdentity, bed bedColours,
 ) ([]int, error) {
 	if len(slots) == 0 {
 		return nil, fmt.Errorf("this bed's plate declares no filament at all; rebuild the bed")
@@ -176,7 +176,7 @@ func bindPlateToTrays(
 	used := map[int]bool{}
 	out := make([]int, 0, len(slots))
 	for i, slot := range slots {
-		index, err := bindOneSlot(slot, trays, identities, used)
+		index, err := bindOneSlot(slot, trays, identities, bed, used)
 		if err != nil {
 			return nil, fmt.Errorf("slot %d: %w", i+1, err)
 		}
@@ -188,13 +188,14 @@ func bindPlateToTrays(
 
 // bindOneSlot picks the tray for one slot, or explains why none will do.
 func bindOneSlot(
-	slot meshio.Slot, trays []loadedTray, identities []colourIdentity, used map[int]bool,
+	slot meshio.Slot, trays []loadedTray, identities []colourIdentity,
+	bed bedColours, used map[int]bool,
 ) (int, error) {
 	wanted, ok := normaliseHex(slot.Colour)
 	if !ok {
 		return 0, fmt.Errorf("the plate declares no readable colour; rebuild the bed")
 	}
-	accepted := acceptedHexes(wanted, identities)
+	accepted := acceptedHexes(wanted, identities, bed)
 
 	best, bestDistance := -1, 0
 	for _, tray := range trays {
@@ -216,7 +217,7 @@ func bindOneSlot(
 		}
 	}
 	if best < 0 {
-		return 0, unservedSlotError(slot, wanted, trays, identities)
+		return 0, unservedSlotError(slot, wanted, trays, identities, bed)
 	}
 	return best, nil
 }
@@ -228,9 +229,9 @@ func bindOneSlot(
 // this fleet's fourteen printers - and refusing it because the colour map has
 // no WHITE row would be absurd. The map's job is to reconcile hexes that
 // DISAGREE, so it is consulted for exactly that.
-func acceptedHexes(wanted string, identities []colourIdentity) map[string]bool {
+func acceptedHexes(wanted string, identities []colourIdentity, bed bedColours) map[string]bool {
 	out := map[string]bool{wanted: true}
-	for _, name := range coloursMeaning(wanted, identities) {
+	for _, name := range coloursMeaning(wanted, identities, bed) {
 		for _, id := range identities {
 			if id.Name == name {
 				for _, h := range id.Hexes {
@@ -258,7 +259,7 @@ func acceptedHexes(wanted string, identities []colourIdentity) map[string]bool {
 // the plate sits outside the conversation, asking for a colour that only ever
 // existed in a lookup table. Reading the built-in table backwards recovers the
 // word the plate was rendered FROM, and the map answers for the word.
-func coloursMeaning(wanted string, identities []colourIdentity) []string {
+func coloursMeaning(wanted string, identities []colourIdentity, bed bedColours) []string {
 	var names []string
 	seen := map[string]bool{}
 	add := func(name string) {
@@ -273,7 +274,36 @@ func coloursMeaning(wanted string, identities []colourIdentity) []string {
 		}
 	}
 	add(fallbackNameFor(wanted))
+
+	// Nothing recognises this hex, so fall back to what the BED is for.
+	//
+	// A plate carries the hex that was current when it was built. Map a colour
+	// afterwards and that hex is orphaned - no colour-map row lists it, and it
+	// is not one of the built-in values either - so a bed locked last week
+	// could never be queued however carefully its colour was mapped today. The
+	// order says GOLD; the shop has confirmed which spools are gold; the plate
+	// is the only party still insisting on a number nobody uses.
+	//
+	// Only when the bed names exactly ONE colour. The white plank body always
+	// matches itself, so a single-colour bed is the ordinary case - and with
+	// two lettering colours there is no way to tell which slot is which, and
+	// guessing is what this gate exists to prevent.
+	if len(names) == 0 && len(bed.Names) == 1 {
+		add(bed.Names[0])
+	}
 	return names
+}
+
+// bedColours is what the ORDER asked for, as opposed to what the plate file
+// happens to declare.
+//
+// Carried separately because the two can disagree: the plate records the hex a
+// colour resolved to when the bed was built, and mapping that colour afterwards
+// changes the answer without rewriting the file.
+type bedColours struct {
+	// Names are the lettering colours on this bed, canonical. Excludes the
+	// plank body, which is white on every bed and always matches itself.
+	Names []string
 }
 
 // fallbackNameFor reads the built-in colour table backwards: which colour word
@@ -364,10 +394,11 @@ func (e slotUnservedError) Error() string {
 // different problem from one that is absent, and both are different from a
 // colour nobody has ever confirmed.
 func unservedSlotError(
-	slot meshio.Slot, wanted string, trays []loadedTray, identities []colourIdentity,
+	slot meshio.Slot, wanted string, trays []loadedTray,
+	identities []colourIdentity, bed bedColours,
 ) error {
 	out := slotUnservedError{Hex: wanted, Material: production.FilamentType(slot.Material)}
-	accepted := acceptedHexes(wanted, identities)
+	accepted := acceptedHexes(wanted, identities, bed)
 
 	var wrongMaterial bool
 	for _, tray := range trays {
@@ -408,4 +439,23 @@ func anyTrayHolds(hex string, trays []loadedTray) bool {
 		}
 	}
 	return false
+}
+
+// bedColoursOf is what the order asked for, from the bed's own jobs.
+//
+// queueColoursFor omits the white plank body, which is what this wants: white
+// matches itself on every bed, and naming it here would make a one-colour bed
+// look like two and disable the single-colour rescue above.
+func bedColoursOf(colours []queueColour) bedColours {
+	out := bedColours{}
+	seen := map[string]bool{}
+	for _, c := range colours {
+		name := production.CanonicalColourName(c.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out.Names = append(out.Names, name)
+	}
+	return out
 }

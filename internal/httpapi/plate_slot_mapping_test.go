@@ -173,7 +173,7 @@ func TestBindPlateToTraysMatchesAnExactHexWithNoColourMapAtAll(t *testing.T) {
 	got, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#2850E0", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#2850E0", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	if err != nil {
 		t.Fatalf("bindPlateToTrays refused an exact match with no map: %v", err)
@@ -190,7 +190,7 @@ func TestBindPlateToTraysReconcilesThePlateAndTheSpoolThroughTheColourMap(t *tes
 	got, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#1560BD", "PLA")},
 		[]loadedTray{trayAt(1, 2, "#2850E0", "PLA")},
-		[]colourIdentity{{Name: "BLUE", Hexes: []string{"#1560BD", "#2850E0"}}},
+		[]colourIdentity{{Name: "BLUE", Hexes: []string{"#1560BD", "#2850E0"}}}, bedColours{},
 	)
 	if err != nil {
 		t.Fatalf("bindPlateToTrays refused a mapped colour: %v", err)
@@ -207,7 +207,7 @@ func TestBindPlateToTraysDoesNotMergeTwoBlacks(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#161616", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#000000", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	if err == nil {
 		t.Fatal("bound #161616 to a #000000 spool; these are two different blacks")
@@ -219,7 +219,7 @@ func TestBindPlateToTraysDoesNotMergeTwoTans(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#D3B7A7", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	if err == nil {
 		t.Fatal("bound #D3B7A7 to a #D3C5A3 spool; these are two different spools")
@@ -230,7 +230,7 @@ func TestBindPlateToTraysRefusesTheRightColourInTheWrongPlastic(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#FFFFFF", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#FFFFFF", "PETG")},
-		nil,
+		nil, bedColours{},
 	)
 	var unserved slotUnservedError
 	if !errors.As(err, &unserved) || unserved.Reason != slotWrongMaterial {
@@ -247,7 +247,7 @@ func TestBindPlateToTraysToleratesTheShelfsMaterialSpelling(t *testing.T) {
 	if _, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#FFFFFF", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#FFFFFF", "PLA Matte")},
-		nil,
+		nil, bedColours{},
 	); err != nil {
 		t.Fatalf("refused a PLA bed on a 'PLA Matte' spool: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestBindPlateToTraysDistinguishesItsRefusals(t *testing.T) {
 			if tc.want == slotTrayTaken {
 				used[0] = true // an earlier slot of the same bed took it
 			}
-			_, err := bindOneSlot(tc.slot, tc.trays, tc.identities, used)
+			_, err := bindOneSlot(tc.slot, tc.trays, tc.identities, bedColours{}, used)
 			var unserved slotUnservedError
 			if !errors.As(err, &unserved) {
 				t.Fatalf("err = %v, want a slotUnservedError", err)
@@ -305,7 +305,7 @@ func TestBindPlateToTraysRefusesAPrinterWithFewerSpoolsThanSlots(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#2850E0", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#FFFFFF", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	if err == nil {
 		t.Fatal("bound a two-slot bed to a printer holding one spool")
@@ -318,7 +318,7 @@ func TestBindPlateToTraysNeverUsesOneSpoolTwice(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#FFFFFF", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#161616", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	var unserved slotUnservedError
 	if !errors.As(err, &unserved) || unserved.Reason != slotTrayTaken {
@@ -339,7 +339,7 @@ func TestBindPlateToTraysProducesABindingAssignmentsFromChoiceAccepts(t *testing
 	}
 	identities := []colourIdentity{{Name: "BLUE", Hexes: []string{"#1560BD", "#2850E0"}}}
 
-	chosen, err := bindPlateToTrays(slots, trays, identities)
+	chosen, err := bindPlateToTrays(slots, trays, identities, bedColours{})
 	if err != nil {
 		t.Fatalf("bindPlateToTrays: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestABindingFromStaleTraysIsRefusedWhenTheSpoolHasChanged(t *testing.T) {
 	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#2850E0", "PLA")}
 	mirror := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#2850E0", "PLA")}
 
-	stale, err := bindPlateToTrays(slots, mirror, nil)
+	stale, err := bindPlateToTrays(slots, mirror, nil, bedColours{})
 	if err != nil {
 		t.Fatalf("binding against the mirror: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestABindingFromStaleTraysIsRefusedWhenTheSpoolHasChanged(t *testing.T) {
 		t.Fatalf("expected the stale mapping to still look valid, got %v", err)
 	}
 	// Re-binding through the colour map catches it.
-	if _, err := bindPlateToTrays(slots, live, nil); err == nil {
+	if _, err := bindPlateToTrays(slots, live, nil, bedColours{}); err == nil {
 		t.Fatal("re-binding accepted a printer that no longer holds this bed's blue")
 	}
 }
@@ -391,7 +391,7 @@ func TestAnOperatorsChoiceIsNotSecondGuessedByTheColourMap(t *testing.T) {
 	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3B7A7", "PLA")}
 
 	// GOLD is unmapped, so Tensor would refuse this bed on its own.
-	if _, err := bindPlateToTrays(slots, trays, nil); err == nil {
+	if _, err := bindPlateToTrays(slots, trays, nil, bedColours{}); err == nil {
 		t.Fatal("expected an unmapped gold to be refused automatically")
 	}
 	// The operator says slot 2 prints from the second tray, and that stands.
@@ -414,7 +414,7 @@ func TestAPlateBuiltBeforeTheMapStillFindsItsColour(t *testing.T) {
 	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3C5A3", "PLA")}
 	gold := []colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}}
 
-	got, err := bindPlateToTrays(slots, trays, gold)
+	got, err := bindPlateToTrays(slots, trays, gold, bedColours{})
 	if err != nil {
 		t.Fatalf("a GOLD bed was refused by a printer holding a confirmed gold spool: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestALegacyHexWithNothingMappedIsStillARefusal(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#D4AF37", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
-		nil,
+		nil, bedColours{},
 	)
 	var unserved slotUnservedError
 	if !errors.As(err, &unserved) || unserved.Reason != slotUnmapped {
@@ -444,7 +444,7 @@ func TestALegacyHexOnlyReachesItsOwnColoursSpools(t *testing.T) {
 	_, err := bindPlateToTrays(
 		[]meshio.Slot{plateSlot("#1560BD", "PLA")},
 		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
-		[]colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}},
+		[]colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}}, bedColours{},
 	)
 	if err == nil {
 		t.Fatal("a BLUE plate bound to a GOLD spool")
@@ -462,5 +462,57 @@ func TestFallbackNameForReadsTheBuiltInTableBackwards(t *testing.T) {
 		if got := fallbackNameFor(hex); got != want {
 			t.Errorf("fallbackNameFor(%s) = %q, want %q", hex, got, want)
 		}
+	}
+}
+
+// BATCH-1000499, exactly. The order says GOLD, the shop has confirmed GOLD is
+// #D3C5A3 and #D3B7A7, a printer holds one of them - and the bed still refused,
+// because its plate was built before GOLD was mapped and carries a hex no
+// colour-map row lists.
+//
+// The plate is the only party still insisting on a number nobody uses. The bed
+// is for GOLD; that is what decides.
+func TestAnOrphanedPlateHexIsRescuedByTheBedsOwnColour(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#C9A227", "PLA")}
+	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3C5A3", "PLA")}
+	gold := []colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3", "#D3B7A7"}}}
+
+	// Without the bed's colour there is nothing to connect #C9A227 to GOLD.
+	if _, err := bindPlateToTrays(slots, trays, gold, bedColours{}); err == nil {
+		t.Fatal("an unrecognised plate hex bound with no colour to justify it")
+	}
+
+	got, err := bindPlateToTrays(slots, trays, gold, bedColours{Names: []string{"GOLD"}})
+	if err != nil {
+		t.Fatalf("a GOLD bed was refused by a printer holding a confirmed gold spool: %v", err)
+	}
+	if want := []int{0, 1}; !slices.Equal(got, want) {
+		t.Errorf("binding = %v, want %v", got, want)
+	}
+}
+
+// The rescue must not become a way to print anything on anything. With two
+// lettering colours there is no telling which slot is which, so it declines.
+func TestTheRescueDeclinesWhenTheBedHasTwoColours(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#C9A227", "PLA")}
+	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#D3C5A3", "PLA")}
+	gold := []colourIdentity{{Name: "GOLD", Hexes: []string{"#D3C5A3"}}}
+
+	_, err := bindPlateToTrays(slots, trays, gold, bedColours{Names: []string{"GOLD", "BLUE"}})
+	if err == nil {
+		t.Fatal("a two-colour bed guessed which slot was which")
+	}
+}
+
+// And a hex the map DOES recognise never reaches the rescue: it binds on its
+// own name, so the bed's colour cannot override what the plate plainly says.
+func TestARecognisedHexDoesNotNeedTheBedsColour(t *testing.T) {
+	slots := []meshio.Slot{plateSlot("#FFFFFF", "PLA"), plateSlot("#2850E0", "PLA")}
+	trays := []loadedTray{trayAt(0, 0, "#FFFFFF", "PLA"), trayAt(0, 1, "#2850E0", "PLA")}
+	blue := []colourIdentity{{Name: "BLUE", Hexes: []string{"#2850E0"}}}
+
+	// The bed claims GOLD; the plate says blue and holds blue. Blue wins.
+	if _, err := bindPlateToTrays(slots, trays, blue, bedColours{Names: []string{"GOLD"}}); err != nil {
+		t.Fatalf("a plate hex the map recognises was refused: %v", err)
 	}
 }

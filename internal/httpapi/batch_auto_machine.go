@@ -67,9 +67,9 @@ type queuePlan struct {
 // take this" has to be able to say why, thirteen times over, rather than
 // shrugging.
 func (s *Server) planQueueForBatch(
-	ctx context.Context, slots []meshio.Slot,
+	ctx context.Context, slots []meshio.Slot, bed bedColours,
 ) (queuePlan, []machineOption, error) {
-	options, err := s.rankMachinesForPlate(ctx, slots)
+	options, err := s.rankMachinesForPlate(ctx, slots, bed)
 	if err != nil {
 		return queuePlan{}, nil, err
 	}
@@ -87,7 +87,7 @@ func (s *Server) planQueueForBatch(
 
 // rankMachinesForPlate weighs every printer in the fleet against this plate.
 func (s *Server) rankMachinesForPlate(
-	ctx context.Context, slots []meshio.Slot,
+	ctx context.Context, slots []meshio.Slot, bed bedColours,
 ) ([]machineOption, error) {
 	log := obs.FromContext(ctx)
 
@@ -118,7 +118,7 @@ func (s *Server) rankMachinesForPlate(
 	out := make([]machineOption, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, s.weighMachine(weighInputs{
-			Row: r, Slots: slots, Identities: identities,
+			Row: r, Slots: slots, Identities: identities, Bed: bed,
 			Load: load, InFlight: inFlight, Sliceable: sliceable,
 			PrinterIDs: printerIDs, Now: now,
 		}))
@@ -133,9 +133,12 @@ type weighInputs struct {
 	Row        gen.ListFleetMachinesWithFamilyRow
 	Slots      []meshio.Slot
 	Identities []colourIdentity
-	Load       map[int]queueLoad
-	InFlight   map[uuid.UUID]int
-	Sliceable  func(model string) string
+	// Bed is what the ORDER asked for, which rescues a plate whose hex was
+	// baked in before its colour was mapped.
+	Bed       bedColours
+	Load      map[int]queueLoad
+	InFlight  map[uuid.UUID]int
+	Sliceable func(model string) string
 	// PrinterIDs maps a machine's serial number to BambuBuddy's id for it. The
 	// load map is keyed by that id and machines are keyed by serial, so
 	// something has to join them; this is the cached fleet index, read once.
@@ -199,7 +202,7 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	// clear refusal, never a wrong-coloured print. Do not "improve" this into a
 	// live read.
 	trays := decodeTrays(machine)
-	slotTrays, err := bindPlateToTrays(in.Slots, trays, in.Identities)
+	slotTrays, err := bindPlateToTrays(in.Slots, trays, in.Identities, in.Bed)
 	if err != nil {
 		opt.Refusal = err.Error()
 		return opt

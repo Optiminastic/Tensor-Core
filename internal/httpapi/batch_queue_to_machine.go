@@ -158,7 +158,15 @@ func (s *Server) targetFor(
 		return gen.Machine{}, nil, statusErr(http.StatusConflict,
 			"This bed's plate declares no filament. Rebuild the bed before sending it.")
 	}
-	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots))
+	// The bed's own colours, so a plate whose hex predates the colour map is
+	// still recognised by the word the order used.
+	jobs, err := s.store.Q.ListJobsForBatch(ctx, &batch.ID)
+	if err != nil {
+		return gen.Machine{}, nil, statusErr(http.StatusInternalServerError,
+			"Could not read the batch's jobs.")
+	}
+	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots),
+		bedColoursOf(s.queueColoursFor(ctx, jobs)))
 	if err != nil {
 		return gen.Machine{}, nil, statusErr(http.StatusBadGateway, "Could not read the fleet.")
 	}
