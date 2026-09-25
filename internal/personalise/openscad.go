@@ -217,6 +217,18 @@ func lastLines(s string) string {
 	return strings.Join(lines, " | ")
 }
 
+// Source returns the .scad a key resolves to, by exactly the rule a render
+// uses.
+//
+// Exported for the configuration side: a mapping is written against the
+// variables a template declares, and "the template" has to mean the same file
+// the renderer would pick - the uploaded override when there is one, the
+// embedded copy otherwise. Reading the upload directly would answer correctly
+// for an overridden key and not at all for an embedded one.
+func (r *Renderer) Source(ctx context.Context, template string) ([]byte, error) {
+	return r.templateSource(ctx, template)
+}
+
 // templateSource is the .scad to render: an uploaded override if there is one,
 // else the copy compiled into this binary.
 func (r *Renderer) templateSource(ctx context.Context, template string) ([]byte, error) {

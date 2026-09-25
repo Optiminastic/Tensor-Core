@@ -15,6 +15,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -65,6 +66,7 @@ func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.ConfigRead.Key()), s.listDesignTemplates)
 	g.GET("/:key/history", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateHistory)
+	g.GET("/:key/params", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateParams)
 	g.POST("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.uploadDesignTemplate)
 }
 
@@ -134,6 +136,51 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+// templateParams lists the variables a template declares.
+//
+// What a product's field mapping is written AGAINST: somebody choosing where
+// the customer's First Name goes needs to know NAME_L exists, and the only
+// place that is recorded is the .scad. Typing it from memory produces a
+// mapping that points at a variable the script never reads, which OpenSCAD
+// accepts in silence - an unknown -D is a legal assignment nothing consumes.
+//
+// Resolved through the renderer rather than by reading the upload directly,
+// so the answer is the file a render would actually use: the uploaded
+// override when one exists, the embedded copy otherwise.
+func (s *Server) templateParams(c *gin.Context) {
+	key := strings.ToLower(strings.TrimSpace(c.Param("key")))
+	if key == "" {
+		detail(c, http.StatusUnprocessableEntity, "Name the template.")
+		return
+	}
+	if s.renderer == nil {
+		// Model generation is off on this host - the API image has no
+		// OpenSCAD. Saying so beats a 500 that reads like a bug.
+		detail(c, http.StatusServiceUnavailable,
+			"Model generation is not configured on this service, so templates cannot be read here.")
+		return
+	}
+
+	source, err := s.renderer.Source(c.Request.Context(), key)
+	if errors.Is(err, personalise.ErrNoTemplate) {
+		detail(c, http.StatusNotFound, "No template is registered under that name.")
+		return
+	}
+	if err != nil {
+		obs.FromContext(c.Request.Context()).Error("could not read template source",
+			"template", key, "error", err)
+		detail(c, http.StatusInternalServerError, "Could not read that template.")
+		return
+	}
+	// Never nil: an empty array renders as [] and a nil one as null, and the
+	// caller is a dropdown that should be empty rather than broken.
+	params := personalise.DeclaredParams(source)
+	if params == nil {
+		params = []personalise.Param{}
+	}
+	c.JSON(http.StatusOK, params)
+}
+
 func (s *Server) templateHistory(c *gin.Context) {
 	rows, err := s.store.Q.ListTemplateHistory(c.Request.Context(), c.Param("key"))
 	if err != nil {
@@ -153,6 +200,23 @@ func (s *Server) templateHistory(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// alwaysPassedParams are set on every render whatever the product is: PART
+// splits the model into its coloured pieces, and OUT_X/Y/Z scale it to the
+// finished size. A template ignoring those renders one solid lump at the
+// template's own size, which slices and prints and is wrong.
+var alwaysPassedParams = []string{"PART", "OUT_X", "OUT_Y", "OUT_Z"}
+
+// requiredParamsFor says what a template under this key must declare.
+func requiredParamsFor(key string) []string {
+	for _, embedded := range embeddedTemplateKeys {
+		if key == embedded {
+			// A plank, driven by the DNP path, which passes the names too.
+			return personalise.RequiredTemplateParams
+		}
+	}
+	return alwaysPassedParams
 }
 
 // uploadDesignTemplate stores a new .scad and makes it the one that renders.
@@ -198,7 +262,18 @@ func (s *Server) uploadDesignTemplate(c *gin.Context) {
 	// template that does not declare the parameters the renderer passes will
 	// silently ignore them - producing a plank with no names on it, which looks
 	// like a rendering bug rather than a bad upload.
-	if missing := personalise.MissingTemplateParams(source); len(missing) > 0 {
+	//
+	// WHICH parameters depends on what is being replaced. Replacing one of the
+	// four plank templates means the DNP render path will drive it, and that
+	// path passes NAME_L and NAME_R unconditionally - so a replacement missing
+	// them is the exact silent failure above.
+	//
+	// A template under a NEW key belongs to a product configured in the
+	// registry, and its variables are whatever its own field mapping names. A
+	// keychain has no NAME_R and demanding one would refuse every product that
+	// is not a plank. The mapping enforces those; this only enforces what
+	// Tensor passes whatever the product is.
+	if missing := personalise.DeclaresAll(source, requiredParamsFor(key)); len(missing) > 0 {
 		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
 			"That template does not declare %s. Tensor sets those with -D, and a "+
 				"template without them renders the wrong thing silently.",
