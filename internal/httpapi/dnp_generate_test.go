@@ -43,6 +43,8 @@ func TestIsGeneratedProduct(t *testing.T) {
 		{"premium plank", "PDNP-PUR", "", true},
 		{"soulmate combo", "SC-RED", "", true},
 		{"soulmate combo with light", "SCWL-BLU", "", true},
+		{"plank with light, new code", "DNPWL-YEL", "", true},
+		{"plank with light, old code", "DNPLB-3", "", true},
 		{"lower case premium", "pdnp-gld", "", true},
 
 		// Still per segment, and these must stay out. SNP is the Single Name

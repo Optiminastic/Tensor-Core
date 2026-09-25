@@ -48,8 +48,8 @@ var generatedProductNames = []string{"dual name plank", "dual name & photo frame
 // product Tensor renders itself.
 //
 // The live families: the plank range carries "DNP", the with-light range
-// "DNPLB", the Dual Name & Photo Frame "DNPF", the Premium plank "PDNP", and
-// the Soulmate combos "SC" and "SCWL".
+// "DNPLB" and now "DNPWL", the Dual Name & Photo Frame "DNPF", the Premium
+// plank "PDNP", and the Soulmate combos "SC" and "SCWL".
 //
 // Matched as whole hyphen-separated segments, never as a prefix. The rule used
 // to accept anything starting with "DNP" and that cost real orders, which is
@@ -74,6 +74,12 @@ var generatedSKUSegments = map[string]bool{
 	"PDNP":  true,
 	"SC":    true,
 	"SCWL":  true,
+	// DNPWL is the storefront's newer code for a plank ordered WITH the light,
+	// replacing DNPLB on the main range. Both are listed: DNPLB is still on the
+	// older standalone "Dual Name Plank with Light" product, and a SKU that
+	// stopped being recognised because its family was retired would hold live
+	// orders for a rename nobody connected to it.
+	"DNPWL": true,
 }
 
 // IsGeneratedProduct reports whether a product is one Tensor renders itself.
