@@ -933,6 +933,36 @@ func (q *Queries) ReplaceVariantBomItem(ctx context.Context, arg ReplaceVariantB
 	return err
 }
 
+const retireVariantsNotInSKUs = `-- name: RetireVariantsNotInSKUs :execrows
+UPDATE product_variants
+SET status = 'retired', updated_at = now()
+WHERE product_id = $1
+  AND status <> 'retired'
+  AND (sku IS NULL OR lower(sku) <> ALL ($2::text[]))
+`
+
+type RetireVariantsNotInSKUsParams struct {
+	ProductID uuid.UUID
+	Skus      []string
+}
+
+// Retires a product's variants that the import no longer saw.
+//
+// Retired, never deleted. A withdrawn SKU must stop matching NEW orders, but
+// jobs and beds already reference the variant it belonged to, and deleting it
+// would orphan them to tidy a list. FindProductBySKU already ignores anything
+// not active, so retiring is the whole of the behaviour change.
+//
+// Variants with no SKU are retired too: they cannot be matched to an order and
+// an import is the moment somebody is looking at what this product covers.
+func (q *Queries) RetireVariantsNotInSKUs(ctx context.Context, arg RetireVariantsNotInSKUsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, retireVariantsNotInSKUs, arg.ProductID, arg.Skus)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const supersedeVariantDesign = `-- name: SupersedeVariantDesign :exec
 UPDATE variant_designs
 SET status = 'replaced'
@@ -1102,4 +1132,89 @@ func (q *Queries) UpdateVariant(ctx context.Context, arg UpdateVariantParams) (P
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const upsertProductByCode = `-- name: UpsertProductByCode :one
+INSERT INTO products (id, code, name, kind, status, notes)
+VALUES ($1, $2, $3,
+        $4, $5, $6)
+ON CONFLICT (code) DO UPDATE
+SET name       = EXCLUDED.name,
+    updated_at = now()
+RETURNING id, code, name, kind, status, notes, created_at, updated_at
+`
+
+type UpsertProductByCodeParams struct {
+	ID     uuid.UUID
+	Code   string
+	Name   string
+	Kind   string
+	Status string
+	Notes  *string
+}
+
+// Creates a product or refreshes its name, for an import that may be a re-import.
+//
+// Kind and status are NOT overwritten on conflict. A re-import is "Shopify has
+// new variants", not "undo whatever somebody decided about this product here" -
+// retiring a product and then re-importing it to pick up a colour should not
+// quietly bring it back to life.
+func (q *Queries) UpsertProductByCode(ctx context.Context, arg UpsertProductByCodeParams) (Product, error) {
+	row := q.db.QueryRow(ctx, upsertProductByCode,
+		arg.ID,
+		arg.Code,
+		arg.Name,
+		arg.Kind,
+		arg.Status,
+		arg.Notes,
+	)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.Kind,
+		&i.Status,
+		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertVariantBySKU = `-- name: UpsertVariantBySKU :exec
+INSERT INTO product_variants (id, product_id, sku, name, status)
+VALUES ($1, $2, $3,
+        $4, 'active')
+ON CONFLICT (lower(sku)) WHERE sku IS NOT NULL DO UPDATE
+SET product_id = EXCLUDED.product_id,
+    name       = EXCLUDED.name,
+    status     = 'active',
+    updated_at = now()
+`
+
+type UpsertVariantBySKUParams struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	Sku       *string
+	Name      string
+}
+
+// Creates a variant or refreshes it, keyed on the SKU.
+//
+// The SKU is the identity: it is what an order carries and what
+// FindProductBySKU matches on, so a variant renamed in Shopify is the same
+// variant and a variant given a new SKU is a new one.
+//
+// Sets status back to 'active', because a re-import is the statement that
+// Shopify still sells this - which is exactly how a variant retired by an
+// earlier import comes back when the shop restores it.
+func (q *Queries) UpsertVariantBySKU(ctx context.Context, arg UpsertVariantBySKUParams) error {
+	_, err := q.db.Exec(ctx, upsertVariantBySKU,
+		arg.ID,
+		arg.ProductID,
+		arg.Sku,
+		arg.Name,
+	)
+	return err
 }

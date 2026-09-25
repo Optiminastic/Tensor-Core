@@ -289,3 +289,53 @@ WHERE lower(v.sku) = lower(sqlc.arg('sku'))
   AND v.status = 'active'
   AND p.status = 'active'
 LIMIT 1;
+
+-- name: UpsertProductByCode :one
+-- Creates a product or refreshes its name, for an import that may be a re-import.
+--
+-- Kind and status are NOT overwritten on conflict. A re-import is "Shopify has
+-- new variants", not "undo whatever somebody decided about this product here" -
+-- retiring a product and then re-importing it to pick up a colour should not
+-- quietly bring it back to life.
+INSERT INTO products (id, code, name, kind, status, notes)
+VALUES (sqlc.arg('id'), sqlc.arg('code'), sqlc.arg('name'),
+        sqlc.arg('kind'), sqlc.arg('status'), sqlc.narg('notes'))
+ON CONFLICT (code) DO UPDATE
+SET name       = EXCLUDED.name,
+    updated_at = now()
+RETURNING *;
+
+-- name: UpsertVariantBySKU :exec
+-- Creates a variant or refreshes it, keyed on the SKU.
+--
+-- The SKU is the identity: it is what an order carries and what
+-- FindProductBySKU matches on, so a variant renamed in Shopify is the same
+-- variant and a variant given a new SKU is a new one.
+--
+-- Sets status back to 'active', because a re-import is the statement that
+-- Shopify still sells this - which is exactly how a variant retired by an
+-- earlier import comes back when the shop restores it.
+INSERT INTO product_variants (id, product_id, sku, name, status)
+VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('sku'),
+        sqlc.arg('name'), 'active')
+ON CONFLICT (lower(sku)) WHERE sku IS NOT NULL DO UPDATE
+SET product_id = EXCLUDED.product_id,
+    name       = EXCLUDED.name,
+    status     = 'active',
+    updated_at = now();
+
+-- name: RetireVariantsNotInSKUs :execrows
+-- Retires a product's variants that the import no longer saw.
+--
+-- Retired, never deleted. A withdrawn SKU must stop matching NEW orders, but
+-- jobs and beds already reference the variant it belonged to, and deleting it
+-- would orphan them to tidy a list. FindProductBySKU already ignores anything
+-- not active, so retiring is the whole of the behaviour change.
+--
+-- Variants with no SKU are retired too: they cannot be matched to an order and
+-- an import is the moment somebody is looking at what this product covers.
+UPDATE product_variants
+SET status = 'retired', updated_at = now()
+WHERE product_id = sqlc.arg('product_id')
+  AND status <> 'retired'
+  AND (sku IS NULL OR lower(sku) <> ALL (sqlc.arg('skus')::text[]));

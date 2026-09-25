@@ -319,6 +319,15 @@ func (c *Client) setVariant(
 }
 
 // ProductSummary is one product in a store's catalog, as shown in a listing.
+// VariantSummary is one sellable combination and the SKU that identifies it.
+type VariantSummary struct {
+	GID   string
+	Title string
+	// SKU is empty when the variant carries none, which is a real state worth
+	// showing: such a variant can never be matched to an order.
+	SKU string
+}
+
 type ProductSummary struct {
 	GID            string
 	Title          string
@@ -334,6 +343,10 @@ type ProductSummary struct {
 	CurrencyCode   string
 	UpdatedAt      string
 	AdminURL       string
+	// Variants and their SKUs. The SKU is what an order carries and what the
+	// registry matches a product by, so importing a product without them
+	// would import something no order can ever find.
+	Variants []VariantSummary
 }
 
 const listProductsQuery = `query ListProducts($first: Int!) {
@@ -352,6 +365,13 @@ const listProductsQuery = `query ListProducts($first: Int!) {
         maxVariantPrice { amount currencyCode }
       }
       updatedAt
+      # The SKUs, which are what Tensor matches an order to a product by.
+      # 100 covers the largest live product comfortably - the biggest today
+      # carries 64 - and a product past that is asking a different question
+      # than "which of my products should Tensor render".
+      variants(first: 100) {
+        nodes { id title sku }
+      }
     }
   }
 }`
@@ -392,6 +412,13 @@ func (c *Client) ListProducts(ctx context.Context, shop, token string, limit int
 						} `json:"maxVariantPrice"`
 					} `json:"priceRangeV2"`
 					UpdatedAt string `json:"updatedAt"`
+					Variants  struct {
+						Nodes []struct {
+							ID    string  `json:"id"`
+							Title string  `json:"title"`
+							SKU   *string `json:"sku"`
+						} `json:"nodes"`
+					} `json:"variants"`
 				} `json:"nodes"`
 			} `json:"products"`
 		} `json:"data"`
@@ -416,6 +443,19 @@ func (c *Client) ListProducts(ctx context.Context, shop, token string, limit int
 			if n.FeaturedImage.AltText != nil {
 				p.ImageAlt = *n.FeaturedImage.AltText
 			}
+		}
+		for _, v := range n.Variants.Nodes {
+			// A variant with no SKU is carried rather than skipped. It is
+			// exactly what somebody importing needs to SEE - a colour that
+			// will never match an order - and dropping it would make the
+			// import quietly cover less than the product does.
+			var sku string
+			if v.SKU != nil {
+				sku = strings.TrimSpace(*v.SKU)
+			}
+			p.Variants = append(p.Variants, VariantSummary{
+				GID: v.ID, Title: v.Title, SKU: sku,
+			})
 		}
 		products = append(products, p)
 	}

@@ -25,6 +25,18 @@ type shopifyProductResponse struct {
 	CurrencyCode   string `json:"currency_code"`
 	UpdatedAt      string `json:"updated_at"`
 	AdminURL       string `json:"admin_url"`
+	// Variants carry the SKUs, which is what the registry matches an order to
+	// a product by - so a picker that showed products without them would be
+	// offering things that can never be rendered.
+	Variants []shopifyVariantResponse `json:"variants"`
+}
+
+type shopifyVariantResponse struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Empty when the variant carries no SKU, which is shown rather than
+	// hidden: it is a variant no order can ever be matched to.
+	SKU string `json:"sku"`
 }
 
 func shopifyProductDTO(p shopify.ProductSummary) shopifyProductResponse {
@@ -34,13 +46,28 @@ func shopifyProductDTO(p shopify.ProductSummary) shopifyProductResponse {
 		ImageURL: p.ImageURL, ImageAlt: p.ImageAlt,
 		MinPrice: p.MinPrice, MaxPrice: p.MaxPrice, CurrencyCode: p.CurrencyCode,
 		UpdatedAt: p.UpdatedAt, AdminURL: p.AdminURL,
+		Variants: shopifyVariantDTOs(p.Variants),
 	}
+}
+
+func shopifyVariantDTOs(in []shopify.VariantSummary) []shopifyVariantResponse {
+	out := make([]shopifyVariantResponse, 0, len(in))
+	for _, v := range in {
+		out = append(out, shopifyVariantResponse{ID: v.GID, Title: v.Title, SKU: v.SKU})
+	}
+	return out
 }
 
 func (s *Server) registerShopifyProducts(r *gin.Engine) {
 	g := r.Group("/brands/:slug/shopify-products")
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.BrandRead.Key()), s.listShopifyProducts)
+	// Importing one into the registry lives here rather than under /registry
+	// because it needs the brand's Shopify connection, which is addressed by
+	// slug - and because the picker and the import should read the same list.
+	// Guarded by config:manage: this writes the registry, not the storefront.
+	g.POST("/import", s.guards.RequirePermission(auth.ConfigManage.Key()),
+		s.importShopifyProduct)
 }
 
 // listShopifyProducts fetches the brand's connected store's product catalog
