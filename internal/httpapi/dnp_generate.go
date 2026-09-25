@@ -47,12 +47,22 @@ var generatedProductNames = []string{"dual name plank", "dual name & photo frame
 // generatedSKUSegments are the hyphen-separated SKU segments that name a
 // product Tensor renders itself.
 //
-// Three live families: T3DPS-DNP-1..16 carries "DNP", the with-light range
-// carries "DNPLB", and the Dual Name & Photo Frame carries "DNPF".
+// The live families: the plank range carries "DNP", the with-light range
+// "DNPLB", the Dual Name & Photo Frame "DNPF", the Premium plank "PDNP", and
+// the Soulmate combos "SC" and "SCWL".
 //
 // Matched as whole hyphen-separated segments, never as a prefix. The rule used
 // to accept anything starting with "DNP" and that cost real orders, which is
-// why DNPF is listed here explicitly rather than falling in by accident.
+// why DNPF is listed here explicitly rather than falling in by accident. It is
+// also why PDNP needs its own entry: "PDNP-PUR" contains no segment equal to
+// "DNP", so a prefix reading would have been the only thing that caught it,
+// and a prefix reading is what did the damage last time.
+//
+// PDNP, SC and SCWL are the storefront's own codes, added as the catalogue
+// grew SKUs Tensor had to recognise. Before them PREMIUM DUAL NAME PLANK
+// rendered only because its NAME contains "dual name plank" - true today and
+// one rename away from not being - and the Soulmate combos carried DNP
+// segments that said nothing about what they are.
 //
 // DNPF renders from the same no-heart template as the plank and differs only in
 // finished size - see personalise.Params.ForProduct. It used to need a design
@@ -61,6 +71,9 @@ var generatedSKUSegments = map[string]bool{
 	"DNP":   true,
 	"DNPLB": true,
 	"DNPF":  true,
+	"PDNP":  true,
+	"SC":    true,
+	"SCWL":  true,
 }
 
 // IsGeneratedProduct reports whether a product is one Tensor renders itself.

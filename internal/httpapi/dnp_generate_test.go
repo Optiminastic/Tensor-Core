@@ -34,6 +34,25 @@ func TestIsGeneratedProduct(t *testing.T) {
 		{"substring in a sku segment", "CARDNPACK-1", "", false},
 		{"substring, no hyphens", "GRANDNPRIX", "", false},
 
+		// The storefront's own codes, each registered by name.
+		//
+		// PDNP is the case that proves the rule is segment-wise: "PDNP-PUR"
+		// holds no segment equal to "DNP", so before it was listed the
+		// PREMIUM DUAL NAME PLANK was recognised only by its product NAME -
+		// true right up until somebody renames it.
+		{"premium plank", "PDNP-PUR", "", true},
+		{"soulmate combo", "SC-RED", "", true},
+		{"soulmate combo with light", "SCWL-BLU", "", true},
+		{"lower case premium", "pdnp-gld", "", true},
+
+		// Still per segment, and these must stay out. SNP is the Single Name
+		// Plank, which Tensor does not render; SC inside a longer word is not
+		// the Soulmate combo.
+		{"single name plank", "SNP-YEL", "Single Name Plank", false},
+		{"single name plank with light", "SNPWL-YEL", "Single Name Plank", false},
+		{"sc inside a word", "DISC-RED", "", false},
+		{"scwl inside a word", "SCWLX-1", "", false},
+
 		// DNPF is now generated too. It renders from the same no-heart
 		// template as the plank at its own finished size (150x40x40), so the
 		// frame no longer waits for somebody to upload a file per order.
