@@ -45,7 +45,7 @@ func (s *Server) rerenderProductionJob(c *gin.Context) {
 	}
 	// An uploaded design has no template to rebuild from, and saying so is more
 	// use than queueing work that would fail with errNotPersonalisable.
-	if !IsGeneratedProduct(deref(job.Sku), deref(job.ProductName)) {
+	if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 		detail(c, http.StatusUnprocessableEntity,
 			"This product's model is uploaded rather than rendered, so there is nothing to rebuild. Upload a new file instead.")
 		return

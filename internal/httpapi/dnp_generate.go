@@ -139,24 +139,24 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 	if err != nil {
 		return fmt.Errorf("load job: %w", err)
 	}
-	if !IsGeneratedProduct(deref(job.Sku), deref(job.ProductName)) {
+	if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 		return errNotPersonalisable
 	}
 	if job.OrderID == nil {
 		return fmt.Errorf("job %s has no order, so there is no personalisation to read", job.JobNumber)
 	}
 
-	params, err := s.plankParamsForJob(ctx, *job.OrderID, job)
+	plan, err := s.renderPlanForJob(ctx, *job.OrderID, job)
 	if err != nil {
 		return err
 	}
 
-	model, err := s.renderColouredPlank(ctx, job, params)
+	model, err := s.renderColouredPlank(ctx, job, plan)
 	if err != nil {
 		return err
 	}
 
-	fileID, err := s.storeGeneratedModel(ctx, job, params, model)
+	fileID, err := s.storeGeneratedModel(ctx, job, plan, model)
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 	// The render consumed the customer's exact input, so there is nothing left
 	// for a person to confirm about it. Not best-effort: a job left pending
 	// here never reaches a bed, which would make the whole render pointless.
-	if err := s.confirmGeneratedPersonalisation(ctx, jobID, params); err != nil {
+	if err := s.confirmGeneratedPersonalisation(ctx, jobID, plan); err != nil {
 		return err
 	}
 	return nil
@@ -215,7 +215,7 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 // plank in a colour nobody chose is scrap, and a job that failed outright
 // helps nobody when the geometry was fine.
 func (s *Server) renderColouredPlank(
-	ctx context.Context, job gen.ProductionJob, params personalise.Params,
+	ctx context.Context, job gen.ProductionJob, plan renderPlan,
 ) ([]byte, error) {
 	log := obs.FromContext(ctx)
 
@@ -243,11 +243,11 @@ func (s *Server) renderColouredPlank(
 				"add the colour to the filament shelf or the built-in table", colour)
 	}
 
-	base, err := s.renderer.RenderSTL(ctx, params.Template, params.ArgsForPart(personalise.PartBase))
+	base, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(personalise.PartBase))
 	if err != nil {
 		return nil, fmt.Errorf("render the base: %w", err)
 	}
-	text, err := s.renderer.RenderSTL(ctx, params.Template, params.ArgsForPart(personalise.PartText))
+	text, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(personalise.PartText))
 	if err != nil {
 		return nil, fmt.Errorf("render the lettering: %w", err)
 	}
@@ -300,9 +300,65 @@ func meshFromSTL(stl []byte) (orientation.Mesh, error) {
 // "VASU & PADMANABH" string on the job row, and splitting that back apart would
 // break on any name containing an ampersand - the very character the join uses.
 // The individual names survive only in the order's line-item properties.
-func (s *Server) plankParamsForJob(
+// renderPlanForJob decides how this job renders: from the registry when the
+// registry describes its SKU, and from the plank path when it does not.
+//
+// The fallback is what makes configuring a new product safe. A SKU the
+// registry says nothing about takes exactly the path it took before this
+// existed, so nothing already printing can be changed by somebody editing a
+// different product.
+//
+// errNoRegistryPlan is the only error that falls through. A configured product
+// whose order is missing a mapped field, or whose mapping is unreadable, has
+// FAILED - falling back there would render a keychain through the plank path
+// and either produce a plank or complain about names the product does not have.
+func (s *Server) renderPlanForJob(
 	ctx context.Context, orderID uuid.UUID, job gen.ProductionJob,
-) (personalise.Params, error) {
+) (renderPlan, error) {
+	props, err := s.linePropertiesForJob(ctx, orderID, job)
+	if err != nil {
+		return renderPlan{}, err
+	}
+
+	plan, err := s.resolveRenderPlan(ctx, job, props)
+	switch {
+	case err == nil:
+		return plan, nil
+	case !errors.Is(err, errNoRegistryPlan):
+		return renderPlan{}, err
+	}
+
+	params, err := personalise.ParamsFromProperties(props)
+	if err != nil {
+		return renderPlan{}, err
+	}
+	params = params.ForProduct(deref(job.Sku), deref(job.ProductName))
+	return plankPlan(params), nil
+}
+
+// plankPlan is the DNP path expressed as a plan, so the renderer and the
+// store below take one shape whichever path decided it.
+func plankPlan(params personalise.Params) renderPlan {
+	return renderPlan{
+		Template: params.Template,
+		Args:     params.Args(),
+		Label:    fmt.Sprintf("%s-%s", params.NameLeft, params.NameRight),
+		Stored: storedRenderParams{
+			Template: params.Template, Hearts: params.Hearts,
+			NameLeft: params.NameLeft, NameRight: params.NameRight,
+		},
+	}
+}
+
+// linePropertiesForJob reads what the customer typed on this job's line.
+//
+// Split out of the params building because the registry path needs exactly
+// the same answer: WHICH properties belong to this job is a question about
+// orders, not about planks, and two copies of it would be two chances to pick
+// the wrong line.
+func (s *Server) linePropertiesForJob(
+	ctx context.Context, orderID uuid.UUID, job gen.ProductionJob,
+) ([]production.LineProp, error) {
 	sku, product := deref(job.Sku), deref(job.ProductName)
 
 	// The job's OWN line first.
@@ -318,21 +374,17 @@ func (s *Server) plankParamsForJob(
 	// made from; this reads that snapshot back. The scan stays as a fallback
 	// for jobs created before the column existed.
 	if props, ok := jobLineProperties(job); ok {
-		params, err := personalise.ParamsFromProperties(props)
-		if err != nil {
-			return personalise.Params{}, err
-		}
-		return params.ForProduct(sku, product), nil
+		return props, nil
 	}
 
 	order, err := s.store.Q.GetOrderByID(ctx, orderID)
 	if err != nil {
-		return personalise.Params{}, fmt.Errorf("load order: %w", err)
+		return nil, fmt.Errorf("load order: %w", err)
 	}
 
 	var items []production.LineItem
 	if err := json.Unmarshal(order.LineItems, &items); err != nil {
-		return personalise.Params{}, fmt.Errorf("read the order's line items: %w", err)
+		return nil, fmt.Errorf("read the order's line items: %w", err)
 	}
 
 	for _, li := range items {
@@ -343,22 +395,15 @@ func (s *Server) plankParamsForJob(
 			// The common case today: 43 of 46 imported orders predate the
 			// properties import. Naming it precisely is what stops somebody
 			// debugging the renderer for an hour.
-			return personalise.Params{}, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"this order carries no personalisation options - press Sync from Shopify to fetch them")
 		}
-		params, err := personalise.ParamsFromProperties(li.Properties)
-		if err != nil {
-			return personalise.Params{}, err
-		}
-		// The names come from the line's properties; the product decides what
-		// they are scaled into.
-		return params.ForProduct(sku, product), nil
+		return li.Properties, nil
 	}
 	if sku != "" {
-		return personalise.Params{}, fmt.Errorf("no line item on this order matches SKU %s", sku)
+		return nil, fmt.Errorf("no line item on this order matches SKU %s", sku)
 	}
-	return personalise.Params{}, fmt.Errorf(
-		"no line item on this order matches the product %q", product)
+	return nil, fmt.Errorf("no line item on this order matches the product %q", product)
 }
 
 // sameLineItem reports whether a line is the one this job was made from.
@@ -389,7 +434,7 @@ func sameLineItem(li production.LineItem, sku, product string) bool {
 // planner packs beds with these numbers, and a bbox nobody checked is how a
 // plate silently stops fitting.
 func (s *Server) storeGeneratedModel(
-	ctx context.Context, job gen.ProductionJob, params personalise.Params, model []byte,
+	ctx context.Context, job gen.ProductionJob, plan renderPlan, model []byte,
 ) (uuid.UUID, error) {
 	// A two-colour plank is a 3MF; a single-colour fallback is still STL. The
 	// extension has to follow the bytes, because everything downstream - the
@@ -414,7 +459,7 @@ func (s *Server) storeGeneratedModel(
 
 	// Named for the job and the customer's own words, so an operator opening
 	// the file list can tell one plank from another without opening them.
-	filename := fmt.Sprintf("%s-%s-%s%s", job.JobNumber, params.NameLeft, params.NameRight, ext)
+	filename := fmt.Sprintf("%s-%s%s", job.JobNumber, plan.Label, ext)
 
 	// And the inputs themselves, beside the file.
 	//
@@ -425,10 +470,7 @@ func (s *Server) storeGeneratedModel(
 	// into a comparison instead of a guess - which is what let a bed print NAVYA
 	// & KRISHNA four times against three other customers' orders without
 	// anything in the database disagreeing with itself.
-	renderParams, err := json.Marshal(storedRenderParams{
-		Template: params.Template, Hearts: params.Hearts,
-		NameLeft: params.NameLeft, NameRight: params.NameRight,
-	})
+	renderParams, err := json.Marshal(plan.Stored)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("record what this model was built from: %w", err)
 	}
@@ -507,13 +549,12 @@ func (s *Server) holdJobForModelFailure(ctx context.Context, jobID uuid.UUID, ca
 // job's file came from - a generated plank and an uploaded STL are otherwise
 // indistinguishable once attached.
 func (s *Server) recordModelGenerated(
-	ctx context.Context, jobID uuid.UUID, params personalise.Params,
+	ctx context.Context, jobID uuid.UUID, plan renderPlan,
 ) error {
 	return recordJobEvent(ctx, s.store.Q, jobEvent{
 		JobID:     jobID,
 		EventType: production.EventModelGenerated,
-		Comment: strPtr(fmt.Sprintf("%s / %s, %d heart(s), %s",
-			params.NameLeft, params.NameRight, params.Hearts, params.Template)),
+		Comment:   strPtr(plan.describe()),
 	})
 }
 
@@ -542,7 +583,10 @@ func (s *Server) enqueueModelGeneration(ctx context.Context, jobs []gen.Producti
 	}
 	log := obs.FromContext(ctx)
 	for _, job := range jobs {
-		if !IsGeneratedProduct(deref(job.Sku), deref(job.ProductName)) {
+		// Registry-aware, like the render itself. A configured product whose
+		// job was never enqueued would sit waiting for a manual upload no
+		// matter how complete its configuration was.
+		if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 			continue
 		}
 		if err := s.modelEnqueuer.Enqueue(ctx, job.ID); err != nil {
@@ -576,7 +620,7 @@ func (s *Server) enqueueModelGeneration(ctx context.Context, jobs []gen.Producti
 // Recorded as validated by "system" and written to the job history, so the
 // decision is auditable rather than invisible.
 func (s *Server) confirmGeneratedPersonalisation(
-	ctx context.Context, jobID uuid.UUID, params personalise.Params,
+	ctx context.Context, jobID uuid.UUID, plan renderPlan,
 ) error {
 	now := time.Now().UTC()
 	by := "system"
@@ -599,9 +643,7 @@ func (s *Server) confirmGeneratedPersonalisation(
 	return recordJobEvent(ctx, s.store.Q, jobEvent{
 		JobID:     jobID,
 		EventType: production.EventModelGenerated,
-		Comment: strPtr(fmt.Sprintf(
-			"Personalisation confirmed by rendering: %s / %s, %d heart(s)",
-			params.NameLeft, params.NameRight, params.Hearts)),
+		Comment:   strPtr("Personalisation confirmed by rendering: " + plan.describe()),
 	})
 }
 
@@ -634,7 +676,18 @@ func jobLineProperties(job gen.ProductionJob) ([]production.LineProp, bool) {
 // "the same model" means, which is worth making on purpose.
 type storedRenderParams struct {
 	Template  string `json:"template"`
-	Hearts    int    `json:"hearts"`
-	NameLeft  string `json:"name_left"`
-	NameRight string `json:"name_right"`
+	Hearts    int    `json:"hearts,omitempty"`
+	NameLeft  string `json:"name_left,omitempty"`
+	NameRight string `json:"name_right,omitempty"`
+	// Args is the registry path's equivalent of the three fields above.
+	//
+	// A product configured in the registry has no NameLeft and no heart count
+	// - it may have neither concept - so what it was built from IS its mapped
+	// arguments. Recorded as a map rather than flattened into named fields
+	// because the names differ per product, which is the whole point of the
+	// mapping.
+	//
+	// omitempty on all four, so a plank's record still reads as it always did
+	// and a registry product's does not carry three empty plank fields.
+	Args map[string]string `json:"args,omitempty"`
 }

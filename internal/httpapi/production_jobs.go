@@ -761,7 +761,7 @@ func (s *Server) buildJobsForOrder(
 		// which is 'stl_missing', and the generator clears that when the model
 		// lands. See dnp_generate.go.
 		var match production.MatchResult
-		generated := IsGeneratedProduct(deref(li.SKU), li.ProductName)
+		generated := s.rendersProduct(ctx, deref(li.SKU), li.ProductName)
 		if !generated {
 			match = s.matchDesignForSKU(ctx, li.SKU)
 		}

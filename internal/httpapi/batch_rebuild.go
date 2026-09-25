@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -145,7 +146,7 @@ const (
 // modelAgreesWithOrder compares one job's stored render inputs against the
 // order line it was made from.
 func (s *Server) modelAgreesWithOrder(ctx context.Context, job gen.ProductionJob) (modelState, string) {
-	if !IsGeneratedProduct(deref(job.Sku), deref(job.ProductName)) {
+	if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 		return modelUncheckable, "this product's model is uploaded, not rendered"
 	}
 	if job.OrderID == nil {
@@ -155,7 +156,10 @@ func (s *Server) modelAgreesWithOrder(ctx context.Context, job gen.ProductionJob
 		return modelWrong, "no model yet"
 	}
 
-	want, err := s.plankParamsForJob(ctx, *job.OrderID, job)
+	// Through the same resolver a render uses, so a registry product is
+	// compared against the registry's answer rather than against what the
+	// plank path would have made of it.
+	plan, err := s.renderPlanForJob(ctx, *job.OrderID, job)
 	if err != nil {
 		// The order cannot be read as a render at all - a missing name, a
 		// colour with no swatch. Re-rendering would fail the same way, and the
@@ -177,10 +181,10 @@ func (s *Server) modelAgreesWithOrder(ctx context.Context, job gen.ProductionJob
 		return modelWrong, "what this model was built from cannot be read"
 	}
 
-	return compareRenderParams(have, storedRenderParams{
-		Template: want.Template, Hearts: want.Hearts,
-		NameLeft: want.NameLeft, NameRight: want.NameRight,
-	})
+	// plan.Stored is exactly what a render of this order would write beside
+	// its file, so the comparison is against the record that render WOULD
+	// leave rather than a second construction of it that could drift.
+	return compareRenderParams(have, plan.Stored)
 }
 
 // compareRenderParams is the comparison itself, with no database behind it.
@@ -194,6 +198,22 @@ func (s *Server) modelAgreesWithOrder(ctx context.Context, job gen.ProductionJob
 // field is compared; matching on names alone is what made a wrong heart count
 // invisible on JOB-115059-2.
 func compareRenderParams(have, want storedRenderParams) (modelState, string) {
+	// A registry product compares on its mapped arguments, because it has no
+	// NameLeft or heart count to compare - it may have neither concept. Both
+	// sides are checked: a product that gained a mapping since its model was
+	// built has a "have" with no Args and a "want" with some, which is a real
+	// disagreement and not a reason to fall through to the plank fields and
+	// find them all equal and empty.
+	if len(have.Args) > 0 || len(want.Args) > 0 {
+		if why, differs := mappedArgsDiffer(have, want); differs {
+			return modelWrong, why
+		}
+		if have.Template != want.Template {
+			return modelWrong, fmt.Sprintf("built from %s, ordered as %s",
+				have.Template, want.Template)
+		}
+		return modelCorrect, ""
+	}
 	switch {
 	case have.NameLeft != want.NameLeft || have.NameRight != want.NameRight:
 		return modelWrong, fmt.Sprintf("built as %s & %s, ordered as %s & %s",
@@ -206,6 +226,33 @@ func compareRenderParams(have, want storedRenderParams) (modelState, string) {
 			have.Template, want.Template)
 	}
 	return modelCorrect, ""
+}
+
+// mappedArgsDiffer compares two registry renders' arguments.
+//
+// Names the first field that disagrees rather than reporting "different":
+// the message reaches somebody deciding whether to rebuild a bed, and
+// "built with NAME_L=\"AMENA\", ordered as \"AMINA\"" is a decision they can
+// make. "The arguments differ" is not.
+func mappedArgsDiffer(have, want storedRenderParams) (string, bool) {
+	if len(have.Args) != len(want.Args) {
+		return fmt.Sprintf("built from %d mapped fields, ordered with %d",
+			len(have.Args), len(want.Args)), true
+	}
+	// Sorted, so the same disagreement reports the same way twice rather than
+	// naming whichever field map iteration reached first.
+	names := make([]string, 0, len(want.Args))
+	for name := range want.Args {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if have.Args[name] != want.Args[name] {
+			return fmt.Sprintf("built with %s=%s, ordered as %s",
+				name, have.Args[name], want.Args[name]), true
+		}
+	}
+	return "", false
 }
 
 // replateBatchAfterRender is replateWhenRendersSettle for a caller holding only
