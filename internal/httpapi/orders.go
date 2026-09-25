@@ -55,6 +55,12 @@ type orderResponse struct {
 	// can be searched by them. The names only, never the whole line_items
 	// document - see order_search_names.go.
 	PersonalisationNames []string `json:"personalisation_names"`
+	// Skus are the distinct SKUs the order's lines carry, for the same reason
+	// and by the same rule as the names above - see order_skus.go. The SKU is
+	// what says WHICH product a line is: the storefront renames products
+	// freely and several read almost alike, but DNP-BLU, PDNP-BLU and
+	// DNPWL-BLU do not.
+	Skus []string `json:"skus"`
 	// ItemCount is the units on the order, summed across its lines.
 	//
 	// Carried on the LIST response, unlike line_items itself: the orders table
@@ -126,6 +132,7 @@ func orderDTO(o gen.Order) orderResponse {
 		ReturnStatus:         o.ReturnStatus,
 		ItemCount:            countLineItems(o.LineItems),
 		PersonalisationNames: personalisationNamesFor(o.LineItems),
+		Skus:                 skusFor(o.LineItems),
 		SourceName:           o.SourceName,
 		SubtotalPrice:        numericStr(o.SubtotalPrice),
 		TotalDiscounts:       numericStr(o.TotalDiscounts),
