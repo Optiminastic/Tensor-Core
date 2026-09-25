@@ -300,7 +300,10 @@ LIMIT 1;
 INSERT INTO products (id, code, name, kind, status, notes)
 VALUES (sqlc.arg('id'), sqlc.arg('code'), sqlc.arg('name'),
         sqlc.arg('kind'), sqlc.arg('status'), sqlc.narg('notes'))
-ON CONFLICT (code) DO UPDATE
+-- lower(code), because that is what uq_products_code is on. A conflict target
+-- of (code) names no index Postgres can infer and fails the whole import with
+-- SQLSTATE 42P10 - which it did, on the first real product anybody tried.
+ON CONFLICT (lower(code)) DO UPDATE
 SET name       = EXCLUDED.name,
     updated_at = now()
 RETURNING *;

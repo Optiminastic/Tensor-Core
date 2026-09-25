@@ -1138,7 +1138,7 @@ const upsertProductByCode = `-- name: UpsertProductByCode :one
 INSERT INTO products (id, code, name, kind, status, notes)
 VALUES ($1, $2, $3,
         $4, $5, $6)
-ON CONFLICT (code) DO UPDATE
+ON CONFLICT (lower(code)) DO UPDATE
 SET name       = EXCLUDED.name,
     updated_at = now()
 RETURNING id, code, name, kind, status, notes, created_at, updated_at
@@ -1159,6 +1159,9 @@ type UpsertProductByCodeParams struct {
 // new variants", not "undo whatever somebody decided about this product here" -
 // retiring a product and then re-importing it to pick up a colour should not
 // quietly bring it back to life.
+// lower(code), because that is what uq_products_code is on. A conflict target
+// of (code) names no index Postgres can infer and fails the whole import with
+// SQLSTATE 42P10 - which it did, on the first real product anybody tried.
 func (q *Queries) UpsertProductByCode(ctx context.Context, arg UpsertProductByCodeParams) (Product, error) {
 	row := q.db.QueryRow(ctx, upsertProductByCode,
 		arg.ID,
