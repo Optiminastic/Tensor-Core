@@ -843,6 +843,26 @@ CREATE TABLE variant_bom (
 );
 CREATE UNIQUE INDEX uq_variant_bom_item ON variant_bom (variant_id, inventory_item_id);
 
+-- Which order field feeds which OpenSCAD variable, per product - see migration
+-- 0079. Product-level, because NAME_L is the same for every colour and a
+-- per-variant mapping would be the same rows repeated with somewhere to
+-- disagree. property_key is stored normalised, as normalisePropKey produces.
+CREATE TABLE product_field_maps (
+    id            uuid PRIMARY KEY,
+    product_id    uuid NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    property_key  varchar(120) NOT NULL,
+    scad_variable varchar(64)  NOT NULL,
+    value_type    varchar(16)  NOT NULL DEFAULT 'string',
+    position      integer      NOT NULL DEFAULT 0,
+    created_at    timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT product_field_maps_value_type_check
+        CHECK (value_type IN ('string', 'number'))
+);
+CREATE UNIQUE INDEX uq_product_field_map_variable
+    ON product_field_maps (product_id, lower(scad_variable));
+CREATE INDEX ix_product_field_maps_product
+    ON product_field_maps (product_id, position);
+
 -- An uploaded OpenSCAD template that overrides the embedded one - see migration
 -- 0071. No rows means the binary's own templates are used, which is how this
 -- behaved before the table existed.

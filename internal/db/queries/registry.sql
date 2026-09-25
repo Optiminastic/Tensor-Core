@@ -231,3 +231,61 @@ SET status = 'replaced'
 WHERE variant_id = sqlc.arg('variant_id')
   AND role = sqlc.arg('role')
   AND status = 'active';
+
+-- name: ListProductFieldMaps :many
+-- A product's order-field-to-OpenSCAD-variable mapping, in editor order.
+--
+-- Read once per model generation to build the -D flags, and read again by the
+-- editor that maintains it. Ordered by position then variable so the list
+-- reads the same way twice and a diff between two products is meaningful.
+SELECT * FROM product_field_maps
+WHERE product_id = sqlc.arg('product_id')
+ORDER BY position, lower(scad_variable);
+
+-- name: InsertProductFieldMap :exec
+-- Adds one mapped field.
+--
+-- ON CONFLICT rather than a blind insert: the unique index is on
+-- (product_id, lower(scad_variable)) because two rows naming NAME_L would both
+-- become -D flags and OpenSCAD takes the last on the command line - so the
+-- model would depend on iteration order, which is to say on nothing.
+INSERT INTO product_field_maps (
+    id, product_id, property_key, scad_variable, value_type, position
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('property_key'),
+    sqlc.arg('scad_variable'), sqlc.arg('value_type'), sqlc.arg('position')
+)
+ON CONFLICT (product_id, lower(scad_variable)) DO UPDATE
+SET property_key = EXCLUDED.property_key,
+    value_type   = EXCLUDED.value_type,
+    position     = EXCLUDED.position;
+
+-- name: ClearProductFieldMaps :exec
+-- Empties a product's mapping so it can be written whole.
+--
+-- Same reasoning as ClearVariantBom: the mapping is edited as a LIST and saved
+-- once, so a half-applied edit cannot leave a product mapping a first name and
+-- not a second. Paired with InsertProductFieldMap inside one transaction.
+DELETE FROM product_field_maps WHERE product_id = sqlc.arg('product_id');
+
+-- name: FindProductBySKU :one
+-- The product an order line belongs to, found by the SKU on its variant.
+--
+-- This is the lookup that makes the registry drive rendering: an order carries
+-- a SKU, product_variants carries the same SKU, and the product it hangs off
+-- owns the template and the field mapping.
+--
+-- Case-insensitive, because the storefront is not consistent about it and a
+-- SKU that matched only in upper case would silently fall through to the
+-- hardcoded path - a product configured in the registry that quietly ignores
+-- its configuration.
+--
+-- Retired variants are excluded: a SKU that has been withdrawn should stop
+-- rendering rather than keep printing from a configuration nobody maintains.
+SELECT p.*
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE lower(v.sku) = lower(sqlc.arg('sku'))
+  AND v.status = 'active'
+  AND p.status = 'active'
+LIMIT 1;

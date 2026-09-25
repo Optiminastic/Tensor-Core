@@ -30,6 +30,20 @@ func (q *Queries) AddVariantOptionValue(ctx context.Context, arg AddVariantOptio
 	return err
 }
 
+const clearProductFieldMaps = `-- name: ClearProductFieldMaps :exec
+DELETE FROM product_field_maps WHERE product_id = $1
+`
+
+// Empties a product's mapping so it can be written whole.
+//
+// Same reasoning as ClearVariantBom: the mapping is edited as a LIST and saved
+// once, so a half-applied edit cannot leave a product mapping a first name and
+// not a second. Paired with InsertProductFieldMap inside one transaction.
+func (q *Queries) ClearProductFieldMaps(ctx context.Context, productID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearProductFieldMaps, productID)
+	return err
+}
+
 const clearVariantBom = `-- name: ClearVariantBom :exec
 DELETE FROM variant_bom WHERE variant_id = $1
 `
@@ -102,6 +116,45 @@ DELETE FROM product_variants WHERE id = $1
 func (q *Queries) DeleteVariant(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteVariant, id)
 	return err
+}
+
+const findProductBySKU = `-- name: FindProductBySKU :one
+SELECT p.id, p.code, p.name, p.kind, p.status, p.notes, p.created_at, p.updated_at
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE lower(v.sku) = lower($1)
+  AND v.status = 'active'
+  AND p.status = 'active'
+LIMIT 1
+`
+
+// The product an order line belongs to, found by the SKU on its variant.
+//
+// This is the lookup that makes the registry drive rendering: an order carries
+// a SKU, product_variants carries the same SKU, and the product it hangs off
+// owns the template and the field mapping.
+//
+// Case-insensitive, because the storefront is not consistent about it and a
+// SKU that matched only in upper case would silently fall through to the
+// hardcoded path - a product configured in the registry that quietly ignores
+// its configuration.
+//
+// Retired variants are excluded: a SKU that has been withdrawn should stop
+// rendering rather than keep printing from a configuration nobody maintains.
+func (q *Queries) FindProductBySKU(ctx context.Context, sku string) (Product, error) {
+	row := q.db.QueryRow(ctx, findProductBySKU, sku)
+	var i Product
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.Kind,
+		&i.Status,
+		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getOptionValueProduct = `-- name: GetOptionValueProduct :one
@@ -269,6 +322,46 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertProductFieldMap = `-- name: InsertProductFieldMap :exec
+INSERT INTO product_field_maps (
+    id, product_id, property_key, scad_variable, value_type, position
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6
+)
+ON CONFLICT (product_id, lower(scad_variable)) DO UPDATE
+SET property_key = EXCLUDED.property_key,
+    value_type   = EXCLUDED.value_type,
+    position     = EXCLUDED.position
+`
+
+type InsertProductFieldMapParams struct {
+	ID           uuid.UUID
+	ProductID    uuid.UUID
+	PropertyKey  string
+	ScadVariable string
+	ValueType    string
+	Position     int32
+}
+
+// Adds one mapped field.
+//
+// ON CONFLICT rather than a blind insert: the unique index is on
+// (product_id, lower(scad_variable)) because two rows naming NAME_L would both
+// become -D flags and OpenSCAD takes the last on the command line - so the
+// model would depend on iteration order, which is to say on nothing.
+func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFieldMapParams) error {
+	_, err := q.db.Exec(ctx, insertProductFieldMap,
+		arg.ID,
+		arg.ProductID,
+		arg.PropertyKey,
+		arg.ScadVariable,
+		arg.ValueType,
+		arg.Position,
+	)
+	return err
 }
 
 const insertProductOption = `-- name: InsertProductOption :one
@@ -520,6 +613,45 @@ func (q *Queries) ListOptionValues(ctx context.Context, productID uuid.UUID) ([]
 			&i.CreatedAt,
 			&i.ProductID,
 			&i.OptionCode,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProductFieldMaps = `-- name: ListProductFieldMaps :many
+SELECT id, product_id, property_key, scad_variable, value_type, position, created_at FROM product_field_maps
+WHERE product_id = $1
+ORDER BY position, lower(scad_variable)
+`
+
+// A product's order-field-to-OpenSCAD-variable mapping, in editor order.
+//
+// Read once per model generation to build the -D flags, and read again by the
+// editor that maintains it. Ordered by position then variable so the list
+// reads the same way twice and a diff between two products is meaningful.
+func (q *Queries) ListProductFieldMaps(ctx context.Context, productID uuid.UUID) ([]ProductFieldMap, error) {
+	rows, err := q.db.Query(ctx, listProductFieldMaps, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductFieldMap{}
+	for rows.Next() {
+		var i ProductFieldMap
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.PropertyKey,
+			&i.ScadVariable,
+			&i.ValueType,
+			&i.Position,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

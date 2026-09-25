@@ -336,6 +336,16 @@ type Product struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+type ProductFieldMap struct {
+	ID           uuid.UUID
+	ProductID    uuid.UUID
+	PropertyKey  string
+	ScadVariable string
+	ValueType    string
+	Position     int32
+	CreatedAt    pgtype.Timestamptz
+}
+
 type ProductOption struct {
 	ID        uuid.UUID
 	ProductID uuid.UUID

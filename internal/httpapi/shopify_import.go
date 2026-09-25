@@ -15,6 +15,8 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
+
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 )
 
 // importShopifyOrder upserts one order and rebuilds its line items from
@@ -333,26 +335,18 @@ func lineProps(props []shopifyLineProp) map[string]string {
 // normalisePropKey reduces a human-facing label to lowercase words separated by
 // single spaces: "STEP 4-First Name-:" becomes "step 4 first name".
 //
-// It lowercases internally rather than trusting the caller to have done it.
-// An earlier version kept only a-z and silently DELETED uppercase letters, so
-// "STEP 6 - WhatsApp Number:" came out as "6 hats pp umber" - a mangling that
-// still looked like a plausible key and would have quietly failed to match.
+// One line, delegating, and it must stay that way. A product's field mapping
+// is written against the key this produces, so a second implementation that
+// drifted from this one by a character would leave every mapping matching
+// nothing - silently, because a mapping that matches nothing looks exactly
+// like an order that carried no properties.
+//
+// The rule itself lives in personalise.NormaliseKey, beside the mapping code
+// that has to agree with it. Its comment records why it keeps digits and
+// lowercases internally: an earlier version kept only a-z and silently DELETED
+// uppercase, so "STEP 6 - WhatsApp Number:" became "6 hats pp umber".
 func normalisePropKey(key string) string {
-	var b strings.Builder
-	lastSpace := true
-	for _, r := range strings.ToLower(key) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastSpace = false
-		default:
-			if !lastSpace {
-				b.WriteByte(' ')
-				lastSpace = true
-			}
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return personalise.NormaliseKey(key)
 }
 
 // keepProperties copies Shopify's attributes onto the line item unchanged.
