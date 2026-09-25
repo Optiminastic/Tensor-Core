@@ -95,24 +95,7 @@ var (
 // Only the two-heart template, and only past the threshold: below it the
 // file's own 60/60 stands, so the shop can still tune the normal case by
 // editing the .scad.
-const (
-	wideMarginNameLetters = 7
-	wideMarginMM          = 70
-)
-
-// needsWideMargins reports whether this plank is a long-named two-heart one.
-//
-// Either name counts. The two are laid out as one intersected run, so the
-// longer of them sets the width whichever side it came from.
-func (p Params) needsWideMargins() bool {
-	if p.Template != templateTwoHeart {
-		return false
-	}
-	// Runes, not bytes: a name is counted in letters as a person would count
-	// them, and a multi-byte character must not count double.
-	return len([]rune(p.NameLeft)) > wideMarginNameLetters ||
-		len([]rune(p.NameRight)) > wideMarginNameLetters
-}
+const ()
 
 // maxNameLetters is the longest name the template lays out sensibly.
 //
@@ -214,10 +197,8 @@ func (p Params) Args() map[string]string {
 		"OUT_Y": strconv.Itoa(shape.Y),
 		"OUT_Z": strconv.Itoa(shape.Z),
 	}
-	if p.needsWideMargins() {
-		args["MARGIN_L"] = strconv.Itoa(wideMarginMM)
-		args["MARGIN_R"] = strconv.Itoa(wideMarginMM)
-	}
+	// Margins are NOT set here. They are the template's, and the template is
+	// the only place they are stated - see the block comment on Args.
 	return args
 }
 

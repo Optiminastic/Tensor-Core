@@ -104,9 +104,9 @@ OUT_Z       = 0;
 
 PLATE_L     = 200;                // X, mm
 PLATE_W     = 50;                 // Y, mm
-PLATE_T     = 1.8;                // thickness, mm
-MARGIN_L    = 12;                  // gap, plate left edge -> first letter
-MARGIN_R    = 12;                  // EQUAL to MARGIN_L on this variant. With no
+PLATE_T     = 1.48;                // thickness, mm
+MARGIN_L    = 20;                  // gap, plate left edge -> first letter
+MARGIN_R    = 20;                  // EQUAL to MARGIN_L on this variant. With no
                                   // heart there is no empty space to reserve on
                                   // the right, so the name is centred on the
                                   // plate with the same 9 mm gap either side.

@@ -94,9 +94,9 @@ OUT_Z       = 0;
 
 PLATE_L     = 200;                // X, mm
 PLATE_W     = 50;                 // Y, mm
-PLATE_T     = 1.8;                // thickness, mm
-MARGIN_L    = 60;                 // EQUAL 50 mm gap on both sides for this
-MARGIN_R    = 60;                 // variant, as specified.
+PLATE_T     = 1.48;                // thickness, mm
+MARGIN_L    = 75;                 // EQUAL 50 mm gap on both sides for this
+MARGIN_R    = 75;                 // variant, as specified.
 TOTAL_H     = 40;                 // overall model height, mm (X/Y are PLATE_L/PLATE_W)
                                   // LETTER_H is derived below, after SINK exists
 MAX_LETTERS = 12;                 // most that will fit in the text zone

@@ -87,10 +87,10 @@ OUT_Z       = 0;
 
 PLATE_L     = 200;                // X, mm
 PLATE_W     = 50;                 // Y, mm
-PLATE_T     = 1.8;                // thickness, mm
-MARGIN_L    = 12;                  // gap, plate left edge -> first letter
+PLATE_T     = 1.48;                // thickness, mm
+MARGIN_L    = 20;                  // gap, plate left edge -> first letter
                                   // (matches dnp_3nf.stl: 15.29mm of 342mm)
-MARGIN_R    = 50;                 // gap, last letter -> plate right edge.
+MARGIN_R    = 75;                 // gap, last letter -> plate right edge.
                                   // Deliberately much larger than MARGIN_L:
                                   // this is the empty space the heart is
                                   // added into. Matches dnp_3nf.stl

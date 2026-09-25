@@ -183,28 +183,32 @@ func TestArgsPinTheFinishedSize(t *testing.T) {
 	}
 }
 
-// A long name on the two-heart plank needs wider margins: two hearts already
-// consume padding slots, so a long name on top of them runs the glyphs into
-// the plate edge.
-func TestWideMarginsForLongTwoHeartNames(t *testing.T) {
+// Margins come from the .scad and from nowhere else.
+//
+// Go used to widen them to 70/70 for a long name on the two-heart plank, on
+// the reasoning that two hearts already consume padding slots. That override
+// now CONTRADICTS the templates it was helping: the two-heart file specifies
+// 75/75, so the override would have quietly narrowed the very case it existed
+// to give room to, and for most names - anything over seven letters.
+//
+// The shop edits these files directly, so a value in the .scad that Go
+// silently replaces is the worst of both: the file says one thing and the
+// plank is another.
+func TestMarginsAlwaysComeFromTheTemplate(t *testing.T) {
 	for _, c := range []struct {
-		name         string
-		hearts       string
-		left, right  string
-		wantOverride bool
+		name   string
+		hearts string
+		left   string
+		right  string
 	}{
-		// Seven is the threshold itself, not past it - the file's 60/60 stands.
-		{"exactly seven letters", "2 RED HEART", "SUBHANJ", "SUBHANT", false},
-		{"short names", "2 RED HEART", "AMY", "BOB", false},
-		// Either side counts: the two are one intersected run, so the longer
-		// name sets the width whichever side it came from.
-		{"long first name", "2 RED HEART", "SUBHANJANA", "BOB", true},
-		{"long second name", "2 RED HEART", "AMY", "SUBHANTIKA", true},
-		{"both long", "2 RED HEART", "SUBHANJANA", "SUBHANTIKA", true},
-		// Only the two-heart template. The others have their own margins for
-		// their own reasons - 12/50 makes room for the single heart.
-		{"one heart, long name", "1 RED HEART", "SUBHANJANA", "SUBHANTIKA", false},
-		{"no heart, long name", "NO HEART", "SUBHANJANA", "SUBHANTIKA", false},
+		{"two hearts, short names", "2 RED HEART", "AMY", "BOB"},
+		{"two hearts, exactly seven", "2 RED HEART", "SUBHANJ", "SUBHANT"},
+		// The cases Go used to override. They must now take the file's 75/75.
+		{"two hearts, long first name", "2 RED HEART", "SUBHANJANA", "BOB"},
+		{"two hearts, long second name", "2 RED HEART", "AMY", "SUBHANTIKA"},
+		{"two hearts, both long", "2 RED HEART", "SUBHANJANA", "SUBHANTIKA"},
+		{"one heart, long name", "1 RED HEART", "SUBHANJANA", "SUBHANTIKA"},
+		{"no heart, long name", "NO HEART", "SUBHANJANA", "SUBHANTIKA"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p, err := ParamsFromProperties(props(
@@ -216,18 +220,10 @@ func TestWideMarginsForLongTwoHeartNames(t *testing.T) {
 				t.Fatalf("params: %v", err)
 			}
 			args := p.Args()
-			left, hasLeft := args["MARGIN_L"]
-			right, hasRight := args["MARGIN_R"]
-
-			if !c.wantOverride {
-				if hasLeft || hasRight {
-					t.Errorf("margins were overridden (%s/%s); the template's own should stand",
-						left, right)
+			for _, k := range []string{"MARGIN_L", "MARGIN_R"} {
+				if v, ok := args[k]; ok {
+					t.Errorf("%s = %q; it must come from the template, not from Go", k, v)
 				}
-				return
-			}
-			if left != "70" || right != "70" {
-				t.Errorf("margins = %s/%s (set=%v/%v), want 70/70", left, right, hasLeft, hasRight)
 			}
 		})
 	}
