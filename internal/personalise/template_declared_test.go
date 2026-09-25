@@ -69,6 +69,24 @@ if (TOP > 0) {
 	}
 }
 
+func TestDeclaredParamsStopsAtTheFirstModule(t *testing.T) {
+	src := []byte(`
+CAP_H = 25;            // a parameter
+module letters() {
+}
+NAME_LN = norm(NAME_L);  // a working value, not a parameter
+HEART_CH = chr(1);
+`)
+	got := DeclaredParams(src)
+	if len(got) != 1 || got[0].Name != "CAP_H" {
+		// Past the first module the script is computing WITH its parameters,
+		// not declaring them. Offering NAME_LN for mapping is worse than
+		// useless: -D would set it and the script reassigns it on the way
+		// past, so the mapping appears to work and does nothing.
+		t.Errorf("params = %+v, want CAP_H alone", got)
+	}
+}
+
 func TestDeclaredParamsTakesTheFirstDeclaration(t *testing.T) {
 	// These templates reassign working values further down. The first is what
 	// the customizer shows and what -D overrides.
@@ -89,8 +107,12 @@ func TestDeclaredParamsOnTheRealTemplates(t *testing.T) {
 				t.Fatalf("read template: %v", err)
 			}
 			params := DeclaredParams(src)
-			if len(params) < 40 {
-				t.Errorf("declared %d params; these files carry far more", len(params))
+			// 48 in each of the four, identically - they are siblings. The
+			// count matters: before the parser stopped at the first module it
+			// returned 88, the extra forty being the script's own working
+			// values, which cannot be mapped and must not be offered.
+			if len(params) != 48 {
+				t.Errorf("declared %d params, want 48", len(params))
 			}
 			// Every variable Tensor sets with -D must be discoverable, or the
 			// mapping UI cannot offer the ones that actually matter.

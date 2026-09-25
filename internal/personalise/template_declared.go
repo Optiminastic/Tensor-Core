@@ -56,6 +56,11 @@ type Param struct {
 	Note string `json:"note"`
 }
 
+// declarationLine matches the start of a `module foo()` or `function bar()`.
+// Everything past the first one is the script computing with its parameters
+// rather than declaring them - see DeclaredParams.
+var declarationLine = regexp.MustCompile(`^\s*(module|function)\s+[A-Za-z_]`)
+
 // sectionLine matches `/* [Output size] */`, the customizer's group header.
 var sectionLine = regexp.MustCompile(`^\s*/\*\s*\[(.+?)\]\s*\*/`)
 
@@ -69,7 +74,15 @@ var assignment = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);\s*
 // DeclaredParams lists the parameters a template declares, in file order.
 //
 // File order, not sorted: the author grouped them, and the grouping is the
-// only guidance anyone has about which of ninety variables matter.
+// only guidance anyone has about which of fifty variables matter.
+//
+// Stops at the first module or function, which is OpenSCAD's own customizer
+// rule rather than an approximation of it. What follows is the script
+// computing WITH its parameters rather than declaring them - `NAME_LN =
+// norm(NAME_L);` and `HEART_CH = chr(1);` are working values, and there are
+// forty of them in each plank template. Offering one for mapping would be
+// worse than useless: -D would set it and the script would reassign it on the
+// way past, so the mapping would appear to work and do nothing at all.
 func DeclaredParams(source []byte) []Param {
 	var (
 		out     []Param
@@ -77,6 +90,9 @@ func DeclaredParams(source []byte) []Param {
 		seen    = map[string]bool{}
 	)
 	for _, line := range strings.Split(string(source), "\n") {
+		if declarationLine.MatchString(line) {
+			break
+		}
 		if m := sectionLine.FindStringSubmatch(line); m != nil {
 			section = strings.TrimSpace(m[1])
 			continue
