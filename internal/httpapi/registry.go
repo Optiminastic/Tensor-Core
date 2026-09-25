@@ -127,6 +127,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	g.DELETE("/products/:code", manage, s.deleteRegistryProduct)
 	g.GET("/variants/:id/bom", read, s.getVariantBom)
 	g.PUT("/variants/:id/bom", manage, s.putVariantBom)
+	// Which order field feeds which OpenSCAD variable, and what the customers
+	// have actually been sending - see registry_field_maps.go.
+	s.registerRegistryFieldMaps(g, read, manage)
 }
 
 func (s *Server) listRegistryProducts(c *gin.Context) {

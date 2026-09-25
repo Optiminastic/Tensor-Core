@@ -185,3 +185,17 @@ WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));
 -- numbered after its order - and stops holding for a job numbered from a
 -- sequence, which then displayed a number belonging to no order at all.
 SELECT id, order_number FROM orders WHERE id = ANY(sqlc.arg('ids')::uuid[]);
+
+-- name: ListRecentOrderLineItems :many
+-- The line_items of the most recent orders, for reading back what customers
+-- actually sent.
+--
+-- The whole jsonb, unlike the orders LIST which deliberately ships none of it:
+-- this is one configuration screen reading a bounded window, not every row of
+-- a table rendering a count. The caller parses and filters in Go because the
+-- question - "which property labels appear on lines whose SKU belongs to this
+-- product" - needs the same normalisation rule the importer used, and
+-- expressing that in SQL would be a second copy of it.
+SELECT line_items FROM orders
+ORDER BY placed_at DESC NULLS LAST, imported_at DESC
+LIMIT sqlc.arg('limit_count');

@@ -495,6 +495,41 @@ func (q *Queries) ListOrdersWithoutJobs(ctx context.Context, source *string) ([]
 	return items, nil
 }
 
+const listRecentOrderLineItems = `-- name: ListRecentOrderLineItems :many
+SELECT line_items FROM orders
+ORDER BY placed_at DESC NULLS LAST, imported_at DESC
+LIMIT $1
+`
+
+// The line_items of the most recent orders, for reading back what customers
+// actually sent.
+//
+// The whole jsonb, unlike the orders LIST which deliberately ships none of it:
+// this is one configuration screen reading a bounded window, not every row of
+// a table rendering a count. The caller parses and filters in Go because the
+// question - "which property labels appear on lines whose SKU belongs to this
+// product" - needs the same normalisation rule the importer used, and
+// expressing that in SQL would be a second copy of it.
+func (q *Queries) ListRecentOrderLineItems(ctx context.Context, limitCount int32) ([][]byte, error) {
+	rows, err := q.db.Query(ctx, listRecentOrderLineItems, limitCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := [][]byte{}
+	for rows.Next() {
+		var line_items []byte
+		if err := rows.Scan(&line_items); err != nil {
+			return nil, err
+		}
+		items = append(items, line_items)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markOrderJobCreationFailed = `-- name: MarkOrderJobCreationFailed :exec
 UPDATE orders
 SET job_creation_error = $1, job_creation_failed_at = now(), updated_at = now()
