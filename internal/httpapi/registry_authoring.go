@@ -36,6 +36,11 @@ func (s *Server) registerRegistryAuthoring(r *gin.Engine) {
 	g.PATCH("/variants/:id", manage, s.updateVariant)
 	g.DELETE("/variants/:id", manage, s.deleteVariant)
 	g.PUT("/variants/:id/design", manage, s.setVariantDesign)
+	// Product-level, because that is the unit somebody thinks in: every colour
+	// of a plank prints from the same .scad and differs by filament, which is
+	// not geometry. Setting it twenty times, once per SKU, is the same answer
+	// typed twenty times and nineteen chances to get one of them wrong.
+	g.PUT("/products/:code/design", manage, s.setProductDesign)
 }
 
 // optionWriteRequest is one axis of choice: heart_count, light, colour.
@@ -444,6 +449,81 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 			TemplateKey: key, DesignID: designID, Version: 1, Status: "active",
 		})
 		return err
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not set the design.")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// productDesignRequest names the file that prints a whole product.
+//
+// No DesignID counterpart to setVariantDesign's: an uploaded 3MF is one
+// specific model and cannot print twenty colours, so applying one across a
+// product would be wrong by construction. A template can, and does.
+type productDesignRequest struct {
+	Role        string `json:"role" binding:"required,oneof=body base"`
+	TemplateKey string `json:"template_key" binding:"required,max=64"`
+}
+
+// setProductDesign points every variant of a product at one template.
+//
+// The registry stores designs per variant and always will - a variant is what
+// a job resolves to. But nobody chooses per variant: the .scad is the product's,
+// and templateKeyForProduct reads the rows back as one key. So this writes the
+// same answer to each row rather than adding a second place a template can live
+// and a second thing that can disagree with the first.
+//
+// Retired variants are included deliberately. A retired SKU still has jobs
+// against it, and leaving its design pointing at the old key would make a
+// re-render of one of those jobs print from a file nothing else uses any more.
+func (s *Server) setProductDesign(c *gin.Context) {
+	product, ok := s.productFromCode(c)
+	if !ok {
+		return
+	}
+	var req productDesignRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	key := strings.TrimSpace(req.TemplateKey)
+	if key == "" {
+		detail(c, http.StatusUnprocessableEntity, "Name the template this product prints from.")
+		return
+	}
+
+	ctx := c.Request.Context()
+	variants, err := s.store.Q.ListVariantsForProduct(ctx, product.ID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the product's variants.")
+		return
+	}
+	if len(variants) == 0 {
+		// Nothing to attach it to, and a template attached to nothing renders
+		// nothing. Said here rather than returning 204 over an empty loop,
+		// which would look like it worked.
+		detail(c, http.StatusUnprocessableEntity,
+			"This product has no variants yet, so there is nothing to print from a template. "+
+				"Import it from Shopify first.")
+		return
+	}
+
+	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		for _, v := range variants {
+			if err := q.SupersedeVariantDesign(ctx, gen.SupersedeVariantDesignParams{
+				VariantID: v.ID, Role: req.Role,
+			}); err != nil {
+				return err
+			}
+			if _, err := q.InsertVariantDesign(ctx, gen.InsertVariantDesignParams{
+				ID: uuid.New(), VariantID: v.ID, Role: req.Role,
+				TemplateKey: &key, Version: 1, Status: "active",
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not set the design.")
