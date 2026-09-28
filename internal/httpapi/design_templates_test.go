@@ -27,19 +27,29 @@ func TestRequiredParamsDependOnTheKey(t *testing.T) {
 			t.Errorf("a new product is required to declare %s; it may have no such field", name)
 		}
 	}
-	// What Tensor passes whatever the product is must still be demanded: PART
-	// splits the model into its coloured pieces and OUT_X/Y/Z scale it to the
-	// finished size. A template ignoring those renders one solid lump at the
-	// template's own size, which slices and prints and is wrong.
-	for _, want := range []string{"PART", "OUT_X", "OUT_Y", "OUT_Z"} {
-		var found bool
-		for _, name := range got {
-			if name == want {
-				found = true
-			}
+	// PART is demanded, and only PART. The renderer runs every template twice,
+	// once as "base" and once as "text", and colours the two results
+	// separately - so a template ignoring it comes out as the same shape
+	// twice, overlapping, in two colours.
+	var hasPart bool
+	for _, name := range got {
+		if name == "PART" {
+			hasPart = true
 		}
-		if !found {
-			t.Errorf("a new product is not required to declare %s, which every render sets", want)
+	}
+	if !hasPart {
+		t.Error("a new product is not required to declare PART, which every render sets")
+	}
+
+	// OUT_X/Y/Z are NOT demanded, and an earlier version of this test asserted
+	// they were "what every render sets". They are not: they come from
+	// personalise.Params.Args(), which is the plank path, while a registry
+	// product's arguments are its own field mapping plus PART. Demanding them
+	// refused the first real product anybody tried to add.
+	for _, name := range got {
+		if name == "OUT_X" || name == "OUT_Y" || name == "OUT_Z" {
+			t.Errorf("a new product is required to declare %s, which the registry "+
+				"render path never passes", name)
 		}
 	}
 }

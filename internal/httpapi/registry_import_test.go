@@ -101,3 +101,37 @@ func TestVariantNameFallsBackToTheSKU(t *testing.T) {
 		t.Errorf("name = %q, want Shopify's own title", got)
 	}
 }
+
+// What a NEW template must declare, and what it must not be asked for.
+//
+// This gate refused the first real product anybody tried to add - a rose,
+// rejected for not declaring OUT_X, OUT_Y and OUT_Z with a message saying
+// Tensor sets them. Tensor does not: those come from personalise.Params,
+// which is the plank path, and a registry product's arguments are its own
+// field mapping plus PART.
+func TestANewTemplateMustDeclareOnlyPART(t *testing.T) {
+	got := requiredParamsFor("sc_rose")
+	if len(got) != 1 || got[0] != "PART" {
+		t.Errorf("requiredParamsFor(new key) = %v, want [PART] - a gate must not "+
+			"demand variables the renderer never passes", got)
+	}
+}
+
+// Replacing a plank is different: the DNP path drives it and passes the names
+// and the output size unconditionally, so a replacement missing NAME_L would
+// print a plank with no name on it.
+func TestReplacingAPlankStillDemandsTheWholePlankContract(t *testing.T) {
+	got := requiredParamsFor("dnp_two_heart")
+	for _, want := range []string{"NAME_L", "NAME_R", "OUT_X", "OUT_Y", "OUT_Z", "PART"} {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("replacing a plank no longer requires %s; a replacement "+
+				"missing it prints a plank with nothing on it", want)
+		}
+	}
+}

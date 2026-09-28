@@ -202,11 +202,24 @@ func (s *Server) templateHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// alwaysPassedParams are set on every render whatever the product is: PART
-// splits the model into its coloured pieces, and OUT_X/Y/Z scale it to the
-// finished size. A template ignoring those renders one solid lump at the
-// template's own size, which slices and prints and is wrong.
-var alwaysPassedParams = []string{"PART", "OUT_X", "OUT_Y", "OUT_Z"}
+// alwaysPassedParams is what the renderer sets on EVERY render, whatever the
+// product.
+//
+// Exactly one thing: PART. renderColouredPlank runs the template twice, once
+// with PART="base" and once with PART="text", and writes the two results into
+// one 3MF as separately coloured objects. A template that ignores PART renders
+// the identical solid both times, so the model comes out doubled - the same
+// geometry twice, overlapping, in two colours. It slices, it prints, and it is
+// wrong.
+//
+// OUT_X/Y/Z are NOT here, though they were, and demanding them was a mistake
+// that refused the first real product anybody tried to add. They come from
+// personalise.Params.Args(), which is the plank path; the registry path builds
+// its arguments from the product's own field mapping and never sets them. A
+// gate has no business demanding variables the renderer does not pass - a
+// template is free to declare them and have a mapping fill them, or to size
+// itself and never mention them.
+var alwaysPassedParams = []string{"PART"}
 
 // requiredParamsFor says what a template under this key must declare.
 func requiredParamsFor(key string) []string {
@@ -271,12 +284,14 @@ func (s *Server) uploadDesignTemplate(c *gin.Context) {
 	// A template under a NEW key belongs to a product configured in the
 	// registry, and its variables are whatever its own field mapping names. A
 	// keychain has no NAME_R and demanding one would refuse every product that
-	// is not a plank. The mapping enforces those; this only enforces what
-	// Tensor passes whatever the product is.
+	// is not a plank. The mapping enforces those; this only enforces PART,
+	// which the renderer passes to everything.
 	if missing := personalise.DeclaresAll(source, requiredParamsFor(key)); len(missing) > 0 {
 		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
-			"That template does not declare %s. Tensor sets those with -D, and a "+
-				"template without them renders the wrong thing silently.",
+			"That template does not declare %s. Tensor renders every model twice, "+
+				`once with PART="base" and once with PART="text", and colours the two `+
+				"results separately - so a template that ignores PART comes out as the "+
+				"same shape twice, overlapping, in two colours.",
 			strings.Join(missing, ", ")))
 		return
 	}
