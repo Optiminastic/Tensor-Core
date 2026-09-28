@@ -45,6 +45,8 @@ services:
       #
       # /usr/local/bin, not /usr/bin: this is no longer the distro package.
       OPENSCAD_BIN: /usr/local/bin/openscad
+      # Same story: a Windows path on the host, the baked-in copy in here.
+      OPENSCAD_ASSET_DIR: /opt/tensor/scadassets
     restart: unless-stopped
     deploy:
       resources:

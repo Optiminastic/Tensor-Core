@@ -74,8 +74,13 @@ type variantWriteRequest struct {
 // Exactly one of TemplateKey and DesignID, mirroring the CHECK on the table
 // rather than trusting a caller: a row with both would mean two files print the
 // same part, and a row with neither means nothing prints it at all.
+//
+// Role is free text, bounded only in length. It used to be oneof=body base,
+// which was true when a product printed one thing and false the moment one
+// printed three: the combo's parts are a plank, a rose and a keychain, named
+// for what an operator picks up. The column never restricted it.
 type variantDesignRequest struct {
-	Role        string  `json:"role" binding:"required,oneof=body base"`
+	Role        string  `json:"role" binding:"required,max=24"`
 	TemplateKey *string `json:"template_key"`
 	DesignID    *string `json:"design_id"`
 }
@@ -462,8 +467,11 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 // No DesignID counterpart to setVariantDesign's: an uploaded 3MF is one
 // specific model and cannot print twenty colours, so applying one across a
 // product would be wrong by construction. A template can, and does.
+// Role is free text, bounded only in length - see variantDesignRequest. A
+// combo's parts are named for what an operator picks up, and oneof=body base
+// refused the first one anybody tried to add: "rose".
 type productDesignRequest struct {
-	Role        string `json:"role" binding:"required,oneof=body base"`
+	Role        string `json:"role" binding:"required,max=24"`
 	TemplateKey string `json:"template_key" binding:"required,max=64"`
 }
 

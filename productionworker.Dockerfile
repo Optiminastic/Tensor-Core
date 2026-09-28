@@ -125,6 +125,20 @@ RUN fc-cache -f > /dev/null \
  && grep -qi "seguibl\|Segoe" /tmp/font-check \
     || echo "WARNING: Segoe UI Black is NOT installed - lettering will render ~66% thin"
 
+# The parts a template imports and the faces it names, staged beside every
+# render by personalise.stageAssets.
+#
+# A template imports by relative name - import("decoration.stl") - and each
+# render happens in a fresh temporary directory, so without these the piece is
+# simply absent and OpenSCAD exits 0. Measured on the heart keychain: dropping
+# decoration.stl took its inlay from 11,844 triangles to 4,339, and dropping
+# Lobster took it to 8,342 in a substituted face. Neither said anything.
+#
+# In the repo for the same reason fonts/ is: the image is built from the repo,
+# so a part that is not in the repo is a part prod does not have.
+COPY scadassets/ /opt/tensor/scadassets/
+ENV OPENSCAD_ASSET_DIR=/opt/tensor/scadassets
+
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
 COPY --from=build /out/replate /usr/local/bin/replate

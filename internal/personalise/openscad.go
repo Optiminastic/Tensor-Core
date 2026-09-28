@@ -115,6 +115,91 @@ func (r *Renderer) AssetPath(name string) string {
 	return filepath.Join(r.assetDir, name)
 }
 
+// stageAssets copies the asset directory beside the template about to render.
+//
+// A template imports its parts by relative name - `import("decoration.stl")`,
+// which OpenSCAD resolves against the .scad's own directory. Every render gets
+// a fresh temporary directory holding nothing but the .scad, so that import
+// found nothing and the part came out EMPTY, with OpenSCAD exiting 0 and
+// saying nothing. The keychain's own notes warn about exactly this.
+//
+// Copied rather than symlinked, which Windows will not do without a privilege,
+// and rather than rendering in the asset directory itself, which would let two
+// concurrent renders of the same template overwrite each other's output.
+//
+// One level deep, plus a fonts/ subdirectory. Deep enough for the parts a
+// template imports and the faces it names; shallow enough that a stray folder
+// of STLs beside them is not copied on every render.
+func (r *Renderer) stageAssets(dir string) error {
+	if r.assetDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(r.assetDir)
+	if err != nil {
+		// Configured and unreadable is worth reporting: a template that needs
+		// its parts would otherwise render an incomplete model successfully.
+		return fmt.Errorf("read asset directory %s: %w", r.assetDir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if e.Name() == fontDirName {
+				if err := copyDir(
+					filepath.Join(r.assetDir, e.Name()), filepath.Join(dir, e.Name()),
+				); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := copyFile(
+			filepath.Join(r.assetDir, e.Name()), filepath.Join(dir, e.Name()),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fontDirName is the subdirectory of the asset directory holding the faces
+// templates name.
+//
+// It is pointed at with OPENSCAD_FONT_PATH rather than installed system-wide,
+// because fontconfig SUBSTITUTES a missing family rather than failing: a
+// template asking for Lobster on a machine without it renders in whatever
+// fontconfig picks, successfully, and nobody finds out until the print is in
+// somebody's hand.
+const fontDirName = "fonts"
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read asset %s: %w", filepath.Base(src), err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return fmt.Errorf("stage asset %s: %w", filepath.Base(src), err)
+	}
+	return nil
+}
+
+func copyDir(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if err := copyFile(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RenderSTL renders one template with the given parameters and returns the STL
 // bytes. Parameters are passed as OpenSCAD literals: quote strings with
 // Quote before putting them in the map.
@@ -154,6 +239,12 @@ func (r *Renderer) render(
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
+	// The parts a template imports, beside it, before it runs. Without this an
+	// import resolves to nothing and the piece is silently missing.
+	if err := r.stageAssets(dir); err != nil {
+		return nil, err
+	}
+
 	scadPath := filepath.Join(dir, template+".scad")
 	if err := os.WriteFile(scadPath, source, 0o600); err != nil {
 		return nil, fmt.Errorf("write template: %w", err)
@@ -172,6 +263,15 @@ func (r *Renderer) render(
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, r.bin, args...)
+	// Named faces come from the staged fonts/ directory. Pointed at rather
+	// than installed, because fontconfig substitutes a missing family instead
+	// of failing - a template asking for Lobster on a machine without it
+	// renders in something else, successfully.
+	if fonts := filepath.Join(dir, fontDirName); r.assetDir != "" {
+		if info, err := os.Stat(fonts); err == nil && info.IsDir() {
+			cmd.Env = append(os.Environ(), "OPENSCAD_FONT_PATH="+fonts)
+		}
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
