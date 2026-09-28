@@ -15,6 +15,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +37,15 @@ type productPartResponse struct {
 	// defaults - the same model for every customer - which is the failure that
 	// looks most like success.
 	Ready bool `json:"ready"`
+	// Conflicting is the files this product's SKUs disagree about for this
+	// part, when they disagree. Empty in the ordinary case.
+	//
+	// Reported rather than hidden. DNP's six variants each print from one of
+	// three plank templates, and the page said "nothing prints this product
+	// yet" - so the obvious next click, choosing a file, silently overwrote
+	// all six. It did, on 28 September, and only the retired rows made it
+	// recoverable.
+	Conflicting []string `json:"conflicting,omitempty"`
 }
 
 // listProductParts answers "what does this product print, and can it".
@@ -61,15 +71,38 @@ func (s *Server) listProductParts(c *gin.Context) {
 		}
 	}
 
+	designs, err := s.store.Q.ListDesignsForProduct(ctx, product.ID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the product's designs.")
+		return
+	}
+	// Every distinct file named per role, so a disagreement between SKUs is
+	// something the page can show rather than something it flattens away.
+	perRole := map[string]map[string]bool{}
+	for _, d := range designs {
+		if d.TemplateKey == nil || strings.TrimSpace(*d.TemplateKey) == "" {
+			continue
+		}
+		role := strings.ToLower(roleOrBody(d.Role))
+		if perRole[role] == nil {
+			perRole[role] = map[string]bool{}
+		}
+		perRole[role][strings.TrimSpace(*d.TemplateKey)] = true
+	}
+
 	out := make([]productPartResponse, 0, 3)
 	for _, role := range s.designRolesForProduct(ctx, product.ID) {
 		key, _ := s.templateKeyForRole(ctx, product.ID, role)
 		n := fields[strings.ToLower(role)]
-		out = append(out, productPartResponse{
+		part := productPartResponse{
 			Role: role, TemplateKey: key,
 			Fields: n, Required: required[strings.ToLower(role)],
 			Ready: key != "" && n > 0,
-		})
+		}
+		if keys := perRole[strings.ToLower(role)]; len(keys) > 1 {
+			part.Conflicting = sortedKeys(keys)
+		}
+		out = append(out, part)
 	}
 
 	// A mapping written before its file was uploaded is a normal half-finished
@@ -90,6 +123,17 @@ func (s *Server) listProductParts(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, out)
+}
+
+// sortedKeys is a set as a stable list, so a disagreement reads the same way
+// twice rather than in whichever order the map yielded.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // partRolesForRender is the design files a job should be created for, in
