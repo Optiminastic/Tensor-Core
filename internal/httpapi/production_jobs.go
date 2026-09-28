@@ -72,7 +72,14 @@ type productionJobResponse struct {
 	// for this line, verbatim and in the order the customer answered them,
 	// which is where the two names and the heart count actually live: the
 	// typed personalisation_name joins them into "A & B" and loses the split.
-	VariantTitle               *string         `json:"variant_title"`
+	VariantTitle *string `json:"variant_title"`
+	// PartRole is which of its product's design files this job prints.
+	//
+	// 'body' for everything that prints one thing, which is almost every job.
+	// A combo's three jobs share a SKU, a customer and a colour, so without
+	// this they are three identical rows and the operator holding one cannot
+	// tell which.
+	PartRole                   string          `json:"part_role"`
 	PersonalisationProperties  json.RawMessage `json:"personalisation_properties"`
 	EstimatedPrintTimeMinutes  *int32          `json:"estimated_print_time_minutes"`
 	DueDate                    *time.Time      `json:"due_date"`
@@ -303,6 +310,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		IsGenerated:               IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)),
 		ModelError:                reportableModelError(j),
 		VariantTitle:              j.VariantTitle,
+		PartRole:                  j.PartRole,
 		PersonalisationProperties: rawJSON(j.PersonalisationProperties, "[]"),
 		EstimatedPrintTimeMinutes: j.EstimatedPrintTimeMinutes, DueDate: db.TimePtr(j.DueDate),
 		Priority: j.Priority, PersonalisationName: j.PersonalisationName, PersonalisationFont: j.PersonalisationFont,
