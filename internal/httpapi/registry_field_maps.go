@@ -74,6 +74,9 @@ func (s *Server) registerRegistryFieldMaps(g *gin.RouterGroup, read, manage gin.
 	g.GET("/products/:code/field-maps", read, s.listProductFieldMaps)
 	g.PUT("/products/:code/field-maps", manage, s.putProductFieldMaps)
 	g.GET("/products/:code/observed-properties", read, s.observedProperties)
+	// What this product prints, file by file. One entry for a product that
+	// prints one thing, three for a combo.
+	g.GET("/products/:code/parts", read, s.listProductParts)
 }
 
 func (s *Server) listProductFieldMaps(c *gin.Context) {

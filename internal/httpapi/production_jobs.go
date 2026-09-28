@@ -728,27 +728,32 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	return created, nil
 }
 
-// buildJobsForOrder decomposes an order's line items into job insert params,
-// one per line: the Job Creation Worker (Stage 2) and Validation (Stage 3)
-// combined into one pass. Each line's SKU is matched against the design
-// catalog (matchDesignForSKU); a match's print facts override the Shopify-
+// buildJobsForOrder decomposes an order's line items into job insert params:
+// the Job Creation Worker (Stage 2) and Validation (Stage 3) combined into one
+// pass. Each line's SKU is matched against the design catalog
+// (matchDesignForSKU); a match's print facts override the Shopify-
 // property-sourced fallback (which is a best guess, per mapShopifyLineItems'
 // own comment). No match still creates the job - flagged with issue_reason,
 // never dropped, matching the "never allow bad jobs into batching" rule (a
 // flagged job is simply excluded from ListBatchableJobs until fixed).
+//
+// One job per line, EXCEPT where the registry says the product prints from
+// several design files - then one job per file. A Soulmate Combo is a plank, a
+// rose and a keychain sold as one line, and as one job it rendered only the
+// plank: JOB-115257 carried "Name On 3D Rose" and "Name On Heart Keychain" and
+// printed neither. Three jobs is also what is physically true, since a job is
+// what carries a colour, takes a place on a bed and gets its own QC - and the
+// rose is not the plank's colour.
 func (s *Server) buildJobsForOrder(
 	ctx context.Context, order gen.Order, items []production.LineItem,
 ) ([]gen.InsertProductionJobParams, error) {
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
-	for i, li := range items {
-		// Named for the Shopify order, so the job, the order and the customer's
-		// own paperwork all carry the same number. Falls back to the sequence
-		// when the order number has no digits to borrow.
-		jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, i)
-		if err != nil {
-			return nil, err
-		}
+	// Runs across PARTS, not lines, so a combo's three jobs number the way a
+	// three-product order's do - JOB-115257, -2, -3 - rather than inventing a
+	// second suffix format that every downstream reader has to learn.
+	jobIndex := 0
+	for _, li := range items {
 		quantity := int32(li.Quantity)
 		if quantity < 1 {
 			quantity = 1
@@ -766,91 +771,176 @@ func (s *Server) buildJobsForOrder(
 			match = s.matchDesignForSKU(ctx, li.SKU)
 		}
 
-		p := gen.InsertProductionJobParams{
-			ID: uuid.New(), JobNumber: jobNumber,
-			OrderID: ptr(order.ID), ShopifyOrderID: &shopifyID,
-			ShopifyCustomerID: order.ShopifyCustomerID, CustomerName: order.CustomerName,
-			Description: descriptionOf(li), Quantity: quantity,
-			Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
-			QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
-			Sku: li.SKU, ProductName: nonEmptyPtr(li.ProductName),
-			Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
-			FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
-			EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
-			DueDate:                   db.Timestamptz(li.DueDate),
-			Priority:                  jobPriorityRank(order, li),
-			PersonalisationName:       li.PersonalisationName, PersonalisationFont: li.PersonalisationFont,
-			PersonalisationColour: li.PersonalisationColour, PersonalisationVariant: li.PersonalisationVariant,
-			PersonalisationStatus: status,
-			NameConfirmed:         confirms.Name, PhotoConfirmed: confirms.Photo, FontConfirmed: confirms.Font,
-			ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
-			CustomerApprovalReceived: confirms.Approval,
-			Colours:                  []byte("[]"),
-			// Snapshotted, not looked up: the job must show what it was made
-			// from even after the order is re-synced and its line items are
-			// rewritten - the same reason material and bbox are copied here.
-			VariantTitle:              li.VariantTitle,
-			PersonalisationProperties: propertiesJSON(li.Properties),
-		}
-		if generated {
-			reason := production.IssueSTLMissing
-			p.IssueReason = &reason
+		// Resolved once per line, not once per part: three parts would
+		// otherwise be three identical registry lookups.
+		roles := s.jobPartRoles(ctx, li, generated)
 
-			// There is nothing for a person to confirm about a generated
-			// product's personalisation. The two names and the heart count are
-			// not preferences somebody checks against a proof - they are the
-			// INPUTS the model is built from, consumed directly by OpenSCAD.
-			// The font is the template's, and the colour is the SKU.
-			//
-			// Left as 'pending' these jobs sat behind "Waiting for
-			// personalisation details to be confirmed" for ever, waiting on a
-			// check with nothing to check: no order carries a font, colour or
-			// variant property, so font_confirmed and its two siblings could
-			// never become true.
-			p.PersonalisationStatus = production.PersonalisationNotRequired
-			p.NameConfirmed = true
-			p.PhotoConfirmed = true
-			p.FontConfirmed = true
-			p.ColourConfirmed = true
-			p.VariantConfirmed = true
-			p.CustomerApprovalReceived = true
-
-			// The colour the customer chose, which for a generated product
-			// arrives only in the variant - "SKY BLUE / NO LIGHT". Without
-			// this a plank reaches the planner with no colour at all, and
-			// colour is what decides which planks can share a bed and which
-			// filament has to be loaded.
-			if colour := colourFromVariant(li.VariantTitle); colour != "" {
-				p.Colour = &colour
-				if raw, err := json.Marshal([]string{colour}); err == nil {
-					p.Colours = raw
-				}
+		for _, role := range roles {
+			// Named for the Shopify order, so the job, the order and the
+			// customer's own paperwork all carry the same number. Falls back
+			// to the sequence when the order number has no digits to borrow.
+			jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, jobIndex)
+			if err != nil {
+				return nil, err
 			}
-		} else {
-			applyMatch(&p, match, quantity)
-		}
+			jobIndex++
 
-		// Last resort: the colour the ORDER itself states.
-		//
-		// A generated product takes its colour from the variant just above, and
-		// a matched design supplies its own - but a line that matched no design
-		// still names a colour on the order, and that was simply dropped. Colour
-		// now decides which jobs may share a bed (see production.GroupByColour),
-		// so a colourless job cannot be batched at all. Reading what the customer
-		// actually ordered is better than leaving it queued for ever.
-		if isEmptyColours(p.Colours) && li.Colour != nil {
-			if c := strings.TrimSpace(*li.Colour); c != "" {
-				if raw, err := json.Marshal([]string{c}); err == nil {
-					p.Colours = raw
-				}
-				if p.Colour == nil {
-					p.Colour = &c
-				}
-			}
+			p := s.jobParamsFor(jobParamsInput{
+				order: order, shopifyID: shopifyID, li: li, jobNumber: jobNumber,
+				role: role, quantity: quantity, status: status, confirms: confirms,
+				generated: generated, match: match,
+			})
+			out = append(out, p)
 		}
-		out = append(out, p)
 	}
 	return out, nil
+}
+
+// jobPartRoles is the design files one line becomes jobs for.
+//
+// Always at least one entry. "" means the job carries the default part_role,
+// which is every job that existed before combos and every product that prints
+// one thing - so the single-job path is untouched rather than re-expressed.
+func (s *Server) jobPartRoles(
+	ctx context.Context, li production.LineItem, generated bool,
+) []string {
+	if !generated {
+		// An uploaded design is one file by definition.
+		return []string{""}
+	}
+	roles := s.partRolesForSKU(ctx, deref(li.SKU))
+	if len(roles) < 2 {
+		// One part, or a product the registry does not describe. Either way
+		// this is the single job it has always been, and passing the role
+		// through would start writing 'body' where nothing wrote it before.
+		return []string{""}
+	}
+	return roles
+}
+
+// jobParamsInput is what building one job needs. A struct because it is nine
+// values and a nine-parameter function is not one anybody can call correctly.
+type jobParamsInput struct {
+	order     gen.Order
+	shopifyID int64
+	li        production.LineItem
+	jobNumber string
+	// role is the design file this job prints, or "" for a product that
+	// prints one thing.
+	role      string
+	quantity  int32
+	status    string
+	confirms  production.Confirms
+	generated bool
+	match     production.MatchResult
+}
+
+// jobParamsFor builds one job's insert parameters.
+//
+// Split out of buildJobsForOrder when a line stopped being one job: the body
+// is the same work it always did, called once per part instead of once per
+// line.
+func (s *Server) jobParamsFor(in jobParamsInput) gen.InsertProductionJobParams {
+	order, li, quantity := in.order, in.li, in.quantity
+	status, confirms, match := in.status, in.confirms, in.match
+	shopifyID := in.shopifyID
+	jobNumber := in.jobNumber
+	generated := in.generated
+
+	p := gen.InsertProductionJobParams{
+		ID: uuid.New(), JobNumber: jobNumber,
+		OrderID: ptr(order.ID), ShopifyOrderID: &shopifyID,
+		ShopifyCustomerID: order.ShopifyCustomerID, CustomerName: order.CustomerName,
+		Description: descriptionOf(li), Quantity: quantity,
+		Status: production.StatusQueued, AssemblyStatus: production.AssemblyPending,
+		QcStatus: production.QcPending, PackagingStatus: production.PackagingPending,
+		Sku: li.SKU, ProductName: nonEmptyPtr(li.ProductName),
+		Material: li.Material, Colour: li.Colour, NozzleProfile: li.NozzleProfile,
+		FilamentGramsRequired:     filamentForQty(li.FilamentGrams, quantity),
+		EstimatedPrintTimeMinutes: intPtrToInt32(li.EstimatedPrintTimeMinutes),
+		DueDate:                   db.Timestamptz(li.DueDate),
+		Priority:                  jobPriorityRank(order, li),
+		PersonalisationName:       li.PersonalisationName, PersonalisationFont: li.PersonalisationFont,
+		PersonalisationColour: li.PersonalisationColour, PersonalisationVariant: li.PersonalisationVariant,
+		PersonalisationStatus: status,
+		NameConfirmed:         confirms.Name, PhotoConfirmed: confirms.Photo, FontConfirmed: confirms.Font,
+		ColourConfirmed: confirms.Colour, VariantConfirmed: confirms.Variant,
+		CustomerApprovalReceived: confirms.Approval,
+		Colours:                  []byte("[]"),
+		// Snapshotted, not looked up: the job must show what it was made
+		// from even after the order is re-synced and its line items are
+		// rewritten - the same reason material and bbox are copied here.
+		VariantTitle:              li.VariantTitle,
+		PersonalisationProperties: propertiesJSON(li.Properties),
+	}
+	if generated {
+		reason := production.IssueSTLMissing
+		p.IssueReason = &reason
+
+		// There is nothing for a person to confirm about a generated
+		// product's personalisation. The two names and the heart count are
+		// not preferences somebody checks against a proof - they are the
+		// INPUTS the model is built from, consumed directly by OpenSCAD.
+		// The font is the template's, and the colour is the SKU.
+		//
+		// Left as 'pending' these jobs sat behind "Waiting for
+		// personalisation details to be confirmed" for ever, waiting on a
+		// check with nothing to check: no order carries a font, colour or
+		// variant property, so font_confirmed and its two siblings could
+		// never become true.
+		p.PersonalisationStatus = production.PersonalisationNotRequired
+		p.NameConfirmed = true
+		p.PhotoConfirmed = true
+		p.FontConfirmed = true
+		p.ColourConfirmed = true
+		p.VariantConfirmed = true
+		p.CustomerApprovalReceived = true
+
+		// The colour the customer chose, which for a generated product
+		// arrives only in the variant - "SKY BLUE / NO LIGHT". Without
+		// this a plank reaches the planner with no colour at all, and
+		// colour is what decides which planks can share a bed and which
+		// filament has to be loaded.
+		if colour := colourFromVariant(li.VariantTitle); colour != "" {
+			p.Colour = &colour
+			if raw, err := json.Marshal([]string{colour}); err == nil {
+				p.Colours = raw
+			}
+		}
+	} else {
+		applyMatch(&p, match, quantity)
+	}
+
+	// Last resort: the colour the ORDER itself states.
+	//
+	// A generated product takes its colour from the variant just above, and
+	// a matched design supplies its own - but a line that matched no design
+	// still names a colour on the order, and that was simply dropped. Colour
+	// now decides which jobs may share a bed (see production.GroupByColour),
+	// so a colourless job cannot be batched at all. Reading what the customer
+	// actually ordered is better than leaving it queued for ever.
+	if isEmptyColours(p.Colours) && li.Colour != nil {
+		if c := strings.TrimSpace(*li.Colour); c != "" {
+			if raw, err := json.Marshal([]string{c}); err == nil {
+				p.Colours = raw
+			}
+			if p.Colour == nil {
+				p.Colour = &c
+			}
+		}
+	}
+
+	// Which of the product's design files this job prints. Left unset for
+	// a product that prints one thing, so the column's own default stands
+	// and every job that existed before parts reads identically.
+	if role := strings.TrimSpace(in.role); role != "" {
+		p.PartRole = &role
+		// Named in the description too, because three rows on a bed list
+		// reading "Soulmate COMBO with LIGHT - RED" tell an operator
+		// nothing about which one is in front of them.
+		p.Description = fmt.Sprintf("%s - %s", p.Description, role)
+	}
+	return p
 }
 
 // isEmptyColours reports whether a job's colours snapshot carries nothing -
