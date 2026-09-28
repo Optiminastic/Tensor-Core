@@ -144,6 +144,32 @@ func TestCompareRenderParamsHandlesBothShapes(t *testing.T) {
 			want:      storedRenderParams{Template: "keychain", Args: map[string]string{"TEXT": `"A"`}},
 			wantState: modelWrong,
 		},
+		{
+			// A combo's parts share a product and an order. Two of them
+			// mapping the same variable name - which the rose and the keychain
+			// will, both declaring TEXT - would otherwise compare equal, and
+			// the bed would keep the wrong model believing it had checked.
+			name:      "a different part of the same product",
+			have:      storedRenderParams{Template: "rose", Role: "rose", Args: map[string]string{"TEXT": `"AJ"`}},
+			want:      storedRenderParams{Template: "rose", Role: "keychain", Args: map[string]string{"TEXT": `"AJ"`}},
+			wantState: modelWrong,
+		},
+		{
+			name:      "the same part",
+			have:      storedRenderParams{Template: "rose", Role: "rose", Args: map[string]string{"TEXT": `"AJ"`}},
+			want:      storedRenderParams{Template: "rose", Role: "rose", Args: map[string]string{"TEXT": `"AJ"`}},
+			wantState: modelCorrect,
+		},
+		{
+			// Every model rendered before parts existed carries no role, and a
+			// product with one design file renders as 'body'. These must
+			// compare equal, or the first check after this ships calls every
+			// model on every bed wrong and rebuilds the lot.
+			name:      "no role recorded, rendered as body",
+			have:      storedRenderParams{Template: "keychain", Args: map[string]string{"TEXT": `"A"`}},
+			want:      storedRenderParams{Template: "keychain", Role: "body", Args: map[string]string{"TEXT": `"A"`}},
+			wantState: modelCorrect,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, why := compareRenderParams(c.have, c.want)

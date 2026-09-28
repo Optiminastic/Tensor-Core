@@ -121,7 +121,9 @@ func (s *Server) resolveRenderPlan(
 		return renderPlan{}, fmt.Errorf("look up %s in the registry: %w", sku, err)
 	}
 
-	template, ok := s.templateKeyForProduct(ctx, product.ID)
+	role := partRoleOf(job)
+
+	template, ok := s.templateKeyForRole(ctx, product.ID, role)
 	if !ok {
 		// Half-configured: a product with a mapping and no template cannot
 		// render, and a product with neither is simply not this system's yet.
@@ -129,13 +131,15 @@ func (s *Server) resolveRenderPlan(
 			"%w: %s names no template", errNoRegistryPlan, product.Code)
 	}
 
-	rows, err := s.store.Q.ListProductFieldMaps(ctx, product.ID)
+	rows, err := s.store.Q.ListProductFieldMaps(ctx, gen.ListProductFieldMapsParams{
+		ProductID: product.ID, Role: role,
+	})
 	if err != nil {
 		return renderPlan{}, fmt.Errorf("read the field mapping for %s: %w", product.Code, err)
 	}
 	if len(rows) == 0 {
 		return renderPlan{}, fmt.Errorf(
-			"%w: %s maps no fields", errNoRegistryPlan, product.Code)
+			"%w: %s maps no fields for %s", errNoRegistryPlan, product.Code, role)
 	}
 
 	maps := make([]personalise.FieldMap, 0, len(rows))
@@ -144,6 +148,7 @@ func (s *Server) resolveRenderPlan(
 			PropertyKey:  r.PropertyKey,
 			ScadVariable: r.ScadVariable,
 			Numeric:      r.ValueType == "number",
+			Optional:     !r.Required,
 		})
 	}
 
@@ -156,7 +161,7 @@ func (s *Server) resolveRenderPlan(
 
 	obs.FromContext(ctx).Info("rendering from the registry",
 		"job", job.JobNumber, "sku", sku, "product", product.Code,
-		"template", template, "fields", len(maps))
+		"part", role, "template", template, "fields", len(maps))
 
 	return renderPlan{
 		Template: template,
@@ -164,6 +169,11 @@ func (s *Server) resolveRenderPlan(
 		Label:    product.Code,
 		Stored: storedRenderParams{
 			Template: template,
+			// Which of the product's design files this model is. Without it,
+			// a combo's three models all record the same product and a
+			// "does this still match the order?" comparison could not tell
+			// the rose's model from the keychain's.
+			Role: role,
 			// The mapped arguments themselves, because for a registry product
 			// there is no NameLeft/Hearts to compare - the args ARE what the
 			// model was built from, and they are what a later "does this still
@@ -211,9 +221,25 @@ func (s *Server) registryRendersSKU(ctx context.Context, sku string) bool {
 	if err != nil {
 		return false
 	}
-	if _, ok := s.templateKeyForProduct(ctx, product.ID); !ok {
+	if len(s.designRolesForProduct(ctx, product.ID)) == 0 {
 		return false
 	}
-	rows, err := s.store.Q.ListProductFieldMaps(ctx, product.ID)
+	rows, err := s.store.Q.ListAllProductFieldMaps(ctx, product.ID)
 	return err == nil && len(rows) > 0
+}
+
+// designRoleBody is the design file a product has when it has only one.
+//
+// Every product configured before combos existed is a body, and the column
+// defaults to it, so "one file" is the zero case of "several" rather than a
+// separate path.
+const designRoleBody = "body"
+
+// partRoleOf is which of its product's design files this job prints.
+func partRoleOf(job gen.ProductionJob) string {
+	role := strings.TrimSpace(job.PartRole)
+	if role == "" {
+		return designRoleBody
+	}
+	return role
 }

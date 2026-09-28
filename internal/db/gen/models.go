@@ -342,6 +342,8 @@ type ProductFieldMap struct {
 	PropertyKey  string
 	ScadVariable string
 	ValueType    string
+	Role         string
+	Required     bool
 	Position     int32
 	CreatedAt    pgtype.Timestamptz
 }
@@ -432,6 +434,7 @@ type ProductionJob struct {
 	MachineFamily              *string
 	VariantTitle               *string
 	PersonalisationProperties  []byte
+	PartRole                   string
 	ModelError                 *string
 	ModelErrorAt               pgtype.Timestamptz
 	IssueReason                *string

@@ -35,6 +35,14 @@ type FieldMap struct {
 	// syntax error, and a quoted number is a string that fails every
 	// arithmetic comparison the script makes against it without erroring.
 	Numeric bool
+	// Optional lets the order not answer this field. The variable is then not
+	// passed at all and the template's own default stands.
+	//
+	// Not every mapped field is a plank's name. Two of the seven Soulmate
+	// Combos in the database carry no rose name, and holding those orders
+	// because a customer skipped an optional box would be the feature's first
+	// act on the issues board.
+	Optional bool
 }
 
 // MissingFieldError names the field an order did not carry.
@@ -54,11 +62,16 @@ func (e *MissingFieldError) Error() string {
 
 // MappedArgs turns an order line's properties into OpenSCAD -D arguments.
 //
-// Every mapped field is required. A model built with a field missing is a
-// product the customer did not order - a plank with one name on it, a keychain
-// with no text - and it looks like a successful render right up until somebody
-// opens the box. Holding the job names the field instead, which is a
+// A required field that the order does not answer stops the render. A model
+// built with one missing is a product the customer did not order - a plank
+// with one name on it - and it looks like a successful render right up until
+// somebody opens the box. Holding the job names the field instead, which is a
 // five-second fix; printing it is scrap.
+//
+// An optional field that the order does not answer is simply not passed, so
+// the template's own default stands. It is NOT passed as an empty string:
+// `-D TEXT=""` engraves nothing where the .scad might have left the surface
+// plain, and those are different objects.
 //
 // PART is deliberately not set here. It changes per render - the base and the
 // lettering are two passes over the same arguments - so the caller adds it.
@@ -87,9 +100,12 @@ func MappedArgs(props []production.LineProp, maps []FieldMap) (map[string]string
 	for _, m := range maps {
 		value, ok := byKey[NormaliseKey(m.PropertyKey)]
 		if !ok || value == "" {
-			// Absent and blank are the same failure to a renderer, and a
-			// blank is the commoner one: the storefront sends the property
-			// with an empty value when a customer skips an optional field.
+			// Absent and blank are the same thing to a renderer, and a blank
+			// is the commoner one: the storefront sends the property with an
+			// empty value when a customer skips a box rather than omitting it.
+			if m.Optional {
+				continue
+			}
 			return nil, &MissingFieldError{
 				PropertyKey: m.PropertyKey, ScadVariable: m.ScadVariable,
 			}

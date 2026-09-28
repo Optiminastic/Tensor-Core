@@ -28,6 +28,12 @@ import (
 )
 
 type fieldMapResponse struct {
+	// Role is which of the product's design files this row feeds.
+	Role string `json:"role"`
+	// Required says whether an order that does not answer it is held. False
+	// means the variable is simply not passed and the template's default
+	// stands - right for a rose the customer chose not to name.
+	Required bool `json:"required"`
 	// PropertyKey is the normalised form, which is what matching uses and so
 	// what the editor must show. Displaying the customer's raw label would be
 	// friendlier and would hide the thing that actually has to line up.
@@ -42,6 +48,9 @@ type fieldMapWriteRequest struct {
 		PropertyKey  string `json:"property_key" binding:"required,max=120"`
 		ScadVariable string `json:"scad_variable" binding:"required,max=64"`
 		ValueType    string `json:"value_type" binding:"required,oneof=string number"`
+		// Absent means required, so a caller written before optional fields
+		// existed keeps the behaviour it was written against.
+		Optional bool `json:"optional"`
 	} `json:"maps"`
 }
 
@@ -72,7 +81,8 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := s.store.Q.ListProductFieldMaps(c.Request.Context(), product.ID)
+	rows, err := s.store.Q.ListProductFieldMaps(c.Request.Context(),
+		gen.ListProductFieldMapsParams{ProductID: product.ID, Role: roleParam(c)})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the field mapping.")
 		return
@@ -80,6 +90,7 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 	out := make([]fieldMapResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, fieldMapResponse{
+			Role: r.Role, Required: r.Required,
 			PropertyKey: r.PropertyKey, ScadVariable: r.ScadVariable,
 			ValueType: r.ValueType, Position: r.Position,
 		})
@@ -90,6 +101,7 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 // fieldMapEntry is one validated row on its way to the database.
 type fieldMapEntry struct {
 	key, variable, valueType string
+	required                 bool
 }
 
 // putProductFieldMaps replaces a product's whole mapping.
@@ -104,6 +116,7 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 			"Each mapped field needs an order field, a variable, and a type of string or number.")
 		return
 	}
+	role := roleParam(c)
 
 	entries := make([]fieldMapEntry, 0, len(req.Maps))
 	seen := map[string]bool{}
@@ -129,27 +142,34 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 			return
 		}
 		seen[strings.ToLower(variable)] = true
-		entries = append(entries, fieldMapEntry{key: key, variable: variable, valueType: m.ValueType})
+		entries = append(entries, fieldMapEntry{
+			key: key, variable: variable, valueType: m.ValueType, required: !m.Optional,
+		})
 	}
 
 	// Refused before it is saved, while the person who can fix it is here. A
 	// mapping naming a variable the template does not declare renders a model
 	// missing the thing the customer asked for and exits 0 - OpenSCAD accepts
 	// an unknown -D and simply never reads it.
-	if why, bad := s.mappingNamesUnknownVariables(c, product, entries); bad {
+	if why, bad := s.mappingNamesUnknownVariables(c, product, role, entries); bad {
 		detail(c, http.StatusUnprocessableEntity, why)
 		return
 	}
 
 	ctx := c.Request.Context()
 	err := s.store.InTx(ctx, func(q *gen.Queries) error {
-		if err := q.ClearProductFieldMaps(ctx, product.ID); err != nil {
+		// Scoped to this role, or saving the rose's mapping would delete the
+		// keychain's on the way past.
+		if err := q.ClearProductFieldMaps(ctx, gen.ClearProductFieldMapsParams{
+			ProductID: product.ID, Role: role,
+		}); err != nil {
 			return err
 		}
 		for i, e := range entries {
 			if err := q.InsertProductFieldMap(ctx, gen.InsertProductFieldMapParams{
 				ID: uuid.New(), ProductID: product.ID, PropertyKey: e.key,
-				ScadVariable: e.variable, ValueType: e.valueType, Position: int32(i),
+				ScadVariable: e.variable, ValueType: e.valueType,
+				Role: role, Required: e.required, Position: int32(i),
 			}); err != nil {
 				return err
 			}
@@ -171,12 +191,12 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 // configuring it for no reason - the render path checks again anyway, where it
 // can fail the one job rather than the whole configuration.
 func (s *Server) mappingNamesUnknownVariables(
-	c *gin.Context, product gen.Product, entries []fieldMapEntry,
+	c *gin.Context, product gen.Product, role string, entries []fieldMapEntry,
 ) (string, bool) {
 	if s.renderer == nil {
 		return "", false
 	}
-	key, ok := s.templateKeyForProduct(c.Request.Context(), product.ID)
+	key, ok := s.templateKeyForRole(c.Request.Context(), product.ID, role)
 	if !ok {
 		return "", false
 	}
@@ -311,20 +331,25 @@ func (s *Server) productByCode(c *gin.Context) (gen.Product, bool) {
 	return product, true
 }
 
-// templateKeyForProduct is the .scad this product's variants print from.
+// templateKeyForRole is the .scad one of a product's design files resolves to.
 //
-// One key per product in practice: every variant of a plank prints from the
-// same file and differs by colour, which is not geometry. Where they disagree
-// - which the schema allows and nothing yet produces - the first is taken and
-// the check this feeds is skipped rather than guessing which variant the
-// mapping was written against.
-func (s *Server) templateKeyForProduct(ctx context.Context, productID uuid.UUID) (string, bool) {
+// One key per role per product: every variant of a plank prints from the same
+// file and differs by colour, which is not geometry. Where the variants
+// disagree about one role - which the schema allows and nothing yet produces -
+// nothing is returned rather than guessing which variant the mapping was
+// written against.
+func (s *Server) templateKeyForRole(
+	ctx context.Context, productID uuid.UUID, role string,
+) (string, bool) {
 	rows, err := s.store.Q.ListDesignsForProduct(ctx, productID)
 	if err != nil {
 		return "", false
 	}
 	var key string
 	for _, r := range rows {
+		if !strings.EqualFold(strings.TrimSpace(r.Role), strings.TrimSpace(role)) {
+			continue
+		}
 		if r.TemplateKey == nil || strings.TrimSpace(*r.TemplateKey) == "" {
 			continue
 		}
@@ -335,4 +360,53 @@ func (s *Server) templateKeyForProduct(ctx context.Context, productID uuid.UUID)
 		key = k
 	}
 	return key, key != ""
+}
+
+// designRolesForProduct is the design files this product prints, in order.
+//
+// Derived from variant_designs rather than stored anywhere of its own: a part
+// EXISTS because a file was assigned to it, and a second list would be a
+// second thing to keep in step with the first.
+//
+// Ordered, and stable: job creation walks this to decide how many jobs a line
+// becomes, and a set that came back in a different order each time would
+// number the same combo's parts differently on two orders.
+func (s *Server) designRolesForProduct(ctx context.Context, productID uuid.UUID) []string {
+	rows, err := s.store.Q.ListDesignsForProduct(ctx, productID)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	roles := make([]string, 0, 3)
+	for _, r := range rows {
+		if r.TemplateKey == nil || strings.TrimSpace(*r.TemplateKey) == "" {
+			// A variant pointing at an uploaded 3MF rather than a template.
+			// Real, and not something this can render from a mapping.
+			continue
+		}
+		role := strings.TrimSpace(r.Role)
+		if role == "" {
+			role = designRoleBody
+		}
+		if seen[strings.ToLower(role)] {
+			continue
+		}
+		seen[strings.ToLower(role)] = true
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles
+}
+
+// roleParam is the design file a field-map request is about.
+//
+// Defaulted rather than required: a product with one file is the common case
+// and asking every caller to name "body" would be ceremony. The editor sends
+// it explicitly once a product has two.
+func roleParam(c *gin.Context) string {
+	role := strings.TrimSpace(c.Query("role"))
+	if role == "" {
+		return designRoleBody
+	}
+	return role
 }

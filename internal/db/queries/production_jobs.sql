@@ -14,7 +14,7 @@ INSERT INTO production_jobs (
     colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
     quality_mm, machine_family, variant_title, personalisation_properties,
     model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-    support_weight_g, purge_weight_g, colour_count
+    support_weight_g, purge_weight_g, colour_count, part_role
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('job_number'), sqlc.narg('order_id'), sqlc.narg('batch_id'),
     sqlc.arg('description'), sqlc.arg('quantity'), sqlc.arg('status'), sqlc.arg('assembly_status'),
@@ -40,7 +40,10 @@ INSERT INTO production_jobs (
     sqlc.narg('model_error'), sqlc.narg('model_error_at'),
     sqlc.narg('issue_reason'), sqlc.narg('bbox_x_mm')::float8, sqlc.narg('bbox_y_mm')::float8,
     sqlc.narg('bbox_z_mm')::float8, sqlc.narg('support_weight_g')::float8,
-    sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count')
+    sqlc.narg('purge_weight_g')::float8, sqlc.narg('colour_count'),
+    -- Defaulted in the column, but named here so a caller that knows which
+    -- part it is building can say so. 'body' where nobody does.
+    coalesce(sqlc.narg('part_role')::text, 'body')
 )
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
           finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
@@ -51,7 +54,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
@@ -65,7 +68,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs WHERE id = $1;
@@ -85,7 +88,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs WHERE job_number = sqlc.arg('job_number');
@@ -102,7 +105,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
@@ -149,7 +152,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at
 FROM production_jobs
@@ -206,7 +209,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
@@ -234,7 +237,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
@@ -271,7 +274,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
@@ -287,7 +290,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 
@@ -411,7 +414,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties,
+          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
 

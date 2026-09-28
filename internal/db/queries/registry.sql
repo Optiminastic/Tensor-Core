@@ -233,40 +233,63 @@ WHERE variant_id = sqlc.arg('variant_id')
   AND status = 'active';
 
 -- name: ListProductFieldMaps :many
--- A product's order-field-to-OpenSCAD-variable mapping, in editor order.
+-- One design file's order-field-to-OpenSCAD-variable mapping, in editor order.
 --
--- Read once per model generation to build the -D flags, and read again by the
+-- Read once per model generated to build the -D flags, and read again by the
 -- editor that maintains it. Ordered by position then variable so the list
 -- reads the same way twice and a diff between two products is meaningful.
+--
+-- Scoped to a role, because a product may print from more than one .scad and
+-- the rose's mapping is not the keychain's.
 SELECT * FROM product_field_maps
 WHERE product_id = sqlc.arg('product_id')
+  AND role = sqlc.arg('role')
 ORDER BY position, lower(scad_variable);
+
+-- name: ListAllProductFieldMaps :many
+-- Every mapped field of a product, across all of its design files.
+--
+-- For the editor and for counting what a product has configured. The render
+-- path uses ListProductFieldMaps, which asks about the one file it is about
+-- to run.
+SELECT * FROM product_field_maps
+WHERE product_id = sqlc.arg('product_id')
+ORDER BY role, position, lower(scad_variable);
 
 -- name: InsertProductFieldMap :exec
 -- Adds one mapped field.
 --
 -- ON CONFLICT rather than a blind insert: the unique index is on
--- (product_id, lower(scad_variable)) because two rows naming NAME_L would both
--- become -D flags and OpenSCAD takes the last on the command line - so the
--- model would depend on iteration order, which is to say on nothing.
+-- (product_id, role, lower(scad_variable)) because two rows naming NAME_L for
+-- one file would both become -D flags and OpenSCAD takes the last on the
+-- command line - so the model would depend on iteration order, which is to
+-- say on nothing. Across two files they are different variables in different
+-- scripts and both are kept.
 INSERT INTO product_field_maps (
-    id, product_id, property_key, scad_variable, value_type, position
+    id, product_id, property_key, scad_variable, value_type, role, required, position
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('property_key'),
-    sqlc.arg('scad_variable'), sqlc.arg('value_type'), sqlc.arg('position')
+    sqlc.arg('scad_variable'), sqlc.arg('value_type'), sqlc.arg('role'),
+    sqlc.arg('required'), sqlc.arg('position')
 )
-ON CONFLICT (product_id, lower(scad_variable)) DO UPDATE
+ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
 SET property_key = EXCLUDED.property_key,
     value_type   = EXCLUDED.value_type,
+    required     = EXCLUDED.required,
     position     = EXCLUDED.position;
 
 -- name: ClearProductFieldMaps :exec
--- Empties a product's mapping so it can be written whole.
+-- Empties ONE design file's mapping so it can be written whole.
 --
 -- Same reasoning as ClearVariantBom: the mapping is edited as a LIST and saved
 -- once, so a half-applied edit cannot leave a product mapping a first name and
 -- not a second. Paired with InsertProductFieldMap inside one transaction.
-DELETE FROM product_field_maps WHERE product_id = sqlc.arg('product_id');
+--
+-- Scoped to the role being saved, or editing the rose would silently delete
+-- the keychain's mapping.
+DELETE FROM product_field_maps
+WHERE product_id = sqlc.arg('product_id')
+  AND role = sqlc.arg('role');
 
 -- name: FindProductBySKU :one
 -- The product an order line belongs to, found by the SKU on its variant.

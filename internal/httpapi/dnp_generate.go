@@ -690,4 +690,12 @@ type storedRenderParams struct {
 	// omitempty on all four, so a plank's record still reads as it always did
 	// and a registry product's does not carry three empty plank fields.
 	Args map[string]string `json:"args,omitempty"`
+	// Role is which of the product's design files this model is.
+	//
+	// omitempty and absent on everything rendered so far, which is what keeps
+	// every model already on disk comparing equal to itself. A combo's three
+	// models would otherwise record the same product and the same order and
+	// be indistinguishable - "is this still what the order says?" could not
+	// tell the rose's model from the keychain's.
+	Role string `json:"role,omitempty"`
 }

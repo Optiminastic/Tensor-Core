@@ -412,6 +412,10 @@ CREATE TABLE production_jobs (
     -- What the customer asked for, snapshotted at creation - see 0064.
     variant_title                 varchar(255),
     personalisation_properties    jsonb NOT NULL DEFAULT '[]',
+    -- Which of its product's design files this job prints - see 0081. A
+    -- product may print from several, and a combo prints three: a plank, a
+    -- rose and a keychain, one job each.
+    part_role                     varchar(24) NOT NULL DEFAULT 'body',
     -- Why a generated model could not be built - see migration 0065.
     model_error                   text,
     model_error_at                timestamptz,
@@ -853,15 +857,22 @@ CREATE TABLE product_field_maps (
     property_key  varchar(120) NOT NULL,
     scad_variable varchar(64)  NOT NULL,
     value_type    varchar(16)  NOT NULL DEFAULT 'string',
+    -- Which design file this row feeds, matching variant_designs.role - see
+    -- migration 0080. A product may print from more than one .scad, and a
+    -- combo prints three.
+    role          varchar(24)  NOT NULL DEFAULT 'body',
+    -- Whether a missing answer holds the job. Required is right for a plank,
+    -- where a blank name is scrap; wrong for a rose the customer left unnamed.
+    required      boolean      NOT NULL DEFAULT true,
     position      integer      NOT NULL DEFAULT 0,
     created_at    timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT product_field_maps_value_type_check
         CHECK (value_type IN ('string', 'number'))
 );
 CREATE UNIQUE INDEX uq_product_field_map_variable
-    ON product_field_maps (product_id, lower(scad_variable));
+    ON product_field_maps (product_id, role, lower(scad_variable));
 CREATE INDEX ix_product_field_maps_product
-    ON product_field_maps (product_id, position);
+    ON product_field_maps (product_id, role, position);
 
 -- An uploaded OpenSCAD template that overrides the embedded one - see migration
 -- 0071. No rows means the binary's own templates are used, which is how this

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -212,6 +213,19 @@ func compareRenderParams(have, want storedRenderParams) (modelState, string) {
 			return modelWrong, fmt.Sprintf("built from %s, ordered as %s",
 				have.Template, want.Template)
 		}
+		// Which design file this model is. A combo's three models share a
+		// product and an order, so without this the rose's model and the
+		// keychain's differ only by their arguments - and two parts whose
+		// mapping happens to name the same variable would compare equal.
+		//
+		// Both sides normalised first. Every model rendered before parts
+		// existed has no role recorded, and a product with one design file
+		// renders as 'body': those are the same file, and comparing the raw
+		// strings would call every model on every bed wrong the first time
+		// this ran.
+		if haveRole, wantRole := roleOrBody(have.Role), roleOrBody(want.Role); !strings.EqualFold(haveRole, wantRole) {
+			return modelWrong, fmt.Sprintf("built as the %s, ordered as the %s", haveRole, wantRole)
+		}
 		return modelCorrect, ""
 	}
 	switch {
@@ -226,6 +240,15 @@ func compareRenderParams(have, want storedRenderParams) (modelState, string) {
 			have.Template, want.Template)
 	}
 	return modelCorrect, ""
+}
+
+// roleOrBody names a design file for a message, including the models rendered
+// before parts existed, whose record carries no role at all.
+func roleOrBody(role string) string {
+	if strings.TrimSpace(role) == "" {
+		return designRoleBody
+	}
+	return role
 }
 
 // mappedArgsDiffer compares two registry renders' arguments.

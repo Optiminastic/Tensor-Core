@@ -31,16 +31,26 @@ func (q *Queries) AddVariantOptionValue(ctx context.Context, arg AddVariantOptio
 }
 
 const clearProductFieldMaps = `-- name: ClearProductFieldMaps :exec
-DELETE FROM product_field_maps WHERE product_id = $1
+DELETE FROM product_field_maps
+WHERE product_id = $1
+  AND role = $2
 `
 
-// Empties a product's mapping so it can be written whole.
+type ClearProductFieldMapsParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+// Empties ONE design file's mapping so it can be written whole.
 //
 // Same reasoning as ClearVariantBom: the mapping is edited as a LIST and saved
 // once, so a half-applied edit cannot leave a product mapping a first name and
 // not a second. Paired with InsertProductFieldMap inside one transaction.
-func (q *Queries) ClearProductFieldMaps(ctx context.Context, productID uuid.UUID) error {
-	_, err := q.db.Exec(ctx, clearProductFieldMaps, productID)
+//
+// Scoped to the role being saved, or editing the rose would silently delete
+// the keychain's mapping.
+func (q *Queries) ClearProductFieldMaps(ctx context.Context, arg ClearProductFieldMapsParams) error {
+	_, err := q.db.Exec(ctx, clearProductFieldMaps, arg.ProductID, arg.Role)
 	return err
 }
 
@@ -326,14 +336,16 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 
 const insertProductFieldMap = `-- name: InsertProductFieldMap :exec
 INSERT INTO product_field_maps (
-    id, product_id, property_key, scad_variable, value_type, position
+    id, product_id, property_key, scad_variable, value_type, role, required, position
 ) VALUES (
     $1, $2, $3,
-    $4, $5, $6
+    $4, $5, $6,
+    $7, $8
 )
-ON CONFLICT (product_id, lower(scad_variable)) DO UPDATE
+ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
 SET property_key = EXCLUDED.property_key,
     value_type   = EXCLUDED.value_type,
+    required     = EXCLUDED.required,
     position     = EXCLUDED.position
 `
 
@@ -343,15 +355,19 @@ type InsertProductFieldMapParams struct {
 	PropertyKey  string
 	ScadVariable string
 	ValueType    string
+	Role         string
+	Required     bool
 	Position     int32
 }
 
 // Adds one mapped field.
 //
 // ON CONFLICT rather than a blind insert: the unique index is on
-// (product_id, lower(scad_variable)) because two rows naming NAME_L would both
-// become -D flags and OpenSCAD takes the last on the command line - so the
-// model would depend on iteration order, which is to say on nothing.
+// (product_id, role, lower(scad_variable)) because two rows naming NAME_L for
+// one file would both become -D flags and OpenSCAD takes the last on the
+// command line - so the model would depend on iteration order, which is to
+// say on nothing. Across two files they are different variables in different
+// scripts and both are kept.
 func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFieldMapParams) error {
 	_, err := q.db.Exec(ctx, insertProductFieldMap,
 		arg.ID,
@@ -359,6 +375,8 @@ func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFi
 		arg.PropertyKey,
 		arg.ScadVariable,
 		arg.ValueType,
+		arg.Role,
+		arg.Required,
 		arg.Position,
 	)
 	return err
@@ -475,6 +493,47 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, position, created_at FROM product_field_maps
+WHERE product_id = $1
+ORDER BY role, position, lower(scad_variable)
+`
+
+// Every mapped field of a product, across all of its design files.
+//
+// For the editor and for counting what a product has configured. The render
+// path uses ListProductFieldMaps, which asks about the one file it is about
+// to run.
+func (q *Queries) ListAllProductFieldMaps(ctx context.Context, productID uuid.UUID) ([]ProductFieldMap, error) {
+	rows, err := q.db.Query(ctx, listAllProductFieldMaps, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductFieldMap{}
+	for rows.Next() {
+		var i ProductFieldMap
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.PropertyKey,
+			&i.ScadVariable,
+			&i.ValueType,
+			&i.Role,
+			&i.Required,
+			&i.Position,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listBomForProduct = `-- name: ListBomForProduct :many
@@ -625,18 +684,27 @@ func (q *Queries) ListOptionValues(ctx context.Context, productID uuid.UUID) ([]
 }
 
 const listProductFieldMaps = `-- name: ListProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, position, created_at FROM product_field_maps
 WHERE product_id = $1
+  AND role = $2
 ORDER BY position, lower(scad_variable)
 `
 
-// A product's order-field-to-OpenSCAD-variable mapping, in editor order.
+type ListProductFieldMapsParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+// One design file's order-field-to-OpenSCAD-variable mapping, in editor order.
 //
-// Read once per model generation to build the -D flags, and read again by the
+// Read once per model generated to build the -D flags, and read again by the
 // editor that maintains it. Ordered by position then variable so the list
 // reads the same way twice and a diff between two products is meaningful.
-func (q *Queries) ListProductFieldMaps(ctx context.Context, productID uuid.UUID) ([]ProductFieldMap, error) {
-	rows, err := q.db.Query(ctx, listProductFieldMaps, productID)
+//
+// Scoped to a role, because a product may print from more than one .scad and
+// the rose's mapping is not the keychain's.
+func (q *Queries) ListProductFieldMaps(ctx context.Context, arg ListProductFieldMapsParams) ([]ProductFieldMap, error) {
+	rows, err := q.db.Query(ctx, listProductFieldMaps, arg.ProductID, arg.Role)
 	if err != nil {
 		return nil, err
 	}
@@ -650,6 +718,8 @@ func (q *Queries) ListProductFieldMaps(ctx context.Context, productID uuid.UUID)
 			&i.PropertyKey,
 			&i.ScadVariable,
 			&i.ValueType,
+			&i.Role,
+			&i.Required,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {
