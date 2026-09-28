@@ -234,3 +234,68 @@ func TestMappedArgsRefusesABadNumberEvenWhenOptional(t *testing.T) {
 		t.Fatal("an optional field answered with a non-number was accepted")
 	}
 }
+
+// A fixed value does not come from the order at all.
+//
+// The plank templates default OUT_X/Y/Z to 0, meaning "natural size, whatever
+// the name needs". The DNP path passes 200/50/40; the registry path builds its
+// arguments from the mapping alone, so SC's plank rendered 377 mm wide - the
+// wrong product, successfully, caught only because no bed is that big.
+func TestMappedArgsUsesAFixedValueWithoutConsultingTheOrder(t *testing.T) {
+	args, err := MappedArgs(
+		// Deliberately carries a property with the same normalised key, to
+		// prove the fixed value wins rather than merely filling a gap.
+		lineProps("OUT X", "999", "STEP 2 - First Name-", "AYUSH"),
+		[]FieldMap{
+			{PropertyKey: "step 2 first name", ScadVariable: "NAME_L"},
+			{ScadVariable: "OUT_X", Numeric: true, Fixed: "200"},
+			{PropertyKey: "out x", ScadVariable: "OUT_Y", Numeric: true, Fixed: "50"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("mapped args: %v", err)
+	}
+	// Unquoted, because a quoted 200 is a string that fails every arithmetic
+	// comparison the script makes against it without erroring.
+	if args["OUT_X"] != "200" {
+		t.Errorf("OUT_X = %q, want 200 unquoted", args["OUT_X"])
+	}
+	if args["OUT_Y"] != "50" {
+		t.Errorf("OUT_Y = %q; a fixed value must beat the order's own answer", args["OUT_Y"])
+	}
+	if args["NAME_L"] != `"AYUSH"` {
+		t.Errorf("NAME_L = %q; mapped fields must still come from the order", args["NAME_L"])
+	}
+}
+
+func TestMappedArgsQuotesAFixedString(t *testing.T) {
+	args, err := MappedArgs(nil, []FieldMap{{ScadVariable: "FONT", Fixed: "Lobster"}})
+	if err != nil {
+		t.Fatalf("mapped args: %v", err)
+	}
+	if args["FONT"] != `"Lobster"` {
+		t.Errorf("FONT = %q, want a quoted string", args["FONT"])
+	}
+}
+
+// A fixed value is typed like any other. Set to something that is not a
+// number, it is refused here rather than passed to OpenSCAD, which would take
+// it as an undefined reference, render, and exit 0.
+func TestMappedArgsRefusesAFixedNumberThatIsNotOne(t *testing.T) {
+	_, err := MappedArgs(nil, []FieldMap{
+		{ScadVariable: "OUT_X", Numeric: true, Fixed: "two hundred"},
+	})
+	if err == nil {
+		t.Fatal("a fixed non-number was accepted")
+	}
+}
+
+// A required field with a fixed value can never be missing, so it must not be
+// able to hold a job.
+func TestMappedArgsNeverHoldsOnAFixedField(t *testing.T) {
+	if _, err := MappedArgs(nil, []FieldMap{
+		{ScadVariable: "OUT_X", Numeric: true, Fixed: "200"},
+	}); err != nil {
+		t.Errorf("an order with no properties held on a fixed field: %v", err)
+	}
+}

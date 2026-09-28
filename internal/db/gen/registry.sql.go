@@ -336,16 +336,18 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 
 const insertProductFieldMap = `-- name: InsertProductFieldMap :exec
 INSERT INTO product_field_maps (
-    id, product_id, property_key, scad_variable, value_type, role, required, position
+    id, product_id, property_key, scad_variable, value_type, role, required,
+    fixed_value, position
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
-    $7, $8
+    $7, $8, $9
 )
 ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
 SET property_key = EXCLUDED.property_key,
     value_type   = EXCLUDED.value_type,
     required     = EXCLUDED.required,
+    fixed_value  = EXCLUDED.fixed_value,
     position     = EXCLUDED.position
 `
 
@@ -357,6 +359,7 @@ type InsertProductFieldMapParams struct {
 	ValueType    string
 	Role         string
 	Required     bool
+	FixedValue   *string
 	Position     int32
 }
 
@@ -377,6 +380,7 @@ func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFi
 		arg.ValueType,
 		arg.Role,
 		arg.Required,
+		arg.FixedValue,
 		arg.Position,
 	)
 	return err
@@ -496,7 +500,7 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 }
 
 const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, position, created_at FROM product_field_maps
 WHERE product_id = $1
 ORDER BY role, position, lower(scad_variable)
 `
@@ -523,6 +527,7 @@ func (q *Queries) ListAllProductFieldMaps(ctx context.Context, productID uuid.UU
 			&i.ValueType,
 			&i.Role,
 			&i.Required,
+			&i.FixedValue,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {
@@ -684,7 +689,7 @@ func (q *Queries) ListOptionValues(ctx context.Context, productID uuid.UUID) ([]
 }
 
 const listProductFieldMaps = `-- name: ListProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, position, created_at FROM product_field_maps
 WHERE product_id = $1
   AND role = $2
 ORDER BY position, lower(scad_variable)
@@ -720,6 +725,7 @@ func (q *Queries) ListProductFieldMaps(ctx context.Context, arg ListProductField
 			&i.ValueType,
 			&i.Role,
 			&i.Required,
+			&i.FixedValue,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {

@@ -34,6 +34,9 @@ type fieldMapResponse struct {
 	// means the variable is simply not passed and the template's default
 	// stands - right for a rose the customer chose not to name.
 	Required bool `json:"required"`
+	// FixedValue is set when this row carries a value rather than reading one
+	// from the order. Empty on an ordinary mapped field.
+	FixedValue string `json:"fixed_value,omitempty"`
 	// PropertyKey is the normalised form, which is what matching uses and so
 	// what the editor must show. Displaying the customer's raw label would be
 	// friendlier and would hide the thing that actually has to line up.
@@ -51,6 +54,9 @@ type fieldMapWriteRequest struct {
 		// Absent means required, so a caller written before optional fields
 		// existed keeps the behaviour it was written against.
 		Optional bool `json:"optional"`
+		// FixedValue replaces the order field. A row carrying one ignores
+		// property_key entirely.
+		FixedValue string `json:"fixed_value"`
 	} `json:"maps"`
 }
 
@@ -96,6 +102,7 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 			Role: r.Role, Required: r.Required,
 			PropertyKey: r.PropertyKey, ScadVariable: r.ScadVariable,
 			ValueType: r.ValueType, Position: r.Position,
+			FixedValue: deref(r.FixedValue),
 		})
 	}
 	c.JSON(http.StatusOK, out)
@@ -105,6 +112,9 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 type fieldMapEntry struct {
 	key, variable, valueType string
 	required                 bool
+	// fixed is a value that does not come from the order. When set, key is
+	// unused - see migration 0082.
+	fixed string
 }
 
 // putProductFieldMaps replaces a product's whole mapping.
@@ -130,9 +140,18 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 		// wrong once silently.
 		key := personalise.NormaliseKey(m.PropertyKey)
 		variable := strings.TrimSpace(m.ScadVariable)
-		if key == "" || variable == "" {
+		fixed := strings.TrimSpace(m.FixedValue)
+		if variable == "" {
 			detail(c, http.StatusUnprocessableEntity,
-				"An order field and a variable are both needed on every row.")
+				"Every row needs the variable it fills.")
+			return
+		}
+		// One source or the other. A row naming neither leaves the variable
+		// unset, which OpenSCAD accepts in silence.
+		if key == "" && fixed == "" {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s has nothing to fill it - choose an order field, or give it a "+
+					"fixed value.", variable))
 			return
 		}
 		// Caught here rather than by the unique index, so the message says
@@ -146,7 +165,8 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 		}
 		seen[strings.ToLower(variable)] = true
 		entries = append(entries, fieldMapEntry{
-			key: key, variable: variable, valueType: m.ValueType, required: !m.Optional,
+			key: key, variable: variable, valueType: m.ValueType,
+			required: !m.Optional, fixed: fixed,
 		})
 	}
 
@@ -169,10 +189,15 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 			return err
 		}
 		for i, e := range entries {
+			var fixed *string
+			if e.fixed != "" {
+				v := e.fixed
+				fixed = &v
+			}
 			if err := q.InsertProductFieldMap(ctx, gen.InsertProductFieldMapParams{
 				ID: uuid.New(), ProductID: product.ID, PropertyKey: e.key,
 				ScadVariable: e.variable, ValueType: e.valueType,
-				Role: role, Required: e.required, Position: int32(i),
+				Role: role, Required: e.required, FixedValue: fixed, Position: int32(i),
 			}); err != nil {
 				return err
 			}

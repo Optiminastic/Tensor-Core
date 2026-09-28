@@ -149,6 +149,7 @@ func (s *Server) resolveRenderPlan(
 			ScadVariable: r.ScadVariable,
 			Numeric:      r.ValueType == "number",
 			Optional:     !r.Required,
+			Fixed:        deref(r.FixedValue),
 		})
 	}
 

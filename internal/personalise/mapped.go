@@ -35,6 +35,15 @@ type FieldMap struct {
 	// syntax error, and a quoted number is a string that fails every
 	// arithmetic comparison the script makes against it without erroring.
 	Numeric bool
+	// Fixed is a value that does not come from the order. When set, the order
+	// is not consulted at all and PropertyKey is unused.
+	//
+	// Not every variable a template needs is the customer's. The plank
+	// templates default OUT_X/Y/Z to 0, meaning "natural size, whatever the
+	// name needs", and without 200/50/40 a plank renders 377 mm wide - the
+	// wrong product, successfully, which is only caught because no bed is
+	// that big.
+	Fixed string
 	// Optional lets the order not answer this field. The variable is then not
 	// passed at all and the template's own default stands.
 	//
@@ -98,6 +107,21 @@ func MappedArgs(props []production.LineProp, maps []FieldMap) (map[string]string
 
 	args := make(map[string]string, len(maps))
 	for _, m := range maps {
+		if m.Fixed != "" {
+			// Still typed: a fixed string is quoted and a fixed number is
+			// not, for the same reason a mapped one is. A quoted 200 would
+			// fail every arithmetic comparison the script makes against it.
+			if m.Numeric {
+				if _, err := strconv.ParseFloat(m.Fixed, 64); err != nil {
+					return nil, fmt.Errorf("%s is set to %q, which is not a number",
+						m.ScadVariable, m.Fixed)
+				}
+				args[m.ScadVariable] = m.Fixed
+			} else {
+				args[m.ScadVariable] = Quote(m.Fixed)
+			}
+			continue
+		}
 		value, ok := byKey[NormaliseKey(m.PropertyKey)]
 		if !ok || value == "" {
 			// Absent and blank are the same thing to a renderer, and a blank
