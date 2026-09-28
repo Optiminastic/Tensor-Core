@@ -270,7 +270,7 @@ func (s *Server) observedProperties(c *gin.Context) {
 			continue
 		}
 		for _, line := range lines {
-			if line.SKU == nil || !skus[strings.ToLower(strings.TrimSpace(*line.SKU))] {
+			if !matchesProduct(line, product.Name, skus) {
 				continue
 			}
 			for _, p := range line.Properties {
@@ -306,6 +306,43 @@ func (s *Server) observedProperties(c *gin.Context) {
 		return out[i].Key < out[j].Key
 	})
 	c.JSON(http.StatusOK, out)
+}
+
+// matchesProduct decides whether an order line belongs to this product.
+//
+// By SKU first, which is the real answer and the only one the render path
+// uses.
+//
+// By product NAME as a fallback, because every SKU in this shop is newer than
+// the orders it should describe. SCWL's seven SKUs were added last week; not
+// one order carries them, so a SKU-only match offers an empty dropdown for
+// every product somebody is trying to configure - the exact moment the list
+// is needed.
+//
+// The name match is deliberately narrow. The storefront sells "Soulmate COMBO
+// with LIGHT - BLUE", so the colour suffix is cut and the rest must equal the
+// registry's name EXACTLY. A prefix match would be a trap: "Dual Name Plank"
+// is a prefix of "Dual Name Plank with Light", and DNP would quietly absorb
+// DNPWL's fields and offer somebody a mapping built from another product's
+// orders.
+func matchesProduct(line production.LineItem, productName string, skus map[string]bool) bool {
+	if line.SKU != nil && skus[strings.ToLower(strings.TrimSpace(*line.SKU))] {
+		return true
+	}
+	want := strings.TrimSpace(productName)
+	if want == "" {
+		return false
+	}
+	got := strings.TrimSpace(line.ProductName)
+	if strings.EqualFold(got, want) {
+		return true
+	}
+	// "<product> - <colour>". LastIndex, so a product whose own name contains
+	// " - " keeps it and only the trailing option is removed.
+	if i := strings.LastIndex(got, " - "); i > 0 {
+		return strings.EqualFold(strings.TrimSpace(got[:i]), want)
+	}
+	return false
 }
 
 // observedPropertyOrderLimit bounds how far back the editor looks.
