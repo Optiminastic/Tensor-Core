@@ -184,6 +184,10 @@ func TestSliceFileSurfacesBambuBuddysReason(t *testing.T) {
 // the same wall every fifteen minutes.
 func TestSliceJobReasonSurvivesARenamedField(t *testing.T) {
 	for name, body := range map[string]string{
+		// The one a live BambuBuddy sends. The others are kept because the
+		// field is undocumented and this one was found by reading a failed job
+		// off the running service, not from a spec.
+		"error_detail":  `{"job_id":27,"status":"failed","error_detail":"G-code conflicts detected"}`,
 		"error_message": `{"job_id":27,"status":"failed","error_message":"G-code conflicts detected"}`,
 		"error":         `{"job_id":27,"status":"failed","error":"G-code conflicts detected"}`,
 		"message":       `{"job_id":27,"status":"failed","message":"G-code conflicts detected"}`,

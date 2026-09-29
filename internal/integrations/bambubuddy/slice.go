@@ -95,16 +95,22 @@ type SliceJob struct {
 	// is told only that a slice failed - which is what happened to
 	// BATCH-1000598 on P2, a bed that can only ever go to a P2S and so retried
 	// into the same wall every fifteen minutes with nothing on screen to act on.
-	Error   string       `json:"error"`
-	Message string       `json:"message"`
-	Detail  string       `json:"detail"`
-	Result  *SliceResult `json:"result"`
+	//
+	// error_detail is the one a live BambuBuddy actually sends, confirmed
+	// against slice job 30: "G-code conflicts detected after slicing ... try
+	// moving the wipe tower further from other models". Guessing the name cost
+	// a round of "gave no reason" on a bed that had a perfectly good one.
+	ErrorDetail string       `json:"error_detail"`
+	Error       string       `json:"error"`
+	Message     string       `json:"message"`
+	Detail      string       `json:"detail"`
+	Result      *SliceResult `json:"result"`
 }
 
 // Reason is what to tell an operator when a slice fails, or empty when
 // BambuBuddy said nothing at all.
 func (j SliceJob) Reason() string {
-	for _, s := range []string{j.ErrorMessage, j.Error, j.Message, j.Detail} {
+	for _, s := range []string{j.ErrorDetail, j.ErrorMessage, j.Error, j.Message, j.Detail} {
 		if t := strings.TrimSpace(s); t != "" {
 			return t
 		}
