@@ -38,7 +38,7 @@ func TestPackRotatesToFit(t *testing.T) {
 	// (250x100) does not fit that leftover at 0 deg (needs 260 wide) but
 	// does turned 90 degrees (needs 110x260, which the 200x300 leftover has
 	// room for).
-	placements, rejected := Pack([]UnitFootprint{
+	placements, rejected := PackOn(plateWithNoTower(), []UnitFootprint{
 		{RefID: "a", XMM: 100, YMM: 290, ZMM: 20},
 		{RefID: "b", XMM: 250, YMM: 100, ZMM: 20},
 	})
@@ -68,7 +68,7 @@ func TestPackTwoUnitsShareBed(t *testing.T) {
 
 func TestPackFullBedRejectsRemainder(t *testing.T) {
 	// A near-max part consumes the whole bed; nothing else can fit.
-	placements, rejected := Pack([]UnitFootprint{
+	placements, rejected := PackOn(plateWithNoTower(), []UnitFootprint{
 		{RefID: "big", XMM: 290, YMM: 290, ZMM: 20},
 		{RefID: "extra", XMM: 100, YMM: 100, ZMM: 20},
 	})
@@ -121,7 +121,7 @@ func plank(ref string) UnitFootprint {
 // harder to lift off in order.
 func TestPackColumnKeepsOneColumnInOrder(t *testing.T) {
 	units := []UnitFootprint{plank("a"), plank("b"), plank("c"), plank("d")}
-	placements, rejected := PackColumn(units)
+	placements, rejected := PackColumnOn(plateWithNoTower(), units)
 	if len(rejected) != 0 {
 		t.Fatalf("rejected %d of 4 planks; they fit in 200 x 230 of a 310 x 300 envelope", len(rejected))
 	}
@@ -177,5 +177,102 @@ func TestPackColumnRejectsAnOverTallUnit(t *testing.T) {
 	tall.ZMM = BedZMM + 1
 	if _, rejected := PackColumn([]UnitFootprint{tall}); len(rejected) != 1 {
 		t.Error("a unit taller than the bed must be rejected")
+	}
+}
+
+// plateWithNoTower is the bed these geometry cases were written against: the
+// whole envelope, with nothing reserved.
+//
+// A single-colour plate really does get this, and stating it here keeps each
+// case about the thing it tests - rotation, ordering, rejection - rather than
+// about how much room a prime tower takes.
+func plateWithNoTower() Bed {
+	b := DefaultBed
+	b.WipeTowerMM = NoWipeTower
+	return b
+}
+
+// The band is the whole point: a two-colour plate has a tower, and the tower
+// has to stand somewhere. The models must leave it a rectangle - beside them or
+// behind them, whichever the bed affords, but a whole one.
+func TestPackLeavesTheWipeTowerItsBand(t *testing.T) {
+	planks := []UnitFootprint{
+		{RefID: "a", XMM: 200, YMM: 50, ZMM: 40},
+		{RefID: "b", XMM: 200, YMM: 50, ZMM: 40},
+		{RefID: "c", XMM: 200, YMM: 50, ZMM: 40},
+	}
+	placements, rejected := PackOn(BedP2S, planks)
+	if len(placements) != 3 || len(rejected) != 0 {
+		t.Fatalf("placed=%d rejected=%d, want 3/0 - a P2S bed of three must still pack",
+			len(placements), len(rejected))
+	}
+	bed := BedP2S.Normalised()
+	ex, ey := extentOf(placements, planks)
+	spareX := bed.XMM - 2*bed.EdgeMarginMM - ex
+	spareY := bed.YMM - 2*bed.EdgeMarginMM - ey
+	if spareX < WipeTowerMM-0.001 && spareY < WipeTowerMM-0.001 {
+		t.Errorf("plate is %.0fx%.0f, leaving %.0fmm beside and %.0fmm behind - "+
+			"the tower needs %.0f on one of them", ex, ey, spareX, spareY, WipeTowerMM)
+	}
+}
+
+// extentOf is how much of the bed the placed models actually cover.
+func extentOf(placements []Placement, units []UnitFootprint) (x, y float64) {
+	for i, p := range placements {
+		w, d := units[i].XMM, units[i].YMM
+		if p.Rotated {
+			w, d = d, w
+		}
+		if end := p.XOffsetMM + w; end > x {
+			x = end
+		}
+		if end := p.YOffsetMM + d; end > y {
+			y = end
+		}
+	}
+	return x - EdgeMarginMM, y - EdgeMarginMM
+}
+
+// Three planks at 15mm apart need 180mm and the band leaves 176mm. Dropping the
+// third would leave a bed of two - below the floor, so it would never print at
+// all - and 10mm is still the ordinary clearance between parts everywhere else.
+func TestPackColumnTightensTheGapRatherThanDropAPlank(t *testing.T) {
+	planks := []UnitFootprint{
+		{RefID: "a", XMM: 200, YMM: 50, ZMM: 40},
+		{RefID: "b", XMM: 200, YMM: 50, ZMM: 40},
+		{RefID: "c", XMM: 200, YMM: 50, ZMM: 40},
+	}
+	placements, rejected := PackColumnOn(BedP2S, planks)
+	if len(placements) != 3 || len(rejected) != 0 {
+		t.Fatalf("placed=%d rejected=%d, want all three in one column", len(placements), len(rejected))
+	}
+	if gap := placements[1].YOffsetMM - (placements[0].YOffsetMM + 50); gap != GapMM {
+		t.Errorf("gap = %.1fmm, want it tightened to %.0f so the column clears the band", gap, GapMM)
+	}
+}
+
+// The wide gap is what the shop asked for and must survive wherever it fits.
+func TestPackColumnKeepsTheWideGapWhenThereIsRoom(t *testing.T) {
+	planks := []UnitFootprint{
+		{RefID: "a", XMM: 200, YMM: 50, ZMM: 40},
+		{RefID: "b", XMM: 200, YMM: 50, ZMM: 40},
+	}
+	placements, _ := PackColumnOn(BedP2S, planks)
+	if len(placements) != 2 {
+		t.Fatalf("placed=%d, want 2", len(placements))
+	}
+	if gap := placements[1].YOffsetMM - (placements[0].YOffsetMM + 50); gap != ColumnGapMM {
+		t.Errorf("gap = %.1fmm, want the full %.0f - two planks leave room for it", gap, ColumnGapMM)
+	}
+}
+
+// A tower band is a reservation, not a way to end up with no bed at all.
+func TestModelDepthNeverCollapsesTheBed(t *testing.T) {
+	silly := Bed{XMM: 256, YMM: 256, ZMM: 256, WipeTowerMM: 10000}.Normalised()
+	if got := silly.ModelYMM(); got != 236 {
+		t.Errorf("model depth = %.1f, want the whole usable bed back when the band is nonsense", got)
+	}
+	if got := BedP2S.Normalised().ModelYMM(); got != 176 {
+		t.Errorf("P2S model depth = %.1f, want 236 less the %.0fmm band", got, WipeTowerMM)
 	}
 }

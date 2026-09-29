@@ -484,7 +484,7 @@ func agingJob(wait time.Duration) PlanJob {
 func TestShouldCreateBatchAgingHoldsBeforeThresholdCrosses(t *testing.T) {
 	// At 20min the bar has only relaxed to ~77.67%, still above this job's
 	// 75.84% - must stay held.
-	batches, unb, held := Plan([]PlanJob{agingJob(20 * time.Minute)}, testNow, realisticAgingGate)
+	batches, unb, held := PlanWithNester([]PlanJob{agingJob(20 * time.Minute)}, testNow, realisticAgingGate, nesterWithoutTower)
 	if len(unb) != 0 {
 		t.Fatalf("unexpected unbatchable: %+v", unb)
 	}
@@ -499,7 +499,7 @@ func TestShouldCreateBatchAgingHoldsBeforeThresholdCrosses(t *testing.T) {
 func TestShouldCreateBatchAgingAcceptsOnceThresholdCrosses(t *testing.T) {
 	// At 40min the bar has relaxed to ~75.33%, at or below this job's
 	// 75.84% - must be created despite being under the 80% target.
-	batches, unb, held := Plan([]PlanJob{agingJob(40 * time.Minute)}, testNow, realisticAgingGate)
+	batches, unb, held := PlanWithNester([]PlanJob{agingJob(40 * time.Minute)}, testNow, realisticAgingGate, nesterWithoutTower)
 	if len(unb) != 0 {
 		t.Fatalf("unexpected unbatchable: %+v", unb)
 	}
@@ -547,7 +547,7 @@ func TestShouldCreateBatchAgingDisabledWhenWindowZero(t *testing.T) {
 	// agingJob must stay held indefinitely (until MaxWait), matching
 	// today's pre-aging behaviour exactly, since effectiveUtilisationThreshold
 	// returns the unchanged 80% target when aging is disabled.
-	_, _, held := Plan([]PlanJob{agingJob(90 * time.Minute)}, testNow, realisticGate)
+	_, _, held := PlanWithNester([]PlanJob{agingJob(90 * time.Minute)}, testNow, realisticGate, nesterWithoutTower)
 	if len(held) != 1 {
 		t.Fatalf("held = %d, want 1 (aging disabled, bar stays at 80%% target)", len(held))
 	}
@@ -589,7 +589,7 @@ func TestFillBedSingleLargeJobClearsTarget(t *testing.T) {
 	big := PlanJob{ID: "big", JobNumber: "JOB-big", Quantity: 1,
 		Footprint: bedpack.UnitFootprint{XMM: 300, YMM: 290, ZMM: 20}}
 
-	batches, unb := packJobs([]PlanJob{big}, strategyFCFS, DefaultNester)
+	batches, unb := packJobs([]PlanJob{big}, strategyFCFS, nesterWithoutTower)
 	if len(unb) != 0 {
 		t.Fatalf("unexpected unbatchable: %+v", unb)
 	}
@@ -618,7 +618,7 @@ func TestFillBedPullsInLaterSmallerJob(t *testing.T) {
 	small := PlanJob{ID: "small", JobNumber: "JOB-small", Quantity: 1,
 		Footprint: bedpack.UnitFootprint{XMM: 85, YMM: 220, ZMM: 20}}
 
-	batches, unb := packJobs([]PlanJob{big, medium, small}, strategyFCFS, DefaultNester)
+	batches, unb := packJobs([]PlanJob{big, medium, small}, strategyFCFS, nesterWithoutTower)
 	if len(unb) != 0 {
 		t.Fatalf("unexpected unbatchable: %+v", unb)
 	}
@@ -769,7 +769,7 @@ func TestFillBedPrefersSameCustomerWhenSpaceLimited(t *testing.T) {
 	same.ShopifyCustomerID = &cust1
 	same.Footprint = bedpack.UnitFootprint{XMM: 85, YMM: 220, ZMM: 20}
 
-	bedJobs, _, _ := fillBed([]PlanJob{anchor, other, same}, DefaultNester)
+	bedJobs, _, _ := fillBed([]PlanJob{anchor, other, same}, nesterWithoutTower)
 	ids := jobIDSet(bedJobs)
 	if !ids["anchor"] {
 		t.Fatalf("expected anchor placed, bed = %+v", bedJobs)
@@ -798,7 +798,7 @@ func TestFillBedAffinityNeverOverridesPhysicalFit(t *testing.T) {
 	fitsFine := smallJob("fits", "PLA") // different customer, fits the leftover strip
 	fitsFine.Footprint = bedpack.UnitFootprint{XMM: 85, YMM: 220, ZMM: 20}
 
-	bedJobs, _, remaining := fillBed([]PlanJob{anchor, tooBig, fitsFine}, DefaultNester)
+	bedJobs, _, remaining := fillBed([]PlanJob{anchor, tooBig, fitsFine}, nesterWithoutTower)
 	ids := jobIDSet(bedJobs)
 	if ids["toobig"] {
 		t.Fatalf("same-customer job that doesn't fit was placed anyway, bed = %+v", bedJobs)
@@ -1067,4 +1067,19 @@ func TestIdleOverrideIsBoundedByIdleMachineCount(t *testing.T) {
 	if len(heldOut) != len(materials)-2 {
 		t.Errorf("held %d partitions, want %d - the remainder should keep waiting for compatible volume", len(heldOut), len(materials)-2)
 	}
+}
+
+// nesterWithoutTower packs on the whole bed, with nothing kept back for a prime
+// tower.
+//
+// The optimiser path these cases exercise is the general one - an arbitrary
+// catalogue, single-filament plates included - and its fixtures are sized to
+// fill the envelope exactly, which is the point of several of them. Saying so
+// here keeps them about the optimiser's decisions rather than about how much
+// room a two-colour plate gives up; the shop's own path is colour batching, and
+// bedpack's tests cover the band.
+var nesterWithoutTower Nester = func(units []bedpack.UnitFootprint) ([]bedpack.Placement, []bedpack.UnitFootprint) {
+	bed := bedpack.DefaultBed
+	bed.WipeTowerMM = bedpack.NoWipeTower
+	return bedpack.PackOn(bed, units)
 }

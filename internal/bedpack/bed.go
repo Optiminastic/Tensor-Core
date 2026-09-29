@@ -27,6 +27,18 @@ type Bed struct {
 	GapMM        float64
 	EdgeMarginMM float64
 	ColumnGapMM  float64
+	// WipeTowerMM is the depth of the band kept clear at the back of the bed
+	// for the prime tower. Every plate here prints in two filaments - a white
+	// body and a coloured lettering pass - so the slicer builds a tower on
+	// every one of them, and it has to stand somewhere.
+	//
+	// Nothing told the packer that. Models were packed to the bed edge, the
+	// tower went where the preset put it, and BambuBuddy answered "G-code
+	// conflicts detected after slicing ... try moving the wipe tower further
+	// from other models" - BATCH-1002076 locally, then BATCH-1000598 on P2 in
+	// production, a three-unit bed that can only ever go to a P2S and so
+	// retried into the same wall every fifteen minutes.
+	WipeTowerMM float64
 }
 
 // DefaultBed is the bed this package assumed before beds were values: the
@@ -34,6 +46,7 @@ type Bed struct {
 var DefaultBed = Bed{
 	XMM: BedXMM, YMM: BedYMM, ZMM: BedZMM,
 	GapMM: GapMM, EdgeMarginMM: EdgeMarginMM, ColumnGapMM: ColumnGapMM,
+	WipeTowerMM: WipeTowerMM,
 }
 
 // Normalised fills in anything the caller left at zero from DefaultBed.
@@ -61,7 +74,37 @@ func (b Bed) Normalised() Bed {
 	if b.ColumnGapMM <= 0 {
 		b.ColumnGapMM = DefaultBed.ColumnGapMM
 	}
+	// Filled from the default like every other clearance, because a partly
+	// written Bed silently losing the reservation is the exact failure this
+	// field exists to prevent. A plate that genuinely needs no tower says so
+	// with NoWipeTower rather than by leaving the field alone.
+	switch {
+	case b.WipeTowerMM == 0:
+		b.WipeTowerMM = DefaultBed.WipeTowerMM
+	case b.WipeTowerMM < 0:
+		b.WipeTowerMM = 0
+	}
 	return b
+}
+
+// NoWipeTower is the band for a plate that prints in a single filament: none.
+//
+// A value rather than 0, because 0 means "unset" for every other clearance on
+// Bed and is filled in from the default.
+const NoWipeTower = -1.0
+
+// ModelYMM is how deep the bed is for MODELS: the build area, less the edge
+// margins, less the band kept for the prime tower.
+//
+// Never negative, and never the whole bed: a tower band wider than the bed
+// would silently pack nothing at all, and "no bed" is not what a misconfigured
+// reservation means.
+func (b Bed) ModelYMM() float64 {
+	usable := b.YMM - 2*b.EdgeMarginMM
+	if b.WipeTowerMM <= 0 || b.WipeTowerMM >= usable {
+		return usable
+	}
+	return usable - b.WipeTowerMM
 }
 
 // AreaMM2 is the raw build area, the denominator for utilisation.

@@ -16,6 +16,11 @@ const (
 	BedZMM       = 300.0
 	GapMM        = 10.0
 	EdgeMarginMM = 10.0
+	// WipeTowerMM is the depth kept clear at the back of every bed for the
+	// prime tower. 60mm is Bambu Studio's default prime-tower width; a plate
+	// that leaves less than that has nowhere for the tower to stand, and the
+	// slice fails after the upload rather than before it.
+	WipeTowerMM = 60.0
 )
 
 // bedAreaMM2 is the raw bed area used for the utilisation percentage - the
@@ -61,11 +66,40 @@ func Pack(units []UnitFootprint) (placements []Placement, rejected []UnitFootpri
 // PackOn is Pack on a named bed - see Bed.
 func PackOn(bed Bed, units []UnitFootprint) (placements []Placement, rejected []UnitFootprint) {
 	bed = bed.Normalised()
+	// The tower needs a rectangle of its own somewhere on the bed, and which
+	// side it comes off costs different amounts on different beds. Taking it
+	// off the width leaves the full depth, which is what lets five planks
+	// stand in one column on an H2C; taking it off the depth is the only
+	// option on a P2S, where a 200mm plank leaves 36mm beside it.
+	//
+	// So the narrow envelope is tried first and the shallow one only if
+	// something did not fit. Trying, rather than reasoning about the shapes:
+	// the packer rotates parts, and which envelope suits a set is a question
+	// about the set, not about the bed.
+	if bed.WipeTowerMM > 0 {
+		narrow := freeRect{bed.EdgeMarginMM, bed.EdgeMarginMM,
+			bed.XMM - 2*bed.EdgeMarginMM - bed.WipeTowerMM, bed.YMM - 2*bed.EdgeMarginMM}
+		shallow := freeRect{bed.EdgeMarginMM, bed.EdgeMarginMM,
+			bed.XMM - 2*bed.EdgeMarginMM, bed.ModelYMM()}
+		if p, r := packWithin(bed, narrow, units); len(r) == 0 {
+			return p, r
+		} else if ps, rs := packWithin(bed, shallow, units); len(rs) <= len(r) {
+			return ps, rs
+		} else {
+			return p, r
+		}
+	}
 	free := []freeRect{{
 		bed.EdgeMarginMM, bed.EdgeMarginMM,
 		bed.XMM - 2*bed.EdgeMarginMM, bed.YMM - 2*bed.EdgeMarginMM,
 	}}
 
+	return packWithin(bed, free[0], units)
+}
+
+// packWithin is PackOn's loop, run against one placement envelope.
+func packWithin(bed Bed, envelope freeRect, units []UnitFootprint) (placements []Placement, rejected []UnitFootprint) {
+	free := []freeRect{envelope}
 	for _, u := range units {
 		if u.ZMM > bed.ZMM {
 			rejected = append(rejected, u)
@@ -247,8 +281,17 @@ func PackColumn(units []UnitFootprint) (placements []Placement, rejected []UnitF
 func PackColumnOn(bed Bed, units []UnitFootprint) (placements []Placement, rejected []UnitFootprint) {
 	bed = bed.Normalised()
 	y := bed.EdgeMarginMM
-	limitY := bed.YMM - bed.EdgeMarginMM
+	// A column is one plank wide, so the tower usually fits beside it - and
+	// beside is free, where behind costs the wide gap between planks. Only a
+	// bed too narrow for both pays in depth.
 	limitX := bed.XMM - bed.EdgeMarginMM
+	limitY := bed.YMM - bed.EdgeMarginMM
+	if bed.WipeTowerMM > 0 && !fitsBesideTower(bed, units) {
+		limitY = bed.EdgeMarginMM + bed.ModelYMM()
+	} else if bed.WipeTowerMM > 0 {
+		limitX -= bed.WipeTowerMM
+	}
+	gap := columnGapFor(bed, limitY-bed.EdgeMarginMM, units)
 
 	for _, u := range units {
 		if u.ZMM > bed.ZMM || bed.EdgeMarginMM+u.XMM > limitX || y+u.YMM > limitY {
@@ -258,7 +301,41 @@ func PackColumnOn(bed Bed, units []UnitFootprint) (placements []Placement, rejec
 		placements = append(placements, Placement{
 			RefID: u.RefID, XOffsetMM: bed.EdgeMarginMM, YOffsetMM: y, Rotated: false,
 		})
-		y += u.YMM + bed.ColumnGapMM
+		y += u.YMM + gap
 	}
 	return placements, rejected
+}
+
+// columnGapFor is the clearance between planks in a single column.
+//
+// ColumnGapMM by default - wide enough to get fingers and a scraper between two
+// finished planks, which is what the shop asked for. Tightened to the ordinary
+// part gap only when the wide one would push the column past the tower band:
+// three planks on a P2S need 180mm at 15mm apart and 170mm at 10mm, and the
+// band leaves 176mm. Rejecting the third plank instead would leave a bed of two
+// - below the floor, so it would never print at all - over 10mm of finger room.
+func columnGapFor(bed Bed, depthAvailable float64, units []UnitFootprint) float64 {
+	if len(units) < 2 {
+		return bed.ColumnGapMM
+	}
+	depth := 0.0
+	for _, u := range units {
+		depth += u.YMM
+	}
+	if depth+bed.ColumnGapMM*float64(len(units)-1) <= depthAvailable {
+		return bed.ColumnGapMM
+	}
+	return bed.GapMM
+}
+
+// fitsBesideTower reports whether a single column of these units leaves the
+// tower room beside it, rather than behind it.
+func fitsBesideTower(bed Bed, units []UnitFootprint) bool {
+	width := bed.XMM - 2*bed.EdgeMarginMM - bed.WipeTowerMM
+	for _, u := range units {
+		if u.XMM > width {
+			return false
+		}
+	}
+	return true
 }

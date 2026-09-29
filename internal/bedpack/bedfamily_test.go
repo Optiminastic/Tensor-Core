@@ -55,12 +55,15 @@ func TestEachClassHoldsTheBedItIsSent(t *testing.T) {
 // plate could not print, and BambuBuddy answered "G-code conflicts detected
 // after slicing" because there was nowhere left for the wipe tower.
 func TestAPlatePackedForItsOwnClassFitsThatClass(t *testing.T) {
-	// Packed for the A2L, measured against the P2S it must never be sent to.
-	wrong, _ := PackOn(BedForFamily("A2L"), planks(4))
+	// Packed for the biggest class, measured against the smallest it must
+	// never be sent to. Five planks, not four: once a band is kept for the
+	// wipe tower the packer turns four planks into a 240x210 grid, which does
+	// fit a P2S - so four no longer demonstrates anything and five does.
+	wrong, _ := PackOn(BedForFamily("H2C"), planks(5))
 	wx, wy := extent(wrong)
 	p2s := BedForFamily("P2S")
 	if wx <= p2s.XMM && wy <= p2s.YMM {
-		t.Fatalf("the A2L packing came out %.0fx%.0f, which fits a P2S - "+
+		t.Fatalf("the H2C packing came out %.0fx%.0f, which fits a P2S - "+
 			"this test no longer guards anything", wx, wy)
 	}
 

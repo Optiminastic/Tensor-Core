@@ -39,7 +39,7 @@ func TestPackIsOrderSensitive(t *testing.T) {
 	sort.SliceStable(sorted, func(a, b int) bool {
 		return sorted[a].XMM*sorted[a].YMM > sorted[b].XMM*sorted[b].YMM
 	})
-	if _, rejected := Pack(sorted); len(rejected) > 0 {
+	if _, rejected := PackOn(plateWithNoTower(), sorted); len(rejected) > 0 {
 		t.Fatalf("largest-first packing rejected %d of %d units; this bed demonstrably fits",
 			len(rejected), len(sorted))
 	}
@@ -62,13 +62,13 @@ func TestPackLargestFirstNeverDoesWorse(t *testing.T) {
 	}
 
 	for i, given := range cases {
-		asGiven, _ := Pack(append([]UnitFootprint(nil), given...))
+		asGiven, _ := PackOn(plateWithNoTower(), append([]UnitFootprint(nil), given...))
 
 		sorted := append([]UnitFootprint(nil), given...)
 		sort.SliceStable(sorted, func(a, b int) bool {
 			return sorted[a].XMM*sorted[a].YMM > sorted[b].XMM*sorted[b].YMM
 		})
-		largestFirst, _ := Pack(sorted)
+		largestFirst, _ := PackOn(plateWithNoTower(), sorted)
 
 		if len(largestFirst) < len(asGiven) {
 			t.Errorf("case %d: largest-first placed %d units, arbitrary order placed %d",
