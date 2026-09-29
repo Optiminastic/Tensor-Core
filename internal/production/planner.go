@@ -111,6 +111,11 @@ type PlannedBatch struct {
 	TotalFilamentGrams          float64
 	BedUtilisationPercent       float64
 	PackingStrategy             string
+	// MachineFamily is the printer class this bed was laid out for, and the
+	// only class that can print it - the plate's offsets are fixed and the
+	// slicer is told not to rearrange them. Empty from the optimiser, which
+	// still packs on one bed for every machine.
+	MachineFamily string
 }
 
 // Unbatchable is a job that could not be placed, with the reason.

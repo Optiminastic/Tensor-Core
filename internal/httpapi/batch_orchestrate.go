@@ -272,6 +272,10 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 				TotalFilamentGrams:          &p.TotalFilamentGrams,
 				BedUtilizationPercent:       &p.BedUtilisationPercent,
 				PackingStrategy:             &p.PackingStrategy,
+				// The class this plate was laid out for, and the only class
+				// that can print it: the offsets are fixed and the slicer is
+				// told not to rearrange them.
+				MachineFamily: familyPtr(p.MachineFamily),
 			})
 			if err != nil {
 				return err
@@ -885,4 +889,16 @@ func (s *Server) worthReplanning(
 			newScore-currentScore, minGain, s.cfg.BatchReplanMinImprovementPercent, currentScore)
 	}
 	return true, fmt.Sprintf("improvement %.2f clears the %.2f threshold", newScore-currentScore, minGain)
+}
+
+// familyPtr carries a planned bed's machine class to the column, or nothing.
+//
+// Empty from the optimiser, which still packs every bed on one size - so a
+// batch it built records no class and the dispatcher treats it as it always
+// did, rather than being told a class that was never true.
+func familyPtr(family string) *string {
+	if strings.TrimSpace(family) == "" {
+		return nil
+	}
+	return &family
 }

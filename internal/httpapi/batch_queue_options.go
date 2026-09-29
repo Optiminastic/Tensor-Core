@@ -230,7 +230,8 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	// to the operator's eye. The dialog still opens, still shows every machine
 	// and still lets any of them be chosen - what changes is that the obvious
 	// one is already selected, with its spools already bound.
-	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots), bedColoursOf(out.Colours))
+	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots),
+		bedColoursOf(out.Colours), deref(batch.MachineFamily))
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the fleet.")
 		return
@@ -292,9 +293,11 @@ func plateSlotsOf(slots []queueSlot) []meshio.Slot {
 // people to do different things - map a colour, load a spool, or simply wait -
 // so the note names whichever one accounts for the fleet.
 func noPrinterNote(options []machineOption) string {
-	var unmapped, loadable int
+	var unmapped, loadable, wrongClass int
 	for _, o := range options {
 		switch {
+		case strings.Contains(o.Refusal, "laid out for"):
+			wrongClass++
 		case strings.Contains(o.Refusal, "confirmed as"):
 			unmapped++
 		case strings.Contains(o.Refusal, "does not hold"):
@@ -302,6 +305,13 @@ func noPrinterNote(options []machineOption) string {
 		}
 	}
 	switch {
+	// Said first when it is the whole story. A bed laid out for one class
+	// cannot print on another whatever spools are loaded, so telling somebody
+	// to map a colour would send them to fix the wrong thing - and the plate
+	// would still have nowhere to go.
+	case wrongClass > 0 && unmapped == 0 && loadable == 0:
+		return "Every printer that could take this bed is the wrong size for it. " +
+			"It waits for one of its own class to free up."
 	case unmapped > 0:
 		return "No spool has been confirmed as one of this bed's colours. " +
 			"Map it under Inventory, then queue this bed."

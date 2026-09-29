@@ -201,7 +201,7 @@ func (s *Server) chooseTargetFor(ctx context.Context, batch gen.Batch) (queueTar
 			"Could not read the batch's jobs.")
 	}
 	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots),
-		bedColoursOf(s.queueColoursFor(ctx, jobs)))
+		bedColoursOf(s.queueColoursFor(ctx, jobs)), deref(batch.MachineFamily))
 	if err != nil {
 		return queueTarget{}, statusErr(http.StatusBadGateway, "Could not read the fleet.")
 	}

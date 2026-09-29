@@ -75,9 +75,9 @@ type queuePlan struct {
 // take this" has to be able to say why, thirteen times over, rather than
 // shrugging.
 func (s *Server) planQueueForBatch(
-	ctx context.Context, slots []meshio.Slot, bed bedColours,
+	ctx context.Context, slots []meshio.Slot, bed bedColours, family string,
 ) (queuePlan, []machineOption, error) {
-	options, err := s.rankMachinesForPlate(ctx, slots, bed)
+	options, err := s.rankMachinesForPlate(ctx, slots, bed, family)
 	if err != nil {
 		return queuePlan{}, nil, err
 	}
@@ -95,7 +95,7 @@ func (s *Server) planQueueForBatch(
 
 // rankMachinesForPlate weighs every printer in the fleet against this plate.
 func (s *Server) rankMachinesForPlate(
-	ctx context.Context, slots []meshio.Slot, bed bedColours,
+	ctx context.Context, slots []meshio.Slot, bed bedColours, family string,
 ) ([]machineOption, error) {
 	log := obs.FromContext(ctx)
 
@@ -147,6 +147,7 @@ func (s *Server) rankMachinesForPlate(
 			Load: load, InFlight: inFlight, Sliceable: sliceable,
 			PrinterIDs: printerIDs, Now: now,
 			WaitingCap: maxBedsWaitingPerMachine,
+			BedFamily:  family,
 		}))
 	}
 	return out, nil
@@ -173,6 +174,10 @@ type weighInputs struct {
 	// WaitingCap is how many beds may be waiting on one printer before it
 	// stops being offered another. See maxBedsWaitingPerMachine.
 	WaitingCap int
+	// BedFamily is the printer class this plate was laid out for, and the only
+	// one that can print it. Empty means a bed planned before classes existed
+	// or built by the optimiser, which is offered to any machine as before.
+	BedFamily string
 }
 
 // maxBedsWaitingPerMachine is how many beds may sit waiting on one printer.
@@ -254,6 +259,18 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	if bindErr != nil {
 		opt.Refusal = bindErr.Error()
 		return opt
+	}
+
+	// The plate was laid out on one class's bed and the slicer is told not to
+	// rearrange it, so this is a fit, not a preference: four planks packed on
+	// an A2L's 330x320 come out 270x270 and a P2S is 256x256. Checked after
+	// the health refusals so a printer that is off still says it is off.
+	if want := strings.TrimSpace(in.BedFamily); want != "" {
+		got := strings.TrimSpace(deref(r.ProfileFamily))
+		if !strings.EqualFold(got, want) {
+			opt.Refusal = fmt.Sprintf("this bed is laid out for a %s", want)
+			return opt
+		}
 	}
 
 	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)

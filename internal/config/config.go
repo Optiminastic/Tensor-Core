@@ -165,6 +165,13 @@ type Settings struct {
 	// most the packer could fit.
 	BatchMaxUnitsPerBed int
 
+	// BatchMinUnitsPerBed is how empty a bed may be and still lock.
+	//
+	// A plate with one plank costs the same machine-hour as a plate with five,
+	// so a bed under this waits for company - except one carrying a priority
+	// job, which locks alone.
+	BatchMinUnitsPerBed int
+
 	// ModelGenConcurrency is how many personalised models render at once.
 	// Zero uses the worker's default. Each render is a single-threaded OpenSCAD
 	// process, so this is effectively "how many cores may renders use".
@@ -459,6 +466,7 @@ func Load() Settings {
 		ArchiveReconcileLimit:            intEnvOr("ARCHIVE_RECONCILE_LIMIT", 0),
 		BatchStrategy:                    envOr("BATCH_STRATEGY", ""),
 		BatchMaxUnitsPerBed:              intEnvOr("BATCH_MAX_UNITS_PER_BED", 0),
+		BatchMinUnitsPerBed:              intEnvOr("BATCH_MIN_UNITS_PER_BED", 0),
 		BambuBuddyWebhookSecret:          envOr("BAMBUBUDDY_WEBHOOK_SECRET", ""),
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),

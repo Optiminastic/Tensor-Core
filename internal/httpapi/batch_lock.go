@@ -31,18 +31,36 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// bedUnitCap is how many products may share one bed.
+// bedUnitCap is the fullest a bed gets.
 //
 // One number for the whole fleet, and one source of truth, so "full" means the
-// same thing to the planner, the dispatcher and the add-jobs endpoint. Deriving
-// it from the machine class was tried and reverted: a plate is built before
-// anything knows which printer will take it, so a bed sized for one class is a
-// bed the others cannot print.
+// same thing to the planner, the dispatcher and the add-jobs endpoint.
+//
+// The class is no longer independent of this - a bed of five is laid out on an
+// H2C's bed, four on an A2L's, three on a P2S's, because the plate's offsets
+// are fixed and a plate laid out for one class cannot print on a smaller one.
+// But the COUNT decides the class rather than the other way round, which is
+// what the reverted attempt had backwards: it sized the bed from live fleet
+// state, so the contents of a plate depended on which printer happened to be
+// free.
 func (s *Server) bedUnitCap() int {
 	if s.cfg.BatchMaxUnitsPerBed > 0 {
 		return s.cfg.BatchMaxUnitsPerBed
 	}
-	return production.MaxColourBatchUnits
+	return production.MaxBedUnits
+}
+
+// bedUnitFloor is how empty a bed may be and still be worth printing.
+//
+// A plate with one plank on it costs the same machine-hour as a plate with
+// five, so a bed under this waits for company. The exception is a bed carrying
+// a priority job: somebody paid to jump the queue, and waiting for company
+// would spend that money on nothing.
+func (s *Server) bedUnitFloor() int {
+	if s.cfg.BatchMinUnitsPerBed > 0 {
+		return s.cfg.BatchMinUnitsPerBed
+	}
+	return production.MinBedUnits
 }
 
 // unitsOnBed counts the products on a bed, quantity included: one job for three
@@ -150,7 +168,10 @@ func (s *Server) readyToLock(ctx context.Context, b gen.Batch) bool {
 			"batch", b.BatchNumber, "error", err)
 		return true
 	}
-	return unitsOf(jobs) >= s.bedUnitCap() || carriesPriority(jobs)
+	// The FLOOR, not the cap. Three, four and five are all real beds - they
+	// simply go to different classes of printer - so holding a bed of three
+	// until it reaches five would be holding a bed that is ready.
+	return unitsOf(jobs) >= s.bedUnitFloor() || carriesPriority(jobs)
 }
 
 // carriesPriority reports whether any plank on a bed was expedited.

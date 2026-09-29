@@ -20,6 +20,7 @@ type Batch struct {
 	MergedFileID                *uuid.UUID
 	PreviewFileID               *uuid.UUID
 	UnitsPerBed                 *int32
+	MachineFamily               *string
 	TotalPrintTimeMinutes       *int32
 	EffectiveTimePerUnitMinutes pgtype.Numeric
 	TotalFilamentGrams          pgtype.Numeric

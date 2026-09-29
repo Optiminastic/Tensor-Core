@@ -359,3 +359,88 @@ func TestGroupByColourRefusesAJobWithNoFootprint(t *testing.T) {
 		t.Errorf("bed holds %d units, want 1 - an unmeasurable job must not take a place", n)
 	}
 }
+
+// A bed is laid out on the bed of the class it will print on.
+//
+// The whole point. A plate is packed at fixed offsets and the slicer is told
+// not to rearrange it, so the class has to be settled before anything is
+// placed. Five goes to an H2C, four to an A2L, three to a P2S.
+func TestABedIsPackedForTheClassItsSizeRoutesTo(t *testing.T) {
+	for _, c := range []struct {
+		units int
+		want  string
+	}{
+		{5, "H2C"}, {4, "A2L"}, {3, "P2S"},
+	} {
+		jobs := make([]PlanJob, 0, c.units)
+		for i := 0; i < c.units; i++ {
+			jobs = append(jobs, plankJob(string(rune('a'+i)), "RED"))
+		}
+		batches, unb := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
+		if len(unb) > 0 {
+			t.Fatalf("%d planks: %d unbatchable", c.units, len(unb))
+		}
+		if len(batches) != 1 {
+			t.Fatalf("%d planks made %d beds, want 1", c.units, len(batches))
+		}
+		if got := batches[0].MachineFamily; got != c.want {
+			t.Errorf("%d units -> %s, want %s", c.units, got, c.want)
+		}
+		if got := batches[0].UnitsPerBed; got != c.units {
+			t.Errorf("%d units -> UnitsPerBed %d", c.units, got)
+		}
+	}
+}
+
+// The plate a bed produces must fit the bed of the class it is routed to.
+//
+// This is the failure that started it: every plate was laid out on the A2L's
+// 330x320, four planks came out 270x270, and the five P2S machines are
+// 256x256. A bed reached P4 and BambuBuddy answered "G-code conflicts detected
+// after slicing ... try moving the wipe tower further from other models".
+func TestEveryBedsPlateFitsTheMachineItIsRoutedTo(t *testing.T) {
+	jobs := make([]PlanJob, 0, 12)
+	for i := 0; i < 12; i++ {
+		jobs = append(jobs, plankJob(string(rune('a'+i)), "RED"))
+	}
+	batches, _ := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
+	if len(batches) == 0 {
+		t.Fatal("no beds")
+	}
+
+	for _, b := range batches {
+		bed := bedpack.BedForFamily(b.MachineFamily)
+		var maxX, maxY float64
+		for i, p := range b.Placements {
+			w, h := b.Jobs[0].Footprint.XMM, b.Jobs[0].Footprint.YMM
+			if p.Rotated {
+				w, h = h, w
+			}
+			if p.XOffsetMM+w > maxX {
+				maxX = p.XOffsetMM + w
+			}
+			if p.YOffsetMM+h > maxY {
+				maxY = p.YOffsetMM + h
+			}
+			_ = i
+		}
+		if maxX > bed.XMM || maxY > bed.YMM {
+			t.Errorf("a %d-unit bed routed to %s is %.0fx%.0f, over its %.0fx%.0f bed",
+				b.UnitsPerBed, b.MachineFamily, maxX, maxY, bed.XMM, bed.YMM)
+		}
+	}
+}
+
+// No bed exceeds the shop's maximum.
+func TestNoBedHoldsMoreThanTheMaximum(t *testing.T) {
+	jobs := make([]PlanJob, 0, 11)
+	for i := 0; i < 11; i++ {
+		jobs = append(jobs, plankJob(string(rune('a'+i)), "BLUE"))
+	}
+	batches, _ := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
+	for _, b := range batches {
+		if b.UnitsPerBed > MaxBedUnits {
+			t.Errorf("a bed holds %d units, over the maximum of %d", b.UnitsPerBed, MaxBedUnits)
+		}
+	}
+}

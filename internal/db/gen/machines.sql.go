@@ -138,7 +138,7 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 }
 
 const listAllBatchesForFleetMachine = `-- name: ListAllBatchesForFleetMachine :many
-SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.machine_family, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
 WHERE m.id = $1
@@ -185,6 +185,7 @@ func (q *Queries) ListAllBatchesForFleetMachine(ctx context.Context, arg ListAll
 			&i.MergedFileID,
 			&i.PreviewFileID,
 			&i.UnitsPerBed,
+			&i.MachineFamily,
 			&i.TotalPrintTimeMinutes,
 			&i.EffectiveTimePerUnitMinutes,
 			&i.TotalFilamentGrams,
@@ -391,7 +392,7 @@ func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetM
 }
 
 const listQueuedBatchesForFleetMachine = `-- name: ListQueuedBatchesForFleetMachine :many
-SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.machine_family, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams
 FROM batches b
 JOIN machines m ON m.machine_profile_id = b.machine_id
 LEFT JOIN LATERAL (
@@ -446,6 +447,7 @@ func (q *Queries) ListQueuedBatchesForFleetMachine(ctx context.Context, fleetMac
 			&i.MergedFileID,
 			&i.PreviewFileID,
 			&i.UnitsPerBed,
+			&i.MachineFamily,
 			&i.TotalPrintTimeMinutes,
 			&i.EffectiveTimePerUnitMinutes,
 			&i.TotalFilamentGrams,

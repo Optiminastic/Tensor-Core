@@ -340,11 +340,14 @@ func healthyRow(serial string) gen.ListFleetMachinesWithFamilyRow {
 	if err != nil {
 		panic(err)
 	}
+	// An A2L, because that is the middle class and the one most beds route to.
+	family := "A2L"
 	return gen.ListFleetMachinesWithFamilyRow{
 		ID: uuid.New(), MachineID: serial, Name: serial,
 		Status:           production.FleetMachineIdle,
 		MachineProfileID: &profileID, ProfileStatus: &ready,
-		Filaments: trays,
+		ProfileFamily: &family,
+		Filaments:     trays,
 	}
 }
 
@@ -440,5 +443,59 @@ func TestAZeroWaitingCapDisablesTheRule(t *testing.T) {
 
 	if !opt.Eligible {
 		t.Errorf("the rule applied with the cap off: %q", opt.Refusal)
+	}
+}
+
+// A plate may only go to the class it was laid out for.
+//
+// A fit, not a preference. The plate's offsets are fixed and the slicer is
+// told not to rearrange them, so four planks packed on an A2L's 330x320 come
+// out 270x270 and simply cannot print on a P2S's 256x256. A bed reached P4
+// that way and BambuBuddy answered "G-code conflicts detected after slicing".
+func TestAPlateIsRefusedByAMachineOfTheWrongClass(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("P2S-7") // healthyRow is an A2L
+	p2s := "P2S"
+	row.ProfileFamily = &p2s
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable: func(string) string { return "" },
+		BedFamily: "A2L", // the plate was laid out for an A2L
+	})
+
+	if opt.Eligible {
+		t.Error("an A2L plate was offered to a P2S; it physically cannot print there")
+	}
+	if !strings.Contains(opt.Refusal, "laid out for a A2L") {
+		t.Errorf("refusal = %q, want it to name the class the plate needs", opt.Refusal)
+	}
+}
+
+func TestAPlateIsAcceptedByItsOwnClass(t *testing.T) {
+	s := &Server{}
+	opt := s.weighMachine(weighInputs{
+		Row: healthyRow("A2L-3"), Slots: redBed, Now: time.Now(),
+		WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable:  func(string) string { return "" },
+		BedFamily:  "A2L",
+	})
+	if !opt.Eligible {
+		t.Errorf("an A2L plate was refused by an A2L: %q", opt.Refusal)
+	}
+}
+
+// A bed planned before classes existed, or built by the optimiser, carries no
+// class. Those must still be offered to the fleet rather than stranded.
+func TestABedWithNoClassIsOfferedToAnyMachine(t *testing.T) {
+	s := &Server{}
+	opt := s.weighMachine(weighInputs{
+		Row: healthyRow("A2L-4"), Slots: redBed, Now: time.Now(),
+		WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable:  func(string) string { return "" },
+		BedFamily:  "",
+	})
+	if !opt.Eligible {
+		t.Errorf("a bed with no recorded class was stranded: %q", opt.Refusal)
 	}
 }

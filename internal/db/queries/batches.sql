@@ -6,13 +6,13 @@
 INSERT INTO batches (
     id, batch_number, machine_id, status, material_shortage, units_per_bed,
     total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams,
-    bed_utilization_percent, packing_strategy, manual
+    bed_utilization_percent, packing_strategy, machine_family, manual
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('batch_number'), sqlc.narg('machine_id'), sqlc.arg('status'),
     sqlc.arg('material_shortage'), sqlc.narg('units_per_bed'), sqlc.narg('total_print_time_minutes'),
     sqlc.narg('effective_time_per_unit_minutes')::float8, sqlc.narg('total_filament_grams')::float8,
     sqlc.narg('bed_utilization_percent')::float8, sqlc.narg('packing_strategy'),
-    sqlc.arg('manual')
+    sqlc.narg('machine_family'), sqlc.arg('manual')
 )
 RETURNING *;
 

@@ -73,7 +73,7 @@ const (
 // so a test can prove the fit rule without depending on bedpack's heuristics.
 func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatch, []Unbatchable) {
 	if maxPerBed < 1 {
-		maxPerBed = MaxColourBatchUnits
+		maxPerBed = MaxBedUnits
 	}
 	if nest == nil {
 		nest = DefaultBedNester
@@ -98,7 +98,16 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 		if len(b.jobs) == 0 {
 			return
 		}
-		batches = append(batches, finaliseOn(bedpack.DefaultBed, b.jobs, b.units, StrategyColour, nest))
+		// The class is decided by how full the bed ended up, and the plate is
+		// laid out on THAT machine's bed. Not a preference: a plate is packed
+		// at fixed offsets and the slicer is told not to rearrange it, so a
+		// plate laid out on the A2L's 330x320 is 270x270 and cannot print on a
+		// P2S's 256x256 - which is how a bed reached P4 and came back "G-code
+		// conflicts detected ... nowhere for the wipe tower".
+		family := BedFamilyForUnits(len(b.units))
+		planned := finaliseOn(bedpack.BedForFamily(family), b.jobs, b.units, StrategyColour, nest)
+		planned.MachineFamily = family
+		batches = append(batches, planned)
 	}
 
 	for _, j := range jobs {
@@ -129,7 +138,11 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 		}
 		// A unit that does not fit an empty bed will never fit any bed, so it is
 		// rejected once here rather than re-tried against every partial bed.
-		if _, rejected := nest(bedpack.DefaultBed, []bedpack.UnitFootprint{unit}); len(rejected) > 0 {
+		//
+		// Against the LARGEST bed, because "never fits any bed" has to mean
+		// every class: a plank that needs the H2C is not unbatchable, it is a
+		// bed of one that routes to an H2C.
+		if _, rejected := nest(bedpack.BedForFamily("H2C"), []bedpack.UnitFootprint{unit}); len(rejected) > 0 {
 			unbatchable = append(unbatchable, Unbatchable{
 				JobID: j.ID, JobNumber: j.JobNumber, Reason: ReasonTooLargeForBed,
 			})
@@ -155,7 +168,12 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 			// does not fit.
 			for take > 0 {
 				trial := append(append([]bedpack.UnitFootprint{}, b.units...), repeat(unit, take)...)
-				if _, rejected := nest(bedpack.DefaultBed, trial); len(rejected) == 0 {
+				// Against the bed this count would route to, so the check and
+				// the plate agree. A fifth unit is judged on an H2C's bed
+				// because a bed of five goes to an H2C; a third on a P2S's,
+				// because that is where it will print.
+				trialBed := bedpack.BedForFamily(BedFamilyForUnits(len(trial)))
+				if _, rejected := nest(trialBed, trial); len(rejected) == 0 {
 					break
 				}
 				take--

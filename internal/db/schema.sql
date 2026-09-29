@@ -470,6 +470,10 @@ CREATE TABLE batches (
     merged_file_id                  uuid REFERENCES file_assets (id) ON DELETE SET NULL,
     preview_file_id                 uuid REFERENCES file_assets (id) ON DELETE SET NULL,
     units_per_bed                   integer,
+    -- The printer class this bed was laid out for - see migration 0083. The
+    -- plate's offsets are fixed and the slicer is told not to rearrange them,
+    -- so this is the only class that can print it.
+    machine_family                  varchar(16),
     total_print_time_minutes        integer,
     effective_time_per_unit_minutes numeric(10, 2),
     total_filament_grams            numeric(10, 2),
