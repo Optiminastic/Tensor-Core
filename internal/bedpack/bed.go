@@ -1,5 +1,7 @@
 package bedpack
 
+import "strings"
+
 // A bed, as a value rather than a compile-time constant.
 //
 // The package was written when the fleet was one machine class, so the bed was
@@ -68,3 +70,43 @@ func (b Bed) Normalised() Bed {
 // reads as "share of the advertised bed" - matching what is printed on the
 // machine's spec sheet.
 func (b Bed) AreaMM2() float64 { return b.XMM * b.YMM }
+
+// Bed sizes per machine family.
+//
+// One bed per class, because a plate is packed at fixed offsets and the slicer
+// is told not to rearrange it: a plate laid out for one class is a plate the
+// smaller classes physically cannot print. Four planks packed on the A2L bed
+// come out 270x270, and a P2S is 256x256 - which is why a bed sent to one
+// answered "G-code conflicts detected after slicing" with nowhere left for the
+// wipe tower.
+//
+// Z is the build height, not a limit anything here enforces; it is carried so
+// a caller asking for "the P2S bed" gets the whole answer.
+var (
+	// BedH2C is the largest: 7 planks fit, measured.
+	BedH2C = Bed{XMM: 350, YMM: 320, ZMM: 325}
+	// BedA2L holds 6. The same size this package assumed for every machine
+	// before beds were per-class.
+	BedA2L = Bed{XMM: 330, YMM: 320, ZMM: 325}
+	// BedP2S holds 4, and is the one the old assumption was wrong about.
+	BedP2S = Bed{XMM: 256, YMM: 256, ZMM: 256}
+)
+
+// BedForFamily is the bed a machine family prints on.
+//
+// An unknown family falls back to the SMALLEST bed, not the default one. A
+// plate that fits the smallest bed fits them all, so the cost of not
+// recognising a family is a less full plate; the cost of guessing large is a
+// plate that cannot print on the machine it was built for.
+func BedForFamily(family string) Bed {
+	switch strings.ToUpper(strings.TrimSpace(family)) {
+	case "H2C":
+		return BedH2C.Normalised()
+	case "A2L":
+		return BedA2L.Normalised()
+	case "P2S":
+		return BedP2S.Normalised()
+	default:
+		return BedP2S.Normalised()
+	}
+}
