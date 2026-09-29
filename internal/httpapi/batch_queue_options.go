@@ -293,11 +293,16 @@ func plateSlotsOf(slots []queueSlot) []meshio.Slot {
 // people to do different things - map a colour, load a spool, or simply wait -
 // so the note names whichever one accounts for the fleet.
 func noPrinterNote(options []machineOption) string {
-	var unmapped, loadable, wrongClass int
+	var unmapped, loadable, wrongClassWithColours int
 	for _, o := range options {
 		switch {
 		case strings.Contains(o.Refusal, "laid out for"):
-			wrongClass++
+			// Only when it HOLDS the colours. A printer of the wrong class
+			// that could not have printed the bed anyway explains nothing,
+			// and counting it would blame the class for a colour problem.
+			if o.HoldsColours {
+				wrongClassWithColours++
+			}
 		case strings.Contains(o.Refusal, "confirmed as"):
 			unmapped++
 		case strings.Contains(o.Refusal, "does not hold"):
@@ -305,13 +310,14 @@ func noPrinterNote(options []machineOption) string {
 		}
 	}
 	switch {
-	// Said first when it is the whole story. A bed laid out for one class
-	// cannot print on another whatever spools are loaded, so telling somebody
-	// to map a colour would send them to fix the wrong thing - and the plate
-	// would still have nowhere to go.
-	case wrongClass > 0 && unmapped == 0 && loadable == 0:
-		return "Every printer that could take this bed is the wrong size for it. " +
-			"It waits for one of its own class to free up."
+	// Said FIRST, ahead of the colour reasons, when a printer holding this
+	// bed's colours was refused for its size. That is the whole story for the
+	// bed even if other printers also lack the colour: mapping a swatch or
+	// loading a spool elsewhere will not help, because the plate is laid out
+	// for a bed those machines do not have.
+	case wrongClassWithColours > 0:
+		return "A printer holds this bed's colours but is the wrong size for it. " +
+			"This bed waits for a machine of its own class."
 	case unmapped > 0:
 		return "No spool has been confirmed as one of this bed's colours. " +
 			"Map it under Inventory, then queue this bed."

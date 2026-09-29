@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +197,35 @@ func TestABedWaitingOnASpoolIsNotHeldByTheCooldown(t *testing.T) {
 	waiting := bed(production.BatchOpen, failedAt(now.Add(-2*time.Hour)))
 	if got := nextDispatchStep(waiting, false, now); got != stepSend {
 		t.Errorf("step = %v; a bed waiting hours on a spool must still be tried", got)
+	}
+}
+
+// The note must name the reason that actually accounts for the bed.
+//
+// A printer holding this bed's colours, refused because the plate is laid out
+// for a different size, is the whole story - mapping a swatch or loading a
+// spool on another machine will not help. Told the colour version instead, an
+// operator goes to Inventory, fixes nothing, and the bed still waits.
+func TestTheNoteBlamesTheClassWhenAPrinterHoldsTheColours(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		// A P2S that holds the colours but cannot take an A2L plate.
+		{Refusal: "this bed is laid out for a A2L", HoldsColours: true},
+		// And an A2L whose spool is simply not mapped.
+		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
+	})
+	if !strings.Contains(note, "wrong size") {
+		t.Errorf("note = %q; it should name the size, not send somebody to Inventory", note)
+	}
+}
+
+// But a wrong-class printer that could not have printed the bed anyway
+// explains nothing, and must not take the blame off a real colour problem.
+func TestTheNoteStillBlamesColourWhenTheWrongClassCouldNotHavePrintedItEither(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		{Refusal: "this bed is laid out for a A2L", HoldsColours: false},
+		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
+	})
+	if strings.Contains(note, "wrong size") {
+		t.Errorf("note = %q; the class is not the reason when that printer lacked the colour too", note)
 	}
 }
