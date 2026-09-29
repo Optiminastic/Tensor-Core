@@ -32,33 +32,42 @@ import (
 )
 
 // batchableJobsResponse is the pool a hand-built bed is chosen from.
-// batchableOrdersResponse is the pool a hand-built bed is chosen from.
 //
-// ORDERS, not jobs. The person building a bed is looking at an orders page and
-// thinking "these four customers are waiting"; a list of JOB-1000008 makes them
-// translate. The job is what actually goes on the plate, so it is still what is
-// sent - it is simply not what is shown.
-type batchableOrdersResponse struct {
-	Orders []batchableOrder `json:"orders"`
+// JOBS, one row each. This grouped them by order once, on the reasoning that
+// somebody building a bed thinks "these four customers are waiting" - true when
+// filling a bed from the top of the queue, and wrong for the case the dialog is
+// actually opened for: a named plank that has to go on a plate now. An order
+// row cannot say "that one of the three", and the job number is what the rest
+// of the floor calls a plank - the queue, the issues board, the plate itself.
+//
+// The whole pool goes over at once and is searched in the browser. It is a few
+// hundred small rows, and a round trip per keystroke would make a box that
+// exists to be typed into feel like one that would rather not be.
+type batchableJobsResponse struct {
+	Jobs []batchableJob `json:"jobs"`
 	// UnitsPerBed is how many products one plate holds, so the dialog can count
 	// places rather than making somebody guess when to stop.
 	UnitsPerBed int `json:"units_per_bed"`
+	// MinUnitsPerBed is how empty a bed may be and still be worth a
+	// machine-hour. Not enforced here - a smaller bed may be built and will
+	// simply wait for company before it locks - but said, so nobody builds a
+	// bed of two and wonders why it never goes.
+	MinUnitsPerBed int `json:"min_units_per_bed"`
 }
 
-// batchableOrder is one customer's planks of one colour, waiting.
-//
-// Grouped by order AND compatibility, not by order alone. An order can hold a
-// blue plank and a gold one, and those cannot share a plate - so offering "this
-// order" as a single thing would offer a bed that cannot be printed. Two rows
-// for that order is honest and rare.
-type batchableOrder struct {
+// batchableJob is one plank waiting, as the search offers it.
+type batchableJob struct {
+	// JobID is what is actually sent when the row is chosen. JobNumber is what
+	// is shown and searched on; the two are never interchanged.
+	JobID     string `json:"job_id"`
+	JobNumber string `json:"job_number"`
+	// OrderNumber is the customer's order, falling back to the job's own
+	// numbering for a reprint or a plank added by hand - those belong to
+	// nobody's shipment.
 	OrderNumber string `json:"order_number"`
-	// JobIDs are the planks this row stands for, and what is actually sent when
-	// it is chosen. The dialog never shows them.
-	JobIDs []string `json:"job_ids"`
-	// Products names what was ordered, for the row - one entry per plank.
-	Products []string `json:"products"`
-	// Units is how many places on the bed this row takes.
+	Product     string `json:"product"`
+	// Units is how many places on the bed this job takes: a job for three of
+	// the same plank takes three, not one.
 	Units int `json:"units"`
 	// CompatibilityKey is an opaque string: two rows may share a bed exactly
 	// when theirs match. Computed here rather than rebuilt in the browser
@@ -67,20 +76,20 @@ type batchableOrder struct {
 	// plate that prints in the wrong colour.
 	CompatibilityKey string `json:"compatibility_key"`
 	ColourLabel      string `json:"colour_label"`
-	// Available reports whether these planks can go on a bed right now. False
-	// ones are still listed, because the question somebody opens this dialog
-	// with is "where are my unfulfilled orders" and an omitted row answers it
+	// Available reports whether this plank can go on a bed right now. False
+	// ones are still listed, because somebody who searches a job number by hand
+	// has asked a direct question about that plank, and omitting it answers
 	// with silence.
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailable_reason"`
-	// OnBed names the bed these planks already sit on.
+	// OnBed names the bed this plank already sits on.
 	OnBed string `json:"on_bed"`
-	// BedLocked marks planks on an approved bed. Taking one off is allowed and
+	// BedLocked marks a plank on an approved bed. Taking one off is allowed and
 	// is not free: that bed's plate comes out of BambuBuddy's queue and its
-	// filament is given back before it is rebuilt without them.
+	// filament is given back before it is rebuilt without it.
 	BedLocked bool `json:"bed_locked"`
-	// Reprint marks planks that have already printed. Choosing them puts the
-	// same jobs back in the queue, which prints a second copy.
+	// Reprint marks a plank that has already printed. Choosing it puts the same
+	// job back in the queue, which prints a second copy.
 	Reprint bool `json:"reprint"`
 	// FinishedStage says where an already-printed plank actually is - waiting
 	// for QC, to be packed, to be dispatched - so "print it again" reads as a
@@ -88,12 +97,12 @@ type batchableOrder struct {
 	FinishedStage string `json:"finished_stage"`
 }
 
-// listBatchableJobs returns every unfulfilled order that could go on a bed.
+// listBatchableJobs returns every plank on an unfulfilled order, searchable.
 //
-// Only orders nobody has shipped, and only planks whose model already exists:
-// this dialog arranges work that is ready, and a plank with no model has
-// nothing to put on a plate. Those appear with that as their reason rather than
-// vanishing, because "where is my order" deserves an answer either way.
+// Only orders nobody has shipped. A plank that cannot be bedded right now -
+// no model yet, held, flagged - is returned with that as its reason rather
+// than omitted: somebody typing a job number has asked about that plank, and
+// a search that finds nothing cannot tell "not eligible" from "not a job".
 //
 // Held, flagged and unvalidated planks are excluded exactly as the planner
 // excludes them. A dialog that let somebody pick a held job would be offering
@@ -116,9 +125,10 @@ func (s *Server) listBatchableJobs(c *gin.Context) {
 		return
 	}
 
-	out := batchableOrdersResponse{
-		Orders:      groupByOrder(stillToPlace(jobs, beds), beds, numbers),
-		UnitsPerBed: s.bedUnitCap(),
+	out := batchableJobsResponse{
+		Jobs:           jobRows(stillToPlace(jobs, beds), beds, numbers),
+		UnitsPerBed:    s.bedUnitCap(),
+		MinUnitsPerBed: s.bedUnitFloor(),
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -165,73 +175,51 @@ func stillToPlace(
 	return out
 }
 
-// groupByOrder collapses planks into one row per order and colour.
+// jobRows turns each plank into a row the search can offer.
 //
-// A row is available only when every plank in it is. They are the same order in
-// the same colour, so they go on a bed together or not at all, and a row that
-// was half-pickable would need explaining twice.
-func groupByOrder(
+// One row per job, in the order the query returned them - oldest customer order
+// first - with the ones that cannot be bedded sorted to the back. That ordering
+// only decides what is shown before anybody types; after that a search decides.
+//
+// Nothing is collapsed. Two planks of one order are two rows because they can
+// be chosen apart: the whole point of picking by job number is that a bed takes
+// one of them and not the other.
+func jobRows(
 	jobs []gen.ProductionJob,
 	beds map[uuid.UUID]gen.ListBatchIdentityForIDsRow,
 	numbers map[uuid.UUID]string,
-) []batchableOrder {
-	type groupKey struct {
-		order  uuid.UUID
-		compat string
-	}
-	index := map[groupKey]int{}
-	out := make([]batchableOrder, 0, len(jobs))
-
+) []batchableJob {
+	out := make([]batchableJob, 0, len(jobs))
 	for _, j := range jobs {
 		var bed gen.ListBatchIdentityForIDsRow
 		if j.BatchID != nil {
 			bed = beds[*j.BatchID]
 		}
-		var orderID uuid.UUID
-		if j.OrderID != nil {
-			orderID = *j.OrderID
+		row := batchableJob{
+			JobID:            j.ID.String(),
+			JobNumber:        j.JobNumber,
+			OrderNumber:      orderTagFor(orderNumberPtr(numbers, j.OrderID), j.JobNumber),
+			Product:          deref(j.ProductName),
+			Units:            int(jobQuantity(j.Quantity)),
+			CompatibilityKey: compatibilityKeyString(j),
+			ColourLabel:      jobColourKey(j),
+			Available:        true,
+			OnBed:            bed.BatchNumber,
+			BedLocked:        bed.Status == production.BatchOpen,
 		}
-		key := groupKey{order: orderID, compat: compatibilityKeyString(j)}
-
-		at, seen := index[key]
-		if !seen {
-			at = len(out)
-			index[key] = at
-			out = append(out, batchableOrder{
-				OrderNumber:      orderTagFor(orderNumberPtr(numbers, j.OrderID), j.JobNumber),
-				CompatibilityKey: key.compat,
-				ColourLabel:      jobColourKey(j),
-				Available:        true,
-				OnBed:            bed.BatchNumber,
-				BedLocked:        bed.Status == production.BatchOpen,
-			})
-		}
-		row := &out[at]
-		row.JobIDs = append(row.JobIDs, j.ID.String())
-		row.Products = append(row.Products, deref(j.ProductName))
-		row.Units += int(jobQuantity(j.Quantity))
 		if j.Status == production.StatusCompleted {
 			row.Reprint = true
 			row.FinishedStage = finishedStage(j)
 		}
-		// One unavailable plank makes the row unavailable: these go on a bed
-		// together or not at all.
-		if reason := unavailableBecause(j, bed); reason != "" && row.Available {
+		if reason := unavailableBecause(j, bed); reason != "" {
 			row.Available = false
 			row.UnavailableReason = reason
 		}
+		out = append(out, row)
 	}
 
-	// Unavailable last, then most planks first - a customer waiting on three is
-	// worth filling a bed with before one waiting on a single plank.
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Available != out[j].Available {
-			return out[i].Available
-		}
-		if out[i].Units != out[j].Units {
-			return out[i].Units > out[j].Units
-		}
-		return out[i].OrderNumber < out[j].OrderNumber
+		return out[i].Available && !out[j].Available
 	})
 	return out
 }

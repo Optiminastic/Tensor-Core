@@ -289,3 +289,87 @@ func TestPlanksOnAPlannedDraftStayInThePool(t *testing.T) {
 		t.Fatal("a plank on a planned Draft was dropped from the pool")
 	}
 }
+
+// Two planks of one order are two rows.
+//
+// This grouped by order once, and an order row could not express "that one of
+// the three" - which is the whole reason for picking by job number. A bed that
+// takes one plank of a three-plank order is an ordinary thing to want.
+func TestJobRowsKeepsEachPlankSeparate(t *testing.T) {
+	order := uuid.New()
+	first := batchableJobRow("JOB-1", `["BLUE"]`)
+	first.OrderID = &order
+	second := batchableJobRow("JOB-2", `["BLUE"]`)
+	second.OrderID = &order
+
+	rows := jobRows(
+		[]gen.ProductionJob{first, second},
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{},
+		map[uuid.UUID]string{order: "#1001"},
+	)
+	if len(rows) != 2 {
+		t.Fatalf("jobRows returned %d rows for two planks of one order, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.JobNumber == "" {
+			t.Error("a row carried no job number; the search has nothing to match on")
+		}
+		if r.JobID == "" {
+			t.Error("a row carried no job id; choosing it would send nothing")
+		}
+	}
+}
+
+// A job for three of the same plank takes three places, not one. Counted wrong,
+// a bed of two such jobs would be offered a third and refused on create.
+func TestJobRowsCountsUnitsNotJobs(t *testing.T) {
+	job := batchableJobRow("JOB-1", `["BLUE"]`)
+	job.Quantity = 3
+
+	rows := jobRows([]gen.ProductionJob{job},
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+	if rows[0].Units != 3 {
+		t.Fatalf("units = %d, want 3 - a job for three planks fills three places", rows[0].Units)
+	}
+}
+
+// A plank that cannot be bedded is still returned, with its reason: somebody
+// typing a job number has asked about that plank, and a search that finds
+// nothing cannot tell "on hold" from "no such job".
+func TestJobRowsKeepsTheUnavailableAndSortsThemLast(t *testing.T) {
+	held := batchableJobRow("JOB-1", `["BLUE"]`)
+	held.Held = true
+	free := batchableJobRow("JOB-2", `["BLUE"]`)
+
+	rows := jobRows([]gen.ProductionJob{held, free},
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+	if len(rows) != 2 {
+		t.Fatalf("jobRows returned %d rows, want the held plank kept", len(rows))
+	}
+	if !rows[0].Available || rows[0].JobNumber != "JOB-2" {
+		t.Errorf("first row = %s (available %v), want the pickable plank first",
+			rows[0].JobNumber, rows[0].Available)
+	}
+	if rows[1].Available || rows[1].UnavailableReason != "on hold" {
+		t.Errorf("held row = %+v, want it marked unavailable and say why", rows[1])
+	}
+}
+
+// The key the browser filters suggestions by. Two colours must not produce one
+// key, or the first pick would stop narrowing anything and a plate would be
+// built that prints one of them wrong.
+func TestJobRowsCarriesAKeyThatSeparatesColours(t *testing.T) {
+	blue := batchableJobRow("JOB-1", `["BLUE"]`)
+	gold := batchableJobRow("JOB-2", `["GOLD"]`)
+
+	rows := jobRows([]gen.ProductionJob{blue, gold},
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+	if rows[0].CompatibilityKey == rows[1].CompatibilityKey {
+		t.Fatal("a blue and a gold plank shared a compatibility key")
+	}
+	for _, r := range rows {
+		if r.ColourLabel == "" {
+			t.Errorf("%s carried no colour label; the bed could not name its own colour", r.JobNumber)
+		}
+	}
+}
