@@ -1,6 +1,6 @@
 package httpapi
 
-// River job timeouts for the two workers in this package.
+// River job timeouts for the workers in this package.
 //
 // A worker that embeds river.WorkerDefaults inherits a Timeout() of zero, which
 // River reads as "use JobTimeoutDefault" - one minute. That is far too short
@@ -25,6 +25,16 @@ import (
 const (
 	defaultBatchPlanTimeout   = 15 * time.Minute
 	defaultJobCreationTimeout = 5 * time.Minute
+	// A dispatch pass reads a plate, uploads it and asks BambuBuddy to slice
+	// it, once per bed, up to BATCH_AUTO_DISPATCH_MAX beds. A plate may be
+	// 256 MB (maxPlateBytes) and a slice is minutes, so a minute is not close.
+	//
+	// This one is worse than being merely too short. The marker that says "this
+	// bed is already slicing" is written in the same transaction that schedules
+	// its queueing; a deadline firing there rolls the marker back while the
+	// slice keeps running on BambuBuddy, so the next pass sees an idle bed and
+	// slices it again. And again.
+	defaultBatchDispatchTimeout = 20 * time.Minute
 )
 
 // minutesOr converts a configured minute count to a duration, falling back when
@@ -46,4 +56,9 @@ func (w *BatchPlanWorker) Timeout(*river.Job[production.PlanBatchesArgs]) time.D
 // Timeout bounds one order's job creation.
 func (w *JobCreationWorker) Timeout(*river.Job[production.CreateJobsArgs]) time.Duration {
 	return minutesOr(w.server.cfg.JobCreationTimeoutMinutes, defaultJobCreationTimeout)
+}
+
+// Timeout bounds one dispatch pass. See defaultBatchDispatchTimeout.
+func (w *DispatchWorker) Timeout(*river.Job[production.DispatchBatchesArgs]) time.Duration {
+	return minutesOr(w.server.cfg.BatchDispatchTimeoutMinutes, defaultBatchDispatchTimeout)
 }

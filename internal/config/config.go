@@ -333,6 +333,15 @@ type Settings struct {
 	BatchPlanTimeoutMinutes   int
 	JobCreationTimeoutMinutes int
 
+	// BatchDispatchTimeoutMinutes bounds one automatic dispatch pass.
+	//
+	// Scales with BATCH_AUTO_DISPATCH_MAX rather than with any single input:
+	// each bed in a pass reads a plate of up to 256 MB, uploads it, and waits
+	// for BambuBuddy to accept a slice. River's one-minute default would fire
+	// mid-pass and roll back the marker that says a bed is already slicing -
+	// so the next pass would slice it again.
+	BatchDispatchTimeoutMinutes int
+
 	// Machine selection weighted scoring (production.MachineScoreWeights, see
 	// machine_scheduler.go/scheduler.go): minutes-equivalent adjustments to a
 	// candidate machine's raw free time - already-loaded material/colour
@@ -438,6 +447,7 @@ func Load() Settings {
 		BatchPlanJobThreshold:    intEnvOr("BATCH_PLAN_JOB_THRESHOLD", 5),
 
 		BatchPlanTimeoutMinutes:          intEnvOr("BATCH_PLAN_TIMEOUT_MINUTES", 15),
+		BatchDispatchTimeoutMinutes:      intEnvOr("BATCH_DISPATCH_TIMEOUT_MINUTES", 20),
 		JobCreationTimeoutMinutes:        intEnvOr("JOB_CREATION_TIMEOUT_MINUTES", 5),
 		BatchPlanDebounceSeconds:         intEnvOr("BATCH_PLAN_DEBOUNCE_SECONDS", 5),
 		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),

@@ -14,7 +14,9 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
@@ -35,6 +37,57 @@ type DispatchOutcome struct {
 	// Failed counts batches whose step errored. The reason is recorded on the
 	// batch itself (print_error), so this is a count rather than a list.
 	Failed int
+	// NoPrinter counts beds the fleet cannot take yet: the colour is loaded
+	// nowhere, or every printer holding it is off, faulted or locked out.
+	//
+	// Not Failed. Nothing is broken, the reason is on the bed for the floor to
+	// act on, and it goes the moment somebody loads a spool. Counted apart so a
+	// shop with one unmapped colour does not read as a dispatcher throwing
+	// errors every seven minutes.
+	NoPrinter int
+}
+
+// dispatchStep is the one thing a bed is ready for this pass.
+type dispatchStep int
+
+const (
+	// stepNone: already moving, or resolved. Costs no budget.
+	stepNone dispatchStep = iota
+	stepHoldOpen
+	stepApprove
+	stepSend
+)
+
+// nextDispatchStep decides what one bed needs, and nothing else.
+//
+// Pure, so the walk's rules can be asserted without a fleet, a database or
+// BambuBuddy - which is why batch_dispatch.go had no test until now.
+func nextDispatchStep(b gen.Batch, readyToLock bool) dispatchStep {
+	switch {
+	case b.Status == production.BatchPendingApproval && !readyToLock:
+		return stepHoldOpen
+	case b.Status == production.BatchPendingApproval:
+		return stepApprove
+	// Already on its way, by any of THREE markers rather than one.
+	//
+	// queue_item_id only appears once the slice finishes, which is minutes.
+	// Between asking for a slice and that moment bambu_slice_job_id is the only
+	// evidence the bed is moving, and pipeline_run_id is the same evidence on
+	// the older path. Reading queue_item_id alone sent every mid-slice bed back
+	// into the send branch, where the already-sent guard turned it into a
+	// no-op - and each no-op spent a slot against the per-run cap. Five beds
+	// slicing meant a pass that did nothing at all, and kept doing nothing
+	// until they landed.
+	case b.QueueItemID != nil || b.PipelineRunID != nil || b.BambuSliceJobID != nil:
+		return stepNone
+	// Belt and braces: ListBatchesToDispatch already excludes these, and the
+	// rule that a failed plate is never retried unattended is stated in three
+	// other files. One of them should be in the walk itself.
+	case b.PrintOutcome != nil:
+		return stepNone
+	default:
+		return stepSend
+	}
 }
 
 // DispatchReadyBatches advances every batch one step, oldest order first.
@@ -48,6 +101,16 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 	var out DispatchOutcome
 
 	if !s.cfg.BatchAutoDispatch {
+		return out
+	}
+
+	// Checked once for the pass, not once per bed. The handler gets these from
+	// filesReady and its own BambuBuddy check before it touches a batch; the
+	// worker has neither, and without them every bed in the list would record
+	// "BambuBuddy is not configured" as its print_error, every seven minutes,
+	// for a fault that has nothing to do with any of them.
+	if s.storage == nil || !s.bambu.Configured() {
+		log.Info("batch dispatch skipped: object storage or BambuBuddy is not configured")
 		return out
 	}
 
@@ -73,18 +136,23 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 		}
 		out.Considered++
 
-		switch {
-		case b.Status == production.BatchPendingApproval:
-			// A Draft that still has room is left alone. Approving it would
-			// freeze a half-empty bed, and the whole point of leaving it a
-			// Draft is that the next order in the same colour joins it instead
-			// of opening a bed of its own. agedOut is the release valve: after
-			// BATCH_MAX_WAIT_HOURS it prints as it is, so a lone plank in an
-			// unpopular colour is not held for company that never arrives.
-			if !s.readyToLock(ctx, b) {
-				out.HeldOpen++
-				continue
-			}
+		// A Draft that still has room is left alone. Approving it would freeze
+		// a half-empty bed, and the whole point of leaving it a Draft is that
+		// the next order in the same colour joins it instead of opening a bed
+		// of its own.
+		readyToLock := b.Status == production.BatchPendingApproval && s.readyToLock(ctx, b)
+
+		switch nextDispatchStep(b, readyToLock) {
+		case stepNone:
+			// Already moving, or resolved. Deliberately spends no budget: a
+			// bed mid-slice is not work this pass can do, and counting it as
+			// work is how a pass full of slicing beds did nothing at all.
+			out.Considered--
+
+		case stepHoldOpen:
+			out.HeldOpen++
+
+		case stepApprove:
 			// Approving commits the bed: it reserves filament, stamps a machine
 			// and enqueues the plate slice. Attributed to systemActor because no
 			// person is behind it - see production_events.go.
@@ -96,23 +164,8 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 			out.Approved++
 			log.Info("batch auto-approved, plate slice queued", "batch", b.BatchNumber)
 
-		case b.QueueItemID != nil:
-			// Already in BambuBuddy's queue. Sending again would put a second
-			// copy of the same bed on a printer.
-
-		default:
-			resp, err := s.SendBatchToPrinter(ctx, b)
-			if err != nil {
-				out.Failed++
-				log.Warn("could not send a batch to a printer", "batch", b.BatchNumber, "error", err)
-				continue
-			}
-			out.Sent++
-			// Queued false is not a failure - the plate is in the library and
-			// BambuBuddy said why it is not moving. That reason is the useful
-			// half of the line.
-			log.Info("batch dispatched", "batch", b.BatchNumber,
-				"queued", resp.Queued, "note", resp.Note)
+		case stepSend:
+			s.autoSendOneBatch(ctx, b, &out)
 		}
 	}
 
@@ -132,3 +185,69 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 // already running. A backlog drains over several passes instead of arriving as
 // one stampede.
 const defaultAutoDispatchMax = 5
+
+// autoSendOneBatch chooses a printer for one bed and sends it there.
+//
+// The same two calls the Queue button makes - chooseTargetFor, then
+// sendBatchToMachine - so an automatic send and a pressed one cannot decide
+// differently. What changes is only what happens to the answer: a person reads
+// a 409, and this writes it on the bed for whoever walks past next.
+func (s *Server) autoSendOneBatch(ctx context.Context, b gen.Batch, out *DispatchOutcome) {
+	log := obs.FromContext(ctx)
+
+	target, err := s.chooseTargetFor(ctx, b)
+	if err != nil {
+		// The fleet cannot take it yet. Expected, recorded, and tried again
+		// next pass: it comes right the moment somebody loads a spool, with
+		// nobody having to press anything.
+		if errors.Is(err, errNoPrinter) {
+			out.NoPrinter++
+			s.recordPrintErrorOnce(ctx, b.ID, reasonOf(err))
+			log.Info("no printer can take a bed yet",
+				"batch", b.BatchNumber, "note", reasonOf(err))
+			return
+		}
+		out.Failed++
+		s.recordPrintErrorOnce(ctx, b.ID, reasonOf(err))
+		log.Warn("could not choose a printer for a bed", "batch", b.BatchNumber, "error", err)
+		return
+	}
+
+	resp, err := s.sendBatchToMachine(ctx, b, target.Machine, target.SlotTrays,
+		systemActor, automaticSend)
+	if err != nil {
+		out.Failed++
+		s.recordPrintErrorOnce(ctx, b.ID, reasonOf(err))
+		log.Warn("could not send a batch to a printer", "batch", b.BatchNumber, "error", err)
+		return
+	}
+	if !resp.Queued {
+		// A nil error that is not a send: the bed was already on its way, or a
+		// slice is running that nothing will queue. Counted as failed rather
+		// than sent, because a worker that reads err == nil as success leaves
+		// the second case parked for ever.
+		out.Failed++
+		log.Warn("a bed was not sent", "batch", b.BatchNumber, "note", resp.Note)
+		return
+	}
+
+	out.Sent++
+	// The reason THIS printer won, which the response carries to an operator
+	// and nothing carries to anyone when the dispatcher chose. Logged so the
+	// answer to "why that one?" exists somewhere.
+	log.Info("bed auto-sent", "batch", b.BatchNumber,
+		"machine", target.Machine.Name, "why", target.Reason, "note", resp.Note)
+}
+
+// reasonOf is the operator-facing half of a failure, never its cause.
+//
+// statusError.Error() appends the wrapped cause - "Could not read the batch's
+// jobs: dial tcp ..." - which is right for a log line and wrong for a red note
+// on the Batches page.
+func reasonOf(err error) string {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.msg
+	}
+	return "Tensor could not send this bed to a printer."
+}

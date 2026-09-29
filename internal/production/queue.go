@@ -14,6 +14,7 @@ package production
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -420,6 +421,27 @@ func (e *QueueSlicedPlateEnqueuer) Enqueue(ctx context.Context, args QueueSliced
 		return nil
 	}
 	_, err := e.client.Insert(ctx, args, nil)
+	return err
+}
+
+// EnqueueTx schedules it inside the caller's transaction.
+//
+// So the marker saying "this bed is already slicing" and the job that will
+// queue the result commit together. Apart, each could fail alone and both
+// failures are bad in their own way: the marker missing lets the next pass
+// slice and PRINT the same plate again, and the job missing leaves a bed whose
+// slice nothing will ever collect.
+//
+// Reports a missing client rather than shrugging, unlike Enqueue. A caller
+// inside a transaction is about to commit a marker that says the queueing is
+// scheduled, and returning nil would make that marker a lie.
+func (e *QueueSlicedPlateEnqueuer) EnqueueTx(
+	ctx context.Context, tx pgx.Tx, args QueueSlicedPlateArgs,
+) error {
+	if e == nil || e.client == nil {
+		return errors.New("the slice-queue enqueuer is not configured")
+	}
+	_, err := e.client.InsertTx(ctx, tx, args, nil)
 	return err
 }
 

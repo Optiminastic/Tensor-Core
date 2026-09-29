@@ -29,6 +29,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -44,17 +46,38 @@ import (
 // rather than being allowed to exhaust the process.
 const maxPlateBytes = 256 << 20
 
+// sendOrigin says who asked for this send, because two rules turn on it.
+//
+// An explicit origin rather than sniffing the actor string: systemActor is used
+// by several automatic steps, and a rule that reads "not a person" by comparing
+// a name is one refactor away from a new caller silently inheriting a
+// permission nobody meant to give it.
+type sendOrigin int
+
+const (
+	// operatorSend is a person pressing Queue. "Run that again" is theirs to
+	// say, so this origin may clear a failed print outcome.
+	operatorSend sendOrigin = iota
+	// automaticSend is the dispatcher, on its own schedule with nobody
+	// watching. It may never clear a failed print outcome - retrying a failed
+	// plate into whatever went wrong the first time is a second wasted bed,
+	// every seven minutes - and it re-checks the bed's jobs, which nothing
+	// does for an already-locked bed otherwise.
+	automaticSend
+)
+
 // sendBatchToMachine slices a bed for one printer and schedules its queueing.
 //
 // Returns before the slice finishes - that takes minutes - so the response says
 // the plate is on its way rather than claiming it is queued.
 func (s *Server) sendBatchToMachine(
-	ctx context.Context, batch gen.Batch, machine gen.Machine, slotTrays []int, actor string,
+	ctx context.Context, batch gen.Batch, machine gen.Machine, slotTrays []int,
+	actor string, origin sendOrigin,
 ) (queueBatchResponse, error) {
 	log := obs.FromContext(ctx)
 	out := queueBatchResponse{BatchNumber: batch.BatchNumber, MachineName: machine.Name}
 
-	batch, locked, err := s.prepareBatchForQueue(ctx, batch, actor)
+	batch, locked, err := s.prepareBatchForQueue(ctx, batch, actor, origin)
 	if err != nil {
 		return out, err
 	}
@@ -158,27 +181,44 @@ func (s *Server) sendBatchToMachine(
 		return out, statusErr(http.StatusBadGateway, "Could not start slicing on BambuBuddy.")
 	}
 
+	// The marker and the queueing, together or not at all.
+	//
+	// They were two statements and each could fail alone, in its own bad way.
+	// A failed SetBatchSliceJob left bambu_slice_job_id unset, so the
+	// already-sent guard above could not fire and the next pass would slice and
+	// PRINT the same plate again. A failed Enqueue left it set with nothing
+	// coming to queue the result, so the bed was stuck: the guard refuses it
+	// for ever and ClearBatchPrintOutcome does not clear that column.
+	//
+	// In one transaction the only outcome is "neither happened": a slice runs
+	// on BambuBuddy that nothing collects, and the next pass sends the bed
+	// cleanly. A wasted slice costs minutes of a slicer's time. A wasted bed
+	// costs plastic and somebody's plank.
 	sliceJobID := int32(job.JobID)
-	if err := s.store.Q.SetBatchSliceJob(ctx, gen.SetBatchSliceJobParams{
-		ID: batch.ID, BambuSliceJobID: &sliceJobID,
-		// The physical printer, not the profile. Until a queue item exists this
-		// row is the only record that this bed is on its way to this unit -
-		// which is what keeps the next bed from being ranked against a fleet
-		// that still looks idle.
-		FleetMachineID: &machine.ID,
-	}); err != nil {
-		log.Warn("could not record the slice job", "batch", batch.BatchNumber, "error", err)
-	}
-
-	if err := s.sliceQueueEnqueuer.Enqueue(ctx, production.QueueSlicedPlateArgs{
-		BatchID: batch.ID, SliceJobID: job.JobID, PrinterID: printerID,
-		MachineID: machine.ID, MachineName: machine.Name,
-		AmsMapping: amsMappingOf(assignments), TrayHexes: trayColoursOf(assignments),
-	}); err != nil {
+	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
+		if err := q.SetBatchSliceJob(ctx, gen.SetBatchSliceJobParams{
+			ID: batch.ID, BambuSliceJobID: &sliceJobID,
+			// The physical printer, not the profile. Until a queue item exists
+			// this row is the only record that this bed is on its way to this
+			// unit - which is what keeps the next bed from being ranked
+			// against a fleet that still looks idle.
+			FleetMachineID: &machine.ID,
+		}); err != nil {
+			return err
+		}
+		return s.sliceQueueEnqueuer.EnqueueTx(ctx, tx, production.QueueSlicedPlateArgs{
+			BatchID: batch.ID, SliceJobID: job.JobID, PrinterID: printerID,
+			MachineID: machine.ID, MachineName: machine.Name,
+			AmsMapping: amsMappingOf(assignments), TrayHexes: trayColoursOf(assignments),
+		})
+	})
+	if err != nil {
 		// The slice is running either way; what is lost is the queueing that
 		// follows it. Say so rather than reporting a clean success.
-		log.Error("could not schedule the queueing that follows the slice",
+		log.Error("could not record the slice or schedule its queueing",
 			"batch", batch.BatchNumber, "error", err)
+		s.recordPrintError(ctx, batch.ID,
+			"Tensor started slicing this bed but could not schedule its queueing. It will be sent again.")
 		out.Note = "slicing started, but Tensor could not schedule the queueing. Send it again once the slice finishes."
 		return out, nil
 	}
@@ -251,8 +291,12 @@ func (s *Server) bindSlots(
 // Shared with the automatic path so the status rules live in one place: a Draft
 // is locked, never sent as a Draft, because the next planning pass can dissolve
 // one and rebuild it from different jobs.
+//
+// actor is load-bearing, not just recorded: systemActor is refused the one
+// thing on this path that only a person may do - clearing a failed print so the
+// bed goes round again.
 func (s *Server) prepareBatchForQueue(
-	ctx context.Context, batch gen.Batch, actor string,
+	ctx context.Context, batch gen.Batch, actor string, origin sendOrigin,
 ) (gen.Batch, bool, error) {
 	switch batch.Status {
 	case production.BatchPendingApproval:
@@ -266,6 +310,15 @@ func (s *Server) prepareBatchForQueue(
 		// A bed whose last print failed keeps its 'open' status and its
 		// outcome. Clearing it is the deliberate human "run that again".
 		if batch.PrintOutcome != nil {
+			// And only a human's. The dispatcher must never retry a failed
+			// plate into whatever went wrong the first time: clearing the
+			// outcome here would do exactly that, one query change away from
+			// ListBatchesToDispatch stopping filtering them out. It refuses
+			// instead, so the bed waits for somebody to decide.
+			if origin == automaticSend {
+				return batch, false, statusErr(http.StatusConflict,
+					"This bed's last print failed. Queue it by hand to run it again.")
+			}
 			if err := s.store.Q.ClearBatchPrintOutcome(ctx, batch.ID); err != nil {
 				return batch, false, statusErrf(http.StatusInternalServerError,
 					"Could not clear the previous print result.", err)
@@ -273,6 +326,21 @@ func (s *Server) prepareBatchForQueue(
 			batch.PrintOutcome = nil
 			batch.QueueItemID = nil
 			batch.PipelineRunID = nil
+		}
+		// The check ApproveBatchFor runs at the moment of commitment, which an
+		// already-locked bed never reaches again. It used not to matter: a
+		// person locked a bed and sent it in the same breath. The dispatcher
+		// sends on its own schedule, so a job held in the hours between is a
+		// job that prints anyway unless it is caught here.
+		if origin == automaticSend {
+			jobs, err := s.store.Q.ListJobsForBatch(ctx, &batch.ID)
+			if err != nil {
+				return batch, false, statusErrf(http.StatusInternalServerError,
+					"Could not read the batch's jobs.", err)
+			}
+			if why := unprintableJob(jobs); why != "" {
+				return batch, false, statusErr(http.StatusConflict, why)
+			}
 		}
 		return batch, false, nil
 

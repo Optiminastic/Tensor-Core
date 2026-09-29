@@ -96,6 +96,24 @@ func (s *Server) recordPrintError(ctx context.Context, batchID uuid.UUID, reason
 	}
 }
 
+// recordPrintErrorOnce is recordPrintError for a caller that will be back.
+//
+// The dispatcher retries a bed no printer can take every pass, and rewriting
+// the same sentence each time would reset print_error_at - the only column that
+// says how long the bed has been waiting. Same record, written when the answer
+// changes; see SetBatchPrintErrorIfChanged.
+//
+// The operator path keeps recordPrintError: a person pressing Queue IS a new
+// attempt, and the timestamp should move.
+func (s *Server) recordPrintErrorOnce(ctx context.Context, batchID uuid.UUID, reason string) {
+	if err := s.store.Q.SetBatchPrintErrorIfChanged(ctx, gen.SetBatchPrintErrorIfChangedParams{
+		ID: batchID, PrintError: &reason,
+	}); err != nil {
+		obs.FromContext(ctx).Warn("could not record the batch's print error",
+			"batch", batchID, "error", err)
+	}
+}
+
 // int32Ptr adapts BambuBuddy's int queue id to the nullable int32 column.
 func int32Ptr(v int) *int32 {
 	n := int32(v)

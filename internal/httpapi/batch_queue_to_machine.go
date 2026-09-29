@@ -18,6 +18,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -129,7 +130,8 @@ func (s *Server) queueBatchToMachine(c *gin.Context) {
 	// which reads the PLATE's own declared slots rather than re-deriving them
 	// from the jobs - and so catches what a job-derived check missed, notably
 	// the white plank body that queueColoursFor omits entirely.
-	resp, err := s.sendBatchToMachine(ctx, batch, target.Machine, target.SlotTrays, currentUserID(c))
+	resp, err := s.sendBatchToMachine(ctx, batch, target.Machine, target.SlotTrays,
+		currentUserID(c), operatorSend)
 	if err != nil {
 		writeStatusError(c, err, "Could not send the batch to that printer.")
 		return
@@ -168,7 +170,24 @@ func (s *Server) targetFor(
 		}
 		return queueTarget{Machine: machine, SlotTrays: req.SlotTrays}, nil
 	}
+	return s.chooseTargetFor(ctx, batch)
+}
 
+// errNoPrinter is "the fleet cannot take this bed yet".
+//
+// Wrapped inside the statusError so a person pressing Queue still gets the 409
+// and the sentence naming the fix, while the automatic dispatcher can tell this
+// one outcome apart from a real failure. It is the only refusal on this path
+// expected to come right on its own - the moment somebody loads a spool - so it
+// is recorded and retried rather than counted as a fault.
+var errNoPrinter = errors.New("no printer can take this bed")
+
+// chooseTargetFor picks the printer for a bed, with nobody in the room.
+//
+// The half of targetFor that has no operator in it, extracted so the dispatcher
+// runs the SAME choice the Queue button makes rather than a second one that can
+// drift from it. planQueueForBatch was written Gin-free for exactly this.
+func (s *Server) chooseTargetFor(ctx context.Context, batch gen.Batch) (queueTarget, error) {
 	slots := s.queueSlotsFor(ctx, batch)
 	if len(slots) == 0 {
 		return queueTarget{}, statusErr(http.StatusConflict,
@@ -190,7 +209,8 @@ func (s *Server) targetFor(
 		// Refused, not fallen back. Sending a bed to a printer that cannot
 		// print its colours is the failure this whole path exists to prevent,
 		// so the answer names what is missing instead.
-		return queueTarget{}, statusErr(http.StatusConflict, noPrinterNote(options))
+		return queueTarget{}, statusErrf(
+			http.StatusConflict, noPrinterNote(options), errNoPrinter)
 	}
 	obs.FromContext(ctx).Info("chose a printer for a bed",
 		"batch", batch.BatchNumber, "printer", plan.Machine.Name, "why", plan.Reason)

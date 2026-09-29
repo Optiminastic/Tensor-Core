@@ -220,6 +220,8 @@ UPDATE batches SET
     print_error_at            = NULL,
     queue_item_id             = NULL,
     pipeline_run_id           = NULL,
+    bambu_slice_job_id        = NULL,
+    fleet_machine_id          = NULL,
     updated_at                = now()
 WHERE id = $1
 `
@@ -231,10 +233,17 @@ WHERE id = $1
 // a failed bed would be retried automatically for ever against whatever went
 // wrong the first time.
 //
-// The send identifiers go with it. SendBatchToPrinter refuses a bed that
-// already carries a queue item or a pipeline run - the guard against printing
-// one bed twice - so leaving them behind would make a failed bed permanently
-// un-resendable, and the only escape would be editing it.
+// The send identifiers go with it. The send path refuses a bed that already
+// carries one - the guard against printing one bed twice - so leaving them
+// behind would make a failed bed permanently un-resendable, and the only escape
+// would be editing it.
+//
+// bambu_slice_job_id and fleet_machine_id are in that list too, and were not.
+// They are set the moment a slice is ASKED for, minutes before any queue item
+// exists, so a bed that failed in those minutes kept a marker no endpoint could
+// clear: refused by every route for ever. fleet_machine_id also counts that
+// dead bed against its printer's load in CountBedsInFlightPerFleetMachine, so
+// the fleet looks busier than it is until somebody notices.
 func (q *Queries) ClearBatchPrintOutcome(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, clearBatchPrintOutcome, id)
 	return err
@@ -1150,6 +1159,8 @@ const listBatchesToDispatch = `-- name: ListBatchesToDispatch :many
 SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams FROM batches b
 WHERE b.status IN ('pending_approval', 'open')
   AND b.print_outcome IS NULL
+  AND b.bambu_slice_job_id IS NULL
+  AND b.pipeline_run_id IS NULL
 ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id) ASC NULLS LAST,
          NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
          b.created_at ASC, b.id ASC
@@ -1166,6 +1177,12 @@ ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id)
 // Both pre-print states are returned and the caller decides what each needs:
 // pending_approval wants approving, open wants sending once its plate has been
 // sliced. Anything further along (in_progress, completed) has left the queue.
+//
+// A bed already slicing is excluded here as well as in the walk. A slice takes
+// minutes and its queue item does not exist until it lands, so every pass in
+// between was re-reading that bed, re-ranking the fleet for it and handing it
+// to a send that could only refuse - and each refusal spent a slot against the
+// per-run cap. Five beds slicing meant a pass that did nothing at all.
 //
 // Priority beds go ahead of that, which is the ONLY thing that overrides
 // longest-waiting. Forming beds priority-first is not enough on its own: a bed
@@ -1990,6 +2007,35 @@ type SetBatchPrintErrorParams struct {
 // nobody has sent yet.
 func (q *Queries) SetBatchPrintError(ctx context.Context, arg SetBatchPrintErrorParams) error {
 	_, err := q.db.Exec(ctx, setBatchPrintError, arg.PrintError, arg.ID)
+	return err
+}
+
+const setBatchPrintErrorIfChanged = `-- name: SetBatchPrintErrorIfChanged :exec
+UPDATE batches SET
+    print_error    = $1,
+    print_error_at = now(),
+    updated_at     = now()
+WHERE id = $2
+  AND print_error IS DISTINCT FROM $1
+`
+
+type SetBatchPrintErrorIfChangedParams struct {
+	PrintError *string
+	ID         uuid.UUID
+}
+
+// SetBatchPrintError for a caller that will be back in seven minutes.
+//
+// The automatic dispatcher retries every BATCH_PLAN_INTERVAL_MINUTES, so a bed
+// waiting on a spool nobody has loaded would rewrite the same sentence two
+// hundred times a day. That costs a write per bed per pass, and worse it resets
+// print_error_at - so the one column that says HOW LONG this bed has been stuck
+// would read "seven minutes ago" for ever.
+//
+// IS DISTINCT FROM rather than <>, so the first failure still writes over a
+// NULL.
+func (q *Queries) SetBatchPrintErrorIfChanged(ctx context.Context, arg SetBatchPrintErrorIfChangedParams) error {
+	_, err := q.db.Exec(ctx, setBatchPrintErrorIfChanged, arg.PrintError, arg.ID)
 	return err
 }
 

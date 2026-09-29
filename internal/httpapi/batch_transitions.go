@@ -78,6 +78,36 @@ func writeStatusError(c *gin.Context, err error, genericMsg string) {
 
 // --- approve --------------------------------------------------------------
 
+// unprintableJob reports why this bed must not reach a printer, or "" when
+// nothing is wrong.
+//
+// Re-checked at the moment of commitment, not trusted from when the batch was
+// planned. A bed can sit for a long time and the world moves under it:
+// personalisation can be un-validated, a job can be flagged, held, or pulled
+// onto another bed entirely. Committing on stale preconditions is how a plate
+// reaches a machine carrying something that should never have been printed.
+//
+// One function because there are now TWO commitment points. Approving a Draft
+// was the only one while a person pressed the button for every send - the
+// window between locking a bed and sending it was however long they took. The
+// dispatcher sends an already-locked bed on its own schedule, so a job held
+// after the lock has to be caught there too, and by the same rule.
+func unprintableJob(jobs []gen.ProductionJob) string {
+	for _, j := range jobs {
+		switch {
+		case j.PersonalisationStatus == production.PersonalisationPending:
+			return "A job in this batch has unvalidated personalisation."
+		case j.IssueReason != nil:
+			return "A job in this batch has an unresolved issue."
+		case j.Held:
+			return "A job in this batch is on hold."
+		case j.Status != production.StatusQueued:
+			return "A job in this batch is no longer queued."
+		}
+	}
+	return ""
+}
+
 // ApproveBatchFor moves a Draft batch to Locked: it resolves the merged plate
 // (reusing the Draft's cached preview when there is one), reserves the
 // filament, and stamps the machine and approver. machineID overrides the
@@ -115,23 +145,8 @@ func (s *Server) ApproveBatchFor(
 	if len(jobs) == 0 {
 		return gen.Batch{}, statusErr(http.StatusConflict, "The batch has no jobs to approve.")
 	}
-	// Re-checked at the moment of commitment, not trusted from when the batch
-	// was planned. A Draft can sit for a long time and the world moves under
-	// it: personalisation can be un-validated, a job can be flagged, held, or
-	// pulled onto another bed entirely. Locking on stale preconditions is how a
-	// plate reaches a machine containing something that should never have been
-	// printed.
-	for _, j := range jobs {
-		switch {
-		case j.PersonalisationStatus == production.PersonalisationPending:
-			return gen.Batch{}, statusErr(http.StatusConflict, "A job in this batch has unvalidated personalisation.")
-		case j.IssueReason != nil:
-			return gen.Batch{}, statusErr(http.StatusConflict, "A job in this batch has an unresolved issue.")
-		case j.Held:
-			return gen.Batch{}, statusErr(http.StatusConflict, "A job in this batch is on hold.")
-		case j.Status != production.StatusQueued:
-			return gen.Batch{}, statusErr(http.StatusConflict, "A job in this batch is no longer queued.")
-		}
+	if why := unprintableJob(jobs); why != "" {
+		return gen.Batch{}, statusErr(http.StatusConflict, why)
 	}
 
 	// The machine is chosen HERE, not when the bed was planned.
