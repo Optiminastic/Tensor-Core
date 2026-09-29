@@ -232,7 +232,7 @@ func (s *Server) getFleetMachineQueue(c *gin.Context) {
 	}
 	out := make([]batchResponse, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, batchDTO(b))
+		out = append(out, s.batchDTO(b))
 	}
 	c.JSON(http.StatusOK, out)
 }

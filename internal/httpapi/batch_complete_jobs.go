@@ -128,6 +128,6 @@ func (s *Server) completeBatchJobs(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, completeBatchJobsResponse{
-		Batch: batchDTO(updated), Completed: len(done), Remaining: int(remaining),
+		Batch: s.batchDTO(updated), Completed: len(done), Remaining: int(remaining),
 	})
 }

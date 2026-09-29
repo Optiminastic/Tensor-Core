@@ -535,7 +535,7 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusCreated, batchDTO(updated))
+	c.JSON(http.StatusCreated, s.batchDTO(updated))
 }
 
 // rebuildSourceBeds puts each bed we took a plank from back together.

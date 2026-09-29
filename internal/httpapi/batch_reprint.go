@@ -157,7 +157,7 @@ func (s *Server) reprintBatchJobs(c *gin.Context) {
 	obs.FromContext(ctx).Info("bed reprinted onto a new one",
 		"from", batch.BatchNumber, "to", newBatch.BatchNumber, "planks", len(pairs))
 	c.JSON(http.StatusCreated, reprintBatchResponse{
-		Batch: batchDTO(newBatch), Reprinted: pairs,
+		Batch: s.batchDTO(newBatch), Reprinted: pairs,
 		Note: newBatch.BatchNumber + " is locked and ready to send.",
 	})
 }

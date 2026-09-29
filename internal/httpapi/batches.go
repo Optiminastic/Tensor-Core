@@ -87,6 +87,12 @@ type batchResponse struct {
 	// own words where it gave any. Null on a batch that printed or was never
 	// sent - the two are told apart by whether it is Locked and unqueued.
 	PrintError *string `json:"print_error"`
+	// AutoQueue reports whether Tensor sends a locked bed to a printer by
+	// itself. Answered here rather than left to the browser: whether a person
+	// still has to press Queue depends on a server flag the browser cannot see,
+	// and a UI that guessed would either hide the only way to send a bed or
+	// keep offering a button for work already done.
+	AutoQueue bool `json:"auto_queue"`
 	// QueueItemID is BambuBuddy's queue item, so a sent batch can be followed
 	// rather than only observed at the moment of sending.
 	QueueItemID *int32 `json:"queue_item_id"`
@@ -101,7 +107,7 @@ type batchResponse struct {
 	FilamentByColour json.RawMessage `json:"filament_by_colour"`
 }
 
-func batchDTO(b gen.Batch) batchResponse {
+func (s *Server) batchDTO(b gen.Batch) batchResponse {
 	utilisation := db.NumFloatPtr(b.BedUtilizationPercent)
 	occupied, free := occupiedFreeArea(utilisation)
 	return batchResponse{
@@ -115,6 +121,7 @@ func batchDTO(b gen.Batch) batchResponse {
 		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
 		PlateSlicedAt: db.TimePtr(b.PlateSlicedAt), PlateSliceError: b.PlateSliceError,
 		PrintError: b.PrintError, QueueItemID: b.QueueItemID,
+		AutoQueue:   s.cfg.BatchAutoDispatch,
 		TotalLayers: b.TotalLayers, SupportGrams: db.NumFloatPtr(b.SupportGrams),
 		PurgeGrams: db.NumFloatPtr(b.PurgeGrams), ColourChanges: b.ColourChanges,
 		FilamentByColour: rawOrEmptyArray(b.FilamentByColour),
@@ -198,7 +205,7 @@ func (s *Server) listBatches(c *gin.Context) {
 		}
 		out := make([]batchResponse, 0, len(rows))
 		for _, b := range rows {
-			out = append(out, batchDTO(b))
+			out = append(out, s.batchDTO(b))
 		}
 		c.JSON(http.StatusOK, s.decorateBatches(ctx, out, batchIDsOf(rows)))
 		return
@@ -214,7 +221,7 @@ func (s *Server) listBatches(c *gin.Context) {
 	}
 	out := make([]batchResponse, 0, len(rows))
 	for _, b := range rows {
-		out = append(out, batchDTO(b))
+		out = append(out, s.batchDTO(b))
 	}
 	if n := len(rows); n > 0 {
 		setNextCursor(c, n, page.limit, db.Time(rows[n-1].CreatedAt), rows[n-1].ID)
@@ -248,7 +255,7 @@ func (s *Server) createBatch(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not create the batch.")
 		return
 	}
-	c.JSON(http.StatusCreated, batchDTO(b))
+	c.JSON(http.StatusCreated, s.batchDTO(b))
 }
 
 type patchBatchRequest struct {
@@ -310,7 +317,7 @@ func (s *Server) patchBatch(c *gin.Context) {
 		writeStatusError(c, err, "Could not update the batch.")
 		return
 	}
-	c.JSON(http.StatusOK, batchDTO(b))
+	c.JSON(http.StatusOK, s.batchDTO(b))
 }
 
 func (s *Server) getBatch(c *gin.Context) {
@@ -324,7 +331,7 @@ func (s *Server) getBatch(c *gin.Context) {
 		dbError(c, err, "That batch does not exist.", "Could not load the batch.")
 		return
 	}
-	dto := batchDTO(b)
+	dto := s.batchDTO(b)
 	if count, err := s.store.Q.CountJobsInBatch(ctx, &id); err == nil {
 		dto.JobsCount = &count
 	}
@@ -403,7 +410,7 @@ func (s *Server) autoCreateBatches(c *gin.Context) {
 
 	out := make([]batchResponse, 0, len(created))
 	for _, b := range created {
-		out = append(out, batchDTO(b))
+		out = append(out, s.batchDTO(b))
 	}
 	c.JSON(http.StatusOK, autoCreateResponse{Created: out, Unbatchable: unbatchable, Held: heldDTO(held)})
 }
@@ -504,7 +511,7 @@ func (s *Server) approveBatch(c *gin.Context) {
 		writeStatusError(c, err, "Could not approve the batch.")
 		return
 	}
-	c.JSON(http.StatusOK, batchDTO(b))
+	c.JSON(http.StatusOK, s.batchDTO(b))
 }
 
 // --- job membership editing (Draft batches only) -------------------------
@@ -708,7 +715,7 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, batchDTO(updated))
+	c.JSON(http.StatusOK, s.batchDTO(updated))
 }
 
 // removeJobFromBatch detaches one job from a batch, then rebuilds the plate
@@ -732,7 +739,7 @@ func (s *Server) removeJobFromBatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, batchDTO(updated))
+	c.JSON(http.StatusOK, s.batchDTO(updated))
 }
 
 // recomputeBatchPlate re-merges a batch's plate from its current job set and
