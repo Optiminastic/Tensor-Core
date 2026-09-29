@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -317,5 +319,126 @@ func TestChosenReasonPluralisesSeveralBlockedPrinters(t *testing.T) {
 	// Sorted, so the same fleet state always reads the same way.
 	if strings.Index(got, "A4") > strings.Index(got, "A5") {
 		t.Errorf("blocked printers should be named in a stable order: %q", got)
+	}
+}
+
+// healthyRow is a printer with nothing wrong with it, holding one red spool:
+// idle, on, profiled, no failed print behind it, and able to print redBed.
+//
+// Loaded on purpose, so a test can be about ONE thing. Every refusal in
+// weighMachine returns early and the colour gate runs FIRST, so a machine with
+// no spools is refused for that - and a test meaning to prove something else
+// would pass for the wrong reason.
+func healthyRow(serial string) gen.ListFleetMachinesWithFamilyRow {
+	profileID := uuid.New()
+	ready := production.MachineOnline
+	ams, tray := 0, 0
+	trays, err := json.Marshal([]loadedTray{{
+		Colour: "#FF0000", Type: "PLA", RemainingGrams: 900,
+		AmsID: &ams, TrayID: &tray,
+	}})
+	if err != nil {
+		panic(err)
+	}
+	return gen.ListFleetMachinesWithFamilyRow{
+		ID: uuid.New(), MachineID: serial, Name: serial,
+		Status:           production.FleetMachineIdle,
+		MachineProfileID: &profileID, ProfileStatus: &ready,
+		Filaments: trays,
+	}
+}
+
+// redBed is a one-slot plate the printer above can take.
+var redBed = []meshio.Slot{{Colour: "#FF0000", Material: "PLA"}}
+
+// One bed per printer at a time.
+//
+// The shop sends a bed to a machine and the next only once that one is
+// actually laying plastic. Stacking a queue per printer commits a bed hours
+// before it runs, which is exactly when the reasons for choosing that machine
+// stop being true: the spools get swapped, a job goes on hold, a faster
+// printer frees up.
+func TestAPrinterWithABedAlreadyWaitingIsNotOfferedAnother(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("H2C-1")
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable: func(string) string { return "" },
+		// One plate pending on this printer in BambuBuddy.
+		PrinterIDs: map[string]int{"H2C-1": 11},
+		Load:       map[int]queueLoad{11: {Items: 1, Minutes: 120}},
+	})
+
+	if opt.Eligible {
+		t.Error("a printer with a bed already waiting was offered another")
+	}
+	if !strings.Contains(opt.Refusal, "already has a bed waiting") {
+		t.Errorf("refusal = %q, want it to say the printer is already holding one", opt.Refusal)
+	}
+}
+
+// The case that makes the rule useful rather than merely strict.
+//
+// A printer PRINTING is not a printer with a backlog - it is the machine
+// working. queueMinutesByPrinter counts only QueuePending, so the next bed
+// goes the moment the last one starts, which is the whole point.
+func TestAPrinterThatIsPrintingWithNothingQueuedStillTakesTheNextBed(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("H2C-2")
+	remaining := int32(45)
+	row.RemainingMinutes = &remaining
+	row.RemainingObservedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable:  func(string) string { return "" },
+		PrinterIDs: map[string]int{"H2C-2": 12},
+		// Nothing PENDING: the plate on the bed is carried by remaining
+		// minutes, not by the queue.
+		Load: map[int]queueLoad{},
+	})
+
+	if !opt.Eligible {
+		t.Errorf("a printing machine with an empty queue was refused: %q", opt.Refusal)
+	}
+}
+
+// A bed Tensor has sent but BambuBuddy's queue cannot see yet counts too, or
+// five beds sent in the minutes before the first is sliced all pick the same
+// printer - the exact failure freeAtFor's in-flight term was added for.
+func TestABedInFlightCountsAgainstItsPrinter(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("A2L-9")
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable: func(string) string { return "" },
+		InFlight:  map[uuid.UUID]int{row.ID: 1},
+	})
+
+	if opt.Eligible {
+		t.Error("a printer with a bed in flight to it was offered another")
+	}
+	if !strings.Contains(opt.Refusal, "already has a bed waiting") {
+		t.Errorf("refusal = %q; this must be the waiting rule, not the colour gate", opt.Refusal)
+	}
+}
+
+// The cap is a setting, not a law: zero means "do not apply it", so the rule
+// can be turned off without deleting the code that implements it.
+func TestAZeroWaitingCapDisablesTheRule(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("P2S-4")
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: 0,
+		Sliceable:  func(string) string { return "" },
+		PrinterIDs: map[string]int{"P2S-4": 4},
+		Load:       map[int]queueLoad{4: {Items: 3, Minutes: 300}},
+	})
+
+	if !opt.Eligible {
+		t.Errorf("the rule applied with the cap off: %q", opt.Refusal)
 	}
 }

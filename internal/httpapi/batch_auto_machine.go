@@ -146,6 +146,7 @@ func (s *Server) rankMachinesForPlate(
 			Row: r, Slots: slots, Identities: identities, Bed: bed,
 			Load: load, InFlight: inFlight, Sliceable: sliceable,
 			PrinterIDs: printerIDs, Now: now,
+			WaitingCap: maxBedsWaitingPerMachine,
 		}))
 	}
 	return out, nil
@@ -169,7 +170,24 @@ type weighInputs struct {
 	// something has to join them; this is the cached fleet index, read once.
 	PrinterIDs map[string]int
 	Now        time.Time
+	// WaitingCap is how many beds may be waiting on one printer before it
+	// stops being offered another. See maxBedsWaitingPerMachine.
+	WaitingCap int
 }
+
+// maxBedsWaitingPerMachine is how many beds may sit waiting on one printer.
+//
+// One, because the shop works that way: a bed goes on a machine, and the next
+// is only sent once that one is actually laying plastic. Stacking a queue per
+// printer commits a bed to a machine hours before it runs, which is exactly
+// when the reason for choosing that machine stops being true - the spools get
+// swapped, a job goes on hold, a faster printer frees up.
+//
+// Counted from BambuBuddy's PENDING items plus the beds Tensor has sent that
+// its queue cannot see yet. A plate that is PRINTING is not counted: that is
+// the printer working, not a backlog, and the whole point is that the next bed
+// goes as soon as the last one starts.
+const maxBedsWaitingPerMachine = 1
 
 // weighMachine decides whether one printer can take the bed, and how soon.
 func (s *Server) weighMachine(in weighInputs) machineOption {
@@ -238,9 +256,19 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 		return opt
 	}
 
+	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
+
+	// One bed at a time. Last, because it is the only refusal here that is not
+	// a fault: the printer is fine, it simply already has work waiting, and
+	// saying so beside the ones that are off or faulted would read as a
+	// problem when it is the system doing what it was asked.
+	if cap := in.WaitingCap; cap > 0 && opt.PendingItems >= cap {
+		opt.Refusal = "this printer already has a bed waiting to start"
+		return opt
+	}
+
 	opt.Eligible = true
 	opt.SlotTrays = slotTrays
-	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
 	return opt
 }
 
