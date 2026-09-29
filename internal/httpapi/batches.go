@@ -511,6 +511,13 @@ func (s *Server) approveBatch(c *gin.Context) {
 		writeStatusError(c, err, "Could not approve the batch.")
 		return
 	}
+	// Locking a Draft by hand is the same event as the planner locking a full
+	// one, and it means the same thing: this bed is ready for a printer. Every
+	// other path that locks a bed says so - planning, editing, replating,
+	// topping up, fulfilment - and this one did not, so a bed somebody locked
+	// deliberately sat until the next periodic pass while beds nobody touched
+	// went within seconds. The floor reads that as the button not working.
+	s.triggerDispatch(c.Request.Context())
 	c.JSON(http.StatusOK, s.batchDTO(b))
 }
 
