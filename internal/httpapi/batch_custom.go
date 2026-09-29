@@ -40,11 +40,20 @@ import (
 // row cannot say "that one of the three", and the job number is what the rest
 // of the floor calls a plank - the queue, the issues board, the plate itself.
 //
-// The whole pool goes over at once and is searched in the browser. It is a few
-// hundred small rows, and a round trip per keystroke would make a box that
-// exists to be typed into feel like one that would rather not be.
+// Searched in the database, a page at a time. The pool is every job the shop
+// has ever created, so sending all of it for the browser to hide most of would
+// turn a search box into a download - and would get slower every week.
 type batchableJobsResponse struct {
 	Jobs []batchableJob `json:"jobs"`
+	// More says the search hit the pool ceiling, so Total is a floor rather
+	// than a count. Said plainly because "40 of 200" from a table of 369 is a
+	// number somebody would otherwise take at face value.
+	More bool `json:"more"`
+	// Total is how many jobs matched, which can be more than were returned.
+	// The dialog says so rather than quietly truncating: a search that shows 40
+	// of 180 is a search that needs narrowing, and a list that simply stops
+	// looks like the answer.
+	Total int `json:"total"`
 	// UnitsPerBed is how many products one plate holds, so the dialog can count
 	// places rather than making somebody guess when to stop.
 	UnitsPerBed int `json:"units_per_bed"`
@@ -97,26 +106,60 @@ type batchableJob struct {
 	FinishedStage string `json:"finished_stage"`
 }
 
-// listBatchableJobs returns every plank on an unfulfilled order, searchable.
+// batchablePoolLimit is how many rows one search reads from the database.
 //
-// Only orders nobody has shipped. A plank that cannot be bedded right now -
-// no model yet, held, flagged - is returned with that as its reason rather
-// than omitted: somebody typing a job number has asked about that plank, and
-// a search that finds nothing cannot tell "not eligible" from "not a job".
+// A ceiling, not a page: the pool is every job ever created and grows with the
+// shop. Filtering in SQL and stopping at a couple of hundred keeps the dialog's
+// cost flat, and anything past it is reached by typing rather than scrolling.
+const batchablePoolLimit = 200
+
+// batchableSearchLimit is how many rows are offered at once.
 //
-// Held, flagged and unvalidated planks are excluded exactly as the planner
-// excludes them. A dialog that let somebody pick a held job would be offering
-// to overrule a hold by accident.
+// A bed holds five. A list longer than this is not a list of candidates, it is
+// a reason to narrow the search - which the response says, by carrying how many
+// matched.
+const batchableSearchLimit = 40
+
+// listBatchableJobs answers the custom-batch dialog's search.
+//
+// Every job, not only the ones on an unfulfilled order. The restriction to
+// outstanding orders read well - a bed clears work that is waiting - and it
+// hid exactly the jobs somebody opens this dialog holding a number for: a plank
+// that printed badly, a customer asking for a second copy, a job whose order
+// shipped without it.
+//
+// A plank that cannot be bedded right now is returned with that as its reason
+// rather than omitted: somebody typing a job number has asked about that plank,
+// and a search that finds nothing cannot tell "on hold" from "no such job".
+//
+// Two query parameters, both optional:
+//
+//	q    - job number, order number or product name, matched loosely.
+//	key  - the bed's compatibility key, once a first job has fixed it.
+//
+// `key` narrows the BROWSE list only. While searching, a job of the wrong
+// colour is returned and the dialog greys it with the reason, because a search
+// for a number that answers with silence is indistinguishable from a typo.
 func (s *Server) listBatchableJobs(c *gin.Context) {
 	ctx := c.Request.Context()
-	jobs, err := s.store.Q.ListJobsForCustomBatch(ctx)
+	search := strings.TrimSpace(c.Query("q"))
+	key := c.Query("key")
+
+	var term *string
+	if search != "" {
+		escaped := likeTerm(search)
+		term = &escaped
+	}
+	jobs, err := s.store.Q.SearchJobsForCustomBatch(ctx, gen.SearchJobsForCustomBatchParams{
+		Search: term, RowLimit: batchablePoolLimit,
+	})
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the orders waiting.")
+		detail(c, http.StatusInternalServerError, "Could not read the jobs waiting.")
 		return
 	}
 	beds, err := s.bedsHolding(ctx, jobs)
 	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the beds those orders are on.")
+		detail(c, http.StatusInternalServerError, "Could not read the beds those jobs are on.")
 		return
 	}
 	numbers, err := s.orderNumbersFor(ctx, jobs)
@@ -125,12 +168,51 @@ func (s *Server) listBatchableJobs(c *gin.Context) {
 		return
 	}
 
+	// Browsing is a suggestion list and is kept tidy: planks already on a bed
+	// somebody built by hand are left out, and once a colour is fixed only that
+	// colour is offered. A SEARCH is a question about a particular plank and is
+	// answered whatever the answer is.
+	pool := jobs
+	if search == "" {
+		pool = stillToPlace(pool, beds)
+	}
+	rows := jobRows(pool, beds, numbers)
+	if search == "" && key != "" {
+		rows = onlyMatching(rows, key)
+	}
+
 	out := batchableJobsResponse{
-		Jobs:           jobRows(stillToPlace(jobs, beds), beds, numbers),
+		Jobs:           rows,
+		Total:          len(rows),
+		More:           len(jobs) == batchablePoolLimit,
 		UnitsPerBed:    s.bedUnitCap(),
 		MinUnitsPerBed: s.bedUnitFloor(),
 	}
+	if len(out.Jobs) > batchableSearchLimit {
+		out.Jobs = out.Jobs[:batchableSearchLimit]
+	}
 	c.JSON(http.StatusOK, out)
+}
+
+// onlyMatching keeps the rows that may share a bed with what is already on it.
+func onlyMatching(rows []batchableJob, key string) []batchableJob {
+	out := make([]batchableJob, 0, len(rows))
+	for _, r := range rows {
+		if r.CompatibilityKey == key {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// likeTerm makes a typed string safe to put inside an ILIKE pattern.
+//
+// Not injection - the term is a bound parameter - but meaning. A customer's
+// product name may hold a percent sign, and unescaped it becomes "match
+// anything", which returns rows that have nothing to do with what was typed.
+func likeTerm(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return r.Replace(s)
 }
 
 // orderNumbersFor reads the store's number for each job's order, in one query.

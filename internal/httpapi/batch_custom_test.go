@@ -373,3 +373,41 @@ func TestJobRowsCarriesAKeyThatSeparatesColours(t *testing.T) {
 		}
 	}
 }
+
+// A typed term goes into an ILIKE pattern, where % means "anything".
+//
+// Not injection - the term is a bound parameter - but meaning. A product name
+// holding a percent sign, searched raw, matches everything and returns a list
+// that has nothing to do with what was typed.
+func TestLikeTermNeutralisesWildcards(t *testing.T) {
+	for term, want := range map[string]string{
+		"50%":        `50\%`,
+		"JOB_115":    `JOB\_115`,
+		`back\slash`: `back\\slash`,
+		"JOB-115042": "JOB-115042",
+	} {
+		if got := likeTerm(term); got != want {
+			t.Errorf("likeTerm(%q) = %q, want %q", term, got, want)
+		}
+	}
+}
+
+// Once a first pick has fixed the colour, the browse list offers that colour
+// and nothing else - the refusal is the same one checkOneBedWorth makes, said
+// early enough that nobody chooses a plate that cannot be printed.
+func TestOnlyMatchingKeepsTheBedsOwnColour(t *testing.T) {
+	rows := []batchableJob{
+		{JobNumber: "JOB-1", CompatibilityKey: "{ BLUE }"},
+		{JobNumber: "JOB-2", CompatibilityKey: "{ GOLD }"},
+		{JobNumber: "JOB-3", CompatibilityKey: "{ BLUE }"},
+	}
+	got := onlyMatching(rows, "{ BLUE }")
+	if len(got) != 2 {
+		t.Fatalf("onlyMatching kept %d rows, want the two blue ones", len(got))
+	}
+	for _, r := range got {
+		if r.CompatibilityKey != "{ BLUE }" {
+			t.Errorf("%s survived the filter with key %q", r.JobNumber, r.CompatibilityKey)
+		}
+	}
+}
