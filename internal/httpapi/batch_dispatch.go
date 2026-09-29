@@ -15,6 +15,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
@@ -58,11 +59,29 @@ const (
 	stepSend
 )
 
+// sendCooldown is how long a bed rests after a send that did not stick.
+//
+// A failed slice RELEASES the bed - clears its slice job so it can be sent
+// again - which is right, because the alternative is a bed wedged for ever.
+// But some plates can never slice: BATCH-1002076's wipe tower collides with
+// its models, and BambuBuddy answers "G-code conflicts detected" every time.
+//
+// Without a rest, that bed is chosen every pass, spends the whole per-run cap
+// on a send that cannot stick, and nothing behind it ever moves. With one, it
+// still retries - the shop asked for retries - but four times an hour instead
+// of nine, and the beds behind it go.
+//
+// It does not slow the case that matters. A bed no printer can take yet keeps
+// the SAME reason each pass, and SetBatchPrintErrorIfChanged leaves the
+// timestamp alone when the reason is unchanged - so its error ages, the
+// cooldown lapses, and it goes the moment a spool is loaded.
+const sendCooldown = 15 * time.Minute
+
 // nextDispatchStep decides what one bed needs, and nothing else.
 //
 // Pure, so the walk's rules can be asserted without a fleet, a database or
 // BambuBuddy - which is why batch_dispatch.go had no test until now.
-func nextDispatchStep(b gen.Batch, readyToLock bool) dispatchStep {
+func nextDispatchStep(b gen.Batch, readyToLock bool, now time.Time) dispatchStep {
 	switch {
 	case b.Status == production.BatchPendingApproval && !readyToLock:
 		return stepHoldOpen
@@ -84,6 +103,9 @@ func nextDispatchStep(b gen.Batch, readyToLock bool) dispatchStep {
 	// rule that a failed plate is never retried unattended is stated in three
 	// other files. One of them should be in the walk itself.
 	case b.PrintOutcome != nil:
+		return stepNone
+	// Resting after a send that did not stick. See sendCooldown.
+	case b.PrintErrorAt.Valid && now.Sub(b.PrintErrorAt.Time) < sendCooldown:
 		return stepNone
 	default:
 		return stepSend
@@ -142,7 +164,7 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 		// of its own.
 		readyToLock := b.Status == production.BatchPendingApproval && s.readyToLock(ctx, b)
 
-		switch nextDispatchStep(b, readyToLock) {
+		switch nextDispatchStep(b, readyToLock, time.Now()) {
 		case stepNone:
 			// Already moving, or resolved. Deliberately spends no budget: a
 			// bed mid-slice is not work this pass can do, and counting it as

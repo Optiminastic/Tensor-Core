@@ -4,6 +4,9 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/google/uuid"
 
@@ -25,22 +28,30 @@ func withSliceJob(id int32) func(*gen.Batch)    { return func(b *gen.Batch) { b.
 func withPipelineRun(id int32) func(*gen.Batch) { return func(b *gen.Batch) { b.PipelineRunID = &id } }
 func withOutcome(v string) func(*gen.Batch)     { return func(b *gen.Batch) { b.PrintOutcome = &v } }
 
+// failedAt is a bed whose last send did not stick, at a given moment.
+func failedAt(t time.Time) func(*gen.Batch) {
+	return func(b *gen.Batch) { b.PrintErrorAt = pgtype.Timestamptz{Time: t, Valid: true} }
+}
+
+// now is the clock every case is judged against.
+var now = time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
 func TestNextDispatchStepHoldsADraftThatStillHasRoom(t *testing.T) {
 	// Approving it would freeze a half-empty bed. The next order in the same
 	// colour is meant to join it rather than open a bed of its own.
-	if got := nextDispatchStep(bed(production.BatchPendingApproval), false); got != stepHoldOpen {
+	if got := nextDispatchStep(bed(production.BatchPendingApproval), false, now); got != stepHoldOpen {
 		t.Errorf("step = %v, want stepHoldOpen", got)
 	}
 }
 
 func TestNextDispatchStepApprovesAFullDraft(t *testing.T) {
-	if got := nextDispatchStep(bed(production.BatchPendingApproval), true); got != stepApprove {
+	if got := nextDispatchStep(bed(production.BatchPendingApproval), true, now); got != stepApprove {
 		t.Errorf("step = %v, want stepApprove", got)
 	}
 }
 
 func TestNextDispatchStepSendsALockedIdleBed(t *testing.T) {
-	if got := nextDispatchStep(bed(production.BatchOpen), false); got != stepSend {
+	if got := nextDispatchStep(bed(production.BatchOpen), false, now); got != stepSend {
 		t.Errorf("step = %v, want stepSend", got)
 	}
 }
@@ -62,7 +73,7 @@ func TestNextDispatchStepSkipsABedThatIsAlreadyMoving(t *testing.T) {
 		{"pipeline run", bed(production.BatchOpen, withPipelineRun(9))},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := nextDispatchStep(c.b, false); got != stepNone {
+			if got := nextDispatchStep(c.b, false, now); got != stepNone {
 				t.Errorf("step = %v, want stepNone - this bed is already on its way", got)
 			}
 		})
@@ -73,7 +84,7 @@ func TestNextDispatchStepSkipsABedThatIsAlreadyMoving(t *testing.T) {
 // first time. ListBatchesToDispatch filters these out; the walk says so too,
 // because the rule is stated in three other files and none of them is the walk.
 func TestNextDispatchStepNeverSendsABedWhosePrintResolved(t *testing.T) {
-	if got := nextDispatchStep(bed(production.BatchOpen, withOutcome("failed")), false); got != stepNone {
+	if got := nextDispatchStep(bed(production.BatchOpen, withOutcome("failed")), false, now); got != stepNone {
 		t.Errorf("step = %v, want stepNone", got)
 	}
 }
@@ -150,5 +161,40 @@ func TestAnOperatorMayStillRerunAFailedBed(t *testing.T) {
 	var se *statusError
 	if errors.As(err, &se) && se.status == http.StatusConflict {
 		t.Error("an operator was refused a re-run; a failed bed would be unprintable by any route")
+	}
+}
+
+// A plate that can never slice must not eat the whole pass, every pass.
+//
+// A failed slice releases the bed so it can be sent again - right, because the
+// alternative is a bed wedged for ever. But BATCH-1002076's wipe tower collides
+// with its models, so BambuBuddy answers "G-code conflicts detected" every
+// time. Chosen every pass it would spend the entire per-run cap on a send that
+// cannot stick, and nothing behind it would ever print.
+func TestABedRestsAfterASendThatDidNotStick(t *testing.T) {
+	justFailed := bed(production.BatchOpen, failedAt(now.Add(-2*time.Minute)))
+	if got := nextDispatchStep(justFailed, false, now); got != stepNone {
+		t.Errorf("step = %v, want stepNone - a bed that just failed must rest", got)
+	}
+}
+
+// It rests, it does not stop. The shop asked for retries.
+func TestABedIsSentAgainOnceItHasRested(t *testing.T) {
+	rested := bed(production.BatchOpen, failedAt(now.Add(-sendCooldown-time.Minute)))
+	if got := nextDispatchStep(rested, false, now); got != stepSend {
+		t.Errorf("step = %v, want stepSend once the cooldown has lapsed", got)
+	}
+}
+
+// The case the cooldown must NOT slow down.
+//
+// A bed no printer can take keeps the same reason every pass, and
+// SetBatchPrintErrorIfChanged leaves the timestamp alone when the reason has
+// not changed. So its error ages, the cooldown lapses, and it goes the moment
+// somebody loads the spool - which is the whole behaviour the shop chose.
+func TestABedWaitingOnASpoolIsNotHeldByTheCooldown(t *testing.T) {
+	waiting := bed(production.BatchOpen, failedAt(now.Add(-2*time.Hour)))
+	if got := nextDispatchStep(waiting, false, now); got != stepSend {
+		t.Errorf("step = %v; a bed waiting hours on a spool must still be tried", got)
 	}
 }
