@@ -88,8 +88,28 @@ type SliceJob struct {
 	// ErrorMessage is BambuBuddy's own words when a slice fails; the field name
 	// is not documented, so an empty value is not proof of success - Failed
 	// consults Status too.
-	ErrorMessage string       `json:"error_message"`
-	Result       *SliceResult `json:"result"`
+	ErrorMessage string `json:"error_message"`
+	// The same words under the other names BambuBuddy has been seen to use.
+	// Undocumented means unversioned: a rename would otherwise turn "the wipe
+	// tower collides with your models" into an empty string, and the operator
+	// is told only that a slice failed - which is what happened to
+	// BATCH-1000598 on P2, a bed that can only ever go to a P2S and so retried
+	// into the same wall every fifteen minutes with nothing on screen to act on.
+	Error   string       `json:"error"`
+	Message string       `json:"message"`
+	Detail  string       `json:"detail"`
+	Result  *SliceResult `json:"result"`
+}
+
+// Reason is what to tell an operator when a slice fails, or empty when
+// BambuBuddy said nothing at all.
+func (j SliceJob) Reason() string {
+	for _, s := range []string{j.ErrorMessage, j.Error, j.Message, j.Detail} {
+		if t := strings.TrimSpace(s); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // Done reports whether the slice produced a file.
@@ -110,7 +130,7 @@ func (j SliceJob) Failed() bool {
 	case "failed", "error", "cancelled", "canceled":
 		return true
 	}
-	return strings.TrimSpace(j.ErrorMessage) != ""
+	return j.Reason() != ""
 }
 
 // FilamentRequirement is one slot the sliced plate needs loaded.

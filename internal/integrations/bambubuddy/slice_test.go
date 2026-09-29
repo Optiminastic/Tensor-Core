@@ -177,3 +177,42 @@ func TestSliceFileSurfacesBambuBuddysReason(t *testing.T) {
 		t.Error("ReasonError carried no reason")
 	}
 }
+
+// A failed slice must arrive with BambuBuddy's own words, whichever field it
+// chose to put them in. The field name is undocumented, and an operator told
+// only "could not slice" has nothing to act on - BATCH-1000598 retried into
+// the same wall every fifteen minutes.
+func TestSliceJobReasonSurvivesARenamedField(t *testing.T) {
+	for name, body := range map[string]string{
+		"error_message": `{"job_id":27,"status":"failed","error_message":"G-code conflicts detected"}`,
+		"error":         `{"job_id":27,"status":"failed","error":"G-code conflicts detected"}`,
+		"message":       `{"job_id":27,"status":"failed","message":"G-code conflicts detected"}`,
+		"detail":        `{"job_id":27,"status":"failed","detail":"G-code conflicts detected"}`,
+	} {
+		var j SliceJob
+		if err := json.Unmarshal([]byte(body), &j); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := j.Reason(); got != "G-code conflicts detected" {
+			t.Errorf("%s: reason = %q, want BambuBuddy's words", name, got)
+		}
+		if !j.Failed() {
+			t.Errorf("%s: a failed slice was not recognised as failed", name)
+		}
+	}
+}
+
+// Silence is not a reason. A slice that says nothing must not produce a
+// confident-sounding sentence with no cause in it.
+func TestSliceJobReasonIsEmptyWhenBambuBuddySaysNothing(t *testing.T) {
+	var j SliceJob
+	if err := json.Unmarshal([]byte(`{"job_id":27,"status":"failed"}`), &j); err != nil {
+		t.Fatal(err)
+	}
+	if got := j.Reason(); got != "" {
+		t.Errorf("reason = %q, want empty so the caller can say so plainly", got)
+	}
+	if !j.Failed() {
+		t.Error("a status of failed was not treated as failed")
+	}
+}

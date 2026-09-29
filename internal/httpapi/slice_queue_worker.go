@@ -16,7 +16,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,13 +63,19 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 		// It will never produce a file. Say why on the batch and release it so
 		// the bed can be sent again, rather than leaving it permanently
 		// un-sendable with a slice nobody is running.
-		reason := strings.TrimSpace(slice.ErrorMessage)
+		reason := slice.Reason()
 		if reason == "" {
-			reason = fmt.Sprintf("BambuBuddy could not slice this plate for %s.", a.MachineName)
+			// Said out loud rather than dressed up. "Could not slice" reads as
+			// a cause; it is the absence of one, and an operator who knows
+			// that looks in BambuBuddy instead of at the bed.
+			reason = fmt.Sprintf(
+				"BambuBuddy could not slice this plate for %s and gave no reason. Check the slice job in BambuBuddy.",
+				a.MachineName)
 		}
 		w.releaseAfterFailure(ctx, a.BatchID, reason)
 		w.logger.Warn("slice failed; the bed is sendable again",
-			"batch", a.BatchID, "slice_job", a.SliceJobID, "reason", reason)
+			"batch", a.BatchID, "slice_job", a.SliceJobID,
+			"status", slice.Status, "reason", reason)
 		return nil
 	}
 
