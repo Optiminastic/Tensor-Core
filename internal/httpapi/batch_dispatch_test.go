@@ -213,7 +213,7 @@ func TestTheNoteBlamesTheClassWhenAPrinterHoldsTheColours(t *testing.T) {
 		// And an A2L whose spool is simply not mapped.
 		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
 	})
-	if !strings.Contains(note, "wrong size") {
+	if !strings.Contains(note, "too small") {
 		t.Errorf("note = %q; it should name the size, not send somebody to Inventory", note)
 	}
 }
@@ -225,7 +225,7 @@ func TestTheNoteStillBlamesColourWhenTheWrongClassCouldNotHavePrintedItEither(t 
 		{Refusal: "this bed is laid out for a A2L", HoldsColours: false},
 		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
 	})
-	if strings.Contains(note, "wrong size") {
+	if strings.Contains(note, "too small") {
 		t.Errorf("note = %q; the class is not the reason when that printer lacked the colour too", note)
 	}
 }

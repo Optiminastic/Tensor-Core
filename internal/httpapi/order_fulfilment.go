@@ -201,7 +201,7 @@ func (s *Server) replatedBatch(
 			"batch", batch.BatchNumber)
 		return replatedPlate{}, false
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
 	if herr != nil {
 		log.Warn("could not rebuild a bed's plate", "batch", batch.BatchNumber, "reason", herr.msg)
 		return replatedPlate{}, false

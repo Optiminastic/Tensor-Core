@@ -446,13 +446,16 @@ func TestAZeroWaitingCapDisablesTheRule(t *testing.T) {
 	}
 }
 
-// A plate may only go to the class it was laid out for.
+// A plate may never go to a machine with a SMALLER bed.
 //
 // A fit, not a preference. The plate's offsets are fixed and the slicer is
 // told not to rearrange them, so four planks packed on an A2L's 330x320 come
 // out 270x270 and simply cannot print on a P2S's 256x256. A bed reached P4
 // that way and BambuBuddy answered "G-code conflicts detected after slicing".
-func TestAPlateIsRefusedByAMachineOfTheWrongClass(t *testing.T) {
+//
+// The rule is one-directional: see TestAPlateIsOfferedALargerBedAsAFallback
+// for the other half, which was refused for a long time and did not need to be.
+func TestAPlateIsRefusedByAMachineWithASmallerBed(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("P2S-7") // healthyRow is an A2L
 	p2s := "P2S"
@@ -497,5 +500,144 @@ func TestABedWithNoClassIsOfferedToAnyMachine(t *testing.T) {
 	})
 	if !opt.Eligible {
 		t.Errorf("a bed with no recorded class was stranded: %q", opt.Refusal)
+	}
+}
+
+// oversizedOption is an eligible printer whose bed is bigger than the plate.
+func oversizedOption(serial string, freeIn time.Duration, items int) machineOption {
+	o := option(serial, true, freeIn, items)
+	o.Oversized = true
+	return o
+}
+
+// The half of the rule that was missing: a plate sits inside a larger bed
+// unchanged, so a bigger machine can print it. Refusing it there kept three
+// H2Cs idle, because a bed is only ever laid out for an H2C at five units and
+// the planner's cap makes five impossible.
+func TestAPlateIsOfferedALargerBedAsAFallback(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("H2C-1") // healthyRow is an A2L
+	h2c := "H2C"
+	row.ProfileFamily = &h2c
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable: func(string) string { return "" },
+		BedFamily: "P2S", // laid out for the smallest bed
+	})
+
+	if !opt.Eligible {
+		t.Fatalf("a P2S plate was refused an H2C: %q", opt.Refusal)
+	}
+	if !opt.Oversized {
+		t.Error("the H2C was not marked oversized, so the picker would treat it as an equal")
+	}
+}
+
+func TestAnExactClassPrinterIsNeverMarkedOversized(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("A2L-1")
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable: func(string) string { return "" },
+		BedFamily: "A2L",
+	})
+	if !opt.Eligible || opt.Oversized {
+		t.Errorf("eligible=%v oversized=%v, want an exact match ranked in the first tier",
+			opt.Eligible, opt.Oversized)
+	}
+}
+
+// The tier is the whole point. "Max bed utilisation" means a three-plank plate
+// does not occupy an H2C while a P2S could have it - even a P2S that is busy.
+func TestAnExactClassPrinterBeatsALargerOneEvenWhenItIsBusier(t *testing.T) {
+	options := []machineOption{
+		oversizedOption("H2C-1", 0, 0),        // free right now
+		option("P2S-1", true, 4*time.Hour, 0), // its own class, hours away
+	}
+	if got := chooseMachine(options); got != 1 {
+		t.Errorf("chose %d, want the P2S - a larger bed is a fallback, not a peer", got)
+	}
+}
+
+func TestALargerBedWinsWhenNoPrinterOfTheBedsOwnClassCanTakeIt(t *testing.T) {
+	options := []machineOption{
+		option("P2S-1", false, 0, 0), // own class, refused
+		oversizedOption("H2C-1", 30*time.Minute, 0),
+	}
+	if got := chooseMachine(options); got != 1 {
+		t.Errorf("chose %d, want the H2C - nothing of the bed's own class was available", got)
+	}
+}
+
+// Inside the fallback tier the ordinary rules still decide, unchanged.
+func TestAmongLargerBedsTheSoonestFreeStillWins(t *testing.T) {
+	t.Run("free time", func(t *testing.T) {
+		options := []machineOption{
+			oversizedOption("H2C-1", 3*time.Hour, 0),
+			oversizedOption("H2C-2", 20*time.Minute, 0),
+		}
+		if got := chooseMachine(options); got != 1 {
+			t.Errorf("chose %d, want the sooner one", got)
+		}
+	})
+	t.Run("queue depth breaks a tie", func(t *testing.T) {
+		options := []machineOption{
+			oversizedOption("H2C-1", time.Hour, 2),
+			oversizedOption("H2C-2", time.Hour, 0),
+		}
+		if got := chooseMachine(options); got != 1 {
+			t.Errorf("chose %d, want the emptier queue", got)
+		}
+	})
+	t.Run("then a stable name", func(t *testing.T) {
+		options := []machineOption{
+			oversizedOption("H2C-2", time.Hour, 0),
+			oversizedOption("H2C-1", time.Hour, 0),
+		}
+		if got := chooseMachine(options); got != 1 {
+			t.Errorf("chose %d, want the same answer every time", got)
+		}
+	})
+}
+
+// A bed planned before classes existed is offered to anything, and must not be
+// mistaken for a plate that was downgraded to a bigger machine.
+func TestABedWithNoClassIsNeverMarkedOversized(t *testing.T) {
+	s := &Server{}
+	opt := s.weighMachine(weighInputs{
+		Row: healthyRow("A2L-1"), Slots: redBed, Now: time.Now(),
+		WaitingCap: maxBedsWaitingPerMachine,
+		Sliceable:  func(string) string { return "" },
+		BedFamily:  "",
+	})
+	if !opt.Eligible || opt.Oversized {
+		t.Errorf("eligible=%v oversized=%v, want it offered as an ordinary choice",
+			opt.Eligible, opt.Oversized)
+	}
+}
+
+func TestChoiceReasonSaysWhyABedWentToALargerMachine(t *testing.T) {
+	if note := oversizedNote(oversizedOption("H2C-1", 0, 0), "P2S"); !strings.Contains(note, "P2S") {
+		t.Errorf("note = %q, want it to name the class the plate was laid out for", note)
+	}
+	if note := oversizedNote(option("P2S-1", true, 0, 0), "P2S"); note != "" {
+		t.Errorf("note = %q, want nothing for an ordinary choice", note)
+	}
+	// No class on the bed, so there is no smaller class to name.
+	if note := oversizedNote(oversizedOption("H2C-1", 0, 0), ""); note != "" {
+		t.Errorf("note = %q, want nothing when the bed states no class", note)
+	}
+}
+
+func TestSortOptionsRanksALargerBedBelowAnExactMatch(t *testing.T) {
+	options := []machineOption{
+		oversizedOption("H2C-1", 0, 0),
+		option("P2S-1", true, 2*time.Hour, 0),
+	}
+	sortOptions(options)
+	if options[0].Machine.MachineID != "P2S-1" {
+		t.Errorf("first = %s, want the exact class first so the list reads as the picker chooses",
+			options[0].Machine.MachineID)
 	}
 }

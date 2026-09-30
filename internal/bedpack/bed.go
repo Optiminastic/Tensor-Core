@@ -1,7 +1,5 @@
 package bedpack
 
-import "strings"
-
 // A bed, as a value rather than a compile-time constant.
 //
 // The package was written when the fleet was one machine class, so the bed was
@@ -118,7 +116,10 @@ func (b Bed) AreaMM2() float64 { return b.XMM * b.YMM }
 //
 // One bed per class, because a plate is packed at fixed offsets and the slicer
 // is told not to rearrange it: a plate laid out for one class is a plate the
-// smaller classes physically cannot print. Four planks packed on the A2L bed
+// smaller classes physically cannot print. Only the smaller ones - a larger bed
+// takes it unchanged, which is what FitForFamily answers and what keeps the
+// biggest machines from sitting idle. Which of them should have it is a routing
+// question, not a geometric one, and is decided in httpapi. Four planks packed on the A2L bed
 // come out 270x270, and a P2S is 256x256 - which is why a bed sent to one
 // answered "G-code conflicts detected after slicing" with nowhere left for the
 // wipe tower.
@@ -142,14 +143,8 @@ var (
 // recognising a family is a less full plate; the cost of guessing large is a
 // plate that cannot print on the machine it was built for.
 func BedForFamily(family string) Bed {
-	switch strings.ToUpper(strings.TrimSpace(family)) {
-	case "H2C":
-		return BedH2C.Normalised()
-	case "A2L":
-		return BedA2L.Normalised()
-	case "P2S":
-		return BedP2S.Normalised()
-	default:
-		return BedP2S.Normalised()
+	if bed, ok := bedForKnownFamily(family); ok {
+		return bed
 	}
+	return BedP2S.Normalised()
 }

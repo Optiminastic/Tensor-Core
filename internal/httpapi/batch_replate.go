@@ -65,11 +65,15 @@ func (s *Server) RebuildBatchPlate(ctx context.Context, batchID uuid.UUID) error
 	units := int32(unitsOf(jobs))
 	filament := sumFilament(jobs)
 	total, effective := batchTimeFromJobs(jobs)
+	// Re-stamped with everything else: the plate was just rebuilt for this job
+	// set, and the class column describes the bed that plate was laid out on.
+	family := production.BedFamilyForUnits(unitsOf(jobs))
 	params := gen.UpdateBatchDerivedMetricsParams{
 		ID: batchID, UnitsPerBed: &units, TotalFilamentGrams: &filament,
 		TotalPrintTimeMinutes: total, EffectiveTimePerUnitMinutes: effective,
 		PreviewFileID:         &plate.fileID,
 		BedUtilizationPercent: &plate.utilisation,
+		MachineFamily:         &family,
 	}
 	params.UnitsPerBed = int32ptr(plate.unitsPerBed)
 	if _, err := s.store.Q.UpdateBatchDerivedMetrics(ctx, params); err != nil {

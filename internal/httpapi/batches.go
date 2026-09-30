@@ -443,7 +443,7 @@ func (s *Server) previewBatch(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not read the batch's jobs.")
 		return
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
 	if herr != nil {
 		detail(c, herr.status, herr.msg)
 		return
@@ -774,7 +774,7 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 	if !s.filesReady(c) {
 		return gen.Batch{}, false
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
 	if herr != nil {
 		detail(c, herr.status, herr.msg)
 		return gen.Batch{}, false
@@ -791,10 +791,15 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 	// so a batch edited after creation was assigned on the strength of a plate
 	// that no longer existed.
 	total, effective := batchTimeFromJobs(jobs)
+	// The class goes with them. plateBed just laid the plate out for this job
+	// set, so the column has to name the same class or the scheduler will offer
+	// the bed to printers it no longer fits.
+	family := production.BedFamilyForUnits(unitsOf(jobs))
 	updated, err := s.store.Q.UpdateBatchDerivedMetrics(ctx, gen.UpdateBatchDerivedMetricsParams{
 		ID: batch.ID, PreviewFileID: &fileID, UnitsPerBed: &unitsPerBed,
 		BedUtilizationPercent: &utilisation, TotalFilamentGrams: &filament,
 		TotalPrintTimeMinutes: total, EffectiveTimePerUnitMinutes: effective,
+		MachineFamily: &family,
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not update the batch.")
@@ -830,7 +835,7 @@ func (s *Server) mergedPlateFor(
 		return uuid.Nil, nil, nil, statusErr(http.StatusServiceUnavailable,
 			"Object storage is not configured, so the merged plate cannot be built.")
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber)
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
 	if herr != nil {
 		return uuid.Nil, nil, nil, statusErr(herr.status, herr.msg)
 	}
@@ -875,12 +880,34 @@ type httpErr struct {
 // one bed, downloads and merges the source models, and returns the plate STL. It
 // yields a 409 when a job lacks a measurable print file or the batch overflows the
 // bed.
+// plateBed is the bed a batch's plate must be laid out on.
+//
+// Derived from what the bed HOLDS, not from the machine_family column. The
+// column is written once, by InsertBatch, and never updated - so a bed that was
+// topped up or had a job taken off it carries the class it was planned as
+// rather than the class it now is. Deriving it here means the geometry and the
+// unit count can never disagree, whatever happened to the membership in
+// between, and the caller writes the same answer back to the column.
+//
+// The rule itself is production.BedFamilyForUnits, the same one the planner
+// used when it proposed the bed, so an untouched bed packs exactly as before.
+func plateBed(jobs []gen.ProductionJob) bedpack.Bed {
+	return bedpack.BedForFamily(production.BedFamilyForUnits(unitsOf(jobs)))
+}
+
 func (s *Server) buildMergedPlate(
-	ctx context.Context, jobs []gen.ProductionJob, batchNumber string,
+	ctx context.Context, jobs []gen.ProductionJob, batchNumber string, bed bedpack.Bed,
 ) (plateResult, *httpErr) {
-	// One bed for every plate: it is built before anything knows which printer
-	// will take it, so it has to fit the smallest bed in the fleet.
-	bed := bedpack.DefaultBed
+	// The bed comes from the caller, which knows the batch and therefore its
+	// class. It used to be bedpack.DefaultBed for every plate, under a comment
+	// calling that "the smallest bed in the fleet" - it is the A2L's 330x320,
+	// and the smallest is the P2S's 256x256. So a bed stamped P2S was laid out
+	// on geometry a P2S does not have and sent there anyway, which is what
+	// BATCH-1000598 answered with "G-code conflicts detected after slicing".
+	//
+	// It also meant the prime-tower band reserved in bedpack never reached a
+	// P2S plate: the band is kept on the bed it is given, and it was always
+	// given the A2L's.
 	type resolved struct {
 		job  gen.ProductionJob
 		file gen.FileAsset

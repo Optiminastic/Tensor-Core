@@ -316,8 +316,11 @@ func noPrinterNote(options []machineOption) string {
 	// loading a spool elsewhere will not help, because the plate is laid out
 	// for a bed those machines do not have.
 	case wrongClassWithColours > 0:
-		return "A printer holds this bed's colours but is the wrong size for it. " +
-			"This bed waits for a machine of its own class."
+		// Stricter than it used to be. A larger bed is now allowed to take this
+		// plate, so reaching here means every printer holding the colours has a
+		// bed too SMALL - there is no bigger machine waiting to be offered it.
+		return "A printer holds this bed's colours but its bed is too small for this plate. " +
+			"This bed waits for a machine of its own class or larger."
 	case unmapped > 0:
 		return "No spool has been confirmed as one of this bed's colours. " +
 			"Map it under Inventory, then queue this bed."

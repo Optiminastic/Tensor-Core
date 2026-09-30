@@ -2247,19 +2247,21 @@ const updateBatchDerivedMetrics = `-- name: UpdateBatchDerivedMetrics :one
 UPDATE batches SET
     preview_file_id         = $1,
     units_per_bed            = $2,
-    bed_utilization_percent = $3::float8,
-    total_filament_grams    = $4::float8,
-    total_print_time_minutes = $5,
-    effective_time_per_unit_minutes = $6::float8,
+    machine_family           = $3,
+    bed_utilization_percent = $4::float8,
+    total_filament_grams    = $5::float8,
+    total_print_time_minutes = $6,
+    effective_time_per_unit_minutes = $7::float8,
     plate_sliced_at          = NULL,
     updated_at               = now()
-WHERE id = $7
+WHERE id = $8
 RETURNING id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, machine_family, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, manual, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id, bambu_slice_job_id, fleet_machine_id, archive_id, print_outcome, print_started_at, print_finished_at, actual_print_time_minutes, actual_filament_grams
 `
 
 type UpdateBatchDerivedMetricsParams struct {
 	PreviewFileID               *uuid.UUID
 	UnitsPerBed                 *int32
+	MachineFamily               *string
 	BedUtilizationPercent       *float64
 	TotalFilamentGrams          *float64
 	TotalPrintTimeMinutes       *int32
@@ -2280,10 +2282,18 @@ type UpdateBatchDerivedMetricsParams struct {
 // be assigned on the strength of a plate that no longer existed. plate_sliced_at
 // is cleared for the same reason: whatever the plate slicer measured was a
 // different set of objects, so the batch is honestly back to an estimate.
+//
+// machine_family is refreshed with them, and for the same reason. It is the
+// class the plate was laid out for, and the layout is rebuilt here - so a bed
+// that lost a job and is now three units carries a plate packed on the P2S bed
+// and must say so, or the scheduler will keep offering it only to the class it
+// was planned as. It was written once by InsertBatch and never updated, which
+// is how a topped-up bed ended up describing contents it no longer had.
 func (q *Queries) UpdateBatchDerivedMetrics(ctx context.Context, arg UpdateBatchDerivedMetricsParams) (Batch, error) {
 	row := q.db.QueryRow(ctx, updateBatchDerivedMetrics,
 		arg.PreviewFileID,
 		arg.UnitsPerBed,
+		arg.MachineFamily,
 		arg.BedUtilizationPercent,
 		arg.TotalFilamentGrams,
 		arg.TotalPrintTimeMinutes,

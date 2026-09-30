@@ -149,9 +149,17 @@ RETURNING *;
 -- be assigned on the strength of a plate that no longer existed. plate_sliced_at
 -- is cleared for the same reason: whatever the plate slicer measured was a
 -- different set of objects, so the batch is honestly back to an estimate.
+--
+-- machine_family is refreshed with them, and for the same reason. It is the
+-- class the plate was laid out for, and the layout is rebuilt here - so a bed
+-- that lost a job and is now three units carries a plate packed on the P2S bed
+-- and must say so, or the scheduler will keep offering it only to the class it
+-- was planned as. It was written once by InsertBatch and never updated, which
+-- is how a topped-up bed ended up describing contents it no longer had.
 UPDATE batches SET
     preview_file_id         = sqlc.narg('preview_file_id'),
     units_per_bed            = sqlc.narg('units_per_bed'),
+    machine_family           = sqlc.narg('machine_family'),
     bed_utilization_percent = sqlc.narg('bed_utilization_percent')::float8,
     total_filament_grams    = sqlc.narg('total_filament_grams')::float8,
     total_print_time_minutes = sqlc.narg('total_print_time_minutes'),

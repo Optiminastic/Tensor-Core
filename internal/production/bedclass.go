@@ -8,6 +8,11 @@ package production
 // four - but a routing rule, so a three-plank plate does not occupy the only
 // machine that can take a five-plank one.
 //
+// Routing, though, is a preference and not a law: bedpack.FitForFamily is the
+// fit half, and a plate whose own class is unavailable may go to a larger bed
+// rather than wait. This function decides what a bed is BUILT for; it does not
+// decide alone where it ends up.
+//
 // It decides the PACKING too, and that half is not a preference. A plate is
 // laid out at fixed offsets and the slicer is told not to rearrange it, so a
 // plate built for one class is a plate the smaller classes cannot print. Four

@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Optiminastic/tensor-core/internal/bedpack"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -54,6 +55,11 @@ type machineOption struct {
 	// is pure arithmetic over trays already in hand, so knowing this for every
 	// printer costs nothing.
 	HoldsColours bool
+	// Oversized marks a printer whose bed is LARGER than the class this plate
+	// was laid out for. Eligible, and deliberately ranked below every exact
+	// match: the shop's rule is that the big beds earn their keep, so a
+	// three-plank plate takes an H2C only when nothing of its own class can.
+	Oversized bool
 }
 
 // queuePlan is the chosen printer and how to print the bed on it.
@@ -89,7 +95,7 @@ func (s *Server) planQueueForBatch(
 	return queuePlan{
 		Machine:   won.Machine,
 		SlotTrays: won.SlotTrays,
-		Reason:    chosenReason(won, options),
+		Reason:    chosenReason(won, options) + oversizedNote(won, family),
 	}, options, nil
 }
 
@@ -265,9 +271,19 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	// rearrange it, so this is a fit, not a preference: four planks packed on
 	// an A2L's 330x320 come out 270x270 and a P2S is 256x256. Checked after
 	// the health refusals so a printer that is off still says it is off.
+	//
+	// One-directional. A SMALLER bed is refused outright; a larger one takes
+	// the plate unchanged and is kept as a fallback, so the shop's biggest
+	// machines get work when nothing of the bed's own class can take it.
 	if want := strings.TrimSpace(in.BedFamily); want != "" {
-		got := strings.TrimSpace(deref(r.ProfileFamily))
-		if !strings.EqualFold(got, want) {
+		switch bedpack.FitForFamily(want, strings.TrimSpace(deref(r.ProfileFamily))) {
+		case bedpack.FitExact:
+		case bedpack.FitOversized:
+			// Bigger than the plate needs. Allowed, because a plate sits
+			// inside a larger bed unchanged, and flagged so the picker takes
+			// it only when the plate's own class cannot.
+			opt.Oversized = true
+		default:
 			opt.Refusal = fmt.Sprintf("this bed is laid out for a %s", want)
 			return opt
 		}
@@ -327,9 +343,27 @@ func freeAtFor(in weighInputs, machine gen.Machine) (time.Time, int) {
 // so the same fleet in the same state always produces the same answer and an
 // operator can be told why.
 func chooseMachine(options []machineOption) int {
+	// Two passes rather than one ordering: the plate's own class first, and a
+	// larger bed only if that pass found nothing.
+	//
+	// Not a key inside beats, though it would sort the same. beats is also what
+	// orders the list an operator reads in the queue dialog, and this file's own
+	// rule is that a constraint must not leak into the score - a leading bool
+	// there makes beats mean two things and invites the next person to weigh
+	// one against the other. As two passes, every guarantee beats already makes
+	// - earliest free, then emptier queue, then stable serial - holds inside
+	// each tier untouched.
+	if best := chooseWithin(options, false); best >= 0 {
+		return best
+	}
+	return chooseWithin(options, true)
+}
+
+// chooseWithin is chooseMachine's loop over one tier of printers.
+func chooseWithin(options []machineOption, oversized bool) int {
 	best := -1
 	for i, o := range options {
-		if !o.Eligible {
+		if !o.Eligible || o.Oversized != oversized {
 			continue
 		}
 		if best < 0 || beats(o, options[best]) {
@@ -477,6 +511,11 @@ func sortOptions(options []machineOption) {
 		if !a.Eligible {
 			return a.Machine.MachineID < b.Machine.MachineID
 		}
+		// The same tier the picker uses, so the list reads in the order the
+		// bed will actually be offered.
+		if a.Oversized != b.Oversized {
+			return !a.Oversized
+		}
 		return beats(a, b)
 	})
 }
@@ -501,4 +540,22 @@ func fleetMachineOf(r gen.ListFleetMachinesWithFamilyRow) gen.Machine {
 		NozzleCount: r.NozzleCount,
 		CreatedAt:   r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
+}
+
+// oversizedNote explains a bed that went to a class larger than it was laid
+// out for. Empty for an ordinary choice.
+//
+// Worth a sentence because the fleet otherwise looks like it is ignoring its
+// own rule: a three-plank bed on an H2C is exactly what "the big beds earn
+// their keep" says should not happen, and the reason it happened - nothing of
+// its own class could take it - is not visible anywhere else.
+//
+// The machine's name is already printed beside this line, so the sentence names
+// the class the PLATE was built for rather than the one it landed on.
+func oversizedNote(won machineOption, bedFamily string) string {
+	if !won.Oversized || strings.TrimSpace(bedFamily) == "" {
+		return ""
+	}
+	return fmt.Sprintf(". This bed was laid out for a %s; no %s printer could take it, so it goes on a larger bed",
+		bedFamily, bedFamily)
 }
