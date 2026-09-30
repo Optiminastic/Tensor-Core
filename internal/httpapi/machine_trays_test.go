@@ -209,3 +209,34 @@ func TestDecodeTraysAddsNothingWithoutADeclaredFixedSpool(t *testing.T) {
 		}
 	}
 }
+
+// The live re-read must not lose the fixed nozzle's spool.
+//
+// liveTraysFor rebuilds a machine from the printer's own AMS status, and an
+// external spool is not in that status - it has no RFID. Rebuilding from the
+// live read alone dropped the declared white, so the send refused a bed the
+// ranking had just accepted: "H2 no longer holds this bed's colours: slot 1: no
+// spool has been confirmed as #FFFFFF", for filament that was loaded.
+func TestALiveTrayReadKeepsTheFixedNozzlesSpool(t *testing.T) {
+	white, idx := "#FFFFFF", int32(1)
+	// What liveTraysFor builds: the live AMS JSON plus the machine's own
+	// declared fixed nozzle.
+	live := gen.Machine{
+		Filaments:         []byte(`[{"colour":"#FFF144","type":"PLA","ams_id":0,"tray_id":3}]`),
+		FixedNozzleColour: &white,
+		FixedNozzleIndex:  &idx,
+	}
+	trays := decodeTrays(live)
+	if len(trays) != 2 {
+		t.Fatalf("decodeTrays returned %d trays, want the AMS spool and the external one", len(trays))
+	}
+	var sawWhite bool
+	for _, tr := range trays {
+		if tr.Colour == "#FFFFFF" {
+			sawWhite = true
+		}
+	}
+	if !sawWhite {
+		t.Error("the declared white was lost, so a two-colour bed would be refused at send time")
+	}
+}

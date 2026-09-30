@@ -453,7 +453,17 @@ func (s *Server) liveTraysFor(ctx context.Context, machine gen.Machine) []loaded
 	if err == nil && printerID > 0 {
 		status, err := s.bambu.GetStatus(ctx, printerID)
 		if err == nil {
-			trays := decodeTrays(gen.Machine{Filaments: filamentsJSON(status)})
+			// The fixed nozzle's spool rides along. It is not in the AMS
+			// status - it is an external feed with no RFID - so a machine
+			// rebuilt from the live read alone loses it, and the send then
+			// refuses a bed the ranking had just accepted: "H2 no longer holds
+			// this bed's colours: no spool has been confirmed as #FFFFFF",
+			// for white that was physically loaded and declared.
+			trays := decodeTrays(gen.Machine{
+				Filaments:         filamentsJSON(status),
+				FixedNozzleColour: machine.FixedNozzleColour,
+				FixedNozzleIndex:  machine.FixedNozzleIndex,
+			})
 			if len(trays) > 0 {
 				return trays
 			}
