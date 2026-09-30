@@ -894,6 +894,25 @@ CREATE UNIQUE INDEX uq_product_field_map_variable
 CREATE INDEX ix_product_field_maps_product
     ON product_field_maps (product_id, role, position);
 
+-- Which BambuBuddy slicer pipeline a SKU prints with, per machine class - see
+-- migration 0085. No row means the class default, which is how slicing behaved
+-- before this table existed: the first pipeline whose target class matched the
+-- printer's model. Keyed on the SKU string because that is what a job carries
+-- and what the rule compares; the registry's variants do not hold the SKUs that
+-- actually print. Many SKUs may name one pipeline, and the batching token is
+-- built from the mapping so that those SKUs keep sharing a plate.
+CREATE TABLE sku_slicer_pipelines (
+    id             uuid PRIMARY KEY,
+    sku            varchar(128) NOT NULL,
+    machine_family varchar(16) NOT NULL,
+    pipeline_id    integer NOT NULL,
+    pipeline_name  varchar(200) NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_sku_pipeline_family
+    ON sku_slicer_pipelines (lower(sku), upper(machine_family));
+
 -- An uploaded OpenSCAD template that overrides the embedded one - see migration
 -- 0071. No rows means the binary's own templates are used, which is how this
 -- behaved before the table existed.

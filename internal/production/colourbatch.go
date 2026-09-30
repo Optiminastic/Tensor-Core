@@ -230,7 +230,7 @@ func colourBedKey(j PlanJob) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	return key + "|" + j.Material + "|" + j.MachineFamily, true
+	return key + "|" + j.Material + "|" + j.MachineFamily + "|" + j.SlicingKey, true
 }
 
 // NormalisedColourKey is the canonical form of a job's colour set: each colour

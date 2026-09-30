@@ -130,6 +130,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// Which order field feeds which OpenSCAD variable, and what the customers
 	// have actually been sending - see registry_field_maps.go.
 	s.registerRegistryFieldMaps(g, read, manage)
+	// Which slicer pipeline each SKU prints with, per machine class - see
+	// registry_pipelines.go.
+	s.registerRegistryPipelines(g, read, manage)
 }
 
 func (s *Server) listRegistryProducts(c *gin.Context) {

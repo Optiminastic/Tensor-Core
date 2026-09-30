@@ -65,9 +65,32 @@ func TestColourBedKeyIsBuiltFromTheNormalisedColourKey(t *testing.T) {
 	if ka != kb {
 		t.Errorf("bed keys differ for the same colour set: %q vs %q", ka, kb)
 	}
-	if want := NormalisedColourKey(a.Colours) + "|PLA|A2L"; ka != want {
+	if want := NormalisedColourKey(a.Colours) + "|PLA|A2L|"; ka != want {
 		t.Errorf("bed key = %q, want %q - it must be the normalised colour set plus "+
-			"material and family", ka, want)
+			"material, family and the SKU's slicing mapping", ka, want)
+	}
+
+	// The slicing mapping splits a bed the same way colour does: one plate is
+	// sliced once, with one process preset. Two SKUs mapped to the SAME
+	// pipeline keep sharing, which is why the token is built from the mapping
+	// and not from the SKU.
+	mapped := PlanJob{Colours: []string{"BLUE", "WHITE"}, Material: "PLA",
+		MachineFamily: "A2L", SlicingKey: "H2C=5;"}
+	sameMapping := mapped
+	other := PlanJob{Colours: []string{"BLUE", "WHITE"}, Material: "PLA",
+		MachineFamily: "A2L", SlicingKey: "H2C=2;"}
+
+	km, _ := colourBedKey(mapped)
+	ks, _ := colourBedKey(sameMapping)
+	ko, _ := colourBedKey(other)
+	if km != ks {
+		t.Errorf("two SKUs mapped to one pipeline got different beds: %q vs %q", km, ks)
+	}
+	if km == ko {
+		t.Errorf("SKUs mapped to different pipelines shared a bed key: %q", km)
+	}
+	if km == ka {
+		t.Error("a mapped SKU shared a bed key with an unmapped one")
 	}
 
 	// A colourless job still has no bed, which is what ReasonNoColour reports.

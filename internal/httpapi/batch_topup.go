@@ -135,7 +135,9 @@ func (s *Server) fillLockedBed(
 	}
 
 	room := cap - unitsOf(existing)
-	chosen, priorityCount := topUpCandidates(compatibilityKeyOf(existing[0]), room, pool, taken)
+	keys := s.slicingKeys(ctx)
+	chosen, priorityCount := topUpCandidates(
+		compatibilityKeyOf(existing[0], keys), room, pool, taken, keys)
 	if len(chosen) == 0 {
 		return placement{}, nil
 	}
@@ -247,7 +249,8 @@ func (s *Server) rebuildAfterTopUp(ctx context.Context, batch gen.Batch) error {
 // re-plate, and that is only worth paying for expedited work. Standard work can
 // wait for a Draft, which costs nothing.
 func topUpCandidates(
-	key production.CompatibilityKey, room int, pool []gen.ProductionJob, taken map[uuid.UUID]bool,
+	key production.CompatibilityKey, room int, pool []gen.ProductionJob,
+	taken map[uuid.UUID]bool, keys map[string]string,
 ) ([]gen.ProductionJob, int) {
 	if room <= 0 {
 		return nil, 0
@@ -257,7 +260,7 @@ func topUpCandidates(
 	left := room
 
 	fits := func(j gen.ProductionJob) bool {
-		if taken[j.ID] || compatibilityKeyOf(j) != key {
+		if taken[j.ID] || compatibilityKeyOf(j, keys) != key {
 			return false
 		}
 		// No splitting. Minting a fragment row here would leave the planner a

@@ -28,7 +28,7 @@ func candidate(colour string, priority, quantity int32) gen.ProductionJob {
 }
 
 func blueBedKey() production.CompatibilityKey {
-	return compatibilityKeyOf(candidate("BLUE", NormalRank, 1))
+	return compatibilityKeyOf(candidate("BLUE", NormalRank, 1), nil)
 }
 
 // The headline bug this whole change exists to stop: a RED plank on a BLUE bed.
@@ -38,7 +38,7 @@ func TestTopUpCandidatesRefusesAColourMismatch(t *testing.T) {
 		candidate("RED", PriorityRank, 1),
 		candidate("GOLD", PriorityRank, 1),
 	}
-	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{})
+	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{}, nil)
 	if len(chosen) != 0 || priority != 0 {
 		t.Errorf("a BLUE bed took %d job(s) of another colour", len(chosen))
 	}
@@ -52,7 +52,7 @@ func TestTopUpCandidatesNeverOpensABedForStandardWorkAlone(t *testing.T) {
 		candidate("BLUE", NormalRank, 1),
 		candidate("BLUE", NormalRank, 1),
 	}
-	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{})
+	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{}, nil)
 	if len(chosen) != 0 || priority != 0 {
 		t.Errorf("a locked bed was opened for %d standard job(s) and no expedited work", len(chosen))
 	}
@@ -69,7 +69,7 @@ func TestTopUpCandidatesFillsTheRestWithStandardWork(t *testing.T) {
 		candidate("BLUE", NormalRank, 1),
 		candidate("BLUE", NormalRank, 1), // one too many for a room of 3
 	}
-	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{})
+	chosen, priority := topUpCandidates(blueBedKey(), 3, pool, map[uuid.UUID]bool{}, nil)
 	if priority != 1 {
 		t.Errorf("expedited jobs placed = %d, want 1", priority)
 	}
@@ -86,13 +86,13 @@ func TestTopUpCandidatesFillsTheRestWithStandardWork(t *testing.T) {
 func TestTopUpCandidatesNeverOvershootsTheRoom(t *testing.T) {
 	// Room for one; the only expedited job needs two.
 	pool := []gen.ProductionJob{candidate("BLUE", PriorityRank, 2)}
-	chosen, _ := topUpCandidates(blueBedKey(), 1, pool, map[uuid.UUID]bool{})
+	chosen, _ := topUpCandidates(blueBedKey(), 1, pool, map[uuid.UUID]bool{}, nil)
 	if len(chosen) != 0 {
 		t.Errorf("a job of quantity 2 was placed in a single free place")
 	}
 
 	// With room for two it fits exactly.
-	chosen, priority := topUpCandidates(blueBedKey(), 2, pool, map[uuid.UUID]bool{})
+	chosen, priority := topUpCandidates(blueBedKey(), 2, pool, map[uuid.UUID]bool{}, nil)
 	if len(chosen) != 1 || priority != 1 {
 		t.Errorf("a job of quantity 2 did not fit two free places (chosen=%d)", len(chosen))
 	}
@@ -101,7 +101,7 @@ func TestTopUpCandidatesNeverOvershootsTheRoom(t *testing.T) {
 // A full bed is not a candidate at all.
 func TestTopUpCandidatesTakesNothingWithNoRoom(t *testing.T) {
 	pool := []gen.ProductionJob{candidate("BLUE", PriorityRank, 1)}
-	if chosen, _ := topUpCandidates(blueBedKey(), 0, pool, map[uuid.UUID]bool{}); len(chosen) != 0 {
+	if chosen, _ := topUpCandidates(blueBedKey(), 0, pool, map[uuid.UUID]bool{}, nil); len(chosen) != 0 {
 		t.Errorf("a bed with no room took %d job(s)", len(chosen))
 	}
 }
@@ -113,7 +113,7 @@ func TestTopUpCandidatesSkipsJobsAlreadyClaimed(t *testing.T) {
 	pool := []gen.ProductionJob{job}
 	taken := map[uuid.UUID]bool{job.ID: true}
 
-	if chosen, _ := topUpCandidates(blueBedKey(), 3, pool, taken); len(chosen) != 0 {
+	if chosen, _ := topUpCandidates(blueBedKey(), 3, pool, taken, nil); len(chosen) != 0 {
 		t.Error("a job already claimed by an earlier bed in the same pass was taken again")
 	}
 }
@@ -126,7 +126,7 @@ func TestTopUpCandidatesRefusesAColourlessJob(t *testing.T) {
 		ID: uuid.New(), JobNumber: "NOCOLOUR", Material: &material, MachineFamily: &family,
 		Colours: []byte("[]"), Priority: PriorityRank, Quantity: 1,
 	}
-	chosen, _ := topUpCandidates(blueBedKey(), 3, []gen.ProductionJob{colourless}, map[uuid.UUID]bool{})
+	chosen, _ := topUpCandidates(blueBedKey(), 3, []gen.ProductionJob{colourless}, map[uuid.UUID]bool{}, nil)
 	if len(chosen) != 0 {
 		t.Error("a job recording no colour was placed on a BLUE bed")
 	}

@@ -34,7 +34,7 @@ func TestCheckOneBedWorthRefusesTwoColours(t *testing.T) {
 	blue := batchableJobRow("JOB-1", `["BLUE"]`)
 	gold := batchableJobRow("JOB-2", `["GOLD"]`)
 
-	err := checkOneBedWorth([]gen.ProductionJob{blue, gold}, 4)
+	err := checkOneBedWorth([]gen.ProductionJob{blue, gold}, 4, nil)
 	if err == nil {
 		t.Fatal("a bed mixing BLUE and GOLD was accepted")
 	}
@@ -49,7 +49,7 @@ func TestCheckOneBedWorthAcceptsOneColour(t *testing.T) {
 		batchableJobRow("JOB-1", `["BLUE"]`),
 		batchableJobRow("JOB-2", `["BLUE"]`),
 	}
-	if err := checkOneBedWorth(jobs, 4); err != nil {
+	if err := checkOneBedWorth(jobs, 4, nil); err != nil {
 		t.Fatalf("two BLUE planks were refused: %v", err)
 	}
 }
@@ -62,7 +62,7 @@ func TestCheckOneBedWorthRefusesMoreThanTheBedHolds(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		jobs = append(jobs, batchableJobRow("JOB-X", `["BLUE"]`))
 	}
-	err := checkOneBedWorth(jobs, 4)
+	err := checkOneBedWorth(jobs, 4, nil)
 	if err == nil {
 		t.Fatal("five products were accepted onto a four-place bed")
 	}
@@ -77,7 +77,7 @@ func TestCheckOneBedWorthCountsProductsNotJobs(t *testing.T) {
 	big := batchableJobRow("JOB-1", `["BLUE"]`)
 	big.Quantity = 5
 
-	if err := checkOneBedWorth([]gen.ProductionJob{big}, 4); err == nil {
+	if err := checkOneBedWorth([]gen.ProductionJob{big}, 4, nil); err == nil {
 		t.Fatal("one job of five planks was accepted onto a four-place bed")
 	}
 }
@@ -85,7 +85,7 @@ func TestCheckOneBedWorthCountsProductsNotJobs(t *testing.T) {
 // A job with no colour has nothing to match against, so it would accept
 // anything beside it - the planner's ReasonNoColour, at this end.
 func TestCheckOneBedWorthRefusesAJobWithNoColour(t *testing.T) {
-	if err := checkOneBedWorth([]gen.ProductionJob{batchableJobRow("JOB-1", `[]`)}, 4); err == nil {
+	if err := checkOneBedWorth([]gen.ProductionJob{batchableJobRow("JOB-1", `[]`)}, 4, nil); err == nil {
 		t.Fatal("a bed whose first job records no colour was accepted")
 	}
 }
@@ -157,17 +157,17 @@ func TestCompatibilityKeyStringSeparatesWhatCannotShareABed(t *testing.T) {
 	alsoBlue := batchableJobRow("JOB-2", `["BLUE"]`)
 	gold := batchableJobRow("JOB-3", `["GOLD"]`)
 
-	if compatibilityKeyString(blue) != compatibilityKeyString(alsoBlue) {
+	if compatibilityKeyString(blue, nil) != compatibilityKeyString(alsoBlue, nil) {
 		t.Error("two BLUE planks produced different keys, so the dialog would not offer the second")
 	}
-	if compatibilityKeyString(blue) == compatibilityKeyString(gold) {
+	if compatibilityKeyString(blue, nil) == compatibilityKeyString(gold, nil) {
 		t.Error("BLUE and GOLD produced the same key, so the dialog would offer a plate that cannot print")
 	}
 
 	petg := batchableJobRow("JOB-4", `["BLUE"]`)
 	material := "PETG"
 	petg.Material = &material
-	if compatibilityKeyString(blue) == compatibilityKeyString(petg) {
+	if compatibilityKeyString(blue, nil) == compatibilityKeyString(petg, nil) {
 		t.Error("PLA and PETG produced the same key")
 	}
 }
@@ -306,6 +306,7 @@ func TestJobRowsKeepsEachPlankSeparate(t *testing.T) {
 		[]gen.ProductionJob{first, second},
 		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{},
 		map[uuid.UUID]string{order: "#1001"},
+		nil,
 	)
 	if len(rows) != 2 {
 		t.Fatalf("jobRows returned %d rows for two planks of one order, want 2", len(rows))
@@ -327,7 +328,7 @@ func TestJobRowsCountsUnitsNotJobs(t *testing.T) {
 	job.Quantity = 3
 
 	rows := jobRows([]gen.ProductionJob{job},
-		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{}, nil)
 	if rows[0].Units != 3 {
 		t.Fatalf("units = %d, want 3 - a job for three planks fills three places", rows[0].Units)
 	}
@@ -342,7 +343,7 @@ func TestJobRowsKeepsTheUnavailableAndSortsThemLast(t *testing.T) {
 	free := batchableJobRow("JOB-2", `["BLUE"]`)
 
 	rows := jobRows([]gen.ProductionJob{held, free},
-		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{}, nil)
 	if len(rows) != 2 {
 		t.Fatalf("jobRows returned %d rows, want the held plank kept", len(rows))
 	}
@@ -363,7 +364,7 @@ func TestJobRowsCarriesAKeyThatSeparatesColours(t *testing.T) {
 	gold := batchableJobRow("JOB-2", `["GOLD"]`)
 
 	rows := jobRows([]gen.ProductionJob{blue, gold},
-		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{})
+		map[uuid.UUID]gen.ListBatchIdentityForIDsRow{}, map[uuid.UUID]string{}, nil)
 	if rows[0].CompatibilityKey == rows[1].CompatibilityKey {
 		t.Fatal("a blue and a gold plank shared a compatibility key")
 	}
@@ -408,6 +409,67 @@ func TestOnlyMatchingKeepsTheBedsOwnColour(t *testing.T) {
 	for _, r := range got {
 		if r.CompatibilityKey != "{ BLUE }" {
 			t.Errorf("%s survived the filter with key %q", r.JobNumber, r.CompatibilityKey)
+		}
+	}
+}
+
+// A plate is sliced once, with one process preset, so two SKUs that print with
+// different settings cannot share one - the same argument as colour.
+//
+// Keyed on the MAPPING rather than on the SKU, and that is the point: several
+// SKUs pointed at one pipeline keep sharing a bed, which is the whole reason
+// for being able to map them together.
+func TestSKUsMappedToOnePipelineStillShareABed(t *testing.T) {
+	dnpRed := batchableJobRow("JOB-1", `["RED"]`)
+	sku1 := "DNP-RED"
+	dnpRed.Sku = &sku1
+	dnpfRed := batchableJobRow("JOB-2", `["RED"]`)
+	sku2 := "DNPF-RED"
+	dnpfRed.Sku = &sku2
+
+	// Both SKUs mapped to pipeline 5 on the H2C.
+	keys := map[string]string{"dnp-red": "H2C=5;", "dnpf-red": "H2C=5;"}
+	if compatibilityKeyOf(dnpRed, keys) != compatibilityKeyOf(dnpfRed, keys) {
+		t.Error("two SKUs mapped to the same pipeline were refused one bed")
+	}
+
+	// One moved to another pipeline: now they slice differently.
+	keys["dnpf-red"] = "H2C=2;"
+	if compatibilityKeyOf(dnpRed, keys) == compatibilityKeyOf(dnpfRed, keys) {
+		t.Error("SKUs mapped to different pipelines shared a bed")
+	}
+}
+
+// Nothing splits until somebody maps something: an unmapped SKU behaves exactly
+// as it did before the mapping existed.
+func TestUnmappedSKUsShareABedAsBefore(t *testing.T) {
+	a := batchableJobRow("JOB-1", `["RED"]`)
+	skuA := "DNP-RED"
+	a.Sku = &skuA
+	b := batchableJobRow("JOB-2", `["RED"]`)
+	skuB := "DNPF-RED"
+	b.Sku = &skuB
+
+	if compatibilityKeyOf(a, nil) != compatibilityKeyOf(b, nil) {
+		t.Error("two unmapped SKUs were split apart; nothing should change until one is mapped")
+	}
+	// And a mapped SKU does not join them.
+	if compatibilityKeyOf(a, map[string]string{"dnp-red": "H2C=5;"}) == compatibilityKeyOf(b, nil) {
+		t.Error("a mapped SKU shared a bed with an unmapped one")
+	}
+}
+
+// A class the router has never heard of must not reach the database: the
+// families here and the ones the packer routes on are one vocabulary.
+func TestOnlyTheShopsMachineClassesCanBeMapped(t *testing.T) {
+	for _, family := range []string{"H2C", "A2L", "P2S"} {
+		if !validMachineFamily(family) {
+			t.Errorf("%s is a class this shop runs and was refused", family)
+		}
+	}
+	for _, family := range []string{"", "h2c", "X1C", "A2L "} {
+		if validMachineFamily(family) {
+			t.Errorf("%q was accepted as a machine class", family)
 		}
 	}
 }

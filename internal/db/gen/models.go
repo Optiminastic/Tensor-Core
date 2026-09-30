@@ -590,6 +590,16 @@ type ShopifyProduct struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type SkuSlicerPipeline struct {
+	ID            uuid.UUID
+	Sku           string
+	MachineFamily string
+	PipelineID    int32
+	PipelineName  string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
 type SliceJob struct {
 	ID        uuid.UUID
 	DesignID  uuid.UUID

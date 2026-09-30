@@ -367,3 +367,75 @@ SET status = 'retired', updated_at = now()
 WHERE product_id = sqlc.arg('product_id')
   AND status <> 'retired'
   AND (sku IS NULL OR lower(sku) <> ALL (sqlc.arg('skus')::text[]));
+
+-- name: ListSKUPipelines :many
+-- Every SKU that prints, with its slicer-pipeline mapping.
+--
+-- A union of three places a SKU can come from, because no single one of them
+-- knows every SKU the shop actually prints: the registry's variants, the jobs
+-- themselves, and the mapping table. The live floor is the reason - of eight
+-- SKUs printing today, one has a matching variant row, so a list built from the
+-- registry alone would offer almost nothing worth mapping.
+--
+-- Mapped and unmapped alike: "not mapped yet" is the state somebody opens this
+-- page to fix, and omitting those rows would hide exactly the work to be done.
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+)
+SELECT k.sku,
+       max(k.display)::text      AS display_sku,
+       max(k.product_code)::text AS product_code,
+       max(k.product_name)::text AS product_name,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM known k
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = k.sku
+GROUP BY k.sku, sp.machine_family, sp.pipeline_id, sp.pipeline_name
+ORDER BY k.sku, sp.machine_family;
+
+-- name: GetPipelineForSKU :one
+-- The pipeline one SKU prints with on one machine class - the slice path's
+-- lookup. Case-insensitive on both sides: a SKU typed into Shopify and one
+-- typed into Tensor disagree about case more often than anybody expects.
+SELECT * FROM sku_slicer_pipelines
+WHERE lower(sku) = lower(sqlc.arg('sku')::text)
+  AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
+
+-- name: ListAllPipelineMappings :many
+-- Every SKU-to-pipeline mapping on the floor, for building the batching token.
+--
+-- Read whole rather than per job: the compatibility key is computed in loops
+-- over candidate pools that run to hundreds of jobs, and a query each would be
+-- hundreds of round trips to answer a question this table can answer in one.
+SELECT lower(sku)::text AS sku, machine_family, pipeline_id
+FROM sku_slicer_pipelines
+ORDER BY lower(sku), upper(machine_family);
+
+-- name: UpsertSKUPipeline :one
+INSERT INTO sku_slicer_pipelines (id, sku, machine_family, pipeline_id, pipeline_name)
+VALUES (
+    sqlc.arg('id'), sqlc.arg('sku'), sqlc.arg('machine_family'),
+    sqlc.arg('pipeline_id'), sqlc.arg('pipeline_name')
+)
+ON CONFLICT (lower(sku), upper(machine_family)) DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING *;
+
+-- name: DeleteSKUPipeline :exec
+-- Clearing a mapping returns the SKU to the class default, which is a real
+-- choice and not an absence of one - hence a delete rather than a null.
+DELETE FROM sku_slicer_pipelines
+WHERE lower(sku) = lower(sqlc.arg('sku')::text)
+  AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);

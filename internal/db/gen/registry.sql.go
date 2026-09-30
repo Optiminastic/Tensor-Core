@@ -119,6 +119,24 @@ func (q *Queries) DeleteProductOption(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const deleteSKUPipeline = `-- name: DeleteSKUPipeline :exec
+DELETE FROM sku_slicer_pipelines
+WHERE lower(sku) = lower($1::text)
+  AND upper(machine_family) = upper($2::text)
+`
+
+type DeleteSKUPipelineParams struct {
+	Sku           string
+	MachineFamily string
+}
+
+// Clearing a mapping returns the SKU to the class default, which is a real
+// choice and not an absence of one - hence a delete rather than a null.
+func (q *Queries) DeleteSKUPipeline(ctx context.Context, arg DeleteSKUPipelineParams) error {
+	_, err := q.db.Exec(ctx, deleteSKUPipeline, arg.Sku, arg.MachineFamily)
+	return err
+}
+
 const deleteVariant = `-- name: DeleteVariant :exec
 DELETE FROM product_variants WHERE id = $1
 `
@@ -181,6 +199,35 @@ func (q *Queries) GetOptionValueProduct(ctx context.Context, id uuid.UUID) (uuid
 	var product_id uuid.UUID
 	err := row.Scan(&product_id)
 	return product_id, err
+}
+
+const getPipelineForSKU = `-- name: GetPipelineForSKU :one
+SELECT id, sku, machine_family, pipeline_id, pipeline_name, created_at, updated_at FROM sku_slicer_pipelines
+WHERE lower(sku) = lower($1::text)
+  AND upper(machine_family) = upper($2::text)
+`
+
+type GetPipelineForSKUParams struct {
+	Sku           string
+	MachineFamily string
+}
+
+// The pipeline one SKU prints with on one machine class - the slice path's
+// lookup. Case-insensitive on both sides: a SKU typed into Shopify and one
+// typed into Tensor disagree about case more often than anybody expects.
+func (q *Queries) GetPipelineForSKU(ctx context.Context, arg GetPipelineForSKUParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, getPipelineForSKU, arg.Sku, arg.MachineFamily)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getProductByCode = `-- name: GetProductByCode :one
@@ -497,6 +544,43 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listAllPipelineMappings = `-- name: ListAllPipelineMappings :many
+SELECT lower(sku)::text AS sku, machine_family, pipeline_id
+FROM sku_slicer_pipelines
+ORDER BY lower(sku), upper(machine_family)
+`
+
+type ListAllPipelineMappingsRow struct {
+	Sku           string
+	MachineFamily string
+	PipelineID    int32
+}
+
+// Every SKU-to-pipeline mapping on the floor, for building the batching token.
+//
+// Read whole rather than per job: the compatibility key is computed in loops
+// over candidate pools that run to hundreds of jobs, and a query each would be
+// hundreds of round trips to answer a question this table can answer in one.
+func (q *Queries) ListAllPipelineMappings(ctx context.Context) ([]ListAllPipelineMappingsRow, error) {
+	rows, err := q.db.Query(ctx, listAllPipelineMappings)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAllPipelineMappingsRow{}
+	for rows.Next() {
+		var i ListAllPipelineMappingsRow
+		if err := rows.Scan(&i.Sku, &i.MachineFamily, &i.PipelineID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
@@ -819,6 +903,80 @@ func (q *Queries) ListProducts(ctx context.Context) ([]ListProductsRow, error) {
 			&i.UpdatedAt,
 			&i.OptionCount,
 			&i.VariantCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSKUPipelines = `-- name: ListSKUPipelines :many
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+)
+SELECT k.sku,
+       max(k.display)::text      AS display_sku,
+       max(k.product_code)::text AS product_code,
+       max(k.product_name)::text AS product_name,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM known k
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = k.sku
+GROUP BY k.sku, sp.machine_family, sp.pipeline_id, sp.pipeline_name
+ORDER BY k.sku, sp.machine_family
+`
+
+type ListSKUPipelinesRow struct {
+	Sku           string
+	DisplaySku    string
+	ProductCode   string
+	ProductName   string
+	MachineFamily *string
+	PipelineID    *int32
+	PipelineName  *string
+}
+
+// Every SKU that prints, with its slicer-pipeline mapping.
+//
+// A union of three places a SKU can come from, because no single one of them
+// knows every SKU the shop actually prints: the registry's variants, the jobs
+// themselves, and the mapping table. The live floor is the reason - of eight
+// SKUs printing today, one has a matching variant row, so a list built from the
+// registry alone would offer almost nothing worth mapping.
+//
+// Mapped and unmapped alike: "not mapped yet" is the state somebody opens this
+// page to fix, and omitting those rows would hide exactly the work to be done.
+func (q *Queries) ListSKUPipelines(ctx context.Context) ([]ListSKUPipelinesRow, error) {
+	rows, err := q.db.Query(ctx, listSKUPipelines)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSKUPipelinesRow{}
+	for rows.Next() {
+		var i ListSKUPipelinesRow
+		if err := rows.Scan(
+			&i.Sku,
+			&i.DisplaySku,
+			&i.ProductCode,
+			&i.ProductName,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
 		); err != nil {
 			return nil, err
 		}
@@ -1255,6 +1413,48 @@ func (q *Queries) UpsertProductByCode(ctx context.Context, arg UpsertProductByCo
 		&i.Kind,
 		&i.Status,
 		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertSKUPipeline = `-- name: UpsertSKUPipeline :one
+INSERT INTO sku_slicer_pipelines (id, sku, machine_family, pipeline_id, pipeline_name)
+VALUES (
+    $1, $2, $3,
+    $4, $5
+)
+ON CONFLICT (lower(sku), upper(machine_family)) DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING id, sku, machine_family, pipeline_id, pipeline_name, created_at, updated_at
+`
+
+type UpsertSKUPipelineParams struct {
+	ID            uuid.UUID
+	Sku           string
+	MachineFamily string
+	PipelineID    int32
+	PipelineName  string
+}
+
+func (q *Queries) UpsertSKUPipeline(ctx context.Context, arg UpsertSKUPipelineParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, upsertSKUPipeline,
+		arg.ID,
+		arg.Sku,
+		arg.MachineFamily,
+		arg.PipelineID,
+		arg.PipelineName,
+	)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

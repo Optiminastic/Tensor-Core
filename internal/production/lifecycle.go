@@ -162,6 +162,18 @@ type CompatibilityKey struct {
 	NozzleRight   string
 	QualityMM     string
 	MachineFamily string
+	// SlicingKey is the SKU's slicer-pipeline mapping, as a token.
+	//
+	// Here for the same reason Colour is: a plate is sliced ONCE, with one
+	// process preset, so two SKUs that print with different settings describe a
+	// plate that cannot be made. Empty for a SKU nobody has mapped, which is
+	// most of them - and all of those share a value, so nothing splits until
+	// somebody maps something.
+	//
+	// Built from the mapping rather than from the SKU deliberately: several
+	// SKUs pointed at one pipeline produce one token and go on sharing a bed,
+	// which is the whole point of being able to map them together.
+	SlicingKey string
 }
 
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.

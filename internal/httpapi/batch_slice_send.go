@@ -142,7 +142,7 @@ func (s *Server) sendBatchToMachine(
 			machine.Name))
 	}
 
-	pipeline, err := s.pipelineForModel(ctx, deref(machine.Model))
+	pipeline, err := s.pipelineForBed(ctx, bedJobs, deref(machine.Model))
 	if err != nil {
 		s.recordPrintError(ctx, batch.ID, err.Error())
 		return out, statusErr(http.StatusConflict, err.Error())
@@ -541,4 +541,84 @@ func nozzleMapOverrides(machine gen.Machine, assignments []slotAssignment) map[s
 		"filament_map_mode": "Manual",
 		"filament_map":      mapping,
 	}
+}
+
+// pipelineForBed picks the slicer configuration for THIS bed on this model.
+//
+// The settings used to come from the printer model alone, so a Dual Name Plank
+// and a heart keychain sent to the same H2C were sliced identically - and with
+// two H2C pipelines on the floor, which one they got was whichever BambuBuddy
+// listed first. A SKU can now name its own, per class.
+//
+// An unmapped SKU falls back to exactly that model-based pick, so nothing
+// changes for a product nobody has configured.
+func (s *Server) pipelineForBed(
+	ctx context.Context, jobs []gen.ProductionJob, model string,
+) (bambubuddy.Pipeline, error) {
+	mapped, err := s.mappedPipelineFor(ctx, jobs, model)
+	if err != nil {
+		return bambubuddy.Pipeline{}, err
+	}
+	if mapped == nil {
+		return s.pipelineForModel(ctx, model)
+	}
+
+	pipelines, err := s.bambu.ListPipelines(ctx)
+	if err != nil {
+		return bambubuddy.Pipeline{}, fmt.Errorf("could not read BambuBuddy's slicer pipelines")
+	}
+	for _, p := range pipelines {
+		if int32(p.ID) != mapped.PipelineID {
+			continue
+		}
+		if p.PrinterPreset == nil || p.ProcessPreset == nil {
+			return bambubuddy.Pipeline{}, fmt.Errorf(
+				"BambuBuddy's %q pipeline has no printer or process preset, so Tensor cannot slice with it",
+				p.Name)
+		}
+		return p, nil
+	}
+	// Refused, not fallen back. Falling back would slice this bed with another
+	// product's settings and say nothing - the plank would print as a keychain
+	// and the only evidence would be the plate.
+	return bambubuddy.Pipeline{}, fmt.Errorf(
+		"this bed's SKU is set to slice with the %q pipeline, which BambuBuddy no longer has. "+
+			"Re-map the SKU under Registry, or add the pipeline back",
+		mapped.PipelineName)
+}
+
+// mappedPipelineFor is the mapping every job on the bed agrees on, or nil when
+// no job has one.
+//
+// Disagreement is refused rather than resolved. compatibilityKeyOf keeps
+// differently-mapped SKUs off one plate, so a planned bed cannot reach this;
+// a bed assembled by hand can, and picking one of two answers would slice half
+// the plate wrong.
+func (s *Server) mappedPipelineFor(
+	ctx context.Context, jobs []gen.ProductionJob, model string,
+) (*gen.SkuSlicerPipeline, error) {
+	var found *gen.SkuSlicerPipeline
+	for _, j := range jobs {
+		sku := strings.TrimSpace(deref(j.Sku))
+		if sku == "" {
+			continue
+		}
+		row, err := s.store.Q.GetPipelineForSKU(ctx, gen.GetPipelineForSKUParams{
+			Sku: sku, MachineFamily: model,
+		})
+		if err != nil {
+			continue // no mapping for this SKU on this class
+		}
+		if found == nil {
+			found = &row
+			continue
+		}
+		if found.PipelineID != row.PipelineID {
+			return nil, fmt.Errorf(
+				"this bed holds SKUs set to slice with different pipelines (%s and %s), "+
+					"so it cannot be sliced as one plate",
+				found.PipelineName, row.PipelineName)
+		}
+	}
+	return found, nil
 }

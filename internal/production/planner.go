@@ -84,15 +84,19 @@ type PlanJob struct {
 	NozzleRight       string
 	QualityMM         string
 	MachineFamily     string
-	SupportUsed       bool
-	InfillPct         float64
-	Priority          int
-	Quantity          int
-	EstimatedMinutes  *int
-	DueDate           *time.Time
-	CreatedAt         time.Time
-	FilamentGrams     float64
-	Footprint         bedpack.UnitFootprint
+	// SlicingKey is the SKU's slicer-pipeline mapping as a token - see
+	// CompatibilityKey.SlicingKey. Two jobs whose SKUs slice differently may
+	// not share a bed.
+	SlicingKey       string
+	SupportUsed      bool
+	InfillPct        float64
+	Priority         int
+	Quantity         int
+	EstimatedMinutes *int
+	DueDate          *time.Time
+	CreatedAt        time.Time
+	FilamentGrams    float64
+	Footprint        bedpack.UnitFootprint
 	// InDraft marks a job that is already sitting in a pending_approval batch.
 	// The planning window always keeps these (see selectWindow): dropping one
 	// would stop the run reproducing that Draft's job set, dissolving a batch
