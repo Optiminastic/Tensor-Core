@@ -7,8 +7,13 @@ package bambubuddy
 // one carries two colours in a single comma-separated string.
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // The estimate stands in when the printer reported no actual time.
@@ -125,5 +130,52 @@ func TestSplitColours(t *testing.T) {
 				t.Errorf("QueueItem.Colours = %v but Archive.Colours = %v", q, got)
 			}
 		})
+	}
+}
+
+// The window is asked for, not filtered afterwards.
+//
+// The archive holds every plate the shop has ever run, and the History board
+// shows a week of it. Reading the lot over a tailnet link and then hiding most
+// of it would pay for the rows first; date_from means BambuBuddy never
+// serialises them.
+func TestListArchivesAsksForOnlyTheWindow(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	since := time.Date(2026, 9, 23, 14, 30, 0, 0, time.UTC)
+	if _, err := New(srv.URL, "key").ListArchives(context.Background(), since, 40); err != nil {
+		t.Fatal(err)
+	}
+	// A date, not a timestamp: date_from is declared as format "date", and
+	// sending RFC3339 is how a filter silently stops filtering.
+	if got := gotQuery.Get("date_from"); got != "2026-09-23" {
+		t.Errorf("date_from = %q, want the window's first day", got)
+	}
+	if got := gotQuery.Get("limit"); got != "40" {
+		t.Errorf("limit = %q, want the caller's 40", got)
+	}
+}
+
+// A caller with no window means the whole archive - the print reconciler, which
+// matches beds sent days ago against prints that finished just now.
+func TestListArchivesSendsNoDateWhenNoWindowIsGiven(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, "key").ListArchives(context.Background(), time.Time{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery.Has("date_from") {
+		t.Errorf("date_from = %q, want it absent so reconciliation still sees older prints",
+			gotQuery.Get("date_from"))
 	}
 }

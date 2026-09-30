@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Archive statuses, as BambuBuddy reports them. The same vocabulary as the
@@ -144,11 +145,17 @@ func (a Archive) FilamentGrams() float64 {
 
 // ListArchives returns BambuBuddy's print history, newest first.
 //
-// Bounded by limit because this list grows without end - every plate ever run
-// stays in it - and a history board shows a page, not an archive. BambuBuddy
-// orders newest-first itself, so the cap takes the recent end rather than an
-// arbitrary slice.
-func (c *Client) ListArchives(ctx context.Context, limit int) ([]Archive, error) {
+// Bounded two ways, and both matter. Limit caps one response, because this list
+// grows without end - every plate ever run stays in it. Since bounds what is
+// ASKED FOR: the shop reads this board to see what came off the beds lately,
+// and everything before that window is weight on a tailnet link for rows nobody
+// scrolls to. A zero Since asks for the whole archive, which is what a caller
+// with no window means.
+//
+// The filter is BambuBuddy's own date_from, so the old rows are never
+// serialised, never sent and never held here. Dropping them after the fact
+// would have paid for them first.
+func (c *Client) ListArchives(ctx context.Context, since time.Time, limit int) ([]Archive, error) {
 	if limit <= 0 {
 		limit = DefaultArchiveLimit
 	}
@@ -157,6 +164,11 @@ func (c *Client) ListArchives(ctx context.Context, limit int) ([]Archive, error)
 	}
 	q := url.Values{}
 	q.Set("limit", fmt.Sprintf("%d", limit))
+	if !since.IsZero() {
+		// A date, not a timestamp: date_from is declared as format "date" and a
+		// full RFC3339 value is not what it parses.
+		q.Set("date_from", since.Format(time.DateOnly))
+	}
 
 	var out []Archive
 	if err := c.get(ctx, "/api/v1/archives/?"+q.Encode(), &out); err != nil {

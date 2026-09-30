@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -75,6 +76,16 @@ type archiveResponse struct {
 	CompletedAt string `json:"completed_at"`
 }
 
+// historyWindow is how far back the History board reads.
+//
+// A week. Long enough that yesterday's failure and last Tuesday's re-run are
+// both still there, short enough that the read stays one small page whatever
+// the shop has printed since.
+//
+// Applied as BambuBuddy's own date_from, so "we do not show it" and "we do not
+// fetch it" are the same sentence rather than two behaviours that can drift.
+const historyWindow = 7 * 24 * time.Hour
+
 // listPrintingHistory answers with BambuBuddy's archive, newest first.
 func (s *Server) listPrintingHistory(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -83,7 +94,11 @@ func (s *Server) listPrintingHistory(c *gin.Context) {
 		return
 	}
 
-	limit := bambubuddy.DefaultArchiveLimit
+	// The WINDOW is the bound here, not the count. A hundred rows sounded like
+	// plenty and was about two days of this shop: the last week is 218 prints.
+	// So the ceiling is high enough that the week decides what comes back, and
+	// exists only so a caller cannot ask for the whole archive by accident.
+	limit := bambubuddy.MaxArchiveLimit
 	if raw := c.Query("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n <= 0 {
@@ -93,7 +108,12 @@ func (s *Server) listPrintingHistory(c *gin.Context) {
 		limit = n
 	}
 
-	items, err := s.bambu.ListArchives(ctx, limit)
+	// One week, and it is asked for rather than filtered afterwards: BambuBuddy
+	// never serialises the older rows, Tensor never holds them, and the board
+	// never has to decide what to hide. The shop reads this to see what came
+	// off the beds lately; an archive going back to the first plate ever run is
+	// weight on a tailnet link for rows nobody scrolls to.
+	items, err := s.bambu.ListArchives(ctx, time.Now().Add(-historyWindow), limit)
 	if err != nil {
 		obs.FromContext(ctx).Error("could not read the BambuBuddy archive", "error", err)
 		var reason bambubuddy.ReasonError

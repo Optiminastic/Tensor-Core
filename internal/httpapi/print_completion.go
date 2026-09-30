@@ -88,7 +88,11 @@ func (s *Server) ReconcileFinishedPrints(ctx context.Context) PrintReconcileOutc
 		log.Warn("could not read BambuBuddy's queue to reconcile prints", "error", err)
 		return out
 	}
-	archives, err := s.bambu.ListArchives(ctx, s.archiveReconcileLimit())
+	// No date window, deliberately, unlike the history board's read. This is
+	// reconciliation: it matches beds Tensor sent against prints that finished,
+	// and a bed sent before the window would silently never be reconciled. The
+	// limit is what bounds it, as before.
+	archives, err := s.bambu.ListArchives(ctx, time.Time{}, s.archiveReconcileLimit())
 	if err != nil {
 		log.Warn("could not read BambuBuddy's archive to reconcile prints", "error", err)
 		return out
