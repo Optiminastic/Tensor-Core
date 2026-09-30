@@ -66,6 +66,17 @@ type SliceRequest struct {
 	AutoOrient  bool   `json:"auto_orient"`
 	AutoArrange bool   `json:"auto_arrange"`
 	BedType     string `json:"bed_type,omitempty"`
+	// ProcessOverrides are slicer settings applied on top of the presets.
+	//
+	// The only way to reach a setting BambuBuddy has no field of its own for,
+	// and the one that matters here is the nozzle map on a two-nozzle machine:
+	// filament_map_mode and filament_map. Verified against the live service -
+	// slice job 41 came back with "filament_map_mode": "Manual" and
+	// "filament_map": ["1","2","1"], exactly as sent.
+	//
+	// Omitted entirely when empty. An empty object is not the same as no
+	// override, and BambuBuddy reads absence as "leave the presets alone".
+	ProcessOverrides map[string]any `json:"process_overrides,omitempty"`
 }
 
 // SliceResult is the file a finished slice produced.

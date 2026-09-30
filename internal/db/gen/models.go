@@ -232,6 +232,8 @@ type Machine struct {
 	Location              *string
 	IpAddress             *string
 	NozzleCount           *int32
+	FixedNozzleColour     *string
+	FixedNozzleIndex      *int32
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 }

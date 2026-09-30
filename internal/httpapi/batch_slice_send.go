@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -170,6 +171,7 @@ func (s *Server) sendBatchToMachine(
 		// bedpack already placed every part and meshio merged them at those
 		// offsets; letting the slicer rearrange the plate would discard it.
 		AutoOrient: false, AutoArrange: false, UseEmbeddedSettings: false,
+		ProcessOverrides: nozzleMapOverrides(machine, assignments),
 	})
 	if err != nil {
 		var reason bambubuddy.ReasonError
@@ -490,4 +492,53 @@ func (s *Server) colourIdentities(ctx context.Context) ([]colourIdentity, error)
 		byName[key] = &out[len(out)-1]
 	}
 	return out, nil
+}
+
+// nozzleMapOverrides pins each plate slot to a nozzle on a two-nozzle machine.
+//
+// Without it Bambu Studio decides for itself, in "Auto For Flush" mode, and on
+// this fleet it decided to put everything on one nozzle: the H2C plate read
+// filament_map ["1","1","1"] however the machine was loaded. That is a
+// single-nozzle print on a two-nozzle printer - the second extruder, and the
+// spool on it, simply unused.
+//
+// The map is 1-based over EXTRUDERS, not slots: entry i is the nozzle that
+// prints the plate's filament i. A slot bound to the external spool prints on
+// the fixed nozzle; everything else prints on the other one.
+//
+// Nil for a single-nozzle machine, which is every A2L and P2S here. Sending a
+// map to a printer with one extruder would be describing a machine that does
+// not exist.
+func nozzleMapOverrides(machine gen.Machine, assignments []slotAssignment) map[string]any {
+	if machine.FixedNozzleIndex == nil || len(assignments) == 0 {
+		return nil
+	}
+	fixed := int(*machine.FixedNozzleIndex) + 1
+	// The other nozzle of the two. Two is all an H2C has, so "not the fixed
+	// one" names it without needing to be told how many there are.
+	other := 1
+	if fixed == 1 {
+		other = 2
+	}
+
+	mapping := make([]string, 0, len(assignments))
+	external := false
+	for _, a := range assignments {
+		if a.AmsIndex == amsSlotUnused {
+			mapping = append(mapping, strconv.Itoa(fixed))
+			external = true
+			continue
+		}
+		mapping = append(mapping, strconv.Itoa(other))
+	}
+	// Nothing on this plate comes off the fixed spool, so there is nothing to
+	// pin: let the slicer arrange the AMS colours as it likes rather than
+	// forcing them all onto one nozzle and telling it that was deliberate.
+	if !external {
+		return nil
+	}
+	return map[string]any{
+		"filament_map_mode": "Manual",
+		"filament_map":      mapping,
+	}
 }

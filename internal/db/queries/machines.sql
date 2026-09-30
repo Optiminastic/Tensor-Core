@@ -140,14 +140,15 @@ LIMIT sqlc.arg('row_limit');
 INSERT INTO machines (
     id, machine_id, name, image_url, status, status_reason, filaments,
     current_layer, total_layers, model, location, ip_address, nozzle_count,
-    remaining_minutes, remaining_observed_at
+    remaining_minutes, remaining_observed_at, fixed_nozzle_index
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('machine_id'), sqlc.arg('name'), sqlc.narg('image_url'),
     sqlc.arg('status'), sqlc.narg('status_reason'), sqlc.arg('filaments'),
     sqlc.narg('current_layer'), sqlc.narg('total_layers'),
     sqlc.narg('model'), sqlc.narg('location'), sqlc.narg('ip_address'),
     sqlc.narg('nozzle_count'),
-    sqlc.narg('remaining_minutes'), sqlc.narg('remaining_observed_at')
+    sqlc.narg('remaining_minutes'), sqlc.narg('remaining_observed_at'),
+    sqlc.narg('fixed_nozzle_index')
 )
 ON CONFLICT (machine_id) DO UPDATE SET
     name          = EXCLUDED.name,
@@ -169,6 +170,11 @@ ON CONFLICT (machine_id) DO UPDATE SET
     -- every bed around a machine that is standing idle.
     remaining_minutes     = EXCLUDED.remaining_minutes,
     remaining_observed_at = EXCLUDED.remaining_observed_at,
+    -- Which extruder the external spool feeds, as the printer reports it. Not
+    -- a preference and not the operator's to state, unlike the colour on it:
+    -- extruder_slots names the feed whose ams_id is 254 and that is a fact
+    -- about how the machine is plumbed.
+    fixed_nozzle_index    = EXCLUDED.fixed_nozzle_index,
     updated_at    = now()
 RETURNING *;
 
@@ -187,3 +193,16 @@ SELECT id, machine_id FROM machines ORDER BY machine_id;
 DELETE FROM machines
 WHERE machine_id <> ALL(sqlc.arg('keep_codes')::text[])
   AND current_batch_id IS NULL;
+
+-- name: SetMachineFixedNozzleColour :one
+-- Records what the fixed nozzle's external spool holds.
+--
+-- Declared, not detected. An external spool carries no RFID, so the printer
+-- reports its colour as 00000000 however long it has been loaded - the person
+-- who put it there is the only source. Empty clears it, which is what "that
+-- nozzle is empty now" has to mean, or a spool that was removed would keep
+-- being offered as a bed's base colour.
+UPDATE machines
+SET fixed_nozzle_colour = sqlc.narg('fixed_nozzle_colour'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;

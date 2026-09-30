@@ -637,6 +637,13 @@ CREATE TABLE machines (
     location                 varchar(255),
     ip_address               varchar(64),
     nozzle_count             integer,
+    -- What the fixed (external-spool) nozzle holds on a two-nozzle machine, and
+    -- which extruder that is, 0-based. The colour is declared by an operator -
+    -- an external spool has no RFID, so the printer reports it as 00000000 -
+    -- while the index is synced from extruder_slots, where the fixed feed shows
+    -- as ams_id 254. Both null on a single-nozzle machine. See migration 0084.
+    fixed_nozzle_colour      varchar(16),
+    fixed_nozzle_index       integer,
     created_at                timestamptz NOT NULL DEFAULT now(),
     updated_at                timestamptz NOT NULL DEFAULT now()
 );

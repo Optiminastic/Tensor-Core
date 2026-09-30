@@ -124,6 +124,10 @@ func (s *Server) syncFleet(ctx context.Context, opts syncFleetOptions) (SyncFlee
 			Location:    nonEmptyPtr(p.Location),
 			IpAddress:   nonEmptyPtr(p.IPAddress),
 			NozzleCount: int32Ptr(p.NozzleCount),
+			// Which extruder the external spool feeds, when one does. A fact
+			// about the plumbing, so it is synced; what is ON that spool is the
+			// operator's to say, so it is not.
+			FixedNozzleIndex: externalExtruderPtr(status),
 			// Layer progress only means something mid-print. A finished plate
 			// still reporting 25/25 would render as a machine permanently at
 			// 100%, which reads as stuck rather than done.
@@ -463,4 +467,18 @@ func profileName(family string, left float64, right *float64, flow string) strin
 
 func trimFloat(v float64) string {
 	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
+}
+
+// externalExtruderPtr is the extruder fed by an external spool, or nil.
+//
+// Nil for every single-nozzle machine on this floor, which is what tells the
+// slice path to send no filament map at all: a printer with one nozzle has
+// nothing to map.
+func externalExtruderPtr(status bambubuddy.Status) *int32 {
+	idx := status.ExternalSpoolExtruder()
+	if idx < 0 {
+		return nil
+	}
+	v := int32(idx)
+	return &v
 }

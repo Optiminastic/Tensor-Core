@@ -53,9 +53,40 @@ const traysPerAMS = 4
 func decodeTrays(m gen.Machine) []loadedTray {
 	var trays []loadedTray
 	if err := json.Unmarshal(m.Filaments, &trays); err != nil {
-		return []loadedTray{}
+		trays = []loadedTray{}
+	}
+	if fixed, ok := fixedNozzleTray(m); ok {
+		trays = append(trays, fixed)
 	}
 	return trays
+}
+
+// fixedNozzleTray is the spool on a two-nozzle machine's external feed.
+//
+// The AMS is not the whole story on an H2C. One extruder is fed from it and the
+// other from a spool on the back of the machine, which on this floor holds the
+// white every plank body prints in. That spool is in no AMS unit, so it was in
+// machines.filaments nowhere, so the colour gate refused all three H2Cs with
+// "no spool has been confirmed as #FFFFFF" for filament that was loaded.
+//
+// Declared rather than synced, and that is not laziness: an external spool has
+// no RFID, so the printer reports its colour as 00000000 no matter what is on
+// it. Only the person who loaded it knows. fixed_nozzle_index IS synced, from
+// the feed the printer reports as ams_id 254, and its absence is what marks a
+// single-nozzle machine - every A2L and P2S here - as having no such spool.
+func fixedNozzleTray(m gen.Machine) (loadedTray, bool) {
+	if m.FixedNozzleIndex == nil || m.FixedNozzleColour == nil {
+		return loadedTray{}, false
+	}
+	hex, ok := normaliseHex(*m.FixedNozzleColour)
+	if !ok {
+		return loadedTray{}, false
+	}
+	ams, tray := amsExternalSpool, 0
+	// No material: the operator declares a colour, not a filament type, and
+	// materialsAgree reads an empty type as "no reason to refuse" rather than
+	// as a mismatch. Stating PLA here would be inventing it.
+	return loadedTray{Colour: hex, AmsID: &ams, TrayID: &tray}, true
 }
 
 // loadedColours is every distinct colour in one machine's AMS.
@@ -85,6 +116,14 @@ func loadedColours(m gen.Machine) []string {
 func amsSlotIndex(t loadedTray) (int, bool) {
 	if t.AmsID == nil || t.TrayID == nil {
 		return 0, false
+	}
+	// The external spool is not in the AMS numbering at all, so it cannot be
+	// flattened into it: 254*4 would address a tray on a twenty-seventh AMS
+	// unit. BambuBuddy's own queue items carry -1 for a plate slot no AMS tray
+	// serves - "[-1, 2, 1]" - which is exactly what a slot printed from the
+	// external feed is.
+	if *t.AmsID == amsExternalSpool {
+		return amsSlotUnused, true
 	}
 	return *t.AmsID*traysPerAMS + *t.TrayID, true
 }

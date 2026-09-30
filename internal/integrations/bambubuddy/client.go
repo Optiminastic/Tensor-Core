@@ -128,6 +128,46 @@ type Tray struct {
 	InfoIdx string `json:"tray_info_idx"`
 }
 
+// ExternalSpoolAMSID is the ams_id a printer reports for its external spool.
+//
+// Bambu's own sentinel, not Tensor's: 254 is what extruder_slots carries for a
+// feed that is not an AMS unit. Named because the number means nothing on
+// sight and a bare 254 in a condition is unreadable.
+const ExternalSpoolAMSID = 254
+
+// ExtruderSlot is what one extruder is fed from.
+//
+// AmsID is 254 for an external spool - see ExternalSpoolAMSID. HasFilament is
+// the printer's own answer and is the only signal available for an external
+// spool, which carries no RFID and so reports neither colour nor type.
+type ExtruderSlot struct {
+	AmsID       int  `json:"ams_id"`
+	SlotID      int  `json:"slot_id"`
+	HasFilament bool `json:"has_filament"`
+}
+
+// ExternalSpoolExtruder is the index of the extruder fed by an external spool,
+// or -1 when none is.
+//
+// Returns the lowest such index: no printer here has two external feeds, and
+// picking arbitrarily among them would make the answer depend on map order.
+func (s Status) ExternalSpoolExtruder() int {
+	found := -1
+	for key, slot := range s.ExtruderSlots {
+		if slot.AmsID != ExternalSpoolAMSID || !slot.HasFilament {
+			continue
+		}
+		idx, err := strconv.Atoi(key)
+		if err != nil {
+			continue
+		}
+		if found < 0 || idx < found {
+			found = idx
+		}
+	}
+	return found
+}
+
 // AMS is one filament unit and its slots.
 type AMS struct {
 	ID           int     `json:"id"`
@@ -186,20 +226,26 @@ type Status struct {
 	CurrentPrint string  `json:"current_print"`
 	Progress     float64 `json:"progress"`
 	// RemainingTime is in minutes.
-	RemainingTime   int          `json:"remaining_time"`
-	LayerNum        int          `json:"layer_num"`
-	TotalLayers     int          `json:"total_layers"`
-	Nozzles         []Nozzle     `json:"nozzles"`
-	NozzleRack      []RackNozzle `json:"nozzle_rack"`
-	AMS             []AMS        `json:"ams"`
-	WifiSignal      int          `json:"wifi_signal"`
-	FirmwareVersion string       `json:"firmware_version"`
-	DoorOpen        bool         `json:"door_open"`
-	ChamberLight    bool         `json:"chamber_light"`
-	SDCard          bool         `json:"sdcard"`
-	SpeedLevel      int          `json:"speed_level"`
-	Temperatures    Temperatures `json:"temperatures"`
-	HMSErrors       []HMSError   `json:"hms_errors"`
+	RemainingTime int          `json:"remaining_time"`
+	LayerNum      int          `json:"layer_num"`
+	TotalLayers   int          `json:"total_layers"`
+	Nozzles       []Nozzle     `json:"nozzles"`
+	NozzleRack    []RackNozzle `json:"nozzle_rack"`
+	AMS           []AMS        `json:"ams"`
+	// ExtruderSlots is what feeds each extruder, keyed by extruder index as a
+	// string. The only place an EXTERNAL spool appears: an AMS unit shows up in
+	// AMS above, and a spool on the back of the machine does not, so a
+	// two-nozzle printer with white on its external feed looked to Tensor like
+	// a printer with no white at all.
+	ExtruderSlots   map[string]ExtruderSlot `json:"extruder_slots"`
+	WifiSignal      int                     `json:"wifi_signal"`
+	FirmwareVersion string                  `json:"firmware_version"`
+	DoorOpen        bool                    `json:"door_open"`
+	ChamberLight    bool                    `json:"chamber_light"`
+	SDCard          bool                    `json:"sdcard"`
+	SpeedLevel      int                     `json:"speed_level"`
+	Temperatures    Temperatures            `json:"temperatures"`
+	HMSErrors       []HMSError              `json:"hms_errors"`
 
 	// Fan speeds are 0-100 percentages.
 	CoolingFanSpeed   int `json:"cooling_fan_speed"`

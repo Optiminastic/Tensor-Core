@@ -538,7 +538,11 @@ func fleetMachineOf(r gen.ListFleetMachinesWithFamilyRow) gen.Machine {
 		RemainingMinutes: r.RemainingMinutes, RemainingObservedAt: r.RemainingObservedAt,
 		Model: r.Model, Location: r.Location, IpAddress: r.IpAddress,
 		NozzleCount: r.NozzleCount,
-		CreatedAt:   r.CreatedAt, UpdatedAt: r.UpdatedAt,
+		// Carried, because decodeTrays reads them: a two-nozzle machine's
+		// external spool is invisible without these, and leaving them behind
+		// here would refuse every H2C a bed while the column said white.
+		FixedNozzleColour: r.FixedNozzleColour, FixedNozzleIndex: r.FixedNozzleIndex,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 }
 

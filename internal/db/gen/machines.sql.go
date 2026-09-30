@@ -48,7 +48,7 @@ func (q *Queries) DeleteFleetMachinesNotIn(ctx context.Context, keepCodes []stri
 }
 
 const getFleetMachine = `-- name: GetFleetMachine :one
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at FROM machines WHERE id = $1
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at FROM machines WHERE id = $1
 `
 
 func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, error) {
@@ -75,6 +75,8 @@ func (q *Queries) GetFleetMachine(ctx context.Context, id uuid.UUID) (Machine, e
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -88,7 +90,7 @@ INSERT INTO machines (
     $1, $2, $3, $4,
     $5, $6
 )
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
 `
 
 type InsertFleetMachineParams struct {
@@ -131,6 +133,8 @@ func (q *Queries) InsertFleetMachine(ctx context.Context, arg InsertFleetMachine
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -258,7 +262,7 @@ func (q *Queries) ListFleetMachineCodes(ctx context.Context) ([]ListFleetMachine
 
 const listFleetMachines = `-- name: ListFleetMachines :many
 
-SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at FROM machines ORDER BY machine_id
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at FROM machines ORDER BY machine_id
 `
 
 // The physical printer fleet (table: machines), distinct from machine_profiles
@@ -295,6 +299,8 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 			&i.Location,
 			&i.IpAddress,
 			&i.NozzleCount,
+			&i.FixedNozzleColour,
+			&i.FixedNozzleIndex,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -309,7 +315,7 @@ func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 }
 
 const listFleetMachinesWithFamily = `-- name: ListFleetMachinesWithFamily :many
-SELECT m.id, m.machine_id, m.name, m.image_url, m.status, m.filaments, m.current_batch_id, m.current_layer, m.total_layers, m.batch_total_time_minutes, m.print_started_at, m.total_waste_grams, m.machine_profile_id, m.status_reason, m.remaining_minutes, m.remaining_observed_at, m.model, m.location, m.ip_address, m.nozzle_count, m.created_at, m.updated_at, mp.family AS profile_family, mp.status AS profile_status
+SELECT m.id, m.machine_id, m.name, m.image_url, m.status, m.filaments, m.current_batch_id, m.current_layer, m.total_layers, m.batch_total_time_minutes, m.print_started_at, m.total_waste_grams, m.machine_profile_id, m.status_reason, m.remaining_minutes, m.remaining_observed_at, m.model, m.location, m.ip_address, m.nozzle_count, m.fixed_nozzle_colour, m.fixed_nozzle_index, m.created_at, m.updated_at, mp.family AS profile_family, mp.status AS profile_status
 FROM machines m
 LEFT JOIN machine_profiles mp ON mp.id = m.machine_profile_id
 ORDER BY m.machine_id
@@ -336,6 +342,8 @@ type ListFleetMachinesWithFamilyRow struct {
 	Location              *string
 	IpAddress             *string
 	NozzleCount           *int32
+	FixedNozzleColour     *string
+	FixedNozzleIndex      *int32
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 	ProfileFamily         *string
@@ -376,6 +384,8 @@ func (q *Queries) ListFleetMachinesWithFamily(ctx context.Context) ([]ListFleetM
 			&i.Location,
 			&i.IpAddress,
 			&i.NozzleCount,
+			&i.FixedNozzleColour,
+			&i.FixedNozzleIndex,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.ProfileFamily,
@@ -490,7 +500,7 @@ func (q *Queries) ListQueuedBatchesForFleetMachine(ctx context.Context, fleetMac
 const setFleetMachineProfile = `-- name: SetFleetMachineProfile :one
 UPDATE machines SET machine_profile_id = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
 `
 
 type SetFleetMachineProfileParams struct {
@@ -524,6 +534,59 @@ func (q *Queries) SetFleetMachineProfile(ctx context.Context, arg SetFleetMachin
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setMachineFixedNozzleColour = `-- name: SetMachineFixedNozzleColour :one
+UPDATE machines
+SET fixed_nozzle_colour = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
+`
+
+type SetMachineFixedNozzleColourParams struct {
+	FixedNozzleColour *string
+	ID                uuid.UUID
+}
+
+// Records what the fixed nozzle's external spool holds.
+//
+// Declared, not detected. An external spool carries no RFID, so the printer
+// reports its colour as 00000000 however long it has been loaded - the person
+// who put it there is the only source. Empty clears it, which is what "that
+// nozzle is empty now" has to mean, or a spool that was removed would keep
+// being offered as a bed's base colour.
+func (q *Queries) SetMachineFixedNozzleColour(ctx context.Context, arg SetMachineFixedNozzleColourParams) (Machine, error) {
+	row := q.db.QueryRow(ctx, setMachineFixedNozzleColour, arg.FixedNozzleColour, arg.ID)
+	var i Machine
+	err := row.Scan(
+		&i.ID,
+		&i.MachineID,
+		&i.Name,
+		&i.ImageUrl,
+		&i.Status,
+		&i.Filaments,
+		&i.CurrentBatchID,
+		&i.CurrentLayer,
+		&i.TotalLayers,
+		&i.BatchTotalTimeMinutes,
+		&i.PrintStartedAt,
+		&i.TotalWasteGrams,
+		&i.MachineProfileID,
+		&i.StatusReason,
+		&i.RemainingMinutes,
+		&i.RemainingObservedAt,
+		&i.Model,
+		&i.Location,
+		&i.IpAddress,
+		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -535,7 +598,7 @@ UPDATE machines SET
     filaments  = $1,
     updated_at = now()
 WHERE id = $2
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
 `
 
 type UpdateFleetMachineFilamentsParams struct {
@@ -567,6 +630,8 @@ func (q *Queries) UpdateFleetMachineFilaments(ctx context.Context, arg UpdateFle
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -583,7 +648,7 @@ UPDATE machines SET
     print_started_at         = $6,
     updated_at                = now()
 WHERE id = $7
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
 `
 
 type UpdateFleetMachineStateParams struct {
@@ -632,6 +697,8 @@ func (q *Queries) UpdateFleetMachineState(ctx context.Context, arg UpdateFleetMa
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -642,14 +709,15 @@ const upsertFleetMachineFromSource = `-- name: UpsertFleetMachineFromSource :one
 INSERT INTO machines (
     id, machine_id, name, image_url, status, status_reason, filaments,
     current_layer, total_layers, model, location, ip_address, nozzle_count,
-    remaining_minutes, remaining_observed_at
+    remaining_minutes, remaining_observed_at, fixed_nozzle_index
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
     $8, $9,
     $10, $11, $12,
     $13,
-    $14, $15
+    $14, $15,
+    $16
 )
 ON CONFLICT (machine_id) DO UPDATE SET
     name          = EXCLUDED.name,
@@ -671,8 +739,13 @@ ON CONFLICT (machine_id) DO UPDATE SET
     -- every bed around a machine that is standing idle.
     remaining_minutes     = EXCLUDED.remaining_minutes,
     remaining_observed_at = EXCLUDED.remaining_observed_at,
+    -- Which extruder the external spool feeds, as the printer reports it. Not
+    -- a preference and not the operator's to state, unlike the colour on it:
+    -- extruder_slots names the feed whose ams_id is 254 and that is a fact
+    -- about how the machine is plumbed.
+    fixed_nozzle_index    = EXCLUDED.fixed_nozzle_index,
     updated_at    = now()
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, created_at, updated_at
+RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
 `
 
 type UpsertFleetMachineFromSourceParams struct {
@@ -691,6 +764,7 @@ type UpsertFleetMachineFromSourceParams struct {
 	NozzleCount         *int32
 	RemainingMinutes    *int32
 	RemainingObservedAt pgtype.Timestamptz
+	FixedNozzleIndex    *int32
 }
 
 // Creates or refreshes a physical unit discovered from BambuBuddy, keyed on
@@ -724,6 +798,7 @@ func (q *Queries) UpsertFleetMachineFromSource(ctx context.Context, arg UpsertFl
 		arg.NozzleCount,
 		arg.RemainingMinutes,
 		arg.RemainingObservedAt,
+		arg.FixedNozzleIndex,
 	)
 	var i Machine
 	err := row.Scan(
@@ -747,6 +822,8 @@ func (q *Queries) UpsertFleetMachineFromSource(ctx context.Context, arg UpsertFl
 		&i.Location,
 		&i.IpAddress,
 		&i.NozzleCount,
+		&i.FixedNozzleColour,
+		&i.FixedNozzleIndex,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

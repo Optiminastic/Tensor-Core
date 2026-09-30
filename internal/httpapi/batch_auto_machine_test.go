@@ -641,3 +641,55 @@ func TestSortOptionsRanksALargerBedBelowAnExactMatch(t *testing.T) {
 			options[0].Machine.MachineID)
 	}
 }
+
+// The nozzle map, which Bambu Studio otherwise decides for itself.
+//
+// Left alone it slices in "Auto For Flush" mode, and on this fleet that put
+// every filament on one nozzle - filament_map ["1","1","1"] on a machine with
+// two extruders and a spool loaded on each. The second nozzle was never used.
+func TestTheNozzleMapPinsTheFixedSpoolToItsOwnNozzle(t *testing.T) {
+	idx := int32(1) // the external spool feeds extruder 1, so nozzle 2
+	machine := gen.Machine{FixedNozzleIndex: &idx}
+	// Slot 1 is the plank body, bound to the external spool; slot 2 is the
+	// lettering, bound to an AMS tray.
+	assignments := []slotAssignment{
+		{SlotIndex: 0, AmsIndex: amsSlotUnused},
+		{SlotIndex: 1, AmsIndex: 6},
+	}
+
+	got := nozzleMapOverrides(machine, assignments)
+	if got == nil {
+		t.Fatal("no overrides sent, so the slicer would map the nozzles itself")
+	}
+	if got["filament_map_mode"] != "Manual" {
+		t.Errorf("mode = %v, want Manual - Auto For Flush is what ignored the second nozzle",
+			got["filament_map_mode"])
+	}
+	want := []string{"2", "1"}
+	mapping, _ := got["filament_map"].([]string)
+	if len(mapping) != len(want) || mapping[0] != want[0] || mapping[1] != want[1] {
+		t.Errorf("filament_map = %v, want %v - the body on the fixed nozzle, the colour on the other",
+			mapping, want)
+	}
+}
+
+// A printer with one extruder has nothing to map, and describing a second
+// nozzle to it would describe a machine that does not exist.
+func TestNoNozzleMapForASingleNozzleMachine(t *testing.T) {
+	got := nozzleMapOverrides(gen.Machine{}, []slotAssignment{{AmsIndex: 6}})
+	if got != nil {
+		t.Errorf("overrides = %v, want none for a one-nozzle printer", got)
+	}
+}
+
+// Every colour off the AMS: there is nothing on the fixed spool to pin, so the
+// slicer is left to arrange them rather than told to stack them on one nozzle.
+func TestNoNozzleMapWhenNothingUsesTheFixedSpool(t *testing.T) {
+	idx := int32(1)
+	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+		{AmsIndex: 6}, {AmsIndex: 7},
+	})
+	if got != nil {
+		t.Errorf("overrides = %v, want none when no slot comes off the fixed spool", got)
+	}
+}

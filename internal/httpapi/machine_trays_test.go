@@ -159,3 +159,53 @@ func TestTrayLabelIsEmptyWhenThePositionIsUnknown(t *testing.T) {
 		t.Errorf("label = %q, want empty for a tray with no recorded position", got[0].Label)
 	}
 }
+
+// The spool Tensor could not see.
+//
+// An H2C's second extruder is fed from a spool on the back of the machine, not
+// from the AMS, and that is where the white every plank body prints in lives.
+// It appears in no AMS unit, so machines.filaments never held it, so the colour
+// gate refused all three H2Cs for want of a filament that was loaded.
+func TestDecodeTraysIncludesTheFixedNozzlesSpool(t *testing.T) {
+	white, idx := "#FFFFFF", int32(1)
+	m := gen.Machine{
+		Filaments:         []byte(`[{"colour":"#C12E1E","type":"PLA","ams_id":0,"tray_id":2}]`),
+		FixedNozzleColour: &white,
+		FixedNozzleIndex:  &idx,
+	}
+	trays := decodeTrays(m)
+	if len(trays) != 2 {
+		t.Fatalf("decodeTrays returned %d trays, want the AMS spool and the fixed one", len(trays))
+	}
+	fixed := trays[len(trays)-1]
+	if fixed.Colour != "#FFFFFF" {
+		t.Errorf("fixed spool colour = %q, want the declared white", fixed.Colour)
+	}
+	// It has to be selectable, which means positioned: bindOneSlot skips any
+	// tray whose position is unknown.
+	index, positioned := amsSlotIndex(fixed)
+	if !positioned {
+		t.Fatal("the fixed spool has no position, so no plate slot could ever bind to it")
+	}
+	if index != amsSlotUnused {
+		t.Errorf("ams index = %d, want %d - the external spool is not in the AMS numbering",
+			index, amsSlotUnused)
+	}
+}
+
+// A single-nozzle machine has no such spool, and a two-nozzle one nobody has
+// told Tensor about has nothing to report. Neither may invent a colour.
+func TestDecodeTraysAddsNothingWithoutADeclaredFixedSpool(t *testing.T) {
+	loaded := []byte(`[{"colour":"#C12E1E","type":"PLA","ams_id":0,"tray_id":2}]`)
+	white, idx := "#FFFFFF", int32(1)
+
+	for name, m := range map[string]gen.Machine{
+		"one nozzle":       {Filaments: loaded},
+		"nothing declared": {Filaments: loaded, FixedNozzleIndex: &idx},
+		"no such nozzle":   {Filaments: loaded, FixedNozzleColour: &white},
+	} {
+		if got := decodeTrays(m); len(got) != 1 {
+			t.Errorf("%s: %d trays, want only what the AMS holds", name, len(got))
+		}
+	}
+}

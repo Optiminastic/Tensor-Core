@@ -197,7 +197,10 @@ func bindOneSlot(
 	}
 	accepted := acceptedHexes(wanted, identities, bed)
 
-	best, bestDistance := -1, 0
+	// found, rather than best < 0, because -1 is a real answer: it is the
+	// ams_mapping value for the external spool, and a plank body printed from
+	// one was reported as "no spool of #FFFFFF" while sitting in the machine.
+	best, bestDistance, found := 0, 0, false
 	for _, tray := range trays {
 		index, positioned := amsSlotIndex(tray)
 		if !positioned || used[index] {
@@ -212,11 +215,11 @@ func bindOneSlot(
 		if !measurable {
 			continue
 		}
-		if best < 0 || d < bestDistance {
-			best, bestDistance = index, d
+		if !found || d < bestDistance {
+			best, bestDistance, found = index, d, true
 		}
 	}
-	if best < 0 {
+	if !found {
 		return 0, unservedSlotError(slot, wanted, trays, identities, bed)
 	}
 	return best, nil

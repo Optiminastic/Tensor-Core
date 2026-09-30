@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,10 +31,18 @@ type fleetMachineResponse struct {
 	StatusReason *string `json:"status_reason"`
 	// What the unit is, as BambuBuddy reports it. Model matters beyond display:
 	// a plate sliced for one model cannot run on another.
-	Model                 *string         `json:"model"`
-	Location              *string         `json:"location"`
-	IPAddress             *string         `json:"ip_address"`
-	NozzleCount           *int32          `json:"nozzle_count"`
+	Model       *string `json:"model"`
+	Location    *string `json:"location"`
+	IPAddress   *string `json:"ip_address"`
+	NozzleCount *int32  `json:"nozzle_count"`
+	// FixedNozzleColour is what the external-spool nozzle holds on a two-nozzle
+	// machine, as an operator declared it - the printer cannot say, because an
+	// external spool carries no RFID. Null on a single-nozzle machine, and on a
+	// two-nozzle one nobody has told Tensor about yet.
+	FixedNozzleColour *string `json:"fixed_nozzle_colour"`
+	// FixedNozzleIndex is which extruder that spool feeds, 0-based, from the
+	// printer's own report. Null means one nozzle, so nothing to declare.
+	FixedNozzleIndex      *int32          `json:"fixed_nozzle_index"`
 	Filaments             json.RawMessage `json:"filaments"`
 	CurrentBatchID        *string         `json:"current_batch_id"`
 	CurrentLayer          *int32          `json:"current_layer"`
@@ -58,6 +67,7 @@ func (s *Server) fleetMachineDTO(ctx context.Context, m gen.Machine) fleetMachin
 		Status: m.Status, StatusReason: m.StatusReason,
 		Model: m.Model, Location: m.Location,
 		IPAddress: m.IpAddress, NozzleCount: m.NozzleCount,
+		FixedNozzleColour: m.FixedNozzleColour, FixedNozzleIndex: m.FixedNozzleIndex,
 		Filaments:      s.computeLiveFilaments(ctx, m),
 		CurrentBatchID: currentBatchID, CurrentLayer: m.CurrentLayer, TotalLayers: m.TotalLayers,
 		BatchTotalTimeMinutes: m.BatchTotalTimeMinutes, PrintStartedAt: startedAt,
@@ -168,6 +178,10 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 	// Discovering the real fleet changes it (creates, updates and removes
 	// machines), so it needs the manage permission, not read.
 	g.POST("/sync", s.guards.RequirePermission(auth.MachineManage.Key()), s.syncFleetMachines)
+	// What the fixed nozzle holds. A declaration, not a measurement, so it is
+	// a write an operator makes rather than something a sync discovers.
+	g.PUT("/:id/fixed-nozzle", s.guards.RequirePermission(auth.MachineManage.Key()),
+		s.setFixedNozzleColour)
 	s.registerFleetMachineLive(g)
 	s.registerFleetMachineUpload(g)
 	s.registerFleetMachineCamera(g)
@@ -261,4 +275,61 @@ func (s *Server) syncFleetMachines(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, result)
+}
+
+type fixedNozzleRequest struct {
+	// Colour is "#RRGGBB", or empty to say the spool has been taken out.
+	Colour string `json:"colour"`
+}
+
+// setFixedNozzleColour records what is on a two-nozzle machine's external spool.
+//
+// Tensor cannot read it. An external spool has no RFID, so the printer reports
+// its colour as 00000000 however long it has been loaded - which is why three
+// H2Cs with white in them were refused every bed for want of white. The
+// operator who loaded it is the only source, so this is where it comes from.
+//
+// Refused on a machine with one nozzle: there is no second feed to describe,
+// and accepting the value would leave a colour on the record that nothing reads
+// and nobody can explain.
+func (s *Server) setFixedNozzleColour(c *gin.Context) {
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req fixedNozzleRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	ctx := c.Request.Context()
+	machine, err := s.store.Q.GetFleetMachine(ctx, id)
+	if err != nil {
+		detail(c, http.StatusNotFound, "No such machine.")
+		return
+	}
+	if machine.FixedNozzleIndex == nil {
+		detail(c, http.StatusUnprocessableEntity,
+			"This printer has one nozzle, so it has no fixed spool to describe.")
+		return
+	}
+
+	var colour *string
+	if trimmed := strings.TrimSpace(req.Colour); trimmed != "" {
+		hex, ok := normaliseHex(trimmed)
+		if !ok {
+			detail(c, http.StatusUnprocessableEntity,
+				"That is not a colour Tensor can read. Use #RRGGBB.")
+			return
+		}
+		colour = &hex
+	}
+
+	updated, err := s.store.Q.SetMachineFixedNozzleColour(ctx, gen.SetMachineFixedNozzleColourParams{
+		ID: id, FixedNozzleColour: colour,
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not record the fixed nozzle's colour.")
+		return
+	}
+	c.JSON(http.StatusOK, s.fleetMachineDTO(ctx, updated))
 }
