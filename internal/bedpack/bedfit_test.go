@@ -8,8 +8,12 @@ import "testing"
 // equality, which is right downward and wrong upward, and the cost was three
 // H2Cs that never printed anything Tensor planned.
 func TestASmallPlateFitsEveryLargerClass(t *testing.T) {
+	// A2L->H2C is NOT here any more, and that is the machine's doing. An H2C's
+	// two nozzles only both reach X 25..325 - 300mm - while an A2L's bed is
+	// 330 wide, so a plate laid out for an A2L has parts the H2C's second
+	// nozzle cannot follow. H2C->A2L became possible for the same reason.
 	for _, c := range []struct{ packedFor, target string }{
-		{"P2S", "A2L"}, {"P2S", "H2C"}, {"A2L", "H2C"},
+		{"P2S", "A2L"}, {"P2S", "H2C"}, {"H2C", "A2L"},
 	} {
 		if got := FitForFamily(c.packedFor, c.target); got != FitOversized {
 			t.Errorf("FitForFamily(%s, %s) = %v, want FitOversized", c.packedFor, c.target, got)
@@ -24,7 +28,7 @@ func TestASmallPlateFitsEveryLargerClass(t *testing.T) {
 // after slicing" - there was nowhere left for the wipe tower.
 func TestAPlateNeverFitsASmallerClass(t *testing.T) {
 	for _, c := range []struct{ packedFor, target string }{
-		{"H2C", "A2L"}, {"H2C", "P2S"}, {"A2L", "P2S"},
+		{"A2L", "H2C"}, {"H2C", "P2S"}, {"A2L", "P2S"},
 	} {
 		if got := FitForFamily(c.packedFor, c.target); got != FitNone {
 			t.Errorf("FitForFamily(%s, %s) = %v, want FitNone - that plate does not fit",

@@ -299,6 +299,9 @@ func filamentsJSON(s bambubuddy.Status) []byte {
 			})
 		}
 	}
+	if external, ok := externalSpoolTray(s); ok {
+		out = append(out, external)
+	}
 	// Ordered by physical position, so the array means the same thing twice
 	// running and an operator reading "AMS 1, slot 2" off the screen can walk
 	// to that slot.
@@ -308,6 +311,43 @@ func filamentsJSON(s bambubuddy.Status) []byte {
 		return []byte("[]")
 	}
 	return raw
+}
+
+// externalSpoolTray is the spool on the machine's external feed, synced.
+//
+// This is what makes the H2C's fixed nozzle usable without anybody declaring
+// its colour: the printers report that spool as FFFFFFFF / PLA, so Tensor can
+// read it like any AMS slot instead of waiting to be told.
+//
+// ONLY vt_tray 254. Every machine also reports a 255, empty on all but one, and
+// no ams_mapping value for it has ever been observed. Carrying it would let the
+// colour gate accept a bed for a spool the send path then cannot address -
+// ranking says yes, sending says no, which is the exact split that made three
+// H2Cs look like they held no white. A tray that cannot be mapped must not
+// count as loaded.
+//
+// The empty-Type test mirrors the AMS loop above: an unloaded external feed
+// reports type "" and colour 00000000.
+func externalSpoolTray(s bambubuddy.Status) (loadedTray, bool) {
+	for _, vt := range s.VTTray {
+		if vt.ID != bambubuddy.ExternalSpoolTrayID || strings.TrimSpace(vt.Type) == "" {
+			continue
+		}
+		hex, ok := normaliseHex(hexColour(vt.Colour))
+		if !ok {
+			return loadedTray{}, false
+		}
+		var grams float64
+		if vt.Remain >= 0 {
+			grams = float64(vt.Remain) * 10
+		}
+		ams, tray := amsExternalSpool, 0
+		return loadedTray{
+			Colour: hex, Type: vt.Type, RemainingGrams: grams,
+			AmsID: &ams, TrayID: &tray, TrayInfoIdx: vt.InfoIdx,
+		}, true
+	}
+	return loadedTray{}, false
 }
 
 // hexColour turns Bambu's 8-digit RGBA ("FFF144FF") into a CSS hex colour.

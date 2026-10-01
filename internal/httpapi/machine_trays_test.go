@@ -187,9 +187,13 @@ func TestDecodeTraysIncludesTheFixedNozzlesSpool(t *testing.T) {
 	if !positioned {
 		t.Fatal("the fixed spool has no position, so no plate slot could ever bind to it")
 	}
-	if index != amsSlotUnused {
-		t.Errorf("ams index = %d, want %d - the external spool is not in the AMS numbering",
-			index, amsSlotUnused)
+	// 254, its own vt_tray id - NOT -1. Measured on H3 with one sliced file,
+	// changing only this value: [-1,1] halted at the first tool change with
+	// "[0700-8012] Failed to get AMS mapping table"; [254,1] completed the
+	// change and printed on.
+	if index != amsExternalSpool {
+		t.Errorf("ams index = %d, want %d - the external spool addresses itself",
+			index, amsExternalSpool)
 	}
 }
 
@@ -238,5 +242,26 @@ func TestALiveTrayReadKeepsTheFixedNozzlesSpool(t *testing.T) {
 	}
 	if !sawWhite {
 		t.Error("the declared white was lost, so a two-colour bed would be refused at send time")
+	}
+}
+
+// -1 and 254 are DIFFERENT ANSWERS and the printer treats them differently.
+//
+// -1 means "no tray serves this slot". 254 is the external feed's own vt_tray
+// id. Conflating them is what sent seven two-colour plates into
+// "[0700-8012] Failed to get AMS mapping table" at their first tool change:
+// measured on H3 with one sliced file, changing only this value, [-1,1] halted
+// there and [254,1] completed the change and printed on.
+func TestTheExternalSpoolIsNotTheUnmappedSentinel(t *testing.T) {
+	if amsExternalSpool == amsSlotUnused {
+		t.Fatal("the external spool and the unmapped sentinel must stay distinct")
+	}
+	ams, tray := amsExternalSpool, 0
+	index, ok := amsSlotIndex(loadedTray{Colour: "#FFFFFF", AmsID: &ams, TrayID: &tray})
+	if !ok || index != amsExternalSpool {
+		t.Fatalf("external spool index = %d (ok=%v), want %d", index, ok, amsExternalSpool)
+	}
+	if index == amsSlotUnused {
+		t.Fatal("the external spool must never be reported as unmapped")
 	}
 }

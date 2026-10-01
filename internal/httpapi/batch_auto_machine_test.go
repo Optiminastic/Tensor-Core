@@ -648,16 +648,18 @@ func TestSortOptionsRanksALargerBedBelowAnExactMatch(t *testing.T) {
 // every filament on one nozzle - filament_map ["1","1","1"] on a machine with
 // two extruders and a spool loaded on each. The second nozzle was never used.
 func TestTheNozzleMapPinsTheFixedSpoolToItsOwnNozzle(t *testing.T) {
-	idx := int32(1) // the external spool feeds extruder 1, so nozzle 2
+	idx := int32(1) // the external spool feeds PHYSICAL extruder 1
 	machine := gen.Machine{FixedNozzleIndex: &idx}
 	// Slot 1 is the plank body, bound to the external spool; slot 2 is the
 	// lettering, bound to an AMS tray.
 	assignments := []slotAssignment{
-		{SlotIndex: 0, AmsIndex: amsSlotUnused},
-		{SlotIndex: 1, AmsIndex: 6},
+		{SlotIndex: 0, AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"},
+		{SlotIndex: 1, AmsIndex: 6, TrayHex: "#D3C5A3"},
 	}
 
-	got := nozzleMapOverrides(machine, assignments)
+	// The H2C's own map, as every file Bambu Studio produced for these
+	// printers carries it: logical 1 is physical 1, logical 2 is physical 0.
+	got := nozzleMapOverrides(machine, assignments, []int{1, 0})
 	if got == nil {
 		t.Fatal("no overrides sent, so the slicer would map the nozzles itself")
 	}
@@ -665,7 +667,12 @@ func TestTheNozzleMapPinsTheFixedSpoolToItsOwnNozzle(t *testing.T) {
 		t.Errorf("mode = %v, want Manual - Auto For Flush is what ignored the second nozzle",
 			got["filament_map_mode"])
 	}
-	want := []string{"2", "1"}
+	// "1", not "2". physical_extruder_map is [1,0] on an H2C, so the physical
+	// index the external spool feeds is LOGICAL 1. Adding one to the physical
+	// index, which this used to do, named the AMS nozzle - and Bambu Studio's
+	// own slice of this plate puts the external colour on 1 and the AMS colour
+	// on 2.
+	want := []string{"1", "2"}
 	mapping, _ := got["filament_map"].([]string)
 	if len(mapping) != len(want) || mapping[0] != want[0] || mapping[1] != want[1] {
 		t.Errorf("filament_map = %v, want %v - the body on the fixed nozzle, the colour on the other",
@@ -673,10 +680,69 @@ func TestTheNozzleMapPinsTheFixedSpoolToItsOwnNozzle(t *testing.T) {
 	}
 }
 
+// The swap is the whole point: an identity map and the H2C's map must not
+// produce the same answer, or the conversion is not happening.
+func TestTheNozzleMapFollowsThePresetsExtruderOrder(t *testing.T) {
+	idx := int32(1)
+	machine := gen.Machine{FixedNozzleIndex: &idx}
+	assignments := []slotAssignment{
+		{SlotIndex: 0, AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"},
+		{SlotIndex: 1, AmsIndex: 6, TrayHex: "#D3C5A3"},
+	}
+
+	swapped, _ := nozzleMapOverrides(machine, assignments, []int{1, 0})["filament_map"].([]string)
+	identity, _ := nozzleMapOverrides(machine, assignments, []int{0, 1})["filament_map"].([]string)
+	if swapped[0] == identity[0] {
+		t.Fatalf("both maps gave %q for the fixed nozzle; physical_extruder_map is being ignored",
+			swapped[0])
+	}
+	if swapped[0] != "1" || identity[0] != "2" {
+		t.Errorf("swapped = %v, identity = %v; want the fixed nozzle at 1 and 2 respectively",
+			swapped, identity)
+	}
+}
+
+// A physical index the preset does not place must not be guessed at: pinning
+// the wrong nozzle prints every colour from the wrong spool.
+func TestNoNozzleMapWhenThePresetDoesNotPlaceThatNozzle(t *testing.T) {
+	idx := int32(3)
+	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
+	}, []int{1, 0})
+	if got != nil {
+		t.Errorf("overrides = %v, want none when the preset does not place that extruder", got)
+	}
+}
+
+// The prime tower is where a nozzle purges the colour before it. BambuBuddy's
+// H2C pipeline ships it off, and its G-code for a two-colour plate carries no
+// prime tower at all where Bambu Studio's does.
+func TestThePrimeTowerIsOnForATwoColourPlate(t *testing.T) {
+	idx := int32(1)
+	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
+	}, []int{1, 0})
+	if got["enable_prime_tower"] != "1" {
+		t.Errorf("enable_prime_tower = %v, want \"1\" - without it each colour change bleeds",
+			got["enable_prime_tower"])
+	}
+}
+
+// One colour never purges, so a tower would be plastic and minutes for nothing.
+func TestNoPrimeTowerForASingleColourPlate(t *testing.T) {
+	idx := int32(1)
+	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#FFFFFF"},
+	}, []int{1, 0})
+	if _, ok := got["enable_prime_tower"]; ok {
+		t.Errorf("overrides = %v, want no prime tower when the plate never changes colour", got)
+	}
+}
+
 // A printer with one extruder has nothing to map, and describing a second
 // nozzle to it would describe a machine that does not exist.
 func TestNoNozzleMapForASingleNozzleMachine(t *testing.T) {
-	got := nozzleMapOverrides(gen.Machine{}, []slotAssignment{{AmsIndex: 6}})
+	got := nozzleMapOverrides(gen.Machine{}, []slotAssignment{{AmsIndex: 6}}, nil)
 	if got != nil {
 		t.Errorf("overrides = %v, want none for a one-nozzle printer", got)
 	}
@@ -688,8 +754,33 @@ func TestNoNozzleMapWhenNothingUsesTheFixedSpool(t *testing.T) {
 	idx := int32(1)
 	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: 6}, {AmsIndex: 7},
-	})
+	}, []int{1, 0})
 	if got != nil {
 		t.Errorf("overrides = %v, want none when no slot comes off the fixed spool", got)
+	}
+}
+
+// extruder_ams_count: BambuBuddy's H2C preset carries no AMS keys, so its
+// slices tell the printer there is no AMS on either nozzle. This reproduces
+// what Bambu Studio writes for the same machine, indexed by LOGICAL extruder.
+func TestTheAMSTopologyMatchesBambuStudiosForAnH2C(t *testing.T) {
+	idx := int32(1)
+	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
+	}, []int{1, 0})
+
+	topology, _ := got["extruder_ams_count"].([]string)
+	want := []string{"1#1|4#0", "1#0|4#1"}
+	if len(topology) != 2 || topology[0] != want[0] || topology[1] != want[1] {
+		t.Fatalf("extruder_ams_count = %v, want %v - Bambu Studio's own value for this printer",
+			topology, want)
+	}
+}
+
+// A one-nozzle machine states a one-entry map. Describing a second extruder
+// would describe a machine that does not exist.
+func TestNoAMSTopologyForASingleNozzleMachine(t *testing.T) {
+	if got, ok := amsTopologyFor(1, []int{0}); ok {
+		t.Errorf("topology = %v, want none for a one-extruder preset", got)
 	}
 }

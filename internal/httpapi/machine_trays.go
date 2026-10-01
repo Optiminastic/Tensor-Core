@@ -55,10 +55,27 @@ func decodeTrays(m gen.Machine) []loadedTray {
 	if err := json.Unmarshal(m.Filaments, &trays); err != nil {
 		trays = []loadedTray{}
 	}
-	if fixed, ok := fixedNozzleTray(m); ok {
-		trays = append(trays, fixed)
+	// The declared colour is a FALLBACK, not a second tray. Since the sync
+	// reads vt_tray, machines.filaments usually already carries the external
+	// spool; appending the declaration too would put two trays on one feed,
+	// both answering to the same ams_mapping value, and which one a slot bound
+	// to would depend on array order.
+	if !hasExternalSpool(trays) {
+		if fixed, ok := fixedNozzleTray(m); ok {
+			trays = append(trays, fixed)
+		}
 	}
 	return trays
+}
+
+// hasExternalSpool reports whether a tray on the external feed is already here.
+func hasExternalSpool(trays []loadedTray) bool {
+	for _, t := range trays {
+		if t.AmsID != nil && *t.AmsID == amsExternalSpool {
+			return true
+		}
+	}
+	return false
 }
 
 // fixedNozzleTray is the spool on a two-nozzle machine's external feed.
@@ -117,13 +134,19 @@ func amsSlotIndex(t loadedTray) (int, bool) {
 	if t.AmsID == nil || t.TrayID == nil {
 		return 0, false
 	}
-	// The external spool is not in the AMS numbering at all, so it cannot be
-	// flattened into it: 254*4 would address a tray on a twenty-seventh AMS
-	// unit. BambuBuddy's own queue items carry -1 for a plate slot no AMS tray
-	// serves - "[-1, 2, 1]" - which is exactly what a slot printed from the
-	// external feed is.
+	// The external spool addresses itself: 254, the printer's own vt_tray id.
+	// NOT -1, and that distinction decides whether a two-colour plate prints.
+	//
+	// -1 was chosen because BambuBuddy's own queue items carry it, and because
+	// 254*4 would address a tray on a twenty-seventh AMS unit. But -1 means "no
+	// tray serves this slot", not "the external feed does", and the printer
+	// reads it that way: measured on H3 with one sliced file, changing only
+	// this value, [-1,1] halted at the first tool change with "[0700-8012]
+	// Failed to get AMS mapping table" while [254,1] completed the change and
+	// carried on printing. Seven -1 runs failed at that step; every 254 run
+	// with a correctly sized mapping got through.
 	if *t.AmsID == amsExternalSpool {
-		return amsSlotUnused, true
+		return amsExternalSpool, true
 	}
 	return *t.AmsID*traysPerAMS + *t.TrayID, true
 }

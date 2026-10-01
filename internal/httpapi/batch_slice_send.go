@@ -171,7 +171,7 @@ func (s *Server) sendBatchToMachine(
 		// bedpack already placed every part and meshio merged them at those
 		// offsets; letting the slicer rearrange the plate would discard it.
 		AutoOrient: false, AutoArrange: false, UseEmbeddedSettings: false,
-		ProcessOverrides: nozzleMapOverrides(machine, assignments),
+		ProcessOverrides: nozzleMapOverrides(machine, assignments, s.physicalExtruderMap(ctx, pipeline)),
 	})
 	if err != nil {
 		var reason bambubuddy.ReasonError
@@ -519,11 +519,27 @@ func (s *Server) colourIdentities(ctx context.Context) ([]colourIdentity, error)
 // Nil for a single-nozzle machine, which is every A2L and P2S here. Sending a
 // map to a printer with one extruder would be describing a machine that does
 // not exist.
-func nozzleMapOverrides(machine gen.Machine, assignments []slotAssignment) map[string]any {
+func nozzleMapOverrides(
+	machine gen.Machine, assignments []slotAssignment, physicalMap []int,
+) map[string]any {
 	if machine.FixedNozzleIndex == nil || len(assignments) == 0 {
 		return nil
 	}
-	fixed := int(*machine.FixedNozzleIndex) + 1
+	// fixed_nozzle_index is a PHYSICAL index - it is synced from the feed the
+	// printer reports as ams_id 254. filament_map wants a LOGICAL one, and on
+	// an H2C physical_extruder_map is [1,0], so the two are swapped rather than
+	// offset by one. Adding one, which this used to do, named the opposite
+	// nozzle: every plate told the slicer to print the external spool's colour
+	// from the AMS nozzle while ams_mapping said it came off the external
+	// spool. Bambu Studio's own output for these machines puts the external
+	// colour on 1 and the AMS colour on 2.
+	fixed, ok := bambubuddy.LogicalExtruder(int(*machine.FixedNozzleIndex), physicalMap)
+	if !ok {
+		// The preset does not place that nozzle. Pinning a guess would print
+		// every colour from the wrong one, so leave the map alone and let the
+		// slicer arrange it - which is what an unmapped bed already does.
+		return nil
+	}
 	// The other nozzle of the two. Two is all an H2C has, so "not the fixed
 	// one" names it without needing to be told how many there are.
 	other := 1
@@ -534,7 +550,10 @@ func nozzleMapOverrides(machine gen.Machine, assignments []slotAssignment) map[s
 	mapping := make([]string, 0, len(assignments))
 	external := false
 	for _, a := range assignments {
-		if a.AmsIndex == amsSlotUnused {
+		// The external feed, which is 254 - its own vt_tray id - not -1. A
+		// slot carrying -1 is one no tray serves at all, and must not be
+		// pinned to the fixed nozzle as though it were the spool on the back.
+		if a.AmsIndex == amsExternalSpool {
 			mapping = append(mapping, strconv.Itoa(fixed))
 			external = true
 			continue
@@ -547,10 +566,100 @@ func nozzleMapOverrides(machine gen.Machine, assignments []slotAssignment) map[s
 	if !external {
 		return nil
 	}
-	return map[string]any{
+	out := map[string]any{
 		"filament_map_mode": "Manual",
 		"filament_map":      mapping,
 	}
+	if topology, ok := amsTopologyFor(fixed, physicalMap); ok {
+		out["extruder_ams_count"] = topology
+	}
+	for k, v := range primeTowerOverrides(assignments) {
+		out[k] = v
+	}
+	return out
+}
+
+// amsTopologyFor is extruder_ams_count: what feeds each nozzle.
+//
+// BambuBuddy's H2C printer preset carries NO ams keys at all - 123 settings and
+// not one of them - so its slices declare ["1#0|4#0","1#0|4#0"]: no AMS on
+// either extruder. Bambu Studio, synced to the same printer, writes
+// ["1#1|4#0","1#0|4#1"]. A file that says the machine has no AMS leaves the
+// printer nothing to build a mapping table from, which is what
+// "[0700-8012] Failed to get AMS mapping table" reports.
+//
+// Indexed by LOGICAL extruder, the same numbering filament_map uses, so the
+// fixed nozzle's own index takes the single-spool holder and the other takes
+// the four-slot AMS. On an H2C that reproduces Studio's value exactly.
+//
+// Two nozzles only. A single-extruder preset states a one-entry map, its AMS
+// topology is whatever its own preset already says, and inventing a second
+// extruder for it would describe a machine that does not exist.
+func amsTopologyFor(fixedLogical int, physicalMap []int) ([]string, bool) {
+	if len(physicalMap) != 2 || fixedLogical < 1 || fixedLogical > 2 {
+		return nil, false
+	}
+	const (
+		spoolHolder = "1#1|4#0" // the external feed: one single-spool unit
+		fourSlotAMS = "1#0|4#1" // the AMS proper
+	)
+	out := make([]string, 2)
+	out[fixedLogical-1] = spoolHolder
+	out[2-fixedLogical] = fourSlotAMS
+	return out, true
+}
+
+// physicalExtruderMap reads how this pipeline's printer numbers its extruders.
+//
+// Read from the preset rather than assumed, because the answer differs per
+// machine: an H2C reports [1,0] and a single-nozzle A2L or P2S reports nothing
+// at all. Nil on any failure, which LogicalExtruder treats as "one nozzle, the
+// numberings agree" - the behaviour every single-nozzle bed already relies on.
+func (s *Server) physicalExtruderMap(ctx context.Context, pipeline bambubuddy.Pipeline) []int {
+	if pipeline.PrinterPreset == nil {
+		return nil
+	}
+	preset, err := s.bambu.GetPrinterPreset(ctx, *pipeline.PrinterPreset)
+	if err != nil {
+		obs.FromContext(ctx).Info("could not read the printer preset's extruder map",
+			"pipeline", pipeline.Name, "error", err)
+		return nil
+	}
+	return preset.PhysicalExtruderMap()
+}
+
+// primeTowerOverrides asks for the prime tower on a plate that changes colour.
+//
+// The tower is where a nozzle purges the colour before it, so without one the
+// first millimetres after every change print in the previous colour. Bambu
+// Studio's own slice of this plate carries "FEATURE: Prime tower"; BambuBuddy's
+// carries none.
+//
+// BAMBUBUDDY CURRENTLY IGNORES THIS, and the override is sent anyway so the
+// intent is recorded and starts working the day that changes. Measured against
+// the live service: slicing one file with
+// process_overrides {"enable_prime_tower":"1","sparse_infill_density":"42%"}
+// came back with sparse_infill_density "42%" applied and enable_prime_tower
+// "0" - then listed enable_prime_tower in different_settings_to_system as a
+// "designer change", though neither the source 3MF nor the process preset says
+// 0. Both say 1. So it is BambuBuddy forcing it off, over its own preset and
+// over an explicit override; nothing Tensor sends can turn it on today.
+//
+// Only for a plate that actually changes colour. A single-colour bed never
+// purges, so a tower there is plastic and minutes for nothing.
+//
+// The space is already reserved: bedpack holds back WipeTowerMM on every plate
+// it packs, and the process preset's own prime_tower_width is 60 - the same
+// number - so this costs no plate area that is not already set aside.
+func primeTowerOverrides(assignments []slotAssignment) map[string]any {
+	seen := map[string]bool{}
+	for _, a := range assignments {
+		seen[a.TrayHex] = true
+	}
+	if len(seen) < 2 {
+		return nil
+	}
+	return map[string]any{"enable_prime_tower": "1"}
 }
 
 // pipelineForBed picks the slicer configuration for THIS bed on this model.
