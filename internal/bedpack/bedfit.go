@@ -45,23 +45,21 @@ const (
 // which is exactly when the check is cheap to add.
 func (b Bed) FitsWithin(other Bed) bool {
 	b, other = b.Normalised(), other.Normalised()
-	// WHERE the plate starts, not just how big it is. Sizes alone called a
-	// 256mm P2S plate a comfortable fit on the H2C's 300mm - and it is not,
-	// because the P2S plate is laid out from X=0 while the H2C's second nozzle
-	// cannot reach before X=25. The plate sliced and then failed with "Found
-	// G-code in unprintable area of multi-extruder printers": 115450-PURPLE,
-	// packed for a P2S, parts at X=10.
+	// SIZE only, deliberately - not where the plate currently starts.
 	//
-	// A plate prints on another bed only if its whole span sits inside that
-	// bed's usable span. For every single-nozzle class both origins are zero
-	// and this is the size comparison it has always been.
-	if b.XOriginMM < other.XOriginMM {
-		return false
-	}
-	if b.XOriginMM+b.XMM > other.XOriginMM+other.XMM {
-		return false
-	}
-	return b.YMM <= other.YMM && b.ZMM <= other.ZMM
+	// Origin matters enormously to whether a plate prints: a P2S plate is laid
+	// out from X=0 and an H2C's second nozzle cannot reach before X=25, which
+	// is how 115450-PURPLE sliced and then failed with "Found G-code in
+	// unprintable area of multi-extruder printers". Checking it HERE was the
+	// wrong place, though, and briefly made things worse than the bug: this
+	// answer gates which printers the queue dialog will even offer, so
+	// refusing on origin greyed out every H2C for every small bed and left no
+	// machine to select - while the fix for the origin, re-plating for the
+	// chosen machine, lives in the send path that selection leads to.
+	//
+	// So the question here is only "are these units able to live on that bed",
+	// and sendBatchToMachine re-lays the plate for whatever machine wins.
+	return b.XMM <= other.XMM && b.YMM <= other.YMM && b.ZMM <= other.ZMM
 }
 
 // FitForFamily answers whether a plate packed for one class can print on a

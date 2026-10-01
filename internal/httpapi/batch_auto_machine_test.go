@@ -536,26 +536,34 @@ func TestAPlateIsOfferedALargerBedAsAFallback(t *testing.T) {
 	}
 }
 
-// A plate laid out for any other class starts at X=10, and an H2C's second
-// nozzle cannot reach before X=25 - so its second colour would print nowhere.
-// 115450-PURPLE, packed for a P2S, sliced and then failed in BambuBuddy with
-// "Found G-code in unprintable area of multi-extruder printers".
-func TestAnH2CRefusesAPlateLaidOutForAnotherClass(t *testing.T) {
+// An H2C takes a SMALLER bed's plate and refuses a WIDER one.
+//
+// A 256mm P2S plate has room inside the 300mm both its nozzles reach, so it is
+// offered. That the plate is currently laid out from X=0 while the H2C starts
+// at X=25 is fixed by re-plating when it is SENT, not by hiding the printer
+// here - refusing it here was briefly worse than the bug it guarded against:
+// every H2C greyed out for every small bed, so no machine could be selected and
+// the send path that re-plates was unreachable.
+//
+// An A2L plate is 330 wide and does not fit 300 however it is laid out.
+func TestAnH2CTakesASmallerPlateAndRefusesAWiderOne(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("H2C-1")
 	h2c := "H2C"
 	row.ProfileFamily = &h2c
 
-	for _, family := range []string{"P2S", "A2L"} {
-		opt := s.weighMachine(weighInputs{
+	weigh := func(family string) machineOption {
+		return s.weighMachine(weighInputs{
 			Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
 			Sliceable: func(string) string { return "" },
 			BedFamily: family,
 		})
-		if opt.Eligible {
-			t.Errorf("an H2C accepted a plate laid out for a %s; its second nozzle cannot reach X<25",
-				family)
-		}
+	}
+	if opt := weigh("P2S"); !opt.Eligible {
+		t.Errorf("an H2C refused a P2S plate it has room for: %q", opt.Refusal)
+	}
+	if opt := weigh("A2L"); opt.Eligible {
+		t.Error("an H2C accepted a 330mm A2L plate; both nozzles only reach 300mm")
 	}
 }
 
