@@ -862,6 +862,7 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 // resolveOptionalMachine/resolveOptionalFile.
 func (s *Server) mergedPlateFor(
 	ctx context.Context, batch gen.Batch, jobs []gen.ProductionJob, uploadedBy string,
+	bed bedpack.Bed,
 ) (fileID uuid.UUID, unitsPerBed *int32, utilisation *float64, err error) {
 	if batch.PreviewFileID != nil {
 		return *batch.PreviewFileID, batch.UnitsPerBed, db.NumFloatPtr(batch.BedUtilizationPercent), nil
@@ -919,7 +920,8 @@ type httpErr struct {
 // one bed, downloads and merges the source models, and returns the plate STL. It
 // yields a 409 when a job lacks a measurable print file or the batch overflows the
 // bed.
-// plateBed is the bed a batch's plate must be laid out on.
+// plateBed is the bed a batch's plate must be laid out on when no machine has
+// been chosen for it yet.
 //
 // Derived from what the bed HOLDS, not from the machine_family column. The
 // column is written once, by InsertBatch, and never updated - so a bed that was
@@ -932,6 +934,42 @@ type httpErr struct {
 // used when it proposed the bed, so an untouched bed packs exactly as before.
 func plateBed(jobs []gen.ProductionJob) bedpack.Bed {
 	return bedpack.BedForFamily(production.BedFamilyForUnits(unitsOf(jobs)))
+}
+
+// plateBedForTarget is the bed to lay a plate out on for a KNOWN machine.
+//
+// The unit-count rule above is a routing heuristic - five units go to an H2C,
+// four to an A2L, fewer to a P2S - and it was also deciding the geometry. That
+// is fine while nobody has picked a machine and wrong once somebody has,
+// because the classes are not nested: an H2C's two nozzles both reach only
+// X 25..325, so a plate laid out on the P2S bed starts at X=10, 15mm inside
+// the strip the second nozzle cannot reach. A one-job bed is always a P2S
+// plate under the old rule, so no small bed could ever two-colour print on an
+// H2C - 115450-PURPLE sliced and then failed with "Found G-code in unprintable
+// area of multi-extruder printers".
+//
+// So once a machine is chosen the plate is laid out for ITS class. An unknown
+// or unrecognised family falls back to the unit count, which is what every bed
+// did before and what a bed with no machine still does.
+func plateBedForTarget(jobs []gen.ProductionJob, family string) bedpack.Bed {
+	if _, ok := bedpack.BedForKnownFamily(family); ok {
+		return bedpack.BedForFamily(family)
+	}
+	return plateBed(jobs)
+}
+
+// targetFamilyForProfile is the machine class a machine_profiles row names.
+//
+// Empty when the profile cannot be read, which plateBedForTarget treats as
+// "no machine chosen" rather than guessing a class.
+func (s *Server) targetFamilyForProfile(ctx context.Context, profileID uuid.UUID) string {
+	profile, err := s.store.Q.GetMachineProfileFull(ctx, profileID)
+	if err != nil {
+		obs.FromContext(ctx).Info("could not read the machine profile's class for the plate",
+			"profile", profileID, "error", err)
+		return ""
+	}
+	return strings.TrimSpace(profile.Family)
 }
 
 func (s *Server) buildMergedPlate(

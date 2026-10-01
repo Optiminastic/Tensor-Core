@@ -179,7 +179,11 @@ func (s *Server) ApproveBatchFor(
 		return gen.Batch{}, statusErrf(http.StatusInternalServerError, "Could not load the machine.", err)
 	}
 
-	mergedID, unitsPerBed, utilisation, err := s.mergedPlateFor(ctx, batch, jobs, approvedBy)
+	// The plate is laid out for the machine just chosen, not for the unit
+	// count. The classes are not nested - an H2C reaches only X 25..325 - so a
+	// one-job bed packed on the P2S bed could never two-colour print there.
+	bed := plateBedForTarget(jobs, s.targetFamilyForProfile(ctx, *machineID))
+	mergedID, unitsPerBed, utilisation, err := s.mergedPlateFor(ctx, batch, jobs, approvedBy, bed)
 	if err != nil {
 		return gen.Batch{}, err
 	}

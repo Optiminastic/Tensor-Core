@@ -32,6 +32,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Optiminastic/tensor-core/internal/bedpack"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -90,6 +91,21 @@ func (s *Server) sendBatchToMachine(
 	if batch.QueueItemID != nil || batch.PipelineRunID != nil || batch.BambuSliceJobID != nil {
 		out.Note = "this batch is already on its way to a printer"
 		return out, nil
+	}
+
+	// The plate has to be laid out for THIS machine's class, and usually is
+	// not. The planner packs a bed when it locks it, before any machine is
+	// chosen, using the unit-count rule - so a one-job bed is a P2S plate
+	// whatever it is later sent to. The classes are not nested: an H2C's two
+	// nozzles both reach only X 25..325, so a P2S plate starts 15mm inside the
+	// strip its second nozzle cannot reach and the slice fails with "Found
+	// G-code in unprintable area of multi-extruder printers".
+	//
+	// Re-plating here rather than refusing, because the bed is perfectly
+	// printable - it was simply laid out for a different machine, and the
+	// layout is the only thing that has to change.
+	if batch, err = s.replateForMachine(ctx, batch, machine); err != nil {
+		return out, err
 	}
 
 	plate, err := s.plateFileFor(ctx, batch)
@@ -740,4 +756,64 @@ func (s *Server) mappedPipelineFor(
 		}
 	}
 	return found, nil
+}
+
+// replateForMachine lays a bed's plate out for the class it is being sent to.
+//
+// A no-op when they already agree, which is every bed whose class the planner
+// happened to guess right and every single-nozzle machine. Only the H2C can
+// disagree in a way that matters, because only it has a usable area that does
+// not start at the bed's origin.
+//
+// A failure here is returned rather than swallowed: sending the old plate would
+// slice, upload, and fail on the printer minutes later with an error naming
+// geometry rather than the bed it came from.
+func (s *Server) replateForMachine(
+	ctx context.Context, batch gen.Batch, machine gen.Machine,
+) (gen.Batch, error) {
+	target := strings.TrimSpace(deref(machine.Model))
+	if target == "" {
+		return batch, nil
+	}
+	if _, known := bedpack.BedForKnownFamily(target); !known {
+		return batch, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(deref(batch.MachineFamily)), target) {
+		return batch, nil
+	}
+
+	log := obs.FromContext(ctx)
+	log.Info("re-plating a bed for the machine it is going to",
+		"batch", batch.BatchNumber, "packed_for", deref(batch.MachineFamily),
+		"machine", machine.Name, "class", target)
+
+	jobs, err := s.store.Q.ListJobsForBatch(ctx, &batch.ID)
+	if err != nil {
+		return batch, statusErr(http.StatusInternalServerError, "Could not read the batch's jobs.")
+	}
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber,
+		bedpack.BedForFamily(target))
+	if herr != nil {
+		return batch, statusErr(herr.status, herr.msg)
+	}
+	fileID, err := s.storePlateSystem(ctx, batch.ID, "preview", plate)
+	if err != nil {
+		return batch, err
+	}
+
+	units := int32(unitsOf(jobs))
+	if _, err := s.store.Q.UpdateBatchDerivedMetrics(ctx, gen.UpdateBatchDerivedMetricsParams{
+		ID: batch.ID, UnitsPerBed: &units,
+		PreviewFileID:         &fileID,
+		BedUtilizationPercent: &plate.utilisation,
+		MachineFamily:         &target,
+	}); err != nil {
+		return batch, statusErr(http.StatusInternalServerError,
+			"Could not record the re-laid plate.")
+	}
+	refreshed, err := s.store.Q.GetBatchByID(ctx, batch.ID)
+	if err != nil {
+		return batch, statusErr(http.StatusInternalServerError, "Could not reload the batch.")
+	}
+	return refreshed, nil
 }

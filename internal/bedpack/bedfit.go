@@ -110,3 +110,11 @@ func bedForKnownFamily(family string) (Bed, bool) {
 func normaliseFamily(family string) string {
 	return strings.ToUpper(strings.TrimSpace(family))
 }
+
+// BedForKnownFamily is bedForKnownFamily for callers outside this package.
+//
+// Exported because "is this a class we have real geometry for?" is a question
+// the HTTP layer has to ask before laying a plate out for a chosen machine: an
+// unrecognised family must fall back to the unit-count rule rather than quietly
+// resolve to some default bed.
+func BedForKnownFamily(family string) (Bed, bool) { return bedForKnownFamily(family) }
