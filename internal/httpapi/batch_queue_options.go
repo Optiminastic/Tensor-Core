@@ -419,6 +419,11 @@ func trayAmsIndex(t queueTray) int {
 	if t.AmsID == nil || t.TrayID == nil {
 		return amsSlotUnused
 	}
+	// The external feed addresses itself, exactly as amsSlotIndex has it.
+	// Flattening it would give 254*4 = 1016, a tray on a twenty-seventh AMS.
+	if *t.AmsID == amsExternalSpool {
+		return amsExternalSpool
+	}
 	return *t.AmsID*traysPerAMS + *t.TrayID
 }
 

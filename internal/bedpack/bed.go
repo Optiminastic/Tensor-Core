@@ -19,9 +19,21 @@ package bedpack
 // the wider clearance the single-column layout uses - enough to get fingers and a
 // scraper between two finished planks.
 type Bed struct {
-	XMM          float64
-	YMM          float64
-	ZMM          float64
+	XMM float64
+	YMM float64
+	ZMM float64
+	// XOriginMM is where the usable area STARTS, not where it is wide.
+	//
+	// Zero on a one-nozzle machine, where the bed is the bed. On an H2C the two
+	// extruders reach different parts of it - the preset says extruder 1 covers
+	// X 0..325 and extruder 2 covers X 25..330 - so a plate both nozzles must
+	// reach has to live in the overlap, X 25..325.
+	//
+	// Nothing told the packer that. Plates were laid out from the usual 10mm
+	// margin, and a two-colour plank starting at X=10 put its SECOND colour
+	// where the second nozzle cannot go: "Found G-code in unprintable area of
+	// multi-extruder printers after slicing", on 115459-PURPLE.
+	XOriginMM    float64
 	GapMM        float64
 	EdgeMarginMM float64
 	ColumnGapMM  float64
@@ -127,8 +139,22 @@ func (b Bed) AreaMM2() float64 { return b.XMM * b.YMM }
 // Z is the build height, not a limit anything here enforces; it is carried so
 // a caller asking for "the P2S bed" gets the whole answer.
 var (
-	// BedH2C is the largest: 7 planks fit, measured.
-	BedH2C = Bed{XMM: 350, YMM: 320, ZMM: 325}
+	// BedH2C is the area BOTH its nozzles can reach, not the whole bed.
+	//
+	// It used to read 350x320x325, which is bigger than the machine: the
+	// printer's own preset gives printable_area 330x320 and printable_height
+	// 325 for extruder 2 but only 320 for extruder 1. Worse for a two-colour
+	// plate, the extruders cover DIFFERENT strips - extruder 1 is X 0..325,
+	// extruder 2 is X 25..330 - so anything both must reach lives in the
+	// overlap: X 25..325, 300mm wide, starting 25mm in.
+	//
+	// Z is extruder 1's 320, not extruder 2's 325: a plate is only as tall as
+	// the shorter nozzle can clear.
+	//
+	// Narrower than before, so a bed that used to take seven planks may now
+	// take six. That is the machine's real reach; the old number simply packed
+	// parts where a nozzle could not follow.
+	BedH2C = Bed{XOriginMM: 25, XMM: 300, YMM: 320, ZMM: 320}
 	// BedA2L holds 6. The same size this package assumed for every machine
 	// before beds were per-class.
 	BedA2L = Bed{XMM: 330, YMM: 320, ZMM: 325}

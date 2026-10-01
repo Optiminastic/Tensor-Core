@@ -106,9 +106,34 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 			"file", slicedFileID, "error", err)
 	}
 
+	// The mapping has to fit the file the slicer produced, not the plate Tensor
+	// sent it. Bambu Studio drops filaments no object prints in, so a bed bound
+	// across four slots can come back declaring two - and a mapping of the
+	// wrong length halts the printer at its first tool change.
+	mapping := a.AmsMapping
+	if sliced, err := w.server.bambu.SlicedFilaments(ctx, slicedFileID); err != nil {
+		// Best-effort: a plate that cannot be re-read is still the plate that
+		// was sliced for these spools, and refusing it here would ground beds
+		// over a download. The planned mapping is what shipped before this.
+		w.logger.Info("could not read the sliced plate's declared filaments; sending the planned mapping",
+			"batch", a.BatchID, "file", slicedFileID, "error", err)
+	} else if aligned, err := mappingForSlicedPlate(sliced, a.AmsMapping, a.TrayHexes); err != nil {
+		w.releaseAfterFailure(ctx, a.BatchID, err.Error())
+		w.logger.Warn("the sliced plate's filaments do not match the spools it was bound to",
+			"batch", a.BatchID, "file", slicedFileID, "error", err)
+		return nil
+	} else {
+		if len(aligned) != len(mapping) {
+			w.logger.Info("resized the ams_mapping to the sliced plate",
+				"batch", a.BatchID, "file", slicedFileID,
+				"planned", mapping, "sent", aligned)
+		}
+		mapping = aligned
+	}
+
 	item, err := w.server.bambu.QueueForPrinting(ctx, slicedFileID, bambubuddy.QueueOptions{
 		PrinterID:             a.PrinterID,
-		AMSMapping:            a.AmsMapping,
+		AMSMapping:            mapping,
 		RequiredFilamentTypes: requiredTypes,
 		// Never true. The whole point of slicing against this printer's trays is
 		// that the check passes honestly; forcing past it would reinstate the
@@ -140,7 +165,7 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 
 	w.logger.Info("sliced plate queued on the chosen printer",
 		"batch", a.BatchID, "machine", a.MachineName, "printer", a.PrinterID,
-		"queue_item", item.ID, "file", slicedFileID, "ams_mapping", a.AmsMapping)
+		"queue_item", item.ID, "file", slicedFileID, "ams_mapping", mapping)
 	return nil
 }
 

@@ -77,9 +77,9 @@ func PackOn(bed Bed, units []UnitFootprint) (placements []Placement, rejected []
 	// the packer rotates parts, and which envelope suits a set is a question
 	// about the set, not about the bed.
 	if bed.WipeTowerMM > 0 {
-		narrow := freeRect{bed.EdgeMarginMM, bed.EdgeMarginMM,
+		narrow := freeRect{bed.XOriginMM + bed.EdgeMarginMM, bed.EdgeMarginMM,
 			bed.XMM - 2*bed.EdgeMarginMM - bed.WipeTowerMM, bed.YMM - 2*bed.EdgeMarginMM}
-		shallow := freeRect{bed.EdgeMarginMM, bed.EdgeMarginMM,
+		shallow := freeRect{bed.XOriginMM + bed.EdgeMarginMM, bed.EdgeMarginMM,
 			bed.XMM - 2*bed.EdgeMarginMM, bed.ModelYMM()}
 		if p, r := packWithin(bed, narrow, units); len(r) == 0 {
 			return p, r
@@ -90,7 +90,7 @@ func PackOn(bed Bed, units []UnitFootprint) (placements []Placement, rejected []
 		}
 	}
 	free := []freeRect{{
-		bed.EdgeMarginMM, bed.EdgeMarginMM,
+		bed.XOriginMM + bed.EdgeMarginMM, bed.EdgeMarginMM,
 		bed.XMM - 2*bed.EdgeMarginMM, bed.YMM - 2*bed.EdgeMarginMM,
 	}}
 

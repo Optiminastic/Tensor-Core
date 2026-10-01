@@ -135,11 +135,36 @@ type Tray struct {
 // sight and a bare 254 in a condition is unreadable.
 const ExternalSpoolAMSID = 254
 
+// ExternalSpoolTrayID is the vt_tray id of the external feed itself.
+//
+// Printers here report TWO virtual trays: 254, the spool holder, and 255, a
+// second slot empty on every machine but one. Only 254's ams_mapping value is
+// known, so only 254 is treated as loadable - see externalSpoolTray.
+const ExternalSpoolTrayID = 254
+
+// VirtualTray is a spool outside any AMS unit, as the printer reports it.
+//
+// The external feed was believed unreadable - no RFID, so "00000000 whatever is
+// on it". That holds only for a spool nobody has told the printer about. All
+// three H2Cs report their external white as FFFFFFFF / PLA / GFL99, because the
+// shop configured the slot. So the colour can be SYNCED, and the fixed nozzle
+// stops depending on somebody typing that colour into Tensor by hand.
+//
+// No Exists field, unlike Tray: an unloaded virtual tray comes back with an
+// empty Type, which is the test externalSpoolTray uses.
+type VirtualTray struct {
+	ID      int    `json:"id"`
+	Colour  string `json:"tray_color"`
+	Type    string `json:"tray_type"`
+	Remain  int    `json:"remain"`
+	InfoIdx string `json:"tray_info_idx"`
+}
+
 // ExtruderSlot is what one extruder is fed from.
 //
 // AmsID is 254 for an external spool - see ExternalSpoolAMSID. HasFilament is
-// the printer's own answer and is the only signal available for an external
-// spool, which carries no RFID and so reports neither colour nor type.
+// the printer's own answer; the colour and type of that spool come from
+// VTTray, not from here.
 type ExtruderSlot struct {
 	AmsID       int  `json:"ams_id"`
 	SlotID      int  `json:"slot_id"`
@@ -237,15 +262,19 @@ type Status struct {
 	// AMS above, and a spool on the back of the machine does not, so a
 	// two-nozzle printer with white on its external feed looked to Tensor like
 	// a printer with no white at all.
-	ExtruderSlots   map[string]ExtruderSlot `json:"extruder_slots"`
-	WifiSignal      int                     `json:"wifi_signal"`
-	FirmwareVersion string                  `json:"firmware_version"`
-	DoorOpen        bool                    `json:"door_open"`
-	ChamberLight    bool                    `json:"chamber_light"`
-	SDCard          bool                    `json:"sdcard"`
-	SpeedLevel      int                     `json:"speed_level"`
-	Temperatures    Temperatures            `json:"temperatures"`
-	HMSErrors       []HMSError              `json:"hms_errors"`
+	ExtruderSlots map[string]ExtruderSlot `json:"extruder_slots"`
+	// VTTray is the machine's virtual trays - the external spool holder and
+	// anything else outside an AMS unit. Read because an H2C prints its fixed
+	// nozzle from here, and that spool appears in AMS nowhere.
+	VTTray          []VirtualTray `json:"vt_tray"`
+	WifiSignal      int           `json:"wifi_signal"`
+	FirmwareVersion string        `json:"firmware_version"`
+	DoorOpen        bool          `json:"door_open"`
+	ChamberLight    bool          `json:"chamber_light"`
+	SDCard          bool          `json:"sdcard"`
+	SpeedLevel      int           `json:"speed_level"`
+	Temperatures    Temperatures  `json:"temperatures"`
+	HMSErrors       []HMSError    `json:"hms_errors"`
 
 	// Fan speeds are 0-100 percentages.
 	CoolingFanSpeed   int `json:"cooling_fan_speed"`
