@@ -15,3 +15,14 @@
 # NOTE: fonts/ is deliberately NOT ignored - see fonts/README.md. The worker
 # image is built from this repo by Coolify, so a font that is not committed is
 # a font prod does not have, and the planks render ~66% thin without it.
+
+# Local-only tooling - never goes to main.
+#
+# These are admin drivers and scratch commands for this machine: they talk to
+# the live BambuBuddy and the dev database, and several exist only to drive one
+# experiment. `git add -A` sweeps an untracked directory in without asking,
+# which is how simulation code reached a staged commit three times; ignoring
+# them is what makes that impossible rather than merely unlikely.
+/cmd/simulator/
+/internal/simulation/
+/cmd/tmp*/
