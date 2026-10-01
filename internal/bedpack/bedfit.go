@@ -45,7 +45,23 @@ const (
 // which is exactly when the check is cheap to add.
 func (b Bed) FitsWithin(other Bed) bool {
 	b, other = b.Normalised(), other.Normalised()
-	return b.XMM <= other.XMM && b.YMM <= other.YMM && b.ZMM <= other.ZMM
+	// WHERE the plate starts, not just how big it is. Sizes alone called a
+	// 256mm P2S plate a comfortable fit on the H2C's 300mm - and it is not,
+	// because the P2S plate is laid out from X=0 while the H2C's second nozzle
+	// cannot reach before X=25. The plate sliced and then failed with "Found
+	// G-code in unprintable area of multi-extruder printers": 115450-PURPLE,
+	// packed for a P2S, parts at X=10.
+	//
+	// A plate prints on another bed only if its whole span sits inside that
+	// bed's usable span. For every single-nozzle class both origins are zero
+	// and this is the size comparison it has always been.
+	if b.XOriginMM < other.XOriginMM {
+		return false
+	}
+	if b.XOriginMM+b.XMM > other.XOriginMM+other.XMM {
+		return false
+	}
+	return b.YMM <= other.YMM && b.ZMM <= other.ZMM
 }
 
 // FitForFamily answers whether a plate packed for one class can print on a

@@ -13,7 +13,7 @@ func TestASmallPlateFitsEveryLargerClass(t *testing.T) {
 	// 330 wide, so a plate laid out for an A2L has parts the H2C's second
 	// nozzle cannot follow. H2C->A2L became possible for the same reason.
 	for _, c := range []struct{ packedFor, target string }{
-		{"P2S", "A2L"}, {"P2S", "H2C"}, {"H2C", "A2L"},
+		{"P2S", "A2L"}, {"H2C", "A2L"},
 	} {
 		if got := FitForFamily(c.packedFor, c.target); got != FitOversized {
 			t.Errorf("FitForFamily(%s, %s) = %v, want FitOversized", c.packedFor, c.target, got)
@@ -27,8 +27,12 @@ func TestASmallPlateFitsEveryLargerClass(t *testing.T) {
 // plate could not print and BambuBuddy answered "G-code conflicts detected
 // after slicing" - there was nowhere left for the wipe tower.
 func TestAPlateNeverFitsASmallerClass(t *testing.T) {
+	// P2S->H2C and A2L->H2C are refusals, not fits. Both are laid out from
+	// X=0 and the H2C's second nozzle starts at X=25, so a two-colour plate
+	// packed for either has lettering the H2C cannot reach - which is how
+	// 115450-PURPLE sliced and then failed in BambuBuddy.
 	for _, c := range []struct{ packedFor, target string }{
-		{"A2L", "H2C"}, {"H2C", "P2S"}, {"A2L", "P2S"},
+		{"A2L", "H2C"}, {"P2S", "H2C"}, {"H2C", "P2S"}, {"A2L", "P2S"},
 	} {
 		if got := FitForFamily(c.packedFor, c.target); got != FitNone {
 			t.Errorf("FitForFamily(%s, %s) = %v, want FitNone - that plate does not fit",
