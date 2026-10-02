@@ -250,44 +250,6 @@ func (q *Queries) GetProductByCode(ctx context.Context, code string) (Product, e
 	return i, err
 }
 
-const getProductByID = `-- name: GetProductByID :one
-SELECT id, code, name, kind, status, notes, created_at, updated_at FROM products WHERE id = $1
-`
-
-func (q *Queries) GetProductByID(ctx context.Context, id uuid.UUID) (Product, error) {
-	row := q.db.QueryRow(ctx, getProductByID, id)
-	var i Product
-	err := row.Scan(
-		&i.ID,
-		&i.Code,
-		&i.Name,
-		&i.Kind,
-		&i.Status,
-		&i.Notes,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getProductOption = `-- name: GetProductOption :one
-SELECT id, product_id, code, label, position, created_at FROM product_options WHERE id = $1
-`
-
-func (q *Queries) GetProductOption(ctx context.Context, id uuid.UUID) (ProductOption, error) {
-	row := q.db.QueryRow(ctx, getProductOption, id)
-	var i ProductOption
-	err := row.Scan(
-		&i.ID,
-		&i.ProductID,
-		&i.Code,
-		&i.Label,
-		&i.Position,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
 const getVariant = `-- name: GetVariant :one
 SELECT id, product_id, sku, name, status, created_at, updated_at FROM product_variants WHERE id = $1
 `

@@ -11,20 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const countColourMapEntries = `-- name: CountColourMapEntries :one
-SELECT count(*) FROM colour_map
-`
-
-// How many colours the shop has confirmed. The colour map labels slots and
-// suggests machines; nothing depends on it to send, since the operator binds
-// slots to trays explicitly.
-func (q *Queries) CountColourMapEntries(ctx context.Context) (int64, error) {
-	row := q.db.QueryRow(ctx, countColourMapEntries)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const deleteColourMapEntry = `-- name: DeleteColourMapEntry :execrows
 DELETE FROM colour_map WHERE id = $1
 `
@@ -87,37 +73,6 @@ func (q *Queries) ListColourMap(ctx context.Context) ([]ColourMap, error) {
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listColourMapHexesByName = `-- name: ListColourMapHexesByName :many
-SELECT hex FROM colour_map
-WHERE lower(trim(colour_name)) = lower(trim($1::text))
-ORDER BY is_primary DESC, hex
-`
-
-// Every hex this colour may legitimately appear as in an AMS, primary first.
-//
-// This is what the slot-to-tray assignment matches against: thirteen printers do
-// not agree on blue, so a bed needing BLUE is satisfied by any spool the shop
-// has confirmed IS blue - and by nothing else.
-func (q *Queries) ListColourMapHexesByName(ctx context.Context, colourName string) ([]string, error) {
-	rows, err := q.db.Query(ctx, listColourMapHexesByName, colourName)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var hex string
-		if err := rows.Scan(&hex); err != nil {
-			return nil, err
-		}
-		items = append(items, hex)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

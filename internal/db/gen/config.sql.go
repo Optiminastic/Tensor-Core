@@ -206,6 +206,7 @@ func (q *Queries) GetDefaultCostAssumptionForBrand(ctx context.Context, brand *s
 }
 
 const getMachineOps = `-- name: GetMachineOps :one
+
 SELECT id, name, status, is_active FROM machine_profiles WHERE id = $1
 `
 
@@ -216,6 +217,8 @@ type GetMachineOpsRow struct {
 	IsActive bool
 }
 
+// Operational machine views for the print queue (machine_profiles.status). The
+// cost fields are omitted here; the config endpoints above own those.
 func (q *Queries) GetMachineOps(ctx context.Context, id uuid.UUID) (GetMachineOpsRow, error) {
 	row := q.db.QueryRow(ctx, getMachineOps, id)
 	var i GetMachineOpsRow
@@ -647,47 +650,7 @@ func (q *Queries) ListCostAssumptions(ctx context.Context) ([]ListCostAssumption
 	return items, nil
 }
 
-const listMachineOps = `-- name: ListMachineOps :many
-
-SELECT id, name, status, is_active FROM machine_profiles ORDER BY name
-`
-
-type ListMachineOpsRow struct {
-	ID       uuid.UUID
-	Name     string
-	Status   string
-	IsActive bool
-}
-
-// Operational machine views for the print queue (machine_profiles.status). The
-// cost fields are omitted here; the config endpoints above own those.
-func (q *Queries) ListMachineOps(ctx context.Context) ([]ListMachineOpsRow, error) {
-	rows, err := q.db.Query(ctx, listMachineOps)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListMachineOpsRow{}
-	for rows.Next() {
-		var i ListMachineOpsRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.Name,
-			&i.Status,
-			&i.IsActive,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listMachineProfilesFull = `-- name: ListMachineProfilesFull :many
-
 SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
        flow, right_flow, default_colour, layer_height_min_mm::float8 AS layer_height_min_mm,
        layer_height_max_mm::float8 AS layer_height_max_mm, supported_filaments,
@@ -712,9 +675,6 @@ type ListMachineProfilesFullRow struct {
 	IsDefault          bool
 }
 
-// Slicing-config machine profiles, exposed via /machines (internal/httpapi/
-// machines_ops.go). Cost (machine_hour_cost) is never read/written here - it
-// stays owned by the /config/machines queries above.
 func (q *Queries) ListMachineProfilesFull(ctx context.Context) ([]ListMachineProfilesFullRow, error) {
 	rows, err := q.db.Query(ctx, listMachineProfilesFull)
 	if err != nil {
@@ -1060,36 +1020,6 @@ func (q *Queries) UpdateMachineProfileFull(ctx context.Context, arg UpdateMachin
 		&i.Status,
 		&i.IsActive,
 		&i.IsDefault,
-	)
-	return i, err
-}
-
-const updateMachineStatus = `-- name: UpdateMachineStatus :one
-UPDATE machine_profiles SET status = $1, updated_at = now()
-WHERE id = $2
-RETURNING id, name, status, is_active
-`
-
-type UpdateMachineStatusParams struct {
-	Status string
-	ID     uuid.UUID
-}
-
-type UpdateMachineStatusRow struct {
-	ID       uuid.UUID
-	Name     string
-	Status   string
-	IsActive bool
-}
-
-func (q *Queries) UpdateMachineStatus(ctx context.Context, arg UpdateMachineStatusParams) (UpdateMachineStatusRow, error) {
-	row := q.db.QueryRow(ctx, updateMachineStatus, arg.Status, arg.ID)
-	var i UpdateMachineStatusRow
-	err := row.Scan(
-		&i.ID,
-		&i.Name,
-		&i.Status,
-		&i.IsActive,
 	)
 	return i, err
 }

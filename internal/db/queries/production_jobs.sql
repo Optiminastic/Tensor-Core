@@ -646,20 +646,6 @@ WHERE batch_id IS NULL
   )
 ORDER BY created_at ASC, id ASC;
 
--- name: SetProductionJobMachineFamily :one
--- Records which printer family a job must run on, for a job whose family does
--- not come from a matched design - a personalised model Tensor rendered itself.
---
--- Clears issue_reason only when it is exactly 'profile_missing', mirroring
--- SetProductionJobPrintFile's treatment of 'stl_missing': supplying the missing
--- fact resolves that one issue and must not paper over a different one.
-UPDATE production_jobs SET
-    machine_family = sqlc.arg('machine_family'),
-    issue_reason   = CASE WHEN issue_reason = 'profile_missing' THEN NULL ELSE issue_reason END,
-    updated_at     = now()
-WHERE id = sqlc.arg('id')
-RETURNING *;
-
 -- name: JobNumberExists :one
 -- Whether a job number is already taken.
 --

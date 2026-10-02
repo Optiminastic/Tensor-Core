@@ -29,46 +29,6 @@ func (q *Queries) DeleteConnection(ctx context.Context, arg DeleteConnectionPara
 	return result.RowsAffected(), nil
 }
 
-const getConnection = `-- name: GetConnection :one
-SELECT id, brand_slug, provider, status, external_account_id,
-       expires_at, connected_by, created_at, updated_at
-FROM brand_connections WHERE brand_slug = $1 AND provider = $2
-`
-
-type GetConnectionParams struct {
-	BrandSlug string
-	Provider  string
-}
-
-type GetConnectionRow struct {
-	ID                uuid.UUID
-	BrandSlug         string
-	Provider          string
-	Status            string
-	ExternalAccountID *string
-	ExpiresAt         pgtype.Timestamptz
-	ConnectedBy       *string
-	CreatedAt         pgtype.Timestamptz
-	UpdatedAt         pgtype.Timestamptz
-}
-
-func (q *Queries) GetConnection(ctx context.Context, arg GetConnectionParams) (GetConnectionRow, error) {
-	row := q.db.QueryRow(ctx, getConnection, arg.BrandSlug, arg.Provider)
-	var i GetConnectionRow
-	err := row.Scan(
-		&i.ID,
-		&i.BrandSlug,
-		&i.Provider,
-		&i.Status,
-		&i.ExternalAccountID,
-		&i.ExpiresAt,
-		&i.ConnectedBy,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const getConnectionWithToken = `-- name: GetConnectionWithToken :one
 SELECT status, external_account_id, access_token
 FROM brand_connections WHERE brand_slug = $1 AND provider = $2
@@ -85,31 +45,11 @@ type GetConnectionWithTokenRow struct {
 	AccessToken       *string
 }
 
-// GetConnectionWithToken is the ONLY query that reads the access token back out.
-// It exists for the server-to-server publish path (e.g. creating a Shopify draft
-// product) and must never be exposed on a caller-facing endpoint.
 func (q *Queries) GetConnectionWithToken(ctx context.Context, arg GetConnectionWithTokenParams) (GetConnectionWithTokenRow, error) {
 	row := q.db.QueryRow(ctx, getConnectionWithToken, arg.BrandSlug, arg.Provider)
 	var i GetConnectionWithTokenRow
 	err := row.Scan(&i.Status, &i.ExternalAccountID, &i.AccessToken)
 	return i, err
-}
-
-const getShopifyConnectionByDomain = `-- name: GetShopifyConnectionByDomain :one
-SELECT id FROM brand_connections
-WHERE provider = 'shopify' AND status = 'connected' AND lower(external_account_id) = lower($1)
-LIMIT 1
-`
-
-// GetShopifyConnectionByDomain lets the inbound order webhooks (webhooks.go)
-// accept a store connected only via the brand-level Shopify OAuth flow
-// (brand_connections), not just the dedicated shopify_connections one - a
-// webhook has no brand_slug to key off, only the shop domain Shopify sends.
-func (q *Queries) GetShopifyConnectionByDomain(ctx context.Context, domain string) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, getShopifyConnectionByDomain, domain)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
 }
 
 const listConnectedShopifyBrands = `-- name: ListConnectedShopifyBrands :many

@@ -43,9 +43,6 @@ SELECT id FROM roles WHERE name = $1;
 -- name: GetRoleNameByID :one
 SELECT name::text FROM roles WHERE id = $1;
 
--- name: GetPermissionID :one
-SELECT id FROM permissions WHERE resource = $1 AND action = $2;
-
 -- name: ListRolePermissionIDs :many
 SELECT permission_id FROM role_permissions WHERE role_id = $1;
 

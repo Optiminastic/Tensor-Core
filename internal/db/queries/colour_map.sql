@@ -12,16 +12,6 @@ WHERE lower(trim(colour_name)) = lower(trim(sqlc.arg('colour_name')::text))
   AND is_primary
 LIMIT 1;
 
--- name: ListColourMapHexesByName :many
--- Every hex this colour may legitimately appear as in an AMS, primary first.
---
--- This is what the slot-to-tray assignment matches against: thirteen printers do
--- not agree on blue, so a bed needing BLUE is satisfied by any spool the shop
--- has confirmed IS blue - and by nothing else.
-SELECT hex FROM colour_map
-WHERE lower(trim(colour_name)) = lower(trim(sqlc.arg('colour_name')::text))
-ORDER BY is_primary DESC, hex;
-
 -- name: ListColourMap :many
 SELECT * FROM colour_map
 ORDER BY lower(trim(colour_name)), is_primary DESC, hex;
@@ -74,9 +64,3 @@ WHERE lower(trim(colour_map.colour_name)) = (
 
 -- name: DeleteColourMapEntry :execrows
 DELETE FROM colour_map WHERE id = sqlc.arg('id');
-
--- name: CountColourMapEntries :one
--- How many colours the shop has confirmed. The colour map labels slots and
--- suggests machines; nothing depends on it to send, since the operator binds
--- slots to trays explicitly.
-SELECT count(*) FROM colour_map;

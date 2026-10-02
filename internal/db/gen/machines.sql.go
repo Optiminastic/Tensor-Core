@@ -593,51 +593,6 @@ func (q *Queries) SetMachineFixedNozzleColour(ctx context.Context, arg SetMachin
 	return i, err
 }
 
-const updateFleetMachineFilaments = `-- name: UpdateFleetMachineFilaments :one
-UPDATE machines SET
-    filaments  = $1,
-    updated_at = now()
-WHERE id = $2
-RETURNING id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at
-`
-
-type UpdateFleetMachineFilamentsParams struct {
-	Filaments []byte
-	ID        uuid.UUID
-}
-
-func (q *Queries) UpdateFleetMachineFilaments(ctx context.Context, arg UpdateFleetMachineFilamentsParams) (Machine, error) {
-	row := q.db.QueryRow(ctx, updateFleetMachineFilaments, arg.Filaments, arg.ID)
-	var i Machine
-	err := row.Scan(
-		&i.ID,
-		&i.MachineID,
-		&i.Name,
-		&i.ImageUrl,
-		&i.Status,
-		&i.Filaments,
-		&i.CurrentBatchID,
-		&i.CurrentLayer,
-		&i.TotalLayers,
-		&i.BatchTotalTimeMinutes,
-		&i.PrintStartedAt,
-		&i.TotalWasteGrams,
-		&i.MachineProfileID,
-		&i.StatusReason,
-		&i.RemainingMinutes,
-		&i.RemainingObservedAt,
-		&i.Model,
-		&i.Location,
-		&i.IpAddress,
-		&i.NozzleCount,
-		&i.FixedNozzleColour,
-		&i.FixedNozzleIndex,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const updateFleetMachineState = `-- name: UpdateFleetMachineState :one
 UPDATE machines SET
     status                   = $1,

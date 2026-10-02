@@ -72,19 +72,8 @@ type skuPipelinesResponse struct {
 func machineFamilies() []string { return []string{"H2C", "A2L", "P2S"} }
 
 func (s *Server) registerRegistryPipelines(g *gin.RouterGroup, read, manage gin.HandlerFunc) {
-	g.GET("/slicer-pipelines", read, s.listSlicerPipelines)
 	g.GET("/sku-pipelines", read, s.listSKUPipelines)
 	g.PUT("/sku-pipelines", manage, s.putSKUPipelines)
-}
-
-// listSlicerPipelines passes BambuBuddy's pipelines through for the dropdowns.
-func (s *Server) listSlicerPipelines(c *gin.Context) {
-	options, err := s.pipelineOptions(c.Request.Context())
-	if err != nil {
-		detail(c, http.StatusBadGateway, err.Error())
-		return
-	}
-	c.JSON(http.StatusOK, options)
 }
 
 func (s *Server) pipelineOptions(ctx context.Context) ([]pipelineOption, error) {

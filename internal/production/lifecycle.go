@@ -6,7 +6,6 @@
 package production
 
 import (
-	"fmt"
 	"strings"
 	"time"
 )
@@ -541,10 +540,4 @@ func set(vals ...string) map[string]bool {
 		m[v] = true
 	}
 	return m
-}
-
-// Validate is a tiny helper the handlers use to turn an invalid enum into a
-// consistent message.
-func InvalidValue(field, value string) error {
-	return fmt.Errorf("%s %q is not a valid value", field, value)
 }

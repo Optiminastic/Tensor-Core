@@ -164,9 +164,6 @@ RETURNING *;
 -- telling somebody what is about to go - see the counts on ListProducts.
 DELETE FROM products WHERE id = sqlc.arg('id');
 
--- name: GetProductByID :one
-SELECT * FROM products WHERE id = sqlc.arg('id');
-
 -- name: UpdateProductOption :one
 UPDATE product_options
 SET code = sqlc.arg('code'), label = sqlc.arg('label'), position = sqlc.arg('position')
@@ -180,9 +177,6 @@ RETURNING *;
 -- combination somebody sold, and silently deleting sold variants to tidy up a
 -- schema change would be the worse failure.
 DELETE FROM product_options WHERE id = sqlc.arg('id');
-
--- name: GetProductOption :one
-SELECT * FROM product_options WHERE id = sqlc.arg('id');
 
 -- name: UpdateOptionValue :one
 UPDATE product_option_values

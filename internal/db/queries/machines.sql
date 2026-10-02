@@ -34,13 +34,6 @@ UPDATE machines SET
 WHERE id = sqlc.arg('id')
 RETURNING *;
 
--- name: UpdateFleetMachineFilaments :one
-UPDATE machines SET
-    filaments  = sqlc.arg('filaments'),
-    updated_at = now()
-WHERE id = sqlc.arg('id')
-RETURNING *;
-
 -- name: AdjustFleetMachineWaste :exec
 -- Applies a signed delta (grams) to a machine's running waste total.
 UPDATE machines SET

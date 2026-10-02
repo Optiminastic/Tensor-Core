@@ -67,22 +67,6 @@ func (q *Queries) DeleteUserRoles(ctx context.Context, userID string) error {
 	return err
 }
 
-const getPermissionID = `-- name: GetPermissionID :one
-SELECT id FROM permissions WHERE resource = $1 AND action = $2
-`
-
-type GetPermissionIDParams struct {
-	Resource string
-	Action   string
-}
-
-func (q *Queries) GetPermissionID(ctx context.Context, arg GetPermissionIDParams) (uuid.UUID, error) {
-	row := q.db.QueryRow(ctx, getPermissionID, arg.Resource, arg.Action)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
-}
-
 const getPermissionsVersion = `-- name: GetPermissionsVersion :one
 SELECT permissions_version FROM user_authz_state WHERE user_id = $1
 `

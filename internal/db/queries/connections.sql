@@ -6,14 +6,6 @@ SELECT id, brand_slug, provider, status, external_account_id,
        expires_at, connected_by, created_at, updated_at
 FROM brand_connections WHERE brand_slug = $1 ORDER BY provider;
 
--- name: GetConnection :one
-SELECT id, brand_slug, provider, status, external_account_id,
-       expires_at, connected_by, created_at, updated_at
-FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
-
--- GetConnectionWithToken is the ONLY query that reads the access token back out.
--- It exists for the server-to-server publish path (e.g. creating a Shopify draft
--- product) and must never be exposed on a caller-facing endpoint.
 -- name: GetConnectionWithToken :one
 SELECT status, external_account_id, access_token
 FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
@@ -40,15 +32,6 @@ RETURNING id, brand_slug, provider, status, external_account_id,
 
 -- name: DeleteConnection :execrows
 DELETE FROM brand_connections WHERE brand_slug = $1 AND provider = $2;
-
--- GetShopifyConnectionByDomain lets the inbound order webhooks (webhooks.go)
--- accept a store connected only via the brand-level Shopify OAuth flow
--- (brand_connections), not just the dedicated shopify_connections one - a
--- webhook has no brand_slug to key off, only the shop domain Shopify sends.
--- name: GetShopifyConnectionByDomain :one
-SELECT id FROM brand_connections
-WHERE provider = 'shopify' AND status = 'connected' AND lower(external_account_id) = lower(sqlc.arg('domain'))
-LIMIT 1;
 
 -- name: ListConnectedShopifyBrands :many
 -- Every brand with a usable Shopify connection, for the all-brands sync.

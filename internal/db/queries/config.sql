@@ -44,20 +44,8 @@ RETURNING id, name, machine_hour_cost::float8 AS machine_hour_cost,
 -- Operational machine views for the print queue (machine_profiles.status). The
 -- cost fields are omitted here; the config endpoints above own those.
 
--- name: ListMachineOps :many
-SELECT id, name, status, is_active FROM machine_profiles ORDER BY name;
-
 -- name: GetMachineOps :one
 SELECT id, name, status, is_active FROM machine_profiles WHERE id = $1;
-
--- name: UpdateMachineStatus :one
-UPDATE machine_profiles SET status = sqlc.arg('status'), updated_at = now()
-WHERE id = sqlc.arg('id')
-RETURNING id, name, status, is_active;
-
--- Slicing-config machine profiles, exposed via /machines (internal/httpapi/
--- machines_ops.go). Cost (machine_hour_cost) is never read/written here - it
--- stays owned by the /config/machines queries above.
 
 -- name: ListMachineProfilesFull :many
 SELECT id, name, family, nozzle_mm::float8 AS nozzle_mm, right_nozzle_mm,
