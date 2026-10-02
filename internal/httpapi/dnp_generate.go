@@ -142,11 +142,26 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 	if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 		return errNotPersonalisable
 	}
-	if job.OrderID == nil {
-		return fmt.Errorf("job %s has no order, so there is no personalisation to read", job.JobNumber)
+	// A job carries its own personalisation snapshot, and that is what
+	// linePropertiesForJob reads first - the order is only a fallback for jobs
+	// created before the column existed. So an order is required only when the
+	// snapshot is absent.
+	//
+	// This guard used to be unconditional, which blocked every bulk-order job:
+	// they are approved from a spreadsheet and have no Shopify order at all, so
+	// forty perfectly complete jobs refused to render with "has no order, so
+	// there is no personalisation to read" while carrying every name they
+	// needed.
+	var orderID uuid.UUID
+	if job.OrderID != nil {
+		orderID = *job.OrderID
+	} else if _, ok := jobLineProperties(job); !ok {
+		return fmt.Errorf(
+			"job %s has neither an order nor its own personalisation, so there is nothing to read",
+			job.JobNumber)
 	}
 
-	plan, err := s.renderPlanForJob(ctx, *job.OrderID, job)
+	plan, err := s.renderPlanForJob(ctx, orderID, job)
 	if err != nil {
 		return err
 	}

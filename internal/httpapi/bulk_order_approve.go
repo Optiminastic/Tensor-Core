@@ -260,7 +260,14 @@ func buildTemplateWorkbook(sheets []productSheet, withExamples bool) *excelize.F
 				case !withExamples:
 					// Left blank for a real order.
 				case col.Numeric:
-					_ = f.SetCellInt(sheet.Code, cell, 3)
+					// Within the column's own bound where it has one: a sample
+					// showing 3 hearts is a sample that teaches somebody to
+					// write a file every render then refuses.
+					example := int64(2)
+					if col.Max > 0 && example > int64(col.Max) {
+						example = int64(col.Max)
+					}
+					_ = f.SetCellInt(sheet.Code, cell, example)
 				case col.Header == colourHeader:
 					_ = f.SetCellStr(sheet.Code, cell, exampleColours[r%len(exampleColours)])
 				default:
@@ -539,12 +546,18 @@ func insertBulkJob(
 	ctx context.Context, q *gen.Queries, in bulkJobInput,
 ) (gen.ProductionJob, error) {
 	order, line, row := in.order, in.line, in.row
-	props := make(map[string]string, len(row.Values))
+	// A LIST of {name, value}, exactly as a Shopify line carries it - not a
+	// map. jobLineProperties unmarshals into []production.LineProp, and a map
+	// fails that decode silently, leaving the renderer to fall back to the
+	// order this job does not have.
+	props := make([]production.LineProp, 0, len(row.Values))
 	for key, value := range row.Values {
-		// "role/VARIABLE" - the renderer keys on the variable alone.
-		parts := strings.SplitN(key, "/", 2)
-		props[parts[len(parts)-1]] = value
+		props = append(props, production.LineProp{Name: key, Value: value})
 	}
+	// Sorted, so two jobs built from the same spreadsheet row store their
+	// properties identically and a diff between them means something.
+	sort.Slice(props, func(i, j int) bool { return props[i].Name < props[j].Name })
+
 	encoded, err := json.Marshal(props)
 	if err != nil {
 		return gen.ProductionJob{}, err

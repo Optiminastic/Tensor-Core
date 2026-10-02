@@ -41,6 +41,16 @@ type sheetColumn struct {
 	// Variable is the OpenSCAD variable this column feeds, empty for the two
 	// that are not variables (serial, colour).
 	Variable string
+	// PropertyKey is the name this value is stored under on the job, and it is
+	// NOT the variable.
+	//
+	// A job's personalisation_properties is a list of {name, value} exactly as
+	// a Shopify line carries it, and everything downstream reads it that way:
+	// the registry render path matches product_field_maps.property_key, and the
+	// built-in plank path matches labels like "left name" and "hearts". Storing
+	// the OpenSCAD variable instead would produce a job whose properties no
+	// reader recognises - which is what happened: "a plank needs both names".
+	PropertyKey string
 	// Role is which design file wants it, so a product printing three files can
 	// ask for two different NAMEs without the headers colliding.
 	Role string
@@ -49,6 +59,13 @@ type sheetColumn struct {
 	// becomes a rule rather than a convention.
 	Numeric  bool
 	Required bool
+	// Max bounds a numeric column, 0 meaning unbounded.
+	//
+	// Set for the heart count, because a plank physically takes 0, 1 or 2 -
+	// personalise.heartCount refuses anything else. Without this a sheet saying
+	// 3 passes validation, creates a hundred jobs and then fails every single
+	// render, which is the worst possible place to discover it.
+	Max int
 }
 
 // productSheet is one product's expected sheet.
@@ -99,9 +116,12 @@ func columnsFromMaps(rows []gen.ListFieldMapsForProductsRow) []sheetColumn {
 		columns = append(columns, sheetColumn{
 			Header:   columnHeader(r.ScadVariable, r.Role, seen[key] > 1),
 			Variable: strings.TrimSpace(r.ScadVariable),
-			Role:     r.Role,
-			Numeric:  r.ValueType == "number",
-			Required: r.Required,
+			// The property key the map itself names, so the value lands under
+			// the label the renderer already looks for.
+			PropertyKey: strings.TrimSpace(r.PropertyKey),
+			Role:        r.Role,
+			Numeric:     r.ValueType == "number",
+			Required:    r.Required,
 		})
 	}
 	return append(columns, sheetColumn{Header: colourHeader, Required: true})
@@ -115,12 +135,19 @@ func columnsFromMaps(rows []gen.ListFieldMapsForProductsRow) []sheetColumn {
 // differ gets them the moment somebody adds its field maps, because
 // columnsFromMaps takes over then without this file changing.
 func defaultColumns() []sheetColumn {
+	// The property keys are the labels personalise.ParamsFromProperties already
+	// matches - "left name", "right name", "hearts" - so a bulk plank reaches
+	// the renderer indistinguishable from a storefront one. Writing NAME_L here
+	// instead would store a property nothing reads.
 	return []sheetColumn{
 		{Header: serialHeader, Numeric: true, Required: true},
-		{Header: "NAME_L", Variable: "NAME_L", Role: "body", Required: true},
-		{Header: "NAME_R", Variable: "NAME_R", Role: "body", Required: true},
+		{Header: "NAME_L", Variable: "NAME_L", PropertyKey: "left name", Role: "body", Required: true},
+		{Header: "NAME_R", Variable: "NAME_R", PropertyKey: "right name", Role: "body", Required: true},
 		{Header: colourHeader, Required: true},
-		{Header: "HEART_COUNT", Variable: "HEART_COUNT", Role: "body", Numeric: true, Required: true},
+		{
+			Header: "HEART_COUNT", Variable: "HEART_COUNT", PropertyKey: "hearts",
+			Role: "body", Numeric: true, Required: true, Max: 2,
+		},
 	}
 }
 
@@ -175,8 +202,9 @@ func buildProductSheets(
 type sheetRow struct {
 	Serial int
 	Colour string
-	// Values are the OpenSCAD variables for this row, keyed "ROLE/VARIABLE" so
-	// a product printing three files keeps them apart.
+	// Values are this row's personalisation, keyed by PROPERTY KEY - the same
+	// label a Shopify line would carry - because that is what every reader
+	// downstream matches on.
 	Values map[string]string
 }
 
@@ -303,6 +331,17 @@ func readRows(
 						sheet, line, col.Header, value))
 					continue
 				}
+				if n < 0 {
+					problems = append(problems, fmt.Sprintf(
+						"Sheet %q row %d: %s cannot be negative.", sheet, line, col.Header))
+					continue
+				}
+				if col.Max > 0 && int(n) > col.Max {
+					problems = append(problems, fmt.Sprintf(
+						"Sheet %q row %d: %s is %s; the most this product takes is %d.",
+						sheet, line, col.Header, value, col.Max))
+					continue
+				}
 				if col.Header == serialHeader {
 					parsed.Serial = int(n)
 					continue
@@ -313,7 +352,14 @@ func readRows(
 			case colourHeader:
 				parsed.Colour = value
 			default:
-				parsed.Values[col.Role+"/"+col.Variable] = value
+				key := col.PropertyKey
+				if key == "" {
+					// A derived column whose map carries no property key. Fall
+					// back to the variable so the value is at least carried,
+					// rather than silently dropped.
+					key = col.Variable
+				}
+				parsed.Values[key] = value
 			}
 		}
 		out = append(out, parsed)
