@@ -333,7 +333,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type DecrementProductionJobQuantityParams struct {
@@ -414,6 +414,7 @@ func (q *Queries) DecrementProductionJobQuantity(ctx context.Context, arg Decrem
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -430,7 +431,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs WHERE id = $1
 `
 
@@ -502,6 +503,7 @@ func (q *Queries) GetProductionJobByID(ctx context.Context, id uuid.UUID) (Produ
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -518,7 +520,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs WHERE job_number = $1
 `
 
@@ -595,6 +597,7 @@ func (q *Queries) GetProductionJobByNumber(ctx context.Context, jobNumber string
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -687,7 +690,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type InsertProductionJobParams struct {
@@ -883,6 +886,7 @@ func (q *Queries) InsertProductionJob(ctx context.Context, arg InsertProductionJ
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -955,7 +959,7 @@ func (q *Queries) JobNumberExists(ctx context.Context, jobNumber string) (bool, 
 }
 
 const listBatchableJobs = `-- name: ListBatchableJobs :many
-SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at FROM production_jobs
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id FROM production_jobs
 WHERE batch_id IS NULL
   AND status = 'queued'
   AND quantity > 0
@@ -1054,6 +1058,7 @@ func (q *Queries) ListBatchableJobs(ctx context.Context) ([]ProductionJob, error
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1123,7 +1128,7 @@ func (q *Queries) ListExcludedQueuedJobs(ctx context.Context) ([]ListExcludedQue
 }
 
 const listJobsForBatch = `-- name: ListJobsForBatch :many
-SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC
 `
 
 func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]ProductionJob, error) {
@@ -1200,6 +1205,7 @@ func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]P
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1223,7 +1229,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
   AND ($2::text IS NULL OR assembly_status = $2::text)
@@ -1354,6 +1360,7 @@ func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobs
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1377,7 +1384,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
 WHERE ($1::text IS NULL OR status = $1::text)
   AND ($2::text IS NULL OR assembly_status = $2::text)
@@ -1506,6 +1513,7 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1518,7 +1526,7 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 }
 
 const listReplannableJobs = `-- name: ListReplannableJobs :many
-SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.part_role, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.part_role, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at, j.bulk_order_id FROM production_jobs j
 LEFT JOIN batches b ON b.id = j.batch_id
 LEFT JOIN orders o ON o.id = j.order_id
 WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
@@ -1630,6 +1638,7 @@ func (q *Queries) ListReplannableJobs(ctx context.Context) ([]ProductionJob, err
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1642,7 +1651,7 @@ func (q *Queries) ListReplannableJobs(ctx context.Context) ([]ProductionJob, err
 }
 
 const listUnassignedCompatibleJobs = `-- name: ListUnassignedCompatibleJobs :many
-SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at FROM production_jobs
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id FROM production_jobs
 WHERE batch_id IS NULL
   AND status = 'queued'
   AND quantity > 0
@@ -1753,6 +1762,7 @@ func (q *Queries) ListUnassignedCompatibleJobs(ctx context.Context, arg ListUnas
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -1895,7 +1905,7 @@ func (q *Queries) ReleaseJobsFromBatch(ctx context.Context, batchID *uuid.UUID) 
 const removeJobFromBatch = `-- name: RemoveJobFromBatch :one
 UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE id = $1 AND batch_id = $2
-RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type RemoveJobFromBatchParams struct {
@@ -1976,6 +1986,7 @@ func (q *Queries) RemoveJobFromBatch(ctx context.Context, arg RemoveJobFromBatch
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -2015,7 +2026,7 @@ func (q *Queries) RequeueFinishedJob(ctx context.Context, id uuid.UUID) error {
 }
 
 const searchJobsForCustomBatch = `-- name: SearchJobsForCustomBatch :many
-SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.part_role, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at FROM production_jobs j
+SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.part_role, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at, j.bulk_order_id FROM production_jobs j
 LEFT JOIN orders o ON o.id = j.order_id
 WHERE j.quantity > 0
   AND (
@@ -2133,6 +2144,7 @@ func (q *Queries) SearchJobsForCustomBatch(ctx context.Context, arg SearchJobsFo
 			&i.ColourCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BulkOrderID,
 		); err != nil {
 			return nil, err
 		}
@@ -2185,7 +2197,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type SetProductionJobPrintFileParams struct {
@@ -2280,6 +2292,7 @@ func (q *Queries) SetProductionJobPrintFile(ctx context.Context, arg SetProducti
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -2298,7 +2311,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type SetProductionJobStatusParams struct {
@@ -2374,6 +2387,7 @@ func (q *Queries) SetProductionJobStatus(ctx context.Context, arg SetProductionJ
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -2416,7 +2430,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type UpdateProductionJobFieldsParams struct {
@@ -2518,6 +2532,7 @@ func (q *Queries) UpdateProductionJobFields(ctx context.Context, arg UpdateProdu
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }
@@ -2548,7 +2563,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type ValidateProductionJobPersonalisationParams struct {
@@ -2647,6 +2662,7 @@ func (q *Queries) ValidateProductionJobPersonalisation(ctx context.Context, arg 
 		&i.ColourCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BulkOrderID,
 	)
 	return i, err
 }

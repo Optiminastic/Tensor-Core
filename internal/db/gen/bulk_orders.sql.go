@@ -12,6 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countJobsForBulkOrder = `-- name: CountJobsForBulkOrder :one
+SELECT count(*)::int AS jobs FROM production_jobs WHERE bulk_order_id = $1
+`
+
+func (q *Queries) CountJobsForBulkOrder(ctx context.Context, bulkOrderID *uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countJobsForBulkOrder, bulkOrderID)
+	var jobs int32
+	err := row.Scan(&jobs)
+	return jobs, err
+}
+
 const deleteBulkOrder = `-- name: DeleteBulkOrder :exec
 DELETE FROM bulk_orders WHERE id = $1
 `
@@ -160,6 +171,67 @@ func (q *Queries) InsertBulkOrderLine(ctx context.Context, arg InsertBulkOrderLi
 		arg.UnitPrice,
 		arg.LineTotal,
 		arg.Position,
+	)
+	return err
+}
+
+const insertBulkProductionJob = `-- name: InsertBulkProductionJob :exec
+INSERT INTO production_jobs (
+    id, job_number, bulk_order_id, description, quantity, status,
+    assembly_status, qc_status, packaging_status,
+    sku, product_name, colour, customer_name,
+    personalisation_status, personalisation_properties,
+    name_confirmed, photo_confirmed, font_confirmed, colour_confirmed,
+    variant_confirmed, customer_approval_received, held, priority, colours
+) VALUES (
+    $1, $2, $3,
+    $4, $5, 'queued',
+    'pending', 'pending', 'pending',
+    $6, $7, $8, $9,
+    'validated', $10,
+    true, true, true, true, true, true, false, 0, $11
+)
+`
+
+type InsertBulkProductionJobParams struct {
+	ID                        uuid.UUID
+	JobNumber                 string
+	BulkOrderID               *uuid.UUID
+	Description               string
+	Quantity                  int32
+	Sku                       *string
+	ProductName               *string
+	Colour                    *string
+	CustomerName              *string
+	PersonalisationProperties []byte
+	Colours                   []byte
+}
+
+// One production job from one spreadsheet row.
+//
+// Deliberately its own insert rather than a widened InsertProductionJob: a bulk
+// job has no Shopify order, no line item and no proof to confirm, so nearly
+// half of that statement's fifty-eight arguments would be nulls threaded
+// through the storefront path for a case it does not serve. The columns here
+// are the ones a bulk job actually has.
+//
+// personalisation_status is 'validated': the names came from a spreadsheet the
+// customer supplied and Tensor has just checked, so there is no proof to send
+// and nothing for an operator to confirm. Leaving it pending would park every
+// bulk job in a queue waiting for an approval that is never coming.
+func (q *Queries) InsertBulkProductionJob(ctx context.Context, arg InsertBulkProductionJobParams) error {
+	_, err := q.db.Exec(ctx, insertBulkProductionJob,
+		arg.ID,
+		arg.JobNumber,
+		arg.BulkOrderID,
+		arg.Description,
+		arg.Quantity,
+		arg.Sku,
+		arg.ProductName,
+		arg.Colour,
+		arg.CustomerName,
+		arg.PersonalisationProperties,
+		arg.Colours,
 	)
 	return err
 }
@@ -334,6 +406,41 @@ func (q *Queries) UpdateBulkOrder(ctx context.Context, arg UpdateBulkOrderParams
 		arg.DiscountAmount,
 		arg.Total,
 	)
+	var i BulkOrder
+	err := row.Scan(
+		&i.ID,
+		&i.QuotationNumber,
+		&i.BrandSlug,
+		&i.CustomerName,
+		&i.CustomerEmail,
+		&i.CustomerPhone,
+		&i.Notes,
+		&i.OrderDate,
+		&i.ValidUntil,
+		&i.Status,
+		&i.DiscountPercent,
+		&i.Subtotal,
+		&i.DiscountAmount,
+		&i.Total,
+		&i.Currency,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateBulkOrderStatus = `-- name: UpdateBulkOrderStatus :one
+UPDATE bulk_orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at
+`
+
+type UpdateBulkOrderStatusParams struct {
+	ID     uuid.UUID
+	Status string
+}
+
+func (q *Queries) UpdateBulkOrderStatus(ctx context.Context, arg UpdateBulkOrderStatusParams) (BulkOrder, error) {
+	row := q.db.QueryRow(ctx, updateBulkOrderStatus, arg.ID, arg.Status)
 	var i BulkOrder
 	err := row.Scan(
 		&i.ID,

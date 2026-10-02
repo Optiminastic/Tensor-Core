@@ -62,6 +62,13 @@ func (s *Server) registerBulkOrders(r *gin.Engine) {
 	// The SKUs that may go on a line, with today's price beside each. Separate
 	// from /registry so the form makes one call for exactly what it needs.
 	g.GET("/sellable-skus", read, s.listSellableSKUs)
+
+	// Approving a quotation: download the workbook it expects, fill it in, and
+	// upload it. Both are manage, not read - the download tells you exactly
+	// what the order promises, and the upload creates production work.
+	g.GET("/:id/sheet-template", manage, s.downloadSheetTemplate)
+	g.GET("/:id/sheet-sample", manage, s.downloadSheetSample)
+	g.POST("/:id/approve", manage, s.approveBulkOrder)
 }
 
 // bulkOrderLineRequest is one requested product. No price: see the file comment.

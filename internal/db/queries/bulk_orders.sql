@@ -53,3 +53,38 @@ GROUP BY bulk_order_id;
 
 -- name: QuotationNumberExists :one
 SELECT EXISTS (SELECT 1 FROM bulk_orders WHERE quotation_number = $1) AS taken;
+
+-- name: InsertBulkProductionJob :exec
+-- One production job from one spreadsheet row.
+--
+-- Deliberately its own insert rather than a widened InsertProductionJob: a bulk
+-- job has no Shopify order, no line item and no proof to confirm, so nearly
+-- half of that statement's fifty-eight arguments would be nulls threaded
+-- through the storefront path for a case it does not serve. The columns here
+-- are the ones a bulk job actually has.
+--
+-- personalisation_status is 'validated': the names came from a spreadsheet the
+-- customer supplied and Tensor has just checked, so there is no proof to send
+-- and nothing for an operator to confirm. Leaving it pending would park every
+-- bulk job in a queue waiting for an approval that is never coming.
+INSERT INTO production_jobs (
+    id, job_number, bulk_order_id, description, quantity, status,
+    assembly_status, qc_status, packaging_status,
+    sku, product_name, colour, customer_name,
+    personalisation_status, personalisation_properties,
+    name_confirmed, photo_confirmed, font_confirmed, colour_confirmed,
+    variant_confirmed, customer_approval_received, held, priority, colours
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('job_number'), sqlc.arg('bulk_order_id'),
+    sqlc.arg('description'), sqlc.arg('quantity'), 'queued',
+    'pending', 'pending', 'pending',
+    sqlc.narg('sku'), sqlc.narg('product_name'), sqlc.narg('colour'), sqlc.narg('customer_name'),
+    'validated', sqlc.arg('personalisation_properties'),
+    true, true, true, true, true, true, false, 0, sqlc.arg('colours')
+);
+
+-- name: UpdateBulkOrderStatus :one
+UPDATE bulk_orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING *;
+
+-- name: CountJobsForBulkOrder :one
+SELECT count(*)::int AS jobs FROM production_jobs WHERE bulk_order_id = $1;

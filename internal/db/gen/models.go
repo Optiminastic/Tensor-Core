@@ -484,6 +484,7 @@ type ProductionJob struct {
 	ColourCount                *int32
 	CreatedAt                  pgtype.Timestamptz
 	UpdatedAt                  pgtype.Timestamptz
+	BulkOrderID                *uuid.UUID
 }
 
 type ProductionJobAssemblyCheck struct {

@@ -447,3 +447,29 @@ JOIN products p ON p.id = v.product_id
 WHERE v.sku IS NOT NULL AND btrim(v.sku) <> ''
   AND v.status = 'active' AND p.status = 'active'
 ORDER BY p.name, v.name;
+
+-- name: ListFieldMapsForProducts :many
+-- Every order-fed mapping for a set of products, across all roles.
+--
+-- Order-fed only: a row with a fixed_value (OUT_X=200) is a constant the
+-- renderer supplies, not something anybody can be asked for, so it must never
+-- become a column somebody has to fill in.
+--
+-- All roles together, because a bulk-order sheet describes the whole product -
+-- a Soulmate COMBO's plank, rose and keychain are one row for the customer even
+-- though they are three design files to the renderer. The role is returned so
+-- two rows naming the same variable (SC has NAME for both the rose and the
+-- keychain) can be told apart.
+SELECT f.*, p.code AS product_code, p.name AS product_name
+FROM product_field_maps f
+JOIN products p ON p.id = f.product_id
+WHERE f.product_id = ANY(sqlc.arg('product_ids')::uuid[])
+  AND f.fixed_value IS NULL
+  AND btrim(f.property_key) <> ''
+ORDER BY p.code, f.position, lower(f.scad_variable);
+
+-- name: GetVariantProduct :one
+-- Which product a variant belongs to, by variant id.
+SELECT v.id AS variant_id, v.sku, p.id AS product_id, p.code AS product_code, p.name AS product_name
+FROM product_variants v JOIN products p ON p.id = v.product_id
+WHERE v.id = $1;

@@ -432,7 +432,12 @@ CREATE TABLE production_jobs (
     purge_weight_g                numeric(10, 3),
     colour_count                  integer,
     created_at                    timestamptz NOT NULL DEFAULT now(),
-    updated_at                    timestamptz NOT NULL DEFAULT now()
+    updated_at                    timestamptz NOT NULL DEFAULT now(),
+    -- The quotation this job was approved from, when it came from one. Null for
+    -- every Shopify job. LAST, because migration 0089 adds it with ALTER TABLE
+    -- ADD COLUMN, which appends - and this file has to describe the same table,
+    -- column order included, or sqlc stops mapping SELECT * to gen.ProductionJob.
+    bulk_order_id                 uuid REFERENCES bulk_orders (id) ON DELETE SET NULL
 );
 CREATE UNIQUE INDEX uq_production_jobs_job_number ON production_jobs (job_number);
 CREATE INDEX ix_production_jobs_order_id ON production_jobs (order_id);

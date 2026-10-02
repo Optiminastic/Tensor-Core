@@ -269,6 +269,34 @@ func (q *Queries) GetVariant(ctx context.Context, id uuid.UUID) (ProductVariant,
 	return i, err
 }
 
+const getVariantProduct = `-- name: GetVariantProduct :one
+SELECT v.id AS variant_id, v.sku, p.id AS product_id, p.code AS product_code, p.name AS product_name
+FROM product_variants v JOIN products p ON p.id = v.product_id
+WHERE v.id = $1
+`
+
+type GetVariantProductRow struct {
+	VariantID   uuid.UUID
+	Sku         *string
+	ProductID   uuid.UUID
+	ProductCode string
+	ProductName string
+}
+
+// Which product a variant belongs to, by variant id.
+func (q *Queries) GetVariantProduct(ctx context.Context, id uuid.UUID) (GetVariantProductRow, error) {
+	row := q.db.QueryRow(ctx, getVariantProduct, id)
+	var i GetVariantProductRow
+	err := row.Scan(
+		&i.VariantID,
+		&i.Sku,
+		&i.ProductID,
+		&i.ProductCode,
+		&i.ProductName,
+	)
+	return i, err
+}
+
 const insertOptionValue = `-- name: InsertOptionValue :one
 INSERT INTO product_option_values (id, option_id, code, label, position)
 VALUES ($1, $2, $3,
@@ -673,6 +701,75 @@ func (q *Queries) ListDesignsForProduct(ctx context.Context, productID uuid.UUID
 			&i.TemplateKey,
 			&i.DesignID,
 			&i.Version,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFieldMapsForProducts = `-- name: ListFieldMapsForProducts :many
+SELECT f.id, f.product_id, f.property_key, f.scad_variable, f.value_type, f.role, f.required, f.fixed_value, f.position, f.created_at, p.code AS product_code, p.name AS product_name
+FROM product_field_maps f
+JOIN products p ON p.id = f.product_id
+WHERE f.product_id = ANY($1::uuid[])
+  AND f.fixed_value IS NULL
+  AND btrim(f.property_key) <> ''
+ORDER BY p.code, f.position, lower(f.scad_variable)
+`
+
+type ListFieldMapsForProductsRow struct {
+	ID           uuid.UUID
+	ProductID    uuid.UUID
+	PropertyKey  string
+	ScadVariable string
+	ValueType    string
+	Role         string
+	Required     bool
+	FixedValue   *string
+	Position     int32
+	CreatedAt    pgtype.Timestamptz
+	ProductCode  string
+	ProductName  string
+}
+
+// Every order-fed mapping for a set of products, across all roles.
+//
+// Order-fed only: a row with a fixed_value (OUT_X=200) is a constant the
+// renderer supplies, not something anybody can be asked for, so it must never
+// become a column somebody has to fill in.
+//
+// All roles together, because a bulk-order sheet describes the whole product -
+// a Soulmate COMBO's plank, rose and keychain are one row for the customer even
+// though they are three design files to the renderer. The role is returned so
+// two rows naming the same variable (SC has NAME for both the rose and the
+// keychain) can be told apart.
+func (q *Queries) ListFieldMapsForProducts(ctx context.Context, productIds []uuid.UUID) ([]ListFieldMapsForProductsRow, error) {
+	rows, err := q.db.Query(ctx, listFieldMapsForProducts, productIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListFieldMapsForProductsRow{}
+	for rows.Next() {
+		var i ListFieldMapsForProductsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.PropertyKey,
+			&i.ScadVariable,
+			&i.ValueType,
+			&i.Role,
+			&i.Required,
+			&i.FixedValue,
+			&i.Position,
+			&i.CreatedAt,
+			&i.ProductCode,
+			&i.ProductName,
 		); err != nil {
 			return nil, err
 		}

@@ -81,7 +81,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
 -- name: AdvanceJobFinishing :one
 UPDATE production_jobs SET finishing_status = sqlc.arg('finishing_status'), updated_at = now()
@@ -98,7 +98,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
 -- name: AdvanceJobQc :one
 UPDATE production_jobs SET qc_status = sqlc.arg('qc_status'), updated_at = now()
@@ -115,7 +115,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
 -- name: AdvanceJobPackaging :one
 UPDATE production_jobs SET packaging_status = sqlc.arg('packaging_status'), updated_at = now()
@@ -131,4 +131,4 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title, personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
