@@ -434,9 +434,13 @@ type pricedLine struct {
 	variantID   *uuid.UUID
 	sku         string
 	productName string
-	quantity    int32
-	unitPrice   float64
-	lineTotal   float64
+	// group is the Shopify product this SKU belongs to. Snapshotted onto the
+	// line because the workbook has one sheet per product, and for most SKUs
+	// there is no registry variant to recover it from later.
+	group     string
+	quantity  int32
+	unitPrice float64
+	lineTotal float64
 }
 
 type bulkTotals struct{ subtotal, discount, total float64 }
@@ -476,7 +480,7 @@ func (s *Server) priceBulkOrder(
 		total := round2(*match.UnitPrice * float64(l.Quantity))
 		subtotal += total
 		line := pricedLine{
-			sku: match.SKU, productName: match.ProductName,
+			sku: match.SKU, productName: match.ProductName, group: match.Group,
 			quantity: l.Quantity, unitPrice: *match.UnitPrice, lineTotal: total,
 		}
 		if match.VariantID != nil {
@@ -502,7 +506,7 @@ func insertLines(ctx context.Context, q *gen.Queries, orderID uuid.UUID, lines [
 			ID: uuid.New(), BulkOrderID: orderID, VariantID: l.variantID,
 			Sku: l.sku, ProductName: l.productName, Quantity: l.quantity,
 			UnitPrice: money(l.unitPrice), LineTotal: money(l.lineTotal),
-			Position: int32(i),
+			Position: int32(i), ProductGroup: l.group,
 		}); err != nil {
 			return err
 		}

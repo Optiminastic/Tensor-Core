@@ -82,6 +82,48 @@ func columnHeader(variable, role string, duplicated bool) string {
 	return fmt.Sprintf("%s (%s)", v, strings.ReplaceAll(strings.TrimSpace(role), "_", " "))
 }
 
+// columnsFromMaps turns one product's field-map rows into its columns.
+//
+// Serial first and colour last, around whatever the maps say comes from the
+// order. Those two are not OpenSCAD variables and are not derived: every row
+// needs a number an operator and a customer can both point at, and a sheet
+// carrying several SKUs of one product cannot do without a colour.
+func columnsFromMaps(rows []gen.ListFieldMapsForProductsRow) []sheetColumn {
+	seen := map[string]int{}
+	for _, r := range rows {
+		seen[strings.ToUpper(strings.TrimSpace(r.ScadVariable))]++
+	}
+	columns := []sheetColumn{{Header: serialHeader, Numeric: true, Required: true}}
+	for _, r := range rows {
+		key := strings.ToUpper(strings.TrimSpace(r.ScadVariable))
+		columns = append(columns, sheetColumn{
+			Header:   columnHeader(r.ScadVariable, r.Role, seen[key] > 1),
+			Variable: strings.TrimSpace(r.ScadVariable),
+			Role:     r.Role,
+			Numeric:  r.ValueType == "number",
+			Required: r.Required,
+		})
+	}
+	return append(columns, sheetColumn{Header: colourHeader, Required: true})
+}
+
+// defaultColumns is the shape a product gets when the registry has no field
+// maps for it: the plank structure the shop specified.
+//
+// Serial, left name, right name, colour, heart count as a number. It is a
+// starting point, not a claim about the product - a product whose real fields
+// differ gets them the moment somebody adds its field maps, because
+// columnsFromMaps takes over then without this file changing.
+func defaultColumns() []sheetColumn {
+	return []sheetColumn{
+		{Header: serialHeader, Numeric: true, Required: true},
+		{Header: "NAME_L", Variable: "NAME_L", Role: "body", Required: true},
+		{Header: "NAME_R", Variable: "NAME_R", Role: "body", Required: true},
+		{Header: colourHeader, Required: true},
+		{Header: "HEART_COUNT", Variable: "HEART_COUNT", Role: "body", Numeric: true, Required: true},
+	}
+}
+
 // buildProductSheets turns field-map rows into the sheets a file must contain.
 //
 // rowsByProduct carries how many units of each product the quotation promises;

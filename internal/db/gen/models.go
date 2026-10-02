@@ -105,16 +105,17 @@ type BulkOrder struct {
 }
 
 type BulkOrderLine struct {
-	ID          uuid.UUID
-	BulkOrderID uuid.UUID
-	VariantID   *uuid.UUID
-	Sku         string
-	ProductName string
-	Quantity    int32
-	UnitPrice   pgtype.Numeric
-	LineTotal   pgtype.Numeric
-	Position    int32
-	CreatedAt   pgtype.Timestamptz
+	ID           uuid.UUID
+	BulkOrderID  uuid.UUID
+	VariantID    *uuid.UUID
+	Sku          string
+	ProductName  string
+	Quantity     int32
+	UnitPrice    pgtype.Numeric
+	LineTotal    pgtype.Numeric
+	Position     int32
+	CreatedAt    pgtype.Timestamptz
+	ProductGroup string
 }
 
 type ColourMap struct {

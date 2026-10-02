@@ -35,8 +35,9 @@ DELETE FROM bulk_orders WHERE id = $1;
 
 -- name: InsertBulkOrderLine :exec
 INSERT INTO bulk_order_lines (
-    id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total, position
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9);
+    id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total,
+    position, product_group
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10);
 
 -- name: DeleteBulkOrderLines :exec
 DELETE FROM bulk_order_lines WHERE bulk_order_id = $1;

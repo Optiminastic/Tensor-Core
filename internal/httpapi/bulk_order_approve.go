@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -46,46 +47,138 @@ const maxSheetUploadBytes = 10 << 20
 
 // sheetsForOrder works out which sheets this order's file must contain.
 //
-// Products whose SKUs are not in the registry, or which are in it without field
-// maps, are skipped: there is nothing to ask for. Returns the sheets and the
-// SKUs that were skipped, so the response can say so rather than silently
-// expecting less than the operator does.
+// ONE SHEET PER PRODUCT, for every product on the order. An earlier version
+// emitted sheets only for products whose SKUs matched a registry variant with
+// field maps, and against a real order that is nothing: the registry holds 15
+// SKUs where the store holds 507, so a quotation for two Shopify products
+// produced an empty workbook and a 409 instead of a file.
+//
+// Where the product IS mapped, its columns are derived from the field maps -
+// the same table the renderer reads - so SC asks for NAME_L, NAME_R and the
+// rose's and keychain's own NAME. Where it is not, the sheet falls back to the
+// plank shape the shop specified: serial, two names, colour, heart count. That
+// is a starting point rather than a guess at the product's real fields, and the
+// way to improve any particular sheet is to give its product field maps, at
+// which point this derives them without anyone touching this code.
 func (s *Server) sheetsForOrder(
 	c *gin.Context, lines []gen.BulkOrderLine,
 ) ([]productSheet, []string, bool) {
 	ctx := c.Request.Context()
 
-	rowsByProduct := map[uuid.UUID]int{}
-	productIDs := make([]uuid.UUID, 0, 4)
-	var skipped []string
-	seen := map[uuid.UUID]bool{}
+	// Group the lines. A registry product when the SKU maps to one, otherwise
+	// the Shopify product snapshotted on the line.
+	type group struct {
+		code      string
+		name      string
+		productID *uuid.UUID
+		rows      int
+	}
+	order := []string{}
+	groups := map[string]*group{}
 
 	for _, line := range lines {
-		if line.VariantID == nil {
-			skipped = append(skipped, line.Sku)
-			continue
+		code, productID, name := s.sheetKeyFor(ctx, line)
+		g := group{code: code, name: name, productID: productID}
+		key := code
+
+		existing, seen := groups[key]
+		if !seen {
+			copied := g
+			groups[key] = &copied
+			order = append(order, key)
+			existing = groups[key]
 		}
-		row, err := s.store.Q.GetVariantProduct(ctx, *line.VariantID)
+		existing.rows += int(line.Quantity)
+	}
+
+	// Field maps for the products that have them, in one read.
+	productIDs := make([]uuid.UUID, 0, len(groups))
+	for _, key := range order {
+		if id := groups[key].productID; id != nil {
+			productIDs = append(productIDs, *id)
+		}
+	}
+	mapsByProduct := map[uuid.UUID][]gen.ListFieldMapsForProductsRow{}
+	if len(productIDs) > 0 {
+		maps, err := s.store.Q.ListFieldMapsForProducts(ctx, productIDs)
 		if err != nil {
-			skipped = append(skipped, line.Sku)
-			continue
+			detail(c, http.StatusInternalServerError, "Could not read the product registry.")
+			return nil, nil, false
 		}
-		rowsByProduct[row.ProductID] += int(line.Quantity)
-		if !seen[row.ProductID] {
-			seen[row.ProductID] = true
-			productIDs = append(productIDs, row.ProductID)
+		for _, m := range maps {
+			mapsByProduct[m.ProductID] = append(mapsByProduct[m.ProductID], m)
 		}
 	}
 
-	if len(productIDs) == 0 {
-		return nil, skipped, true
+	sheets := make([]productSheet, 0, len(order))
+	var defaulted []string
+	for _, key := range order {
+		g := groups[key]
+		sheet := productSheet{Code: g.code, ProductName: g.name, Rows: g.rows}
+		if g.productID != nil {
+			sheet.ProductID = *g.productID
+		}
+		if rows := mapsByProduct[sheet.ProductID]; len(rows) > 0 {
+			sheet.Columns = columnsFromMaps(rows)
+		} else {
+			sheet.Columns = defaultColumns()
+			defaulted = append(defaulted, g.code)
+		}
+		sheets = append(sheets, sheet)
 	}
-	maps, err := s.store.Q.ListFieldMapsForProducts(ctx, productIDs)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the product registry.")
-		return nil, nil, false
+	sort.Slice(sheets, func(i, j int) bool { return sheets[i].Code < sheets[j].Code })
+	return sheets, defaulted, true
+}
+
+// sheetKeyFor is which sheet a line's rows live on.
+//
+// ONE definition, used by both the code that builds the sheets and the code
+// that reads rows back out of them. They were briefly two copies of the same
+// rule, which is a bug waiting for the first product whose registry code and
+// Shopify title disagree: the sheet would be written under one name and read
+// under another, and the order would approve to no jobs at all.
+//
+// The registry's product code wins when the SKU maps to a variant - it is
+// short, stable and what the shop calls the product. Otherwise the Shopify
+// product title, sanitised into something Excel will accept.
+func (s *Server) sheetKeyFor(ctx context.Context, line gen.BulkOrderLine) (string, *uuid.UUID, string) {
+	if line.VariantID != nil {
+		if row, err := s.store.Q.GetVariantProduct(ctx, *line.VariantID); err == nil {
+			id := row.ProductID
+			return row.ProductCode, &id, row.ProductName
+		}
 	}
-	return buildProductSheets(maps, rowsByProduct), skipped, true
+	group := strings.TrimSpace(line.ProductGroup)
+	name := group
+	if name == "" {
+		name = line.ProductName
+	}
+	return sheetNameFor(group, line.Sku), nil, name
+}
+
+// sheetNameFor turns a product title into something Excel will accept.
+//
+// Excel refuses []:*?/\ in a sheet name and truncates past 31 characters, so a
+// name it rejects is a workbook that cannot be opened at all. The SKU is the
+// fallback for a line carrying no product title.
+func sheetNameFor(title, sku string) string {
+	name := strings.TrimSpace(title)
+	if name == "" {
+		name = strings.TrimSpace(sku)
+	}
+	name = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`[]:*?/\`, r) {
+			return '-'
+		}
+		return r
+	}, name)
+	if len(name) > 31 {
+		name = strings.TrimSpace(name[:31])
+	}
+	if name == "" {
+		return "Sheet"
+	}
+	return name
 }
 
 // downloadSheetTemplate serves the workbook this order expects, with its
@@ -104,9 +197,9 @@ func (s *Server) downloadSheetTemplate(c *gin.Context) {
 		return
 	}
 	if len(sheets) == 0 {
-		detail(c, http.StatusConflict,
-			"None of this order's products have personalisation fields in the registry yet, "+
-				"so there is nothing to fill in.")
+		// Only reachable for an order with no lines, which the create endpoint
+		// refuses - so this is a guard, not a path anybody walks.
+		detail(c, http.StatusConflict, "This order has no products to fill in.")
 		return
 	}
 
@@ -239,14 +332,12 @@ func (s *Server) approveBulkOrder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	sheets, skipped, ok := s.sheetsForOrder(c, lines)
+	sheets, defaulted, ok := s.sheetsForOrder(c, lines)
 	if !ok {
 		return
 	}
 	if len(sheets) == 0 {
-		detail(c, http.StatusConflict,
-			"None of this order's products have personalisation fields in the registry yet, "+
-				"so there is nothing to approve against.")
+		detail(c, http.StatusConflict, "This order has no products to approve against.")
 		return
 	}
 
@@ -293,7 +384,10 @@ func (s *Server) approveBulkOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"quotation_number": order.QuotationNumber,
 		"jobs_created":     created,
-		"skipped_skus":     skipped,
+		// Which sheets used the fallback column shape rather than derived one.
+		// Worth saying: those columns are a starting point, and the way to make
+		// them right is to give the product field maps in the registry.
+		"default_shape_sheets": defaulted,
 	})
 }
 
@@ -308,23 +402,18 @@ func (s *Server) createJobsFromSheets(
 ) (int, error) {
 	ctx := c.Request.Context()
 
-	// Which SKUs belong to which sheet, so a row can be attributed to the line
-	// that ordered it. A sheet holds every SKU of its product in order, so the
-	// rows are handed out in the order the lines appear.
+	// Which sheet each line draws its rows from. Resolved the SAME way
+	// sheetsForOrder names them, or a line would look for rows under a key that
+	// sheet does not have - and an unmapped product, which is most of them,
+	// would silently produce no jobs.
 	type pending struct {
 		line gen.BulkOrderLine
 		code string
 	}
 	var queue []pending
 	for _, line := range lines {
-		if line.VariantID == nil {
-			continue
-		}
-		row, err := s.store.Q.GetVariantProduct(ctx, *line.VariantID)
-		if err != nil {
-			continue
-		}
-		queue = append(queue, pending{line: line, code: row.ProductCode})
+		code, _, _ := s.sheetKeyFor(ctx, line)
+		queue = append(queue, pending{line: line, code: code})
 	}
 
 	cursor := map[string]int{}

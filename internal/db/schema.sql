@@ -973,6 +973,10 @@ CREATE TABLE bulk_order_lines (
     unit_price     numeric(12, 2) NOT NULL CHECK (unit_price >= 0),
     line_total     numeric(12, 2) NOT NULL CHECK (line_total >= 0),
     position       integer NOT NULL DEFAULT 0,
-    created_at     timestamptz NOT NULL DEFAULT now()
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    -- The Shopify product this line belongs to, snapshotted. The workbook has
+    -- one sheet per product, and a product is not a SKU. LAST, because
+    -- migration 0090 appends it. See that migration for why.
+    product_group  varchar(300) NOT NULL DEFAULT ''
 );
 CREATE INDEX ix_bulk_order_lines_order ON bulk_order_lines (bulk_order_id, position);

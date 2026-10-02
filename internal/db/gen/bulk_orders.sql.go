@@ -144,20 +144,22 @@ func (q *Queries) InsertBulkOrder(ctx context.Context, arg InsertBulkOrderParams
 
 const insertBulkOrderLine = `-- name: InsertBulkOrderLine :exec
 INSERT INTO bulk_order_lines (
-    id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total, position
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total,
+    position, product_group
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 `
 
 type InsertBulkOrderLineParams struct {
-	ID          uuid.UUID
-	BulkOrderID uuid.UUID
-	VariantID   *uuid.UUID
-	Sku         string
-	ProductName string
-	Quantity    int32
-	UnitPrice   pgtype.Numeric
-	LineTotal   pgtype.Numeric
-	Position    int32
+	ID           uuid.UUID
+	BulkOrderID  uuid.UUID
+	VariantID    *uuid.UUID
+	Sku          string
+	ProductName  string
+	Quantity     int32
+	UnitPrice    pgtype.Numeric
+	LineTotal    pgtype.Numeric
+	Position     int32
+	ProductGroup string
 }
 
 func (q *Queries) InsertBulkOrderLine(ctx context.Context, arg InsertBulkOrderLineParams) error {
@@ -171,6 +173,7 @@ func (q *Queries) InsertBulkOrderLine(ctx context.Context, arg InsertBulkOrderLi
 		arg.UnitPrice,
 		arg.LineTotal,
 		arg.Position,
+		arg.ProductGroup,
 	)
 	return err
 }
@@ -271,7 +274,7 @@ func (q *Queries) ListBulkOrderLineCounts(ctx context.Context) ([]ListBulkOrderL
 }
 
 const listBulkOrderLines = `-- name: ListBulkOrderLines :many
-SELECT id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total, position, created_at FROM bulk_order_lines WHERE bulk_order_id = $1 ORDER BY position, id
+SELECT id, bulk_order_id, variant_id, sku, product_name, quantity, unit_price, line_total, position, created_at, product_group FROM bulk_order_lines WHERE bulk_order_id = $1 ORDER BY position, id
 `
 
 func (q *Queries) ListBulkOrderLines(ctx context.Context, bulkOrderID uuid.UUID) ([]BulkOrderLine, error) {
@@ -294,6 +297,7 @@ func (q *Queries) ListBulkOrderLines(ctx context.Context, bulkOrderID uuid.UUID)
 			&i.LineTotal,
 			&i.Position,
 			&i.CreatedAt,
+			&i.ProductGroup,
 		); err != nil {
 			return nil, err
 		}
