@@ -102,6 +102,7 @@ type BulkOrder struct {
 	CreatedBy       *string
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+	JobCode         *string
 }
 
 type BulkOrderLine struct {

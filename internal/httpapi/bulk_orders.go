@@ -41,18 +41,19 @@ import (
 
 // registerBulkOrders mounts the bulk-order routes.
 //
-// Read is pricing:read and write is pricing:generate, rather than permissions of
-// their own. A quotation IS pricing - it puts a rupee figure in front of a
-// customer - and those two keys already mean "may see prices" and "may set
-// one". It also lands the role matrix where the shop asked: the nav leaf sits
-// inside Production, whose section needs production:read, so an Operator (no
-// pricing:read) never sees this page and a Designer (no production:read) never
-// sees it either.
+// ADMIN ONLY, on bulk_order:read and bulk_order:manage.
+//
+// These were pricing:read and pricing:generate first, which was wrong: a
+// Project Lead and a Performance Marketer hold pricing:read, so the page was
+// visible to three roles. Bulk orders carry negotiated prices, a customer's
+// whole order book, and the power to put a hundred jobs on the floor from one
+// spreadsheet - the shop's instruction is that only an admin sees them, and
+// admin-only means a permission no other role is granted.
 func (s *Server) registerBulkOrders(r *gin.Engine) {
 	g := r.Group("/brands/:slug/bulk-orders")
 	g.Use(s.guards.RequireUser())
-	read := s.guards.RequirePermission(auth.PricingRead.Key())
-	manage := s.guards.RequirePermission(auth.PricingGenerate.Key())
+	read := s.guards.RequirePermission(auth.BulkOrderRead.Key())
+	manage := s.guards.RequirePermission(auth.BulkOrderManage.Key())
 
 	g.GET("", read, s.listBulkOrders)
 	g.POST("", manage, s.createBulkOrder)

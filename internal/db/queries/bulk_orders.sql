@@ -55,7 +55,7 @@ GROUP BY bulk_order_id;
 -- name: QuotationNumberExists :one
 SELECT EXISTS (SELECT 1 FROM bulk_orders WHERE quotation_number = $1) AS taken;
 
--- name: InsertBulkProductionJob :exec
+-- name: InsertBulkProductionJob :one
 -- One production job from one spreadsheet row.
 --
 -- Deliberately its own insert rather than a widened InsertProductionJob: a bulk
@@ -74,18 +74,45 @@ INSERT INTO production_jobs (
     sku, product_name, colour, customer_name,
     personalisation_status, personalisation_properties,
     name_confirmed, photo_confirmed, font_confirmed, colour_confirmed,
-    variant_confirmed, customer_approval_received, held, priority, colours
+    variant_confirmed, customer_approval_received, held, priority, colours,
+    issue_reason
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('job_number'), sqlc.arg('bulk_order_id'),
     sqlc.arg('description'), sqlc.arg('quantity'), 'queued',
     'pending', 'pending', 'pending',
     sqlc.narg('sku'), sqlc.narg('product_name'), sqlc.narg('colour'), sqlc.narg('customer_name'),
-    'validated', sqlc.arg('personalisation_properties'),
-    true, true, true, true, true, true, false, 0, sqlc.arg('colours')
-);
+    -- not_required, matching a generated Shopify job: the names are the INPUTS
+    -- OpenSCAD builds the model from, not preferences somebody checks against a
+    -- proof. Left pending, every bulk job would sit behind a confirmation with
+    -- nothing to confirm.
+    'not_required', sqlc.arg('personalisation_properties'),
+    true, true, true, true, true, true, false, 0, sqlc.arg('colours'),
+    -- stl_missing, exactly as a generated storefront job starts: it is what
+    -- keeps the job out of batching until its model exists, and what the model
+    -- generator looks for. Cleared by the render, after which the job batches
+    -- like any other.
+    sqlc.narg('issue_reason')
+)
+-- Returned so the caller can schedule the model render, which has to happen
+-- after the transaction commits.
+RETURNING *;
 
 -- name: UpdateBulkOrderStatus :one
 UPDATE bulk_orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING *;
+
+-- name: ApproveBulkOrder :one
+-- Stamp the job code and mark the order accepted, together.
+UPDATE bulk_orders SET status = 'accepted', job_code = $2, updated_at = now()
+WHERE id = $1 RETURNING *;
+
+-- name: JobCodeTaken :one
+-- Whether another order already uses this code. Checked before approving so a
+-- clash is reported against the input rather than discovered when the unique
+-- index rejects the hundredth job.
+SELECT EXISTS (
+    SELECT 1 FROM bulk_orders
+    WHERE upper(job_code) = upper($1) AND id <> $2
+) AS taken;
 
 -- name: CountJobsForBulkOrder :one
 SELECT count(*)::int AS jobs FROM production_jobs WHERE bulk_order_id = $1;

@@ -959,9 +959,14 @@ CREATE TABLE bulk_orders (
     currency        varchar(8) NOT NULL DEFAULT 'INR',
     created_by      varchar(64),
     created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now()
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    -- The code this order's production jobs are numbered from: OMPT gives
+    -- OMPT-1, OMPT-2. Set at approval, unique across orders. LAST, because
+    -- migration 0091 appends it. See that migration.
+    job_code        varchar(16)
 );
 CREATE INDEX ix_bulk_orders_brand ON bulk_orders (brand_slug, created_at DESC);
+CREATE UNIQUE INDEX uq_bulk_orders_job_code ON bulk_orders (upper(job_code)) WHERE job_code IS NOT NULL;
 
 CREATE TABLE bulk_order_lines (
     id             uuid PRIMARY KEY,

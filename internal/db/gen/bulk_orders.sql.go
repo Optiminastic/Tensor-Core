@@ -12,6 +12,44 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveBulkOrder = `-- name: ApproveBulkOrder :one
+UPDATE bulk_orders SET status = 'accepted', job_code = $2, updated_at = now()
+WHERE id = $1 RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code
+`
+
+type ApproveBulkOrderParams struct {
+	ID      uuid.UUID
+	JobCode *string
+}
+
+// Stamp the job code and mark the order accepted, together.
+func (q *Queries) ApproveBulkOrder(ctx context.Context, arg ApproveBulkOrderParams) (BulkOrder, error) {
+	row := q.db.QueryRow(ctx, approveBulkOrder, arg.ID, arg.JobCode)
+	var i BulkOrder
+	err := row.Scan(
+		&i.ID,
+		&i.QuotationNumber,
+		&i.BrandSlug,
+		&i.CustomerName,
+		&i.CustomerEmail,
+		&i.CustomerPhone,
+		&i.Notes,
+		&i.OrderDate,
+		&i.ValidUntil,
+		&i.Status,
+		&i.DiscountPercent,
+		&i.Subtotal,
+		&i.DiscountAmount,
+		&i.Total,
+		&i.Currency,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.JobCode,
+	)
+	return i, err
+}
+
 const countJobsForBulkOrder = `-- name: CountJobsForBulkOrder :one
 SELECT count(*)::int AS jobs FROM production_jobs WHERE bulk_order_id = $1
 `
@@ -42,7 +80,7 @@ func (q *Queries) DeleteBulkOrderLines(ctx context.Context, bulkOrderID uuid.UUI
 }
 
 const getBulkOrder = `-- name: GetBulkOrder :one
-SELECT id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at FROM bulk_orders WHERE id = $1
+SELECT id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code FROM bulk_orders WHERE id = $1
 `
 
 func (q *Queries) GetBulkOrder(ctx context.Context, id uuid.UUID) (BulkOrder, error) {
@@ -67,6 +105,7 @@ func (q *Queries) GetBulkOrder(ctx context.Context, id uuid.UUID) (BulkOrder, er
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.JobCode,
 	)
 	return i, err
 }
@@ -78,7 +117,7 @@ INSERT INTO bulk_orders (
     notes, order_date, valid_until, status, discount_percent,
     subtotal, discount_amount, total, created_by
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at
+RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code
 `
 
 type InsertBulkOrderParams struct {
@@ -138,6 +177,7 @@ func (q *Queries) InsertBulkOrder(ctx context.Context, arg InsertBulkOrderParams
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.JobCode,
 	)
 	return i, err
 }
@@ -178,22 +218,33 @@ func (q *Queries) InsertBulkOrderLine(ctx context.Context, arg InsertBulkOrderLi
 	return err
 }
 
-const insertBulkProductionJob = `-- name: InsertBulkProductionJob :exec
+const insertBulkProductionJob = `-- name: InsertBulkProductionJob :one
 INSERT INTO production_jobs (
     id, job_number, bulk_order_id, description, quantity, status,
     assembly_status, qc_status, packaging_status,
     sku, product_name, colour, customer_name,
     personalisation_status, personalisation_properties,
     name_confirmed, photo_confirmed, font_confirmed, colour_confirmed,
-    variant_confirmed, customer_approval_received, held, priority, colours
+    variant_confirmed, customer_approval_received, held, priority, colours,
+    issue_reason
 ) VALUES (
     $1, $2, $3,
     $4, $5, 'queued',
     'pending', 'pending', 'pending',
     $6, $7, $8, $9,
-    'validated', $10,
-    true, true, true, true, true, true, false, 0, $11
+    -- not_required, matching a generated Shopify job: the names are the INPUTS
+    -- OpenSCAD builds the model from, not preferences somebody checks against a
+    -- proof. Left pending, every bulk job would sit behind a confirmation with
+    -- nothing to confirm.
+    'not_required', $10,
+    true, true, true, true, true, true, false, 0, $11,
+    -- stl_missing, exactly as a generated storefront job starts: it is what
+    -- keeps the job out of batching until its model exists, and what the model
+    -- generator looks for. Cleared by the render, after which the job batches
+    -- like any other.
+    $12
 )
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type InsertBulkProductionJobParams struct {
@@ -208,6 +259,7 @@ type InsertBulkProductionJobParams struct {
 	CustomerName              *string
 	PersonalisationProperties []byte
 	Colours                   []byte
+	IssueReason               *string
 }
 
 // One production job from one spreadsheet row.
@@ -222,8 +274,10 @@ type InsertBulkProductionJobParams struct {
 // customer supplied and Tensor has just checked, so there is no proof to send
 // and nothing for an operator to confirm. Leaving it pending would park every
 // bulk job in a queue waiting for an approval that is never coming.
-func (q *Queries) InsertBulkProductionJob(ctx context.Context, arg InsertBulkProductionJobParams) error {
-	_, err := q.db.Exec(ctx, insertBulkProductionJob,
+// Returned so the caller can schedule the model render, which has to happen
+// after the transaction commits.
+func (q *Queries) InsertBulkProductionJob(ctx context.Context, arg InsertBulkProductionJobParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, insertBulkProductionJob,
 		arg.ID,
 		arg.JobNumber,
 		arg.BulkOrderID,
@@ -235,8 +289,99 @@ func (q *Queries) InsertBulkProductionJob(ctx context.Context, arg InsertBulkPro
 		arg.CustomerName,
 		arg.PersonalisationProperties,
 		arg.Colours,
+		arg.IssueReason,
 	)
-	return err
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.VariantTitle,
+		&i.PersonalisationProperties,
+		&i.PartRole,
+		&i.ModelError,
+		&i.ModelErrorAt,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BulkOrderID,
+	)
+	return i, err
+}
+
+const jobCodeTaken = `-- name: JobCodeTaken :one
+SELECT EXISTS (
+    SELECT 1 FROM bulk_orders
+    WHERE upper(job_code) = upper($1) AND id <> $2
+) AS taken
+`
+
+type JobCodeTakenParams struct {
+	Upper interface{}
+	ID    uuid.UUID
+}
+
+// Whether another order already uses this code. Checked before approving so a
+// clash is reported against the input rather than discovered when the unique
+// index rejects the hundredth job.
+func (q *Queries) JobCodeTaken(ctx context.Context, arg JobCodeTakenParams) (bool, error) {
+	row := q.db.QueryRow(ctx, jobCodeTaken, arg.Upper, arg.ID)
+	var taken bool
+	err := row.Scan(&taken)
+	return taken, err
 }
 
 const listBulkOrderLineCounts = `-- name: ListBulkOrderLineCounts :many
@@ -310,7 +455,7 @@ func (q *Queries) ListBulkOrderLines(ctx context.Context, bulkOrderID uuid.UUID)
 }
 
 const listBulkOrders = `-- name: ListBulkOrders :many
-SELECT id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at FROM bulk_orders
+SELECT id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code FROM bulk_orders
 WHERE brand_slug = $1
 ORDER BY created_at DESC, id DESC
 `
@@ -345,6 +490,7 @@ func (q *Queries) ListBulkOrders(ctx context.Context, brandSlug string) ([]BulkO
 			&i.CreatedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.JobCode,
 		); err != nil {
 			return nil, err
 		}
@@ -374,7 +520,7 @@ UPDATE bulk_orders SET
     discount_percent = $9, subtotal = $10, discount_amount = $11, total = $12,
     updated_at = now()
 WHERE id = $1
-RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at
+RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code
 `
 
 type UpdateBulkOrderParams struct {
@@ -430,12 +576,13 @@ func (q *Queries) UpdateBulkOrder(ctx context.Context, arg UpdateBulkOrderParams
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.JobCode,
 	)
 	return i, err
 }
 
 const updateBulkOrderStatus = `-- name: UpdateBulkOrderStatus :one
-UPDATE bulk_orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at
+UPDATE bulk_orders SET status = $2, updated_at = now() WHERE id = $1 RETURNING id, quotation_number, brand_slug, customer_name, customer_email, customer_phone, notes, order_date, valid_until, status, discount_percent, subtotal, discount_amount, total, currency, created_by, created_at, updated_at, job_code
 `
 
 type UpdateBulkOrderStatusParams struct {
@@ -465,6 +612,7 @@ func (q *Queries) UpdateBulkOrderStatus(ctx context.Context, arg UpdateBulkOrder
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.JobCode,
 	)
 	return i, err
 }

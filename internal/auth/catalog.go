@@ -83,6 +83,19 @@ var (
 	// separation holds at the API and not merely in the UI.
 	RegistryRead = PermissionSpec{"registry", "read", "View the product registry: SKUs, parts and templates"}
 
+	// Bulk orders are ADMIN-ONLY, at the shop's instruction: they carry
+	// negotiated prices, a customer's whole order book and the power to put a
+	// hundred jobs on the floor from one upload.
+	//
+	// Their own pair rather than reusing pricing:read, which was the first
+	// attempt and was wrong: a Project Lead and a Performance Marketer both
+	// hold that, so the page would have been visible to three roles. Admin
+	// holds every permission by construction (roleGrants maps ADMIN to
+	// AllPermissions), so adding these here and to NO role grant is exactly
+	// what "admin only" means.
+	BulkOrderRead   = PermissionSpec{"bulk_order", "read", "View bulk orders and their quotations"}
+	BulkOrderManage = PermissionSpec{"bulk_order", "manage", "Create, edit and approve bulk orders"}
+
 	ShopifyPublish = PermissionSpec{"shopify", "publish", "Publish an approved SKU to Shopify"}
 
 	// The production pipeline (ported from print-queue-be). production:read is the
@@ -132,6 +145,7 @@ var AllPermissions = []PermissionSpec{
 	PricingRead, PricingGenerate, PricingOverride,
 	ConfigRead, ConfigManage,
 	RegistryRead,
+	BulkOrderRead, BulkOrderManage,
 	ShopifyPublish,
 	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 	OrderRead,

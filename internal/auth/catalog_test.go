@@ -9,10 +9,11 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	// 39 since registry:read split reading the product registry away from
-	// reading cost configuration. See RegistryRead in catalog.go.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 39 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 39 each", len(admin), len(AllPermissions))
+	// 41: registry:read split reading the product registry away from reading
+	// cost configuration, and bulk_order:read/manage are admin-only by being
+	// granted to no other role. See catalog.go.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 41 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 41 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -144,7 +145,13 @@ func TestProjectLeadCannotManageUsers(t *testing.T) {
 // brand:MANAGE - create, edit, delete - stays admin-only, which is the thing
 // this test was protecting.
 func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
-	adminOnly := []string{"project:read", "project:manage", "brand:manage"}
+	adminOnly := []string{
+		"project:read", "project:manage", "brand:manage",
+		// Bulk orders carry negotiated prices and can put a hundred jobs on the
+		// floor from one upload. The shop asked for admin only, and this is
+		// where that is enforced rather than hoped for.
+		"bulk_order:read", "bulk_order:manage",
+	}
 	for _, role := range AllRoles {
 		if role == RoleAdmin {
 			continue
@@ -170,8 +177,8 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 39 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 12 (operator)
-	// + 6 (packaging_qc) = 94.
+	// 41 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 12 (operator)
+	// + 6 (packaging_qc) = 96.
 	//
 	// Moved from 84 when the shop restated three roles: +1 admin and +1 project
 	// lead for registry:read, +1 designer for pricing:read (Costing), and the
@@ -185,7 +192,7 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 94 {
-		t.Fatalf("total grants = %d, want 94", total)
+	if total != 96 {
+		t.Fatalf("total grants = %d, want 96", total)
 	}
 }
