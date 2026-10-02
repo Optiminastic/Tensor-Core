@@ -234,7 +234,18 @@ func (s *Server) renderColouredPlank(
 ) ([]byte, error) {
 	log := obs.FromContext(ctx)
 
+	// The variant title first, which is where a storefront job carries it -
+	// "SKY BLUE / NO LIGHT", the colour and the light choice together.
+	//
+	// Then the job's own colour column, which is where a BULK job carries it: a
+	// quotation has no Shopify variant, and its colour comes from the
+	// spreadsheet row, one per plank. Without this fallback every bulk plank
+	// failed with `no swatch for ""` while holding the colour it needed in the
+	// column beside the empty one being read.
 	colour := colourFromVariant(job.VariantTitle)
+	if colour == "" {
+		colour = strings.TrimSpace(deref(job.Colour))
+	}
 	hex, err := s.resolveColourHex(ctx, colour)
 	if err != nil {
 		if !errors.Is(err, errUnknownColour) {
