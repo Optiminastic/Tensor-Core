@@ -52,20 +52,6 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	s.planMu.Lock()
 	defer s.planMu.Unlock()
 
-	// The priority top-up used to run here, before the planner read its pool:
-	// it opened locked beds and moved expedited work onto their spare places.
-	//
-	// It is not called any more, at the shop's instruction - a priority order
-	// is planned as an ordinary one now (see the note above sortByArrival).
-	// Opening a locked bed only ever paid for itself when the plank jumping the
-	// queue was worth a withdrawal and a re-plate; with nothing jumping the
-	// queue it is a committed plate disturbed for no gain. Worse under the
-	// current lock rule, where a bed locks only once a printer is free and
-	// waiting for it: withdrawing that plate delays the very bed it tops up.
-	//
-	// The code is left intact (batch_topup.go) rather than deleted, because the
-	// mechanism is the right one if expedited handling ever comes back.
-
 	signature, sigOK := s.poolSignature(ctx)
 	if sigOK && signature == s.lastPlannedPool {
 		obs.FromContext(ctx).Info("batch plan skipped, the job pool is unchanged since the last run",

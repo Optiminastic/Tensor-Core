@@ -543,38 +543,6 @@ ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
 UPDATE production_jobs SET priority = sqlc.arg('rank')::int, updated_at = now()
 WHERE order_id = sqlc.arg('order_id') AND priority > sqlc.arg('rank')::int;
 
--- name: ListUnbatchedJobsByUrgency :many
--- Jobs not committed to any bed, most urgent first.
---
--- ListReplannableJobs' eligibility bar and its reach: unbatched jobs PLUS
--- Draft members. A Draft is a proposal the planner dissolves and rebuilds every
--- run, so taking a plank out of one costs nothing - the remainder is re-formed
--- moments later in the same pass. Locked beds are excluded, as everywhere: a
--- committed plate is not a pool to draw from.
---
--- Draft members are here because a priority plank parked in a half-empty Draft
--- is the exact case this feature exists for: it will not print until two more
--- of its colour arrive, while a locked bed of three sits one plank short of
--- going to a machine.
---
--- The ordering is sortPriorityFirst expressed in SQL: priority ASC (LOWER IS
--- MORE URGENT), then the customer's placed_at within each rank. Written here
--- rather than sorted in Go so the top-up and the planner cannot come to
--- different conclusions about who is next.
-SELECT j.* FROM production_jobs j
-LEFT JOIN batches b ON b.id = j.batch_id
-LEFT JOIN orders o ON o.id = j.order_id
--- b.manual excludes a bed somebody built by hand. Its jobs sit on a Draft, so
--- without this they would be reconsidered, the bed dissolved and the planks
--- handed back out - undoing a person's deliberate arrangement on a timer.
-WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false))
-  AND j.status = 'queued'
-  AND j.quantity > 0
-  AND j.personalisation_status IN ('validated', 'not_required')
-  AND j.issue_reason IS NULL
-  AND j.held = false
-ORDER BY j.priority ASC, COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC;
-
 -- name: AssignUnbatchedJobsWithinCap :execrows
 -- Puts UNBATCHED jobs on a bed, refusing the whole statement if the units being
 -- added would take it past its cap.
