@@ -260,6 +260,43 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 		opt.Refusal = "this printer is in maintenance"
 		return opt
 	}
+	// How much this printer already owes, needed both for the rule below and
+	// for ranking the ones that survive it.
+	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
+
+	// ONE BED PER MACHINE, and the printer must be EMPTY.
+	//
+	// Here, with the other availability refusals, rather than last. It used to
+	// sit at the end of this function on the reasoning that it is not a fault -
+	// the printer is fine, it simply already has work. But that put it BEHIND
+	// the colour gate, and the consequence showed up the moment the rule was
+	// checked against the live fleet: A5 was mid-print and the dialog said "no
+	// spool has been confirmed as #FFFFFF", because binding failed first. The
+	// rule had become unobservable, and the operator was told the less useful
+	// of two true things.
+	//
+	// This file's own convention settles it - "a printer that is off says it is
+	// off, not that its spools are wrong". Being busy is availability, like off,
+	// offline and maintenance, and availability comes before anything about the
+	// bed. HoldsColours is computed above the switch precisely so a printer
+	// refused here is still reported as holding the colours (see chosenReason),
+	// so nothing is lost by refusing earlier.
+	if cap := in.WaitingCap; cap > 0 {
+		// The printer's own live state as well as its queue. A plate started
+		// from BambuBuddy's UI, or one whose queue item has already been
+		// retired, leaves the machine running with nothing queued against it -
+		// and "running" is the signal that cannot be missed, because it means
+		// something is physically on the bed.
+		if r.Status == production.FleetMachineRunning {
+			opt.Refusal = "this printer is printing"
+			return opt
+		}
+		if opt.PendingItems >= cap {
+			opt.Refusal = "this printer already has a bed"
+			return opt
+		}
+	}
+
 	// Checked here rather than at send time, where it was a 409 raised AFTER
 	// the bed had already been locked - an irreversible step taken for a
 	// printer that was never going to work.
@@ -291,29 +328,6 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 			opt.Oversized = true
 		default:
 			opt.Refusal = fmt.Sprintf("this bed is laid out for a %s", want)
-			return opt
-		}
-	}
-
-	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
-
-	// One bed at a time, and the printer must be EMPTY. Last, because these are
-	// the only refusals here that are not faults: the printer is fine, it
-	// simply already has its batch, and saying so beside the ones that are off
-	// or faulted would read as a problem when it is the system doing what it
-	// was asked.
-	if cap := in.WaitingCap; cap > 0 {
-		// The printer's own live state as well as its queue. A plate started
-		// from BambuBuddy's UI, or one whose queue item has already been
-		// retired, leaves the machine running with nothing queued against it -
-		// and "running" is the one signal that cannot be missed, because it
-		// means something is physically on the bed.
-		if r.Status == production.FleetMachineRunning {
-			opt.Refusal = "this printer is printing"
-			return opt
-		}
-		if opt.PendingItems >= cap {
-			opt.Refusal = "this printer already has a bed"
 			return opt
 		}
 	}
