@@ -56,9 +56,13 @@ func (s *Server) bedUnitCap() int {
 // bedUnitFloor is how empty a bed may be and still be worth printing.
 //
 // A plate with one plank on it costs the same machine-hour as a plate with
-// five, so a bed under this waits for company. The exception is a bed carrying
-// a priority job: somebody paid to jump the queue, and waiting for company
-// would spend that money on nothing.
+// five, so a bed under this waits for company.
+//
+// NO EXCEPTIONS. A bed carrying a priority job used to be one - somebody had
+// paid to jump the queue, and waiting for company spent that money on nothing -
+// but batching is first come, first served now, so an expedited bed waits for
+// its third plank like any other. Clearing the floor is also only half of it:
+// see readyToLock, which additionally wants a free printer.
 func (s *Server) bedUnitFloor() int {
 	if s.cfg.BatchMinUnitsPerBed > 0 {
 		return s.cfg.BatchMinUnitsPerBed
