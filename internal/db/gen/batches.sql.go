@@ -1761,6 +1761,13 @@ UPDATE batches SET
     plate_slice_error        = NULL,
     queue_item_id            = NULL,
     pipeline_run_id          = NULL,
+    -- The THIRD marker of "already on its way", and the one that was missed.
+    -- nextDispatchStep treats any of the three as "this bed is moving, leave
+    -- it alone", and ListBatchesToDispatch excludes a bed that has one - so a
+    -- reopened bed keeping its slice id returns to Draft and is then invisible
+    -- to the dispatcher for ever. Found while reopening beds in bulk, which is
+    -- the only operation that creates enough of them to notice.
+    bambu_slice_job_id       = NULL,
     print_error              = NULL,
     print_error_at           = NULL,
     -- And what the last print did. A bed re-plated from different jobs that
@@ -1785,8 +1792,8 @@ RETURNING id, batch_number, machine_id, status, approved_by, approved_at, materi
 // would ever fill, because a locked bed has left the replanning pool.
 //
 // Everything approval produced is cleared, not just the status. The merged plate
-// and its slice describe a bed that no longer exists, and queue_item_id /
-// pipeline_run_id say "already sent to BambuBuddy" - which the dispatcher reads
+// and its slice describe a bed that no longer exists, and queue_item_id,
+// pipeline_run_id and bambu_slice_job_id all say "already sent to BambuBuddy" - which the dispatcher reads
 // as "nothing to do", so a refilled bed carrying a stale queue id would sit at
 // four planks and never reach a printer.
 //
