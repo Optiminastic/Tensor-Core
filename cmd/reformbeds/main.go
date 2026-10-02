@@ -25,6 +25,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -49,9 +51,22 @@ func main() {
 		"reopen only beds holding fewer than the per-bed cap, leaving full ones as they are")
 	flag.Parse()
 
+	// Load, not Overload: an exported DATABASE_URL therefore WINS over
+	// env/local.env, which is how this is pointed at production from a dev
+	// checkout. Verified against godotenv v1.5.1 - loadFile only sets a key
+	// when it is absent from the environment.
 	_ = godotenv.Load("env/local.env")
 	cfg := config.Load()
 	ctx := context.Background()
+
+	// Say which database, before touching it.
+	//
+	// This reopens committed plates, and the checkout it runs from is wired to
+	// the DEV database while the beds worth reforming are in PRODUCTION. One
+	// forgotten variable is the difference, and nothing else on screen
+	// distinguishes the two - the output is a list of bed numbers that look
+	// alike. So the target is printed first, and never the password.
+	fmt.Printf("database: %s\n\n", safeTarget(cfg.DatabaseURL))
 
 	store, err := db.Open(ctx, cfg.DatabaseURL, db.Options{})
 	if err != nil {
@@ -184,4 +199,17 @@ func liveQueueItems(ctx context.Context, cfg config.Settings) map[int]bool {
 		}
 	}
 	return live
+}
+
+// safeTarget is the host and database name of a connection string, with the
+// credentials dropped. Enough to tell production from dev at a glance, and
+// safe to print into a terminal somebody may paste into a ticket.
+func safeTarget(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Host == "" {
+		// Not a URL (a key=value DSN, or malformed). Saying so is better than
+		// printing something that might carry a password.
+		return "unrecognised DATABASE_URL format"
+	}
+	return u.Host + strings.TrimSuffix(u.Path, "/")
 }
