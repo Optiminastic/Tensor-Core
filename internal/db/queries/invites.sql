@@ -6,8 +6,8 @@ SET revoked_at = now(), updated_at = now()
 WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL;
 
 -- name: InsertInvite :one
-INSERT INTO user_invites (id, email, role_id, token_hash, expires_at, created_by, brand_slugs)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO user_invites (id, email, role_id, token_hash, expires_at, created_by)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: GetInviteByTokenHash :one

@@ -70,51 +70,28 @@ VALUES ($1, $2, $3)
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
 -- name: ListMembers :many
--- Every user who holds a role, with their roles and the brands they may work in.
+-- Every user who holds a role, with their roles.
 --
--- One query rather than a roster read plus two per member: the People page
--- shows every member with both lists, and doing it per row is how a page that
+-- One query rather than a roster read plus one per member: the People page
+-- shows every member with their roles, and doing it per row is how a page that
 -- renders fine with four people stops loading at forty.
 --
--- array_agg over a LEFT JOIN, with the NULLs filtered out, so a member with a
--- role but no brand grant still appears - that is the ordinary state of
--- somebody just invited, and dropping them from the roster would make the
--- admin think the invite failed.
+-- No brands. Store-level access was removed - every role reaches every brand -
+-- so there is nothing per-member to report (migration 0087).
 --
--- DISTINCT inside each aggregate because the two joins multiply: a user with
--- two roles and three brands produces six rows, and without it every role
--- would be listed three times.
+-- DISTINCT inside the aggregate because a user with two roles produces two
+-- rows, and array_remove drops the NULL a role with no grants would contribute.
 SELECT ur.user_id,
-       array_remove(array_agg(DISTINCT r.name), NULL)::text[]          AS roles,
-       array_remove(array_agg(DISTINCT uba.brand_slug), NULL)::text[]  AS brand_slugs
+       array_remove(array_agg(DISTINCT r.name), NULL)::text[] AS roles
 FROM user_roles ur
 JOIN roles r ON r.id = ur.role_id
-LEFT JOIN user_brand_access uba ON uba.user_id = ur.user_id
 GROUP BY ur.user_id
 ORDER BY ur.user_id;
-
--- name: ListUserBrandSlugs :many
--- One member's brands. Used after a write, to return the state that was saved.
-SELECT brand_slug FROM user_brand_access
-WHERE user_id = $1
-ORDER BY brand_slug;
 
 -- name: DeleteUserRoles :exec
 -- Strip every role from a user. Their Better Auth account is untouched - this
 -- is "no longer a member of this workspace", not "deleted".
 DELETE FROM user_roles WHERE user_id = $1;
-
--- name: DeleteUserBrandAccess :exec
--- Strip every brand grant from a user. Paired with DeleteUserRoles when a
--- member is removed, and used on its own to clear before replacing the set.
-DELETE FROM user_brand_access WHERE user_id = $1;
-
--- name: InsertUserBrandAccess :exec
--- Grant one brand. Idempotent, so replacing a set never fails on a slug the
--- member already had.
-INSERT INTO user_brand_access (user_id, brand_slug, granted_by)
-VALUES ($1, $2, $3)
-ON CONFLICT (user_id, brand_slug) DO NOTHING;
 
 -- name: UserHasAnyRole :one
 -- Whether this user is a member at all. The remove path checks it so deleting

@@ -27,13 +27,6 @@ func (s *Server) registerAdmin(r *gin.Engine) {
 type inviteCreateRequest struct {
 	Email string `json:"email" binding:"required,email"`
 	Role  string `json:"role" binding:"required,oneof=ADMIN DESIGNER PROJECT_LEAD PERFORMANCE_MARKETER OPERATOR PACKAGING_QC"`
-	// BrandSlugs is what this invite promises; it is applied to
-	// user_brand_access when the person accepts and has a user id. The field
-	// was always posted by the invite form and, until now, always dropped.
-	//
-	// Optional: an invite that names no brand is normal, and an admin sets
-	// brand access on the roster afterwards either way.
-	BrandSlugs []string `json:"brand_slugs"`
 }
 
 type inviteCreatedResponse struct {
@@ -55,8 +48,7 @@ func (s *Server) createInvite(c *gin.Context) {
 	var token string
 	err := s.store.InTx(c.Request.Context(), func(q *gen.Queries) error {
 		inv, tok, err := auth.IssueInvite(c.Request.Context(), q, req.Email,
-			auth.RoleName(req.Role), user.ID, auth.DefaultInviteTTL,
-			dedupeStrings(req.BrandSlugs))
+			auth.RoleName(req.Role), user.ID, auth.DefaultInviteTTL)
 		if err != nil {
 			return err
 		}

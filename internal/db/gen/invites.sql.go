@@ -13,7 +13,7 @@ import (
 )
 
 const getInviteByID = `-- name: GetInviteByID :one
-SELECT id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at, brand_slugs
+SELECT id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at
 FROM user_invites
 WHERE id = $1
 `
@@ -33,13 +33,12 @@ func (q *Queries) GetInviteByID(ctx context.Context, id uuid.UUID) (UserInvite, 
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.BrandSlugs,
 	)
 	return i, err
 }
 
 const getInviteByTokenHash = `-- name: GetInviteByTokenHash :one
-SELECT id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at, brand_slugs
+SELECT id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at
 FROM user_invites
 WHERE token_hash = $1
 `
@@ -59,25 +58,23 @@ func (q *Queries) GetInviteByTokenHash(ctx context.Context, tokenHash string) (U
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.BrandSlugs,
 	)
 	return i, err
 }
 
 const insertInvite = `-- name: InsertInvite :one
-INSERT INTO user_invites (id, email, role_id, token_hash, expires_at, created_by, brand_slugs)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at, brand_slugs
+INSERT INTO user_invites (id, email, role_id, token_hash, expires_at, created_by)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, email, role_id, token_hash, expires_at, accepted_at, accepted_user_id, revoked_at, created_by, created_at, updated_at
 `
 
 type InsertInviteParams struct {
-	ID         uuid.UUID
-	Email      string
-	RoleID     uuid.UUID
-	TokenHash  string
-	ExpiresAt  pgtype.Timestamptz
-	CreatedBy  *string
-	BrandSlugs []string
+	ID        uuid.UUID
+	Email     string
+	RoleID    uuid.UUID
+	TokenHash string
+	ExpiresAt pgtype.Timestamptz
+	CreatedBy *string
 }
 
 func (q *Queries) InsertInvite(ctx context.Context, arg InsertInviteParams) (UserInvite, error) {
@@ -88,7 +85,6 @@ func (q *Queries) InsertInvite(ctx context.Context, arg InsertInviteParams) (Use
 		arg.TokenHash,
 		arg.ExpiresAt,
 		arg.CreatedBy,
-		arg.BrandSlugs,
 	)
 	var i UserInvite
 	err := row.Scan(
@@ -103,7 +99,6 @@ func (q *Queries) InsertInvite(ctx context.Context, arg InsertInviteParams) (Use
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.BrandSlugs,
 	)
 	return i, err
 }

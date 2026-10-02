@@ -173,12 +173,11 @@ var AllPermissions = []PermissionSpec{
 // brand:read was admin-only, no non-admin could enter the product at all: the
 // switcher called GET /brands, got a 403, and showed nothing to pick.
 //
-// WHICH brands a member sees is a separate question from whether they may ask,
-// and it is answered by user_brand_access (migration 0086) rather than by a
-// permission: listBrands returns every brand to an admin and only the granted
-// ones to everybody else. brand:MANAGE - creating, editing and deleting a brand
-// - stays admin-only, which is what TestProjectAndBrandAreAdminOnly still
-// pins.
+// Every role sees every brand, at the shop's instruction. A grant table briefly
+// scoped the list per member; it is gone (migration 0087), so brand:read means
+// "sees the stores" with nothing further to configure. brand:MANAGE - creating,
+// editing and deleting a brand - stays admin-only, which is what
+// TestProjectAndBrandManageAreAdminOnly pins.
 var roleGrants = map[RoleName][]PermissionSpec{
 	RoleAdmin: AllPermissions,
 	// Designs AND Costing. PricingRead is what puts the Costing area in the nav

@@ -138,8 +138,8 @@ func TestProjectLeadCannotManageUsers(t *testing.T) {
 // role that cannot list brands cannot reach any page it is otherwise entitled
 // to - which is what happened: the switcher called GET /brands, got a 403, and
 // every non-admin saw an empty workspace. Asking which brands exist is now
-// allowed to everyone, and WHICH ones come back is scoped per member by
-// user_brand_access (see listBrands).
+// allowed to everyone, and so is seeing all of them - store-level scoping was
+// removed (migration 0087).
 //
 // brand:MANAGE - create, edit, delete - stays admin-only, which is the thing
 // this test was protecting.

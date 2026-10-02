@@ -56,17 +56,6 @@ func (q *Queries) DeleteRolePermission(ctx context.Context, arg DeleteRolePermis
 	return err
 }
 
-const deleteUserBrandAccess = `-- name: DeleteUserBrandAccess :exec
-DELETE FROM user_brand_access WHERE user_id = $1
-`
-
-// Strip every brand grant from a user. Paired with DeleteUserRoles when a
-// member is removed, and used on its own to clear before replacing the set.
-func (q *Queries) DeleteUserBrandAccess(ctx context.Context, userID string) error {
-	_, err := q.db.Exec(ctx, deleteUserBrandAccess, userID)
-	return err
-}
-
 const deleteUserRoles = `-- name: DeleteUserRoles :exec
 DELETE FROM user_roles WHERE user_id = $1
 `
@@ -184,25 +173,6 @@ func (q *Queries) InsertRolePermission(ctx context.Context, arg InsertRolePermis
 	return err
 }
 
-const insertUserBrandAccess = `-- name: InsertUserBrandAccess :exec
-INSERT INTO user_brand_access (user_id, brand_slug, granted_by)
-VALUES ($1, $2, $3)
-ON CONFLICT (user_id, brand_slug) DO NOTHING
-`
-
-type InsertUserBrandAccessParams struct {
-	UserID    string
-	BrandSlug string
-	GrantedBy *string
-}
-
-// Grant one brand. Idempotent, so replacing a set never fails on a slug the
-// member already had.
-func (q *Queries) InsertUserBrandAccess(ctx context.Context, arg InsertUserBrandAccessParams) error {
-	_, err := q.db.Exec(ctx, insertUserBrandAccess, arg.UserID, arg.BrandSlug, arg.GrantedBy)
-	return err
-}
-
 const insertUserRole = `-- name: InsertUserRole :exec
 INSERT INTO user_roles (user_id, role_id, assigned_by)
 VALUES ($1, $2, $3)
@@ -222,35 +192,29 @@ func (q *Queries) InsertUserRole(ctx context.Context, arg InsertUserRoleParams) 
 
 const listMembers = `-- name: ListMembers :many
 SELECT ur.user_id,
-       array_remove(array_agg(DISTINCT r.name), NULL)::text[]          AS roles,
-       array_remove(array_agg(DISTINCT uba.brand_slug), NULL)::text[]  AS brand_slugs
+       array_remove(array_agg(DISTINCT r.name), NULL)::text[] AS roles
 FROM user_roles ur
 JOIN roles r ON r.id = ur.role_id
-LEFT JOIN user_brand_access uba ON uba.user_id = ur.user_id
 GROUP BY ur.user_id
 ORDER BY ur.user_id
 `
 
 type ListMembersRow struct {
-	UserID     string
-	Roles      []string
-	BrandSlugs []string
+	UserID string
+	Roles  []string
 }
 
-// Every user who holds a role, with their roles and the brands they may work in.
+// Every user who holds a role, with their roles.
 //
-// One query rather than a roster read plus two per member: the People page
-// shows every member with both lists, and doing it per row is how a page that
+// One query rather than a roster read plus one per member: the People page
+// shows every member with their roles, and doing it per row is how a page that
 // renders fine with four people stops loading at forty.
 //
-// array_agg over a LEFT JOIN, with the NULLs filtered out, so a member with a
-// role but no brand grant still appears - that is the ordinary state of
-// somebody just invited, and dropping them from the roster would make the
-// admin think the invite failed.
+// No brands. Store-level access was removed - every role reaches every brand -
+// so there is nothing per-member to report (migration 0087).
 //
-// DISTINCT inside each aggregate because the two joins multiply: a user with
-// two roles and three brands produces six rows, and without it every role
-// would be listed three times.
+// DISTINCT inside the aggregate because a user with two roles produces two
+// rows, and array_remove drops the NULL a role with no grants would contribute.
 func (q *Queries) ListMembers(ctx context.Context) ([]ListMembersRow, error) {
 	rows, err := q.db.Query(ctx, listMembers)
 	if err != nil {
@@ -260,7 +224,7 @@ func (q *Queries) ListMembers(ctx context.Context) ([]ListMembersRow, error) {
 	items := []ListMembersRow{}
 	for rows.Next() {
 		var i ListMembersRow
-		if err := rows.Scan(&i.UserID, &i.Roles, &i.BrandSlugs); err != nil {
+		if err := rows.Scan(&i.UserID, &i.Roles); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -288,33 +252,6 @@ func (q *Queries) ListRolePermissionIDs(ctx context.Context, roleID uuid.UUID) (
 			return nil, err
 		}
 		items = append(items, permission_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listUserBrandSlugs = `-- name: ListUserBrandSlugs :many
-SELECT brand_slug FROM user_brand_access
-WHERE user_id = $1
-ORDER BY brand_slug
-`
-
-// One member's brands. Used after a write, to return the state that was saved.
-func (q *Queries) ListUserBrandSlugs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := q.db.Query(ctx, listUserBrandSlugs, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var brand_slug string
-		if err := rows.Scan(&brand_slug); err != nil {
-			return nil, err
-		}
-		items = append(items, brand_slug)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -24,7 +24,6 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
-	"github.com/Optiminastic/tensor-core/internal/db/gen"
 )
 
 // tokenFor mints a token carrying exactly the permissions of one role.
@@ -175,13 +174,14 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
-// A member sees the brands an admin granted them, and no others.
+// Every role sees every store.
 //
-// The permission says they may ask; user_brand_access says which answers come
-// back. Both halves are needed: without the permission every non-admin got a
-// 403 and an empty switcher, and without the scoping they would all see every
-// brand the workspace has.
-func TestIntegrationBrandListIsScopedToGrantedBrands(t *testing.T) {
+// This replaces a test that pinned the opposite - an admin saw all brands, an
+// ungranted member saw none, and a grant through the People page let one
+// through. The shop's instruction is that store-level access does not exist, so
+// what is worth pinning now is that NO role is filtered: the mistake this
+// catches is scoping creeping back in for one role and not another.
+func TestIntegrationEveryRoleSeesEveryStore(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
 	minter := newTokenMinter(t)
@@ -195,51 +195,33 @@ func TestIntegrationBrandListIsScopedToGrantedBrands(t *testing.T) {
 		}
 	}
 
-	// The admin sees both, with no grants of their own - an admin is not in
-	// user_brand_access at all. Asserted as "contains", not as a count: the
-	// seed ships a fixture brand of its own and this test is about scoping, not
-	// about what else is in the workspace.
-	adminSees := brandSlugsFrom(t, router, adminToken)
-	for _, want := range []string{"alpha-brand", "beta-brand"} {
-		if !contains(adminSees, want) {
-			t.Errorf("admin does not see %s (sees %v)", want, adminSees)
+	want := brandSlugsFrom(t, router, adminToken)
+	if len(want) < 2 {
+		t.Fatalf("the admin sees %v, want at least the two just created", want)
+	}
+
+	// Every other role sees exactly the same list, with no grant anywhere.
+	for _, role := range []auth.RoleName{
+		auth.RoleDesigner, auth.RoleOperator, auth.RoleProjectLead,
+		auth.RolePerformanceMarketer, auth.RolePackagingQc,
+	} {
+		token := tokenFor(t, minter, role, "usr_"+string(role))
+		got := brandSlugsFrom(t, router, token)
+		if len(got) != len(want) {
+			t.Errorf("%s sees %v, want the same %v the admin sees", role, got, want)
+			continue
+		}
+		for _, slug := range want {
+			if !contains(got, slug) {
+				t.Errorf("%s cannot see %s", role, slug)
+			}
 		}
 	}
 
-	// A designer with no grants sees none. Deliberate: access is given, not
-	// assumed, so a brand-new member starts with nothing rather than the lot.
-	designerID := "usr_" + string(auth.RoleDesigner)
-	designerToken := tokenFor(t, minter, auth.RoleDesigner, designerID)
-	if got := brandSlugsFrom(t, router, designerToken); len(got) != 0 {
-		t.Errorf("an ungranted designer sees %v, want nothing", got)
-	}
-
-	// Make them a member, then grant one brand through the route the People
-	// page calls - which did not exist at all until now.
-	roleID, err := store.Q.GetRoleIDByName(t.Context(), string(auth.RoleDesigner))
-	if err != nil {
-		t.Fatalf("look up the designer role: %v", err)
-	}
-	if err := store.Q.InsertUserRole(t.Context(), gen.InsertUserRoleParams{
-		UserID: designerID, RoleID: roleID,
-	}); err != nil {
-		t.Fatalf("make the designer a member: %v", err)
-	}
-	rr := doJSON(router, http.MethodPut, "/admin/users/"+designerID+"/brands", adminToken,
-		map[string][]string{"brand_slugs": {"alpha-brand"}})
-	if rr.Code != http.StatusNoContent {
-		t.Fatalf("PUT brands = %d, want 204: %s", rr.Code, rr.Body.String())
-	}
-
-	got := brandSlugsFrom(t, router, designerToken)
-	if len(got) != 1 || got[0] != "alpha-brand" {
-		t.Errorf("after the grant the designer sees %v, want [alpha-brand]", got)
-	}
-
-	// And cannot reach the other one by typing its slug, which the switcher
-	// would otherwise merely hide.
-	if rr := doJSON(router, http.MethodGet, "/brands/beta-brand", designerToken, nil); rr.Code != http.StatusNotFound {
-		t.Errorf("GET an ungranted brand = %d, want 404 - a 403 would confirm it exists", rr.Code)
+	// And can open one by slug, which is the half a list-only filter would miss.
+	designer := tokenFor(t, minter, auth.RoleDesigner, "usr_designer_detail")
+	if rr := doJSON(router, http.MethodGet, "/brands/beta-brand", designer, nil); rr.Code != http.StatusOK {
+		t.Errorf("a designer opening a store by slug = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
 }
 

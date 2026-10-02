@@ -51,14 +51,9 @@ func newRawToken() (string, error) {
 // invite for that email. It returns the stored row and the one-time raw token
 // (never persisted). Run inside a transaction so the revoke and insert are
 // atomic.
-//
-// brandSlugs is what the invite PROMISES, not a grant: the person has no user
-// id until they accept, so there is nothing to grant access to yet. It is
-// stored on the invite row and applied by AcceptInvite. Before this it was
-// accepted by the form, posted, and silently dropped.
 func IssueInvite(
 	ctx context.Context, q *gen.Queries, email string, role RoleName, createdBy string,
-	ttl time.Duration, brandSlugs []string,
+	ttl time.Duration,
 ) (gen.UserInvite, string, error) {
 	normalised := strings.ToLower(strings.TrimSpace(email))
 
@@ -89,9 +84,6 @@ func IssueInvite(
 		TokenHash: hashToken(raw),
 		ExpiresAt: pgtype.Timestamptz{Time: time.Now().UTC().Add(ttl), Valid: true},
 		CreatedBy: createdByPtr,
-		// Never nil: the column is NOT NULL, and an empty list is the ordinary
-		// case of an invite that promises no brand in particular.
-		BrandSlugs: append([]string{}, brandSlugs...),
 	})
 	if err != nil {
 		return gen.UserInvite{}, "", err
@@ -135,19 +127,6 @@ func AcceptInvite(ctx context.Context, q *gen.Queries, rawToken, userID string) 
 		UserID: userID, RoleID: invite.RoleID, AssignedBy: invite.CreatedBy,
 	}); err != nil {
 		return gen.UserInvite{}, err
-	}
-	// The brands the invite promised, now that there is a user id to grant them
-	// to. Best-effort PER SLUG: a brand deleted between the invite and the
-	// acceptance must not fail the acceptance, because somebody is standing at
-	// a password form and the alternative is an account that cannot be created.
-	// They are told nothing; an admin can see and fix the brand list on the
-	// roster, which is where brand access is managed from anyway.
-	for _, slug := range invite.BrandSlugs {
-		if err := q.InsertUserBrandAccess(ctx, gen.InsertUserBrandAccessParams{
-			UserID: userID, BrandSlug: slug, GrantedBy: invite.CreatedBy,
-		}); err != nil {
-			continue
-		}
 	}
 	if _, err := q.BumpPermissionsVersion(ctx, userID); err != nil {
 		return gen.UserInvite{}, err
