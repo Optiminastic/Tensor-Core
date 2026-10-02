@@ -362,7 +362,17 @@ func TestIntegrationBrandGuard(t *testing.T) {
 		t.Errorf("no-perm GET /brands = %d, want 403", rr.Code)
 	}
 
-	// Token with brand:read -> 200 and the one seeded fixture brand.
+	// brand:read -> 200, and an EMPTY list, which is the change.
+	//
+	// The permission used to be the whole answer: hold it and you saw every
+	// brand. It now answers only "may you ask?", and WHICH brands come back is
+	// scoped per member by user_brand_access - so a token holding brand:read
+	// and nothing else belongs to somebody who has been granted no brand, and
+	// sees none. The seeded fixture brand is still there; it is simply not
+	// theirs.
+	//
+	// brand:manage is what means "sees every brand", and
+	// TestIntegrationBrandListIsScopedToGrantedBrands covers both sides.
 	withPerm := minter.mint(t, []string{"brand:read"})
 	rr := doJSON(router, http.MethodGet, "/brands", withPerm, nil)
 	if rr.Code != http.StatusOK {
@@ -370,8 +380,21 @@ func TestIntegrationBrandGuard(t *testing.T) {
 	}
 	var brands []map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &brands)
+	if len(brands) != 0 {
+		t.Errorf("an ungranted member sees %d brands, want 0 - brand:read asks the "+
+			"question, user_brand_access answers it", len(brands))
+	}
+
+	// An admin (brand:manage) sees the seeded fixture brand, so the empty list
+	// above is scoping rather than a broken query.
+	asAdmin := minter.mint(t, []string{"brand:read", "brand:manage"})
+	rr = doJSON(router, http.MethodGet, "/brands", asAdmin, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin GET /brands = %d body=%s", rr.Code, rr.Body.String())
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &brands)
 	if len(brands) != 1 {
-		t.Errorf("brands = %d, want 1", len(brands))
+		t.Errorf("admin sees %d brands, want the 1 seeded fixture", len(brands))
 	}
 }
 
