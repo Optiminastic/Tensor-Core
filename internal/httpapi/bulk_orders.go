@@ -67,7 +67,9 @@ func (s *Server) registerBulkOrders(r *gin.Engine) {
 	// upload it. Both are manage, not read - the download tells you exactly
 	// what the order promises, and the upload creates production work.
 	g.GET("/:id/sheet-template", manage, s.downloadSheetTemplate)
-	g.GET("/:id/sheet-sample", manage, s.downloadSheetSample)
+	// Not under an id: the sample is built from the registry, not from any one
+	// order, and routing it through an order would imply otherwise.
+	g.GET("/sheet-sample", manage, s.downloadSheetSample)
 	g.POST("/:id/approve", manage, s.approveBulkOrder)
 }
 
