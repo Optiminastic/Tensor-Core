@@ -1,15 +1,16 @@
 package httpapi
 
-// Which orders jump the queue, and what that does to the planning pool.
+// Which orders carry the paid priority upgrade, and what is still done with it.
 //
-// The rank convention is load-bearing in two places that sort opposite-looking
-// ways - the planner here and min(j.priority) ASC in the machine scheduler - so
-// these pin "lower is more urgent" rather than leaving it to a comment.
+// The answer to the second half is now "nothing, in batching". The rank is
+// stamped and recorded; the planner, the lock gate and the dispatcher all read
+// past it. The convention it encodes - LOWER IS MORE URGENT - is still
+// load-bearing for the machine scheduler's min(j.priority) ASC, so these pin it
+// rather than leaving it to a comment.
 
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
@@ -65,39 +66,16 @@ func TestJobPriorityRank(t *testing.T) {
 	}
 }
 
-// Priority first, oldest first within each rank.
+// There was a TestSortPriorityFirstKeepsOldestFirstWithinARank here, covering
+// the sort that pulled every expedited plank to the front of the planning pool.
+// Both the sort and the test are gone: batching is first come, first served at
+// the shop's instruction.
 //
-// The second half is the part worth protecting: the pool arrives ordered by the
-// order's placed_at, and a non-stable sort would put priority planks first
-// while shuffling everything behind them - silently discarding the fairness
-// rule the rest of the planner is built on.
-func TestSortPriorityFirstKeepsOldestFirstWithinARank(t *testing.T) {
-	at := func(day int) time.Time { return time.Date(2026, 9, day, 0, 0, 0, 0, time.UTC) }
-
-	jobs := []production.PlanJob{
-		{JobNumber: "old-standard", Priority: NormalRank, CreatedAt: at(1)},
-		{JobNumber: "mid-standard", Priority: NormalRank, CreatedAt: at(2)},
-		{JobNumber: "old-priority", Priority: PriorityRank, CreatedAt: at(3)},
-		{JobNumber: "new-standard", Priority: NormalRank, CreatedAt: at(4)},
-		{JobNumber: "new-priority", Priority: PriorityRank, CreatedAt: at(5)},
-	}
-	sortPriorityFirst(jobs)
-
-	want := []string{"old-priority", "new-priority", "old-standard", "mid-standard", "new-standard"}
-	for i, w := range want {
-		if jobs[i].JobNumber != w {
-			t.Fatalf("position %d = %q, want %q (full order %v)", i, jobs[i].JobNumber, w, jobNames(jobs))
-		}
-	}
-}
-
-func jobNames(jobs []production.PlanJob) []string {
-	out := make([]string, 0, len(jobs))
-	for _, j := range jobs {
-		out = append(out, j.JobNumber)
-	}
-	return out
-}
+// Nothing replaces it in this file, because there is no longer anything here to
+// assert - the serving order comes from SQL (ListReplannableJobs, placed_at
+// ASC) and AutoCreateBatches hands it over untouched. The behaviour that
+// matters is pinned where it is now decided, in
+// production.TestColourBedsAreFilledFirstComeFirstServed.
 
 // A priority order's jobs are ranked on every import, not only when they are
 // created.

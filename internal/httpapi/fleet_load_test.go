@@ -30,11 +30,18 @@ func TestQueueMinutesByPrinterSumsPendingWork(t *testing.T) {
 	}
 }
 
-// The double-count this function exists to avoid. A printing item's remaining
-// time is carried by machines.remaining_minutes; adding its full print time
-// here would charge the machine twice for one plate, and charge it the whole
-// print when five minutes are left.
-func TestQueueMinutesByPrinterIgnoresThePlateAlreadyPrinting(t *testing.T) {
+// The plate on the bed counts as an ITEM but not as MINUTES, and the asymmetry
+// is the whole design of this function.
+//
+// Minutes: a printing item's remaining time is carried by
+// machines.remaining_minutes, so adding its full print time here would charge
+// the machine twice for one plate - and charge it the whole print when five
+// minutes are left.
+//
+// Items: the shop runs one batch per machine, so a printer with a plate on the
+// bed has its batch. Counting only the pending ones made a printing machine
+// read as holding nothing, which is how it took a second bed mid-print.
+func TestQueueMinutesByPrinterCountsThePrintingPlateAsAnItemButNotAsMinutes(t *testing.T) {
 	got := queueMinutesByPrinter([]bambubuddy.QueueItem{
 		queued(bambubuddy.QueuePrinting, intPtr(3), 7200),
 		queued(bambubuddy.QueuePending, intPtr(3), 1200),
@@ -44,8 +51,25 @@ func TestQueueMinutesByPrinterIgnoresThePlateAlreadyPrinting(t *testing.T) {
 		t.Errorf("printer 3 = %d minutes, want 20 - the printing plate is counted by "+
 			"remaining_minutes, not here", got[3].Minutes)
 	}
-	if got[3].Items != 1 {
-		t.Errorf("printer 3 = %d items, want 1", got[3].Items)
+	if got[3].Items != 2 {
+		t.Errorf("printer 3 = %d items, want 2 - the plate being printed occupies the "+
+			"machine just as much as the one behind it", got[3].Items)
+	}
+}
+
+// A printer printing with nothing queued behind it still holds one item, which
+// is what makes the one-bed-per-machine rule fire for it.
+func TestQueueMinutesByPrinterChargesAPrintingPlateOnItsOwn(t *testing.T) {
+	got := queueMinutesByPrinter([]bambubuddy.QueueItem{
+		queued(bambubuddy.QueuePrinting, intPtr(5), 7200),
+	})
+
+	if got[5].Items != 1 {
+		t.Errorf("printer 5 = %d items, want 1", got[5].Items)
+	}
+	if got[5].Minutes != 0 {
+		t.Errorf("printer 5 = %d minutes, want 0 - remaining_minutes carries this plate",
+			got[5].Minutes)
 	}
 }
 

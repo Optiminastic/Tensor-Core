@@ -386,6 +386,11 @@ func (s *Server) updateBatchAnd(ctx context.Context, params gen.UpdateBatchParam
 		// is queued, unlike the threshold-gated per-job triggers (see
 		// triggerBatchPlan's doc comment).
 		s.triggerBatchPlan(ctx)
+		// And a dispatch pass, which the replan alone does not guarantee: it
+		// only triggers one when it CREATES a bed, and the beds this machine
+		// has just unblocked already exist. A free printer is what the lock
+		// gate waits on, so the pass that notices has to run.
+		s.triggerDispatch(ctx)
 	}
 	return b, nil
 }

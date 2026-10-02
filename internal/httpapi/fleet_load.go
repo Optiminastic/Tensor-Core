@@ -25,10 +25,15 @@ import (
 
 // queueLoad is the work standing in front of one printer.
 type queueLoad struct {
-	// Items is how many plates are waiting, used to break a tie between two
-	// printers that are both free now.
+	// Items is how many plates this printer owes, the one it is PRINTING
+	// included. That inclusion is the shop's one-bed-per-machine rule: a
+	// printer laying plastic already has its batch, so it is not offered
+	// another until that plate is off the bed.
 	Items int
-	// Minutes is how long they will take.
+	// Minutes is how long the WAITING ones will take. The plate on the bed is
+	// deliberately absent - its remaining time is carried by
+	// machines.remaining_minutes and counting it here would charge the printer
+	// twice for one plate.
 	Minutes int
 }
 
@@ -49,12 +54,21 @@ func (s *Server) fleetQueueLoad(ctx context.Context) map[int]queueLoad {
 	return queueMinutesByPrinter(items)
 }
 
-// queueMinutesByPrinter sums the pending work bound to each printer.
+// queueMinutesByPrinter sums the work bound to each printer.
 //
-// Only QueuePending counts. A QueuePrinting item is the plate on the bed right
-// now, and its REMAINING time is already carried by machines.remaining_minutes
-// - adding its full print time here would charge a machine twice for one plate
-// and, worse, charge it the whole print when five minutes are left.
+// The two halves of a queueLoad count different things, and the asymmetry is
+// the point.
+//
+// ITEMS count QueuePending and QueuePrinting alike, because the shop's rule is
+// one bed per machine: a printer with a plate on the bed has its batch, and the
+// next one goes when that plate comes off. Counting only the pending ones made
+// a printing machine read as having nothing on it, which is how a printer took
+// a second bed while the first was still running.
+//
+// MINUTES count only the pending ones. A QueuePrinting item's REMAINING time is
+// already carried by machines.remaining_minutes, so adding its full print time
+// here would charge a machine twice for one plate and, worse, charge it the
+// whole print when five minutes are left.
 //
 // An item bound to no printer is charged to nobody. It is waiting for whichever
 // machine fits, so attributing it to one would invent load that does not exist;
@@ -62,13 +76,20 @@ func (s *Server) fleetQueueLoad(ctx context.Context) map[int]queueLoad {
 func queueMinutesByPrinter(items []bambubuddy.QueueItem) map[int]queueLoad {
 	out := map[int]queueLoad{}
 	for _, it := range items {
-		if it.Status != bambubuddy.QueuePending || it.PrinterID == nil {
+		if it.PrinterID == nil {
 			continue
 		}
-		load := out[*it.PrinterID]
-		load.Items++
-		load.Minutes += queueItemMinutes(it)
-		out[*it.PrinterID] = load
+		switch it.Status {
+		case bambubuddy.QueuePending:
+			load := out[*it.PrinterID]
+			load.Items++
+			load.Minutes += queueItemMinutes(it)
+			out[*it.PrinterID] = load
+		case bambubuddy.QueuePrinting:
+			load := out[*it.PrinterID]
+			load.Items++
+			out[*it.PrinterID] = load
+		}
 	}
 	return out
 }

@@ -2,17 +2,33 @@ package httpapi
 
 // Putting expedited work onto beds that already exist.
 //
-// A locked bed is invisible to the planner: ListReplannableJobs returns
-// unbatched jobs and Draft members only, so once a bed locks nothing can ever
-// fill a place it has spare - whether it locked under-full or lost a plank to a
-// fulfilled order. A priority order therefore waited for a whole new bed to
-// form and fill, behind the bed that was about to print anyway.
+// NOT CALLED any more. AutoCreateBatches ran this before reading its pool; the
+// call is gone, because batching is first come, first served at the shop's
+// instruction and this exists only to let a priority order jump ahead. The code
+// is kept rather than deleted - the mechanism is the right one if expedited
+// handling comes back, and its tests still describe it exactly.
 //
-// Draft beds need none of this. The planner dissolves and rebuilds them every
-// run from a pool sorted priority-first (sortPriorityFirst), so an expedited
-// plank already joins the first open bed of its colour and standard work fills
-// the rest of that plate. This is only about the beds the planner can no longer
-// see.
+// Two things about it are worth knowing before it is switched on again.
+//
+// It reads production_jobs.priority, which is still stamped (see
+// order_priority.go) but no longer read by the planner, the lock gate or the
+// dispatcher. Turning this on alone would therefore reintroduce queue-jumping
+// through one door while the other three stayed shut, which is a confusing
+// half-state rather than a policy.
+//
+// And the lock rule has changed underneath it. A bed now locks only once a
+// printer is free and waiting for it (readyToLock), so a locked bed is one on
+// its way to a machine - opening it costs a withdrawal from that printer's
+// queue and a re-upload, which can leave the expedited plank slower than if the
+// bed had been left alone. ListLockedBedsWithRoom's unsent-beds-first ordering
+// was written for exactly that cost and is now the common case rather than the
+// exception.
+//
+// What it was for: a locked bed is invisible to the planner -
+// ListReplannableJobs returns unbatched jobs and Draft members only - so once a
+// bed locks nothing can fill a place it has spare, whether it locked under-full
+// or lost a plank to a fulfilled order. Draft beds never needed it, since the
+// planner dissolves and rebuilds them every run.
 
 import (
 	"context"

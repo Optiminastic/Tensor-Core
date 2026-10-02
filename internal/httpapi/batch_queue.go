@@ -55,9 +55,11 @@ func (s *Server) QueueBatchForPrinting(
 		// status - the last three in one transaction.
 		//
 		// readyToLock is deliberately not consulted. That gate decides whether
-		// the AUTOMATIC dispatcher should freeze a half-empty bed; an operator
-		// pressing this button has already decided. The response says how full
-		// the bed was so the decision is visible rather than silent.
+		// the AUTOMATIC dispatcher should freeze a bed - under the floor, or
+		// with no free printer holding its colours - and an operator pressing
+		// this button has already decided both. The response says how full the
+		// bed was so the decision is visible rather than silent, and the send
+		// that follows still refuses a printer that cannot print it.
 		approved, err := s.ApproveBatchFor(ctx, batchID, nil, actor)
 		if err != nil {
 			return printBatchResponse{}, err

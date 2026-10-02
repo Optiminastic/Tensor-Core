@@ -1,36 +1,29 @@
 package production
 
-// Priority work consolidates onto its own beds.
+// Beds are filled first come, first served - a paid priority upgrade does not
+// change the order.
 //
-// The question this answers: given six expedited blue planks and a pile of
-// standard blue ones, does the planner produce one full bed of expedited work
-// (plus the remainder) or six beds each carrying one expedited plank among
-// three standard ones?
+// This file used to assert the opposite. It pinned that six expedited planks
+// consolidated onto their own beds ahead of twelve older standard ones, on the
+// reasoning that every bed carrying a priority plank jumps the dispatch queue,
+// so scattering them drags standard work ahead with them.
 //
-// It has to be the former. Every bed a priority plank sits on is a bed that
-// jumps the dispatch queue, so scattering them means printing six plates to
-// clear six expedited customers instead of two - and dragging eighteen standard
-// planks ahead of the queue with them.
+// The shop has since instructed that priority orders are planned as ordinary
+// ones. The three places that read the rank are gone - httpapi's
+// sortPriorityFirst, carriesPriority in the lock gate, and the min(priority)
+// term in ListBatchesToDispatch - and this is the test that proves the planner
+// itself never looked at it.
 //
 // GroupByColour does not sort, so this is really a test of the contract between
-// it and its caller: the pool arrives priority-first (httpapi.sortPriorityFirst)
-// and GroupByColour fills each colour's open bed before starting another.
+// it and its caller: the pool arrives in placed_at order and comes out in that
+// order, whatever ranks are scattered through it.
 
 import (
-	"sort"
 	"testing"
 	"time"
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
 )
-
-// planJobsPriorityFirst is what httpapi.sortPriorityFirst produces, duplicated
-// here rather than imported because httpapi depends on this package.
-func planJobsPriorityFirst(jobs []PlanJob) []PlanJob {
-	out := append([]PlanJob(nil), jobs...)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
-	return out
-}
 
 func plank(number, colour string, priority int, placed time.Time) PlanJob {
 	return PlanJob{
@@ -42,21 +35,26 @@ func plank(number, colour string, priority int, placed time.Time) PlanJob {
 	}
 }
 
-func TestPriorityPlanksFillTheirOwnBedsRatherThanScatter(t *testing.T) {
+// Six late expedited planks behind twelve early standard ones stay behind them.
+//
+// The pool is handed over oldest-first, which is what ListReplannableJobs
+// returns, and the expedited planks were placed LAST - so under the old
+// priority-first rule they filled the first bed, and under this one they fill
+// the last.
+func TestColourBedsAreFilledFirstComeFirstServed(t *testing.T) {
 	at := func(d int) time.Time { return time.Date(2026, 9, d, 0, 0, 0, 0, time.UTC) }
 
 	var pool []PlanJob
-	// Six expedited blue planks, placed LATE - so oldest-first alone would put
-	// every one of them behind the standard work below.
-	for i := 0; i < 6; i++ {
-		pool = append(pool, plank("P"+string(rune('1'+i)), "BLUE", -1, at(20+i)))
-	}
-	// Twelve standard blue planks, placed earlier.
+	// Twelve standard blue planks, placed first.
 	for i := 0; i < 12; i++ {
 		pool = append(pool, plank("S"+string(rune('a'+i)), "BLUE", 0, at(1+i)))
 	}
+	// Six expedited blue planks, placed after every one of them.
+	for i := 0; i < 6; i++ {
+		pool = append(pool, plank("P"+string(rune('1'+i)), "BLUE", -1, at(20+i)))
+	}
 
-	batches, unbatchable := GroupByColour(planJobsPriorityFirst(pool), 4, DefaultBedNester)
+	batches, unbatchable := GroupByColour(pool, 4, DefaultBedNester)
 	if len(unbatchable) != 0 {
 		t.Fatalf("nothing should be unbatchable, got %d", len(unbatchable))
 	}
@@ -73,40 +71,61 @@ func TestPriorityPlanksFillTheirOwnBedsRatherThanScatter(t *testing.T) {
 		counts = append(counts, n)
 	}
 
-	// Six expedited planks at four per bed: one full bed of four, then two
-	// riding with standard work. NOT six beds of one.
-	if counts[0] != 4 {
-		t.Errorf("first bed carries %d priority planks, want 4 - expedited work "+
-			"must fill a bed before standard work joins it (all beds: %v)", counts[0], counts)
+	// Eighteen planks at four per bed: five beds. The twelve standard ones fill
+	// the first three exactly, so the expedited six are on the last two -
+	// four on bed 3, the remaining two on bed 4 - purely because they arrived
+	// last. Under the old rule this was [4 2 0 0 0].
+	if len(counts) != 5 {
+		t.Fatalf("eighteen planks produced %d beds, want 5 (priority per bed: %v)",
+			len(counts), counts)
 	}
-	if counts[1] != 2 {
-		t.Errorf("second bed carries %d priority planks, want the remaining 2 (all beds: %v)",
-			counts[1], counts)
+	if counts[0] != 0 {
+		t.Errorf("the first bed carries %d priority planks, want 0 - the twelve older "+
+			"standard orders come first (all beds: %v)", counts[0], counts)
 	}
-	beds := 0
-	for _, n := range counts {
-		if n > 0 {
-			beds++
+	for i, want := range []int{0, 0, 0, 4, 2} {
+		if counts[i] != want {
+			t.Errorf("bed %d carries %d priority planks, want %d - arrival order, "+
+				"not rank (all beds: %v)", i, counts[i], want, counts)
 		}
-	}
-	if beds != 2 {
-		t.Errorf("priority work is spread over %d beds, want 2 - every such bed jumps "+
-			"the dispatch queue, so scattering drags standard planks ahead with it "+
-			"(all beds: %v)", beds, counts)
 	}
 }
 
-// Different colours cannot share a bed, so expedited work in five colours is
-// five beds however it is sorted. Pinned so the test above is not read as
-// promising more than the filament allows.
-func TestPriorityPlanksStillCannotMixColours(t *testing.T) {
+// The oldest order is on the first bed, which is the property the whole rule
+// reduces to. Pinned separately because the counts above would also be
+// satisfied by an order nobody intended.
+func TestTheOldestOrderIsOnTheFirstBed(t *testing.T) {
+	at := func(d int) time.Time { return time.Date(2026, 9, d, 0, 0, 0, 0, time.UTC) }
+
+	pool := []PlanJob{
+		plank("oldest-standard", "BLUE", 0, at(1)),
+		plank("expedited", "BLUE", -1, at(2)),
+		plank("newest-standard", "BLUE", 0, at(3)),
+	}
+
+	batches, _ := GroupByColour(pool, 4, DefaultBedNester)
+	if len(batches) != 1 {
+		t.Fatalf("three blue planks produced %d beds, want 1", len(batches))
+	}
+	if got := batches[0].Jobs[0].JobNumber; got != "oldest-standard" {
+		t.Errorf("the first place on the bed went to %q, want the oldest order", got)
+	}
+	if got := batches[0].Jobs[1].JobNumber; got != "expedited" {
+		t.Errorf("the second place went to %q, want the plank that arrived second", got)
+	}
+}
+
+// Different colours cannot share a bed, so work in five colours is five beds
+// however it is ordered. Pinned so the tests above are not read as promising
+// more than the filament allows.
+func TestColourBedsStillCannotMixColours(t *testing.T) {
 	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	pool := []PlanJob{
 		plank("P1", "BLUE", -1, at),
 		plank("P2", "RED", -1, at),
 		plank("P3", "GOLD", -1, at),
 	}
-	batches, _ := GroupByColour(planJobsPriorityFirst(pool), 4, DefaultBedNester)
+	batches, _ := GroupByColour(pool, 4, DefaultBedNester)
 	if len(batches) != 3 {
 		t.Errorf("three colours produced %d beds, want 3", len(batches))
 	}

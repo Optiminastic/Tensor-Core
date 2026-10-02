@@ -190,6 +190,20 @@ func (s *Server) ReconcileFinishedPrints(ctx context.Context) PrintReconcileOutc
 			out.Completed++
 		}
 	}
+
+	// A plate coming off a bed is what frees a printer, and a free printer is
+	// now the event the whole lock gate waits on: a bed locks only once a
+	// machine of its class is empty with the right colours (see readyToLock).
+	// Without this the Draft that machine just unblocked waited for the next
+	// periodic tick, so every printer idled for part of an interval after each
+	// plate - which is the throughput the one-bed-per-machine rule costs if
+	// nothing tells the dispatcher the moment it is paid back.
+	//
+	// Failures count too: a failed plate releases its printer just as a
+	// finished one does.
+	if out.Completed > 0 || out.Failed > 0 {
+		s.triggerDispatch(ctx)
+	}
 	return out
 }
 

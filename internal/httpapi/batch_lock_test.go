@@ -192,88 +192,114 @@ func bedsWithUnits(t *testing.T, store *db.Store) []int {
 	return out
 }
 
-// A partial bed is never locked by the dispatcher, however long it waits.
+// A bed under the floor is never locked by the dispatcher, however long it
+// waits.
 //
 // The Draft is the only state that can still absorb the next order in its
 // colour - the planner dissolves and reforms Drafts on every run - so locking a
-// bed of three commits a wasted plate AND denies the fourth order its place.
+// bed of one commits a wasted plate AND denies the orders behind it their
+// place.
 //
 // There used to be an escape after BATCH_MAX_WAIT_HOURS. It is gone: the
-// judgement moved from a clock to a person, who can still approve a partial bed
-// by hand.
-func TestIntegrationOnlyAFullBedIsReadyToLock(t *testing.T) {
+// judgement moved from a clock to a person, who can still approve a thin bed by
+// hand.
+//
+// A nil fleet snapshot is passed deliberately. It makes the FLOOR the only
+// thing under test: with no fleet to ask, readyToLock must answer false for
+// every bed, so a bed that clears the floor here and still returns false is
+// proof the second half of the gate ran - which the test below is for.
+func TestIntegrationABedUnderTheFloorIsNotReadyToLock(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
 	minter := newTokenMinter(t)
 	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
 	ctx := context.Background()
 
-	cap := srv.bedUnitCap()
-	partialID := seedBedWith(t, store, "BATCH-READY-PARTIAL", cap-1)
-	fullID := seedBedWith(t, store, "BATCH-READY-FULL", cap)
+	floor := srv.bedUnitFloor()
+	thinID := seedBedWith(t, store, "BATCH-READY-THIN", floor-1)
 
 	// Old enough that the retired aging rule would have released it.
 	if _, err := store.Pool.Exec(ctx,
 		`UPDATE batches SET created_at = now() - interval '30 days' WHERE id = $1`,
-		partialID); err != nil {
-		t.Fatalf("age the partial bed: %v", err)
+		thinID); err != nil {
+		t.Fatalf("age the thin bed: %v", err)
 	}
 
-	partial, err := store.Q.GetBatchByID(ctx, partialID)
+	thin, err := store.Q.GetBatchByID(ctx, thinID)
 	if err != nil {
-		t.Fatalf("load the partial bed: %v", err)
-	}
-	full, err := store.Q.GetBatchByID(ctx, fullID)
-	if err != nil {
-		t.Fatalf("load the full bed: %v", err)
+		t.Fatalf("load the thin bed: %v", err)
 	}
 
-	if srv.readyToLock(ctx, partial) {
-		t.Errorf("a bed of %d locked after waiting; it must stay a Draft so the next "+
-			"order in its colour can complete it", cap-1)
-	}
-	if !srv.readyToLock(ctx, full) {
-		t.Errorf("a bed of %d did not lock; a full bed has nothing left to absorb", cap)
+	if srv.readyToLock(ctx, thin, nil) {
+		t.Errorf("a bed of %d locked after waiting; under the floor of %d it must stay "+
+			"a Draft so the next orders in its colour can complete it", floor-1, floor)
 	}
 }
 
-// A bed carrying expedited work locks under-full, which is the one exception to
-// the rule above.
+// Clearing the floor is NOT enough on its own - a printer has to be free.
 //
-// The arithmetic is why: priority orders arrive one or two per colour per day,
-// so a bed holding one waits days for a fourth of its colour. By the time a bed
-// reaches here the planner has already filled it with standard work of the same
-// colour and the top-up has already tried to move the plank onto a bed that
-// would complete one - so this is the last resort, not the first.
-func TestIntegrationAPriorityBedLocksEvenWhenUnderFull(t *testing.T) {
+// This is the rule that replaced "a priority bed locks under-full". The shop's
+// instruction: a batch locks when it holds at least the floor AND a machine of
+// its class is standing empty with the right colours. Locking is one-way, so a
+// bed committed while the fleet is full can neither print nor grow.
+//
+// Expressed with a nil snapshot, which is what the dispatcher passes when the
+// fleet cannot be read - the strictest form of "no printer is available". The
+// positive case needs a fleet with loaded trays and is covered by the
+// weighMachine tests in batch_auto_machine_test.go, which decide eligibility
+// for this gate and the send path alike.
+func TestIntegrationABedAtTheFloorStillWaitsForAFreePrinter(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
 	minter := newTokenMinter(t)
 	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
 	ctx := context.Background()
 
-	cap := srv.bedUnitCap()
-	batchID := seedBedWith(t, store, "BATCH-PRIO-PARTIAL", cap-2)
+	floor := srv.bedUnitFloor()
+	batchID := seedBedWith(t, store, "BATCH-READY-FLOOR", floor)
 
 	batch, err := store.Q.GetBatchByID(ctx, batchID)
 	if err != nil {
 		t.Fatalf("load the bed: %v", err)
 	}
-	// Standard work at this size waits, as the test above pins.
-	if srv.readyToLock(ctx, batch) {
-		t.Fatalf("a standard bed of %d locked; this test needs it not to", cap-2)
-	}
 
-	// One plank on it was expedited.
+	if srv.readyToLock(ctx, batch, nil) {
+		t.Errorf("a bed of %d locked with no printer available; the floor is necessary "+
+			"but not sufficient", floor)
+	}
+}
+
+// Expedited work no longer buys a lock.
+//
+// It used to: a bed carrying one priority plank locked however thin it was, on
+// the reasoning that priority orders arrive one or two per colour per day and
+// would otherwise wait days for company. The shop has instructed that priority
+// orders are treated as normal ones on a first-come-first-served basis, so such
+// a bed stays an open Draft and keeps absorbing jobs of its colour profile.
+func TestIntegrationAPriorityBedIsNotLockedUnderTheFloor(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	minter := newTokenMinter(t)
+	srv := testServerWithBatchQueue(t, store, auth.NewGuards(minter.verifier, ""), 1)
+	ctx := context.Background()
+
+	floor := srv.bedUnitFloor()
+	batchID := seedBedWith(t, store, "BATCH-PRIO-PARTIAL", floor-1)
+
+	// Every plank on it was expedited - the strongest form of the old rule.
 	if _, err := store.Pool.Exec(ctx,
-		`UPDATE production_jobs SET priority = $1
-		  WHERE id = (SELECT id FROM production_jobs WHERE batch_id = $2 LIMIT 1)`,
+		`UPDATE production_jobs SET priority = $1 WHERE batch_id = $2`,
 		PriorityRank, batchID); err != nil {
-		t.Fatalf("rank a plank on the bed: %v", err)
+		t.Fatalf("rank the planks on the bed: %v", err)
 	}
 
-	if !srv.readyToLock(ctx, batch) {
-		t.Errorf("a bed of %d carrying expedited work did not lock - it would wait days "+
-			"for a fourth plank of its colour", cap-2)
+	batch, err := store.Q.GetBatchByID(ctx, batchID)
+	if err != nil {
+		t.Fatalf("load the bed: %v", err)
+	}
+
+	if srv.readyToLock(ctx, batch, nil) {
+		t.Errorf("a bed of %d carrying only expedited work locked; priority is read as "+
+			"normal now, so it must wait for the floor like any other bed", floor-1)
 	}
 }

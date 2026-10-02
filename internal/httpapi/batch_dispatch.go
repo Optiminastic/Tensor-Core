@@ -27,10 +27,10 @@ type DispatchOutcome struct {
 	Considered int
 	Approved   int
 	Sent       int
-	// HeldOpen counts Drafts left alone because they still have room. They are
-	// not stuck: a bed under the cap is deliberately still absorbing work, and
-	// locking one early would send a half-empty plate while the next order in
-	// its colour opened a bed of its own.
+	// HeldOpen counts Drafts left alone - under the floor, or with no free
+	// printer that holds their colours. They are not stuck: a bed that is still
+	// a Draft is a bed still absorbing work, and locking one early would freeze
+	// a plate that can neither print nor grow.
 	//
 	// This field used to be "Waiting", meaning waiting on a plate slice, which
 	// has had no meaning since BambuBuddy took over slicing.
@@ -147,6 +147,11 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 		max = defaultAutoDispatchMax
 	}
 
+	// One fleet read for the pass. The lock gate asks whether a printer is free
+	// for each Draft it sees, and a backlog of Drafts would otherwise mean a
+	// BambuBuddy queue read per bed.
+	snap := s.fleetSnapshotNow(ctx)
+
 	for _, b := range rows {
 		if out.Approved+out.Sent >= max {
 			// Not an error, and worth saying: the rest are simply next run's
@@ -158,11 +163,12 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 		}
 		out.Considered++
 
-		// A Draft that still has room is left alone. Approving it would freeze
-		// a half-empty bed, and the whole point of leaving it a Draft is that
-		// the next order in the same colour joins it instead of opening a bed
-		// of its own.
-		readyToLock := b.Status == production.BatchPendingApproval && s.readyToLock(ctx, b)
+		// A Draft under the floor, or one no free printer can take, is left
+		// alone. Approving it would freeze a plate that cannot print and can no
+		// longer grow, and the whole point of leaving it a Draft is that the
+		// next order in the same colour joins it instead of opening a bed of
+		// its own.
+		readyToLock := b.Status == production.BatchPendingApproval && s.readyToLock(ctx, b, snap)
 
 		switch nextDispatchStep(b, readyToLock, time.Now()) {
 		case stepNone:
@@ -187,7 +193,7 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 			log.Info("batch auto-approved, plate slice queued", "batch", b.BatchNumber)
 
 		case stepSend:
-			s.autoSendOneBatch(ctx, b, &out)
+			s.autoSendOneBatch(ctx, b, &out, snap)
 		}
 	}
 
@@ -214,7 +220,9 @@ const defaultAutoDispatchMax = 5
 // sendBatchToMachine - so an automatic send and a pressed one cannot decide
 // differently. What changes is only what happens to the answer: a person reads
 // a 409, and this writes it on the bed for whoever walks past next.
-func (s *Server) autoSendOneBatch(ctx context.Context, b gen.Batch, out *DispatchOutcome) {
+func (s *Server) autoSendOneBatch(
+	ctx context.Context, b gen.Batch, out *DispatchOutcome, snap *fleetSnapshot,
+) {
 	log := obs.FromContext(ctx)
 
 	target, err := s.chooseTargetFor(ctx, b)
@@ -254,6 +262,11 @@ func (s *Server) autoSendOneBatch(ctx context.Context, b gen.Batch, out *Dispatc
 	}
 
 	out.Sent++
+	// Taken for the rest of this pass. The snapshot's in-flight counts came
+	// from one DB read before the walk started, so without this a Draft later
+	// in the same pass would still see this printer as empty and lock against
+	// it - and only one of the two could ever reach it.
+	snap.claim(target.Machine.ID)
 	// The reason THIS printer won, which the response carries to an operator
 	// and nothing carries to anyone when the dispatcher chose. Logged so the
 	// answer to "why that one?" exists somewhere.

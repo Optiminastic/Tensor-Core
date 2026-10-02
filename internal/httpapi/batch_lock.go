@@ -2,23 +2,26 @@ package httpapi
 
 // When a bed stops being a proposal and becomes a commitment.
 //
-// Under colour batching a bed holds one colour and at most four products. Until
-// it holds four it is deliberately still a Draft: the planner dissolves and
-// reforms Drafts on every run, which is exactly what lets a bed that formed with
-// two blue planks absorb a third when the next blue order arrives (see
-// ListReplannableJobs). A bed frozen at two would make the customer behind it
-// wait for a whole new bed.
+// Under colour batching a bed holds one colour and at most bedUnitCap products.
+// It stays a Draft until it holds at least bedUnitFloor of them AND a printer
+// of its class is free with the right colours loaded. Both halves matter, and
+// the second is the one that is easy to leave out.
 //
-// The moment it holds four there is nothing left to absorb, so freezing it is
-// not a loss - and leaving it a Draft would be: the next planner run could
-// dissolve those four and rearrange them, changing a plate somebody may already
-// be looking at. So a full bed is approved on the spot, which reserves its
-// filament, stamps its machine, queues its plate slice and takes it out of the
-// replanning pool for good.
+// A Draft is the only state that can still absorb work: the planner dissolves
+// and reforms Drafts on every run, which is exactly what lets a bed that formed
+// with two blue planks take a third when the next blue order arrives (see
+// ListReplannableJobs). So staying a Draft is not the bed waiting around - it
+// is the bed still growing.
 //
-// A bed that never fills waits. That is deliberate: a partial plate is a wasted
-// one, so an under-full bed stays a Draft indefinitely, absorbing the next order
-// in its colour. An operator can still approve one by hand when the wait stops
+// Locking is the opposite, and it is one-way. It merges the plate, reserves the
+// filament, stamps a machine and takes the jobs out of the replanning pool for
+// good. Doing that while no printer can take the bed is the worst of both: the
+// plate cannot print AND it cannot grow. So the lock is held until the fleet
+// can actually have it, at which point freezing costs nothing - the bed is on
+// its way to a machine within the same pass.
+//
+// A bed that never reaches the floor, or whose colour is loaded nowhere, waits
+// indefinitely. An operator can still approve one by hand when the wait stops
 // being worth it - see readyToLock.
 
 import (
@@ -94,7 +97,7 @@ func (s *Server) bedIsFull(ctx context.Context, batchID uuid.UUID) (bool, error)
 	return unitsOf(jobs) >= s.bedUnitCap(), nil
 }
 
-// lockFullBatches approves every newly-planned bed that is already full.
+// lockFullBatches approves every newly-planned bed a printer can take.
 //
 // Best-effort per bed and deliberately after the planning transaction: approval
 // merges the plate, reserves filament and enqueues a slice, none of which
@@ -103,13 +106,30 @@ func (s *Server) bedIsFull(ctx context.Context, batchID uuid.UUID) (bool, error)
 // stays a Draft and the dispatch pass tries it again.
 func (s *Server) lockFullBatches(ctx context.Context, created []gen.Batch) {
 	log := obs.FromContext(ctx)
+	// One fleet read for the whole run, shared by every bed below. Taken here
+	// rather than inside readyToLock because planning can produce dozens of
+	// beds and the snapshot costs three BambuBuddy round-trips.
+	snap := s.fleetSnapshotNow(ctx)
 	for _, b := range created {
 		if b.Status != production.BatchPendingApproval {
 			continue
 		}
+		// Re-read, because the row in hand is stale in the one field the gate
+		// needs. These batches were returned by the planning transaction;
+		// cachePreview has since written each one's preview_file_id, and the
+		// copy here still says nil. Without this re-read the gate finds no
+		// plate to bind to trays and holds every bed it was called for -
+		// silently costing each new bed a whole dispatch interval.
+		fresh, err := s.store.Q.GetBatchByID(ctx, b.ID)
+		if err != nil {
+			log.Info("could not re-read a new bed before locking it, leaving it as a Draft",
+				"batch", b.BatchNumber, "error", err)
+			continue
+		}
+		b = fresh
 		// The same rule the dispatcher applies, so a bed does not have to wait
 		// for the next pass to be committed on grounds that already hold.
-		if !s.readyToLock(ctx, b) {
+		if !s.readyToLock(ctx, b, snap) {
 			continue
 		}
 		units, _ := s.unitsOnBed(ctx, b.ID)
@@ -127,65 +147,72 @@ func (s *Server) lockFullBatches(ctx context.Context, created []gen.Batch) {
 
 // readyToLock reports whether a Draft should be committed now.
 //
-// Full, or carrying expedited work.
+// TWO conditions, both required, both the shop's own words: the bed holds at
+// least bedUnitFloor products, AND a printer of its class is standing empty
+// with the right colours loaded.
 //
-// Full is the ordinary rule. A bed of three waits for a fourth however long
-// that takes, because a Draft is the only state that can still absorb one: the
-// planner dissolves and reforms Drafts on every run, so the next order in that
-// colour joins the bed instead of opening one of its own.
+// The floor, not the cap. Three, four and five are all real beds - they simply
+// go to different classes of printer - so holding a bed of three until it
+// reaches five would be holding a bed that is ready. Under the floor it waits
+// for company, because a plate with one plank on it costs the same machine-hour
+// as a plate with five.
 //
-// There used to be a second escape - after BATCH_MAX_WAIT_HOURS a partial bed
-// locked anyway. That is gone at the shop's instruction: a partial bed is a
-// wasted plate, and for STANDARD work waiting costs less than printing one.
+// The free-printer half is the new one, and it is what makes the floor safe to
+// act on. A bed of three used to lock the moment it formed and then sat
+// "locked, and no printer can take it" - its filament reserved, its jobs out of
+// the replanning pool, unable to absorb the fourth order in its colour that
+// arrived an hour later. Waiting for a machine instead costs nothing and keeps
+// the bed growing: the planner dissolves and reforms Drafts on every run, so
+// the next order in that colour joins this bed rather than opening one of its
+// own. See bedHasFreePrinter.
 //
-// THE CONSEQUENCE for standard work, stated plainly: a colour that never
-// reaches four never prints by itself. An operator can still approve such a bed
-// by hand - ApproveBatchFor has no fullness check, deliberately - so the
-// judgement moves to a person rather than to a clock.
+// Two escapes have been REMOVED, both deliberately and both on instruction:
 //
-// Expedited work is the exception, and it is not a clock. A customer paid for
-// priority dispatch, and the arithmetic is against them ever being filled:
-// priority orders arrive one or two per colour per day, so a bed of one waits
-// days for a fourth of its colour. The order in which the pieces run is what
-// keeps the waste small - the planner has already filled this bed with standard
-// work of the same colour, and the locked-bed top-up has already tried to move
-// the plank onto a bed that would complete one. Only a bed that neither could
-// fill reaches here, and printing that under-full is the last resort the shop
-// chose over letting it sit.
+//   - A clock. After BATCH_MAX_WAIT_HOURS a partial bed used to lock anyway. A
+//     partial bed is a wasted plate, and waiting costs less than printing one.
+//   - Expedited work. A bed carrying a priority plank used to lock under-full.
+//     Batching is first come, first served now, so a priority bed stays an open
+//     Draft and keeps absorbing jobs of its colour profile like any other.
+//
+// THE CONSEQUENCE, stated plainly: a colour that never reaches the floor never
+// prints by itself, and a bed whose colour is loaded nowhere never locks. An
+// operator can still approve either by hand - ApproveBatchFor has no fullness
+// or fleet check, deliberately - so the judgement moves to a person rather than
+// to a clock.
 //
 // Outside colour batching every Draft is ready: the optimiser's own gate already
 // decided a bed was worth building before it produced one, so second-guessing it
 // here would strand beds it deliberately released.
-func (s *Server) readyToLock(ctx context.Context, b gen.Batch) bool {
+func (s *Server) readyToLock(ctx context.Context, b gen.Batch, snap *fleetSnapshot) bool {
 	if s.batchStrategy() != production.StrategyColour {
 		return true
 	}
+	log := obs.FromContext(ctx)
+
 	jobs, err := s.store.Q.ListJobsForBatch(ctx, &b.ID)
 	if err != nil {
-		// Unknown is not "no": failing to read the bed must not strand it
-		// permanently, and approval re-checks everything that matters anyway.
-		obs.FromContext(ctx).Warn("could not read a bed's jobs, treating it as ready",
-			"batch", b.BatchNumber, "error", err)
-		return true
+		// Held, not released. Approval no longer re-checks everything that
+		// matters - it does not ask whether a printer is free - so guessing
+		// "ready" here commits a plate on the strength of a failed read.
+		// Holding a Draft costs one pass; the next one re-reads it.
+		log.Warn("could not read a bed's jobs, holding it open", "batch", b.BatchNumber, "error", err)
+		return false
 	}
-	// The FLOOR, not the cap. Three, four and five are all real beds - they
-	// simply go to different classes of printer - so holding a bed of three
-	// until it reaches five would be holding a bed that is ready.
-	return unitsOf(jobs) >= s.bedUnitFloor() || carriesPriority(jobs)
-}
-
-// carriesPriority reports whether any plank on a bed was expedited.
-//
-// Any, not all: colour batching mixes one priority order with three standard
-// ones as a matter of course, and it is the expedited customer who decides
-// whether the bed can afford to wait.
-func carriesPriority(jobs []gen.ProductionJob) bool {
-	for _, j := range jobs {
-		if j.Priority < NormalRank {
-			return true
-		}
+	if units := unitsOf(jobs); units < s.bedUnitFloor() {
+		return false
 	}
-	return false
+	machineID, ok, why := s.bedHasFreePrinter(ctx, b, snap)
+	if !ok {
+		// Info: a bed waiting for a machine is the system working, not a fault.
+		log.Info("bed held open, no printer can take it yet",
+			"batch", b.BatchNumber, "reason", why)
+		return false
+	}
+	// Taken for the rest of this pass, so the next bed in it does not see the
+	// same idle printer and lock against it too. One batch per machine has to
+	// hold WITHIN a pass as well as between them.
+	snap.claim(machineID)
+	return true
 }
 
 // triggerDispatch schedules a pass that walks ready beds onto printers.

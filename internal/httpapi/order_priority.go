@@ -7,14 +7,24 @@ package httpapi
 // the order carries a flag for that: the only record is the shipping option
 // they chose, so that string is what this reads.
 //
-// There is history here. Priority orders used to be excluded from production
-// altogether, on the instruction that they were handled outside Tensor; that
-// rule is gone (see ShouldCreateJobs) and nineteen unfulfilled priority orders
-// came back into the queue with it. This is the opposite policy: they are not
-// merely included, they are served first.
+// There is history here, and the policy has now moved twice. Priority orders
+// were once excluded from production altogether, on the instruction that they
+// were handled outside Tensor; that rule went (see ShouldCreateJobs) and
+// nineteen unfulfilled priority orders came back into the queue with it. They
+// were then served FIRST - pulled to the front of the planning pool, locking
+// beds under-full, jumping the dispatch queue.
+//
+// They are served in TURN as of this change, again at the shop's instruction:
+// read as an ordinary order by the planner, the lock gate and the dispatcher
+// alike. What survives is the record - the rank is still stamped on the job, so
+// the shipping promise is still visible to whoever packs the parcel, and
+// turning the behaviour back on is a matter of reading the column again.
+//
+// The three places that read it, now gone: sortPriorityFirst (below),
+// carriesPriority (batch_lock.go) and the min(priority) term in
+// ListBatchesToDispatch.
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
@@ -53,23 +63,16 @@ func OrderIsPriority(order gen.Order) bool {
 	return strings.Contains(strings.ToLower(*order.ShippingTitle), priorityShippingMarker)
 }
 
-// sortPriorityFirst brings priority work to the front of a planning pool.
+// There was a sortPriorityFirst here, which pulled every expedited plank to the
+// front of the planning pool. It is gone: BATCHING IS FIRST COME, FIRST SERVED
+// at the shop's instruction, so a priority order is grouped, locked and sent in
+// exactly the same order as any other.
 //
-// GroupByColour never reorders - "oldest order first" is a property of the list
-// it is handed, not something it computes - so the serving order is decided
-// here, which is the seam that contract leaves for exactly this.
+// The rank below is still stamped, and still means what it says - it is simply
+// not read by the planner any more. Keeping the column is what makes this
+// reversible, and it is the only record anywhere that a customer paid for the
+// upgrade; the fulfilment side still wants to know.
 //
-// Stable, and that is the whole point: the pool arrives ordered by the order's
-// placed_at, so a stable sort by rank alone yields priority-first AND
-// oldest-first within each rank. A non-stable sort would put priority planks
-// first and shuffle everything behind them, quietly discarding the fairness
-// rule the rest of the planner is built on.
-func sortPriorityFirst(jobs []production.PlanJob) {
-	sort.SliceStable(jobs, func(i, j int) bool {
-		return jobs[i].Priority < jobs[j].Priority
-	})
-}
-
 // jobPriorityRank is the rank to stamp on a new job.
 //
 // A line item may carry its own priority (the import can set one, and a reprint

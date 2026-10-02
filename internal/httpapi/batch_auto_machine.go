@@ -152,7 +152,7 @@ func (s *Server) rankMachinesForPlate(
 			Row: r, Slots: slots, Identities: identities, Bed: bed,
 			Load: load, InFlight: inFlight, Sliceable: sliceable,
 			PrinterIDs: printerIDs, Now: now,
-			WaitingCap: maxBedsWaitingPerMachine,
+			WaitingCap: maxBedsPerMachine,
 			BedFamily:  family,
 		}))
 	}
@@ -178,7 +178,7 @@ type weighInputs struct {
 	PrinterIDs map[string]int
 	Now        time.Time
 	// WaitingCap is how many beds may be waiting on one printer before it
-	// stops being offered another. See maxBedsWaitingPerMachine.
+	// stops being offered another. See maxBedsPerMachine.
 	WaitingCap int
 	// BedFamily is the printer class this plate was laid out for, and the only
 	// one that can print it. Empty means a bed planned before classes existed
@@ -186,19 +186,25 @@ type weighInputs struct {
 	BedFamily string
 }
 
-// maxBedsWaitingPerMachine is how many beds may sit waiting on one printer.
+// maxBedsPerMachine is how many beds one printer may hold at a time.
 //
-// One, because the shop works that way: a bed goes on a machine, and the next
-// is only sent once that one is actually laying plastic. Stacking a queue per
-// printer commits a bed to a machine hours before it runs, which is exactly
-// when the reason for choosing that machine stops being true - the spools get
-// swapped, a job goes on hold, a faster printer frees up.
+// ONE, counting the plate it is printing, at the shop's instruction: "for every
+// machine just queue max only 1 batch, not more than that". A printer is
+// offered a bed when it is standing EMPTY and not before.
 //
-// Counted from BambuBuddy's PENDING items plus the beds Tensor has sent that
-// its queue cannot see yet. A plate that is PRINTING is not counted: that is
-// the printer working, not a backlog, and the whole point is that the next bed
-// goes as soon as the last one starts.
-const maxBedsWaitingPerMachine = 1
+// It used to mean one bed WAITING, with a printing plate uncounted - so a
+// machine took its next bed the moment the current one started. That is a
+// deeper queue than the shop runs, and it commits a bed to a machine hours
+// before it prints, which is exactly when the reason for choosing that machine
+// stops being true: the spools get swapped, a job goes on hold, a faster
+// printer frees up. Holding the bed as a Draft instead keeps all those options
+// open, and keeps the bed absorbing work (see readyToLock).
+//
+// Counted from BambuBuddy's queue - pending AND printing, see
+// queueMinutesByPrinter - plus the beds Tensor has sent that its queue cannot
+// see yet, plus the printer's own live state, because a plate started in
+// BambuBuddy's own UI occupies the machine just the same.
+const maxBedsPerMachine = 1
 
 // weighMachine decides whether one printer can take the bed, and how soon.
 func (s *Server) weighMachine(in weighInputs) machineOption {
@@ -291,13 +297,25 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 
 	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
 
-	// One bed at a time. Last, because it is the only refusal here that is not
-	// a fault: the printer is fine, it simply already has work waiting, and
-	// saying so beside the ones that are off or faulted would read as a
-	// problem when it is the system doing what it was asked.
-	if cap := in.WaitingCap; cap > 0 && opt.PendingItems >= cap {
-		opt.Refusal = "this printer already has a bed waiting to start"
-		return opt
+	// One bed at a time, and the printer must be EMPTY. Last, because these are
+	// the only refusals here that are not faults: the printer is fine, it
+	// simply already has its batch, and saying so beside the ones that are off
+	// or faulted would read as a problem when it is the system doing what it
+	// was asked.
+	if cap := in.WaitingCap; cap > 0 {
+		// The printer's own live state as well as its queue. A plate started
+		// from BambuBuddy's UI, or one whose queue item has already been
+		// retired, leaves the machine running with nothing queued against it -
+		// and "running" is the one signal that cannot be missed, because it
+		// means something is physically on the bed.
+		if r.Status == production.FleetMachineRunning {
+			opt.Refusal = "this printer is printing"
+			return opt
+		}
+		if opt.PendingItems >= cap {
+			opt.Refusal = "this printer already has a bed"
+			return opt
+		}
 	}
 
 	opt.Eligible = true

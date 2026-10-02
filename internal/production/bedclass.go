@@ -24,8 +24,12 @@ const (
 	// waits for company, because a plate with one plank on it costs the same
 	// machine-hour as a plate with five.
 	//
-	// A bed carrying a priority job locks anyway: somebody paid to jump the
-	// queue and waiting for company would spend that money on nothing.
+	// Three, and no exceptions. A bed carrying a priority job used to lock
+	// however thin it was, on the grounds that somebody had paid to jump the
+	// queue; that is gone, and such a bed now waits for its third plank like
+	// any other (see httpapi.readyToLock). Reaching three is also necessary
+	// rather than sufficient: a bed locks only once a printer of its class is
+	// free with the right colours loaded.
 	MinBedUnits = 3
 	// MaxBedUnits is the fullest a bed gets. Five, not the seven an H2C could
 	// hold, because the classes below it must be able to take a bed too - and

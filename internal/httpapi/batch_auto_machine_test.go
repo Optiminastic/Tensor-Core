@@ -356,17 +356,17 @@ var redBed = []meshio.Slot{{Colour: "#FF0000", Material: "PLA"}}
 
 // One bed per printer at a time.
 //
-// The shop sends a bed to a machine and the next only once that one is
-// actually laying plastic. Stacking a queue per printer commits a bed hours
-// before it runs, which is exactly when the reasons for choosing that machine
-// stop being true: the spools get swapped, a job goes on hold, a faster
+// The shop's instruction, in their words: "for every machine just queue max
+// only 1 batch, not more than that". Stacking a queue per printer commits a bed
+// hours before it runs, which is exactly when the reasons for choosing that
+// machine stop being true: the spools get swapped, a job goes on hold, a faster
 // printer frees up.
 func TestAPrinterWithABedAlreadyWaitingIsNotOfferedAnother(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("H2C-1")
 
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
 		// One plate pending on this printer in BambuBuddy.
 		PrinterIDs: map[string]int{"H2C-1": 11},
@@ -376,34 +376,62 @@ func TestAPrinterWithABedAlreadyWaitingIsNotOfferedAnother(t *testing.T) {
 	if opt.Eligible {
 		t.Error("a printer with a bed already waiting was offered another")
 	}
-	if !strings.Contains(opt.Refusal, "already has a bed waiting") {
+	if !strings.Contains(opt.Refusal, "already has a bed") {
 		t.Errorf("refusal = %q, want it to say the printer is already holding one", opt.Refusal)
 	}
 }
 
-// The case that makes the rule useful rather than merely strict.
+// A printer laying plastic has its batch, so it is not offered another.
 //
-// A printer PRINTING is not a printer with a backlog - it is the machine
-// working. queueMinutesByPrinter counts only QueuePending, so the next bed
-// goes the moment the last one starts, which is the whole point.
-func TestAPrinterThatIsPrintingWithNothingQueuedStillTakesTheNextBed(t *testing.T) {
+// This inverted at the shop's instruction. The rule used to be one bed WAITING,
+// with the printing plate uncounted, so the next bed went the moment the last
+// one started. "Any P2S is empty" is the condition now, and empty means empty:
+// a bed waits as a Draft - where it can still absorb work - until a machine is
+// genuinely free.
+//
+// Asserted on the printer's own live state with an EMPTY queue, which is the
+// case the queue count alone cannot catch: a plate started in BambuBuddy's own
+// UI, or one whose queue item has already been retired, leaves a machine
+// running with nothing queued against it.
+func TestAPrinterThatIsPrintingIsNotOfferedTheNextBed(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("H2C-2")
+	row.Status = production.FleetMachineRunning
 	remaining := int32(45)
 	row.RemainingMinutes = &remaining
 	row.RemainingObservedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
 
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable:  func(string) string { return "" },
 		PrinterIDs: map[string]int{"H2C-2": 12},
-		// Nothing PENDING: the plate on the bed is carried by remaining
-		// minutes, not by the queue.
-		Load: map[int]queueLoad{},
+		Load:       map[int]queueLoad{},
+	})
+
+	if opt.Eligible {
+		t.Error("a printing machine was offered the next bed; one batch per machine " +
+			"means the printer must be empty")
+	}
+	if !strings.Contains(opt.Refusal, "is printing") {
+		t.Errorf("refusal = %q, want it to say the printer is printing", opt.Refusal)
+	}
+}
+
+// An idle printer with an empty queue is what the rule is FOR. Pinned beside
+// the two refusals above so "empty" is not read as "never eligible".
+func TestAnIdlePrinterWithAnEmptyQueueTakesTheBed(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("P2S-7")
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
+		Sliceable:  func(string) string { return "" },
+		PrinterIDs: map[string]int{"P2S-7": 7},
+		Load:       map[int]queueLoad{},
 	})
 
 	if !opt.Eligible {
-		t.Errorf("a printing machine with an empty queue was refused: %q", opt.Refusal)
+		t.Errorf("an empty, idle printer was refused: %q", opt.Refusal)
 	}
 }
 
@@ -415,7 +443,7 @@ func TestABedInFlightCountsAgainstItsPrinter(t *testing.T) {
 	row := healthyRow("A2L-9")
 
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
 		InFlight:  map[uuid.UUID]int{row.ID: 1},
 	})
@@ -423,7 +451,7 @@ func TestABedInFlightCountsAgainstItsPrinter(t *testing.T) {
 	if opt.Eligible {
 		t.Error("a printer with a bed in flight to it was offered another")
 	}
-	if !strings.Contains(opt.Refusal, "already has a bed waiting") {
+	if !strings.Contains(opt.Refusal, "already has a bed") {
 		t.Errorf("refusal = %q; this must be the waiting rule, not the colour gate", opt.Refusal)
 	}
 }
@@ -462,7 +490,7 @@ func TestAPlateIsRefusedByAMachineWithASmallerBed(t *testing.T) {
 	row.ProfileFamily = &p2s
 
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
 		BedFamily: "A2L", // the plate was laid out for an A2L
 	})
@@ -479,7 +507,7 @@ func TestAPlateIsAcceptedByItsOwnClass(t *testing.T) {
 	s := &Server{}
 	opt := s.weighMachine(weighInputs{
 		Row: healthyRow("A2L-3"), Slots: redBed, Now: time.Now(),
-		WaitingCap: maxBedsWaitingPerMachine,
+		WaitingCap: maxBedsPerMachine,
 		Sliceable:  func(string) string { return "" },
 		BedFamily:  "A2L",
 	})
@@ -494,7 +522,7 @@ func TestABedWithNoClassIsOfferedToAnyMachine(t *testing.T) {
 	s := &Server{}
 	opt := s.weighMachine(weighInputs{
 		Row: healthyRow("A2L-4"), Slots: redBed, Now: time.Now(),
-		WaitingCap: maxBedsWaitingPerMachine,
+		WaitingCap: maxBedsPerMachine,
 		Sliceable:  func(string) string { return "" },
 		BedFamily:  "",
 	})
@@ -523,7 +551,7 @@ func TestAPlateIsOfferedALargerBedAsAFallback(t *testing.T) {
 	row := healthyRow("A2L-1") // healthyRow is an A2L
 
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
 		BedFamily: "P2S", // laid out for the smallest bed
 	})
@@ -554,7 +582,7 @@ func TestAnH2CTakesASmallerPlateAndRefusesAWiderOne(t *testing.T) {
 
 	weigh := func(family string) machineOption {
 		return s.weighMachine(weighInputs{
-			Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+			Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 			Sliceable: func(string) string { return "" },
 			BedFamily: family,
 		})
@@ -571,7 +599,7 @@ func TestAnExactClassPrinterIsNeverMarkedOversized(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("A2L-1")
 	opt := s.weighMachine(weighInputs{
-		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsWaitingPerMachine,
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
 		BedFamily: "A2L",
 	})
@@ -640,7 +668,7 @@ func TestABedWithNoClassIsNeverMarkedOversized(t *testing.T) {
 	s := &Server{}
 	opt := s.weighMachine(weighInputs{
 		Row: healthyRow("A2L-1"), Slots: redBed, Now: time.Now(),
-		WaitingCap: maxBedsWaitingPerMachine,
+		WaitingCap: maxBedsPerMachine,
 		Sliceable:  func(string) string { return "" },
 		BedFamily:  "",
 	})

@@ -1173,8 +1173,7 @@ WHERE b.status IN ('pending_approval', 'open')
   AND b.print_outcome IS NULL
   AND b.bambu_slice_job_id IS NULL
   AND b.pipeline_run_id IS NULL
-ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id) ASC NULLS LAST,
-         NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
+ORDER BY NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint ASC NULLS LAST,
          b.created_at ASC, b.id ASC
 `
 
@@ -1196,13 +1195,15 @@ ORDER BY (SELECT min(j.priority) FROM production_jobs j WHERE j.batch_id = b.id)
 // to a send that could only refuse - and each refusal spent a slot against the
 // per-run cap. Five beds slicing meant a pass that did nothing at all.
 //
-// Priority beds go ahead of that, which is the ONLY thing that overrides
-// longest-waiting. Forming beds priority-first is not enough on its own: a bed
-// carrying an expedited plank still reaches a printer in batch-number order,
-// so without this the customer who paid to jump the queue waits behind every
-// bed formed before theirs. min(priority) ASC NULLS LAST is the same
-// convention as the machine scheduler - LOWER IS MORE URGENT - and a bed with
-// no jobs sorts last rather than first.
+// Nothing overrides longest-waiting. There used to be a min(priority) ASC term
+// ahead of the batch number, so a bed carrying one expedited plank reached a
+// printer before every bed formed before it. That is gone at the shop's
+// instruction: DISPATCH IS FIRST COME, FIRST SERVED, and a priority order is
+// read as an ordinary one here as it now is in the planner and the lock gate.
+//
+// Batch number ascending is therefore the whole rule - beds are numbered in
+// the order they were formed, so this is arrival order, with created_at and id
+// behind it only to make the sort total.
 //
 // A bed whose print already resolved is excluded. A failed plate keeps its
 // 'open' status - a failure is "still locked, and here is why" rather than a
@@ -1459,10 +1460,9 @@ type ListLockedBedsWithRoomRow struct {
 //
 // The ordering is the interesting part.
 //
-// NOT oldest-first, which is the obvious guess. ListBatchesToDispatch already
-// sorts min(priority) ASC ahead of batch number, so the moment a priority plank
-// joins ANY bed that bed jumps to the head of the dispatch queue - the bed's
-// age does not change when it prints, so it cannot discriminate.
+// NOT oldest-first, which is the obvious guess. A bed's age does not change
+// when it prints, so it cannot discriminate between two beds that both have
+// room.
 //
 // What does discriminate is what the edit costs. A bed with no queue_item_id
 // was never handed to BambuBuddy: topping it up costs one re-plate. A bed

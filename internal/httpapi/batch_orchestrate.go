@@ -52,21 +52,19 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	s.planMu.Lock()
 	defer s.planMu.Unlock()
 
-	// Expedited work takes any free place on a bed that already exists, before
-	// the planner reads its pool.
+	// The priority top-up used to run here, before the planner read its pool:
+	// it opened locked beds and moved expedited work onto their spare places.
 	//
-	// Inside the mutex and BEFORE the read, deliberately: a job placed on a
-	// locked bed is then simply absent from the pool the planner sees, so the
-	// two cannot both claim it and there is nothing to reconcile afterwards.
-	// Before the signature short-circuit too, because a locked bed can become
-	// toppable without the unbatched pool changing at all.
-	if s.batchStrategy() == production.StrategyColour {
-		if t := s.TopUpLockedBedsWithPriority(ctx); t.BedsFilled > 0 {
-			obs.FromContext(ctx).Info("expedited work placed on existing beds before planning",
-				"beds", t.BedsFilled, "priority", t.PriorityPlaced, "standard", t.StandardPlaced,
-				"skipped_printing", t.SkippedPrinting, "failed", t.Failed)
-		}
-	}
+	// It is not called any more, at the shop's instruction - a priority order
+	// is planned as an ordinary one now (see the note above sortByArrival).
+	// Opening a locked bed only ever paid for itself when the plank jumping the
+	// queue was worth a withdrawal and a re-plate; with nothing jumping the
+	// queue it is a committed plate disturbed for no gain. Worse under the
+	// current lock rule, where a bed locks only once a printer is free and
+	// waiting for it: withdrawing that plate delays the very bed it tops up.
+	//
+	// The code is left intact (batch_topup.go) rather than deleted, because the
+	// mechanism is the right one if expedited handling ever comes back.
 
 	signature, sigOK := s.poolSignature(ctx)
 	if sigOK && signature == s.lastPlannedPool {
@@ -95,7 +93,16 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: %v", errPlanBatchableJobs, err)
 	}
-	sortPriorityFirst(planJobs)
+	// NOT re-sorted. First come, first served, at the shop's instruction: a
+	// paid priority upgrade no longer changes the order work is planned in.
+	//
+	// sortPriorityFirst used to run here and pulled every expedited plank to
+	// the front of the pool. Nothing replaces it, deliberately - the serving
+	// order is already correct, because ListReplannableJobs returns the pool
+	// ordered by the ORDER's placed_at and GroupByColour walks that list once
+	// without reordering. A Go-side sort could not reproduce it anyway:
+	// PlanJob.CreatedAt is the job's own row timestamp, and one import stamps
+	// ninety jobs to the same microsecond.
 	gate := production.BatchGate{
 		MaxWait:           time.Duration(s.cfg.BatchMaxWaitHours * float64(time.Hour)),
 		DueSoonWindow:     time.Duration(s.cfg.BatchDueSoonHours * float64(time.Hour)),
@@ -334,10 +341,16 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		// plate is actually committed to a machine. See ApproveBatchFor.
 	}
 
-	// A bed with four products on it has nothing left to absorb, so it stops
-	// being a proposal here rather than staying open to a rearrangement nobody
-	// asked for. Under-full beds are left as Drafts on purpose - that is what
-	// lets the next matching colour join them. See batch_lock.go.
+	// A bed that clears the floor AND has a free printer waiting for it stops
+	// being a proposal here, rather than waiting a dispatch interval for a
+	// decision that can already be made. Every other bed is left as a Draft on
+	// purpose - that is what lets the next matching colour join it, and what
+	// keeps a plate the fleet cannot take today from being committed anyway.
+	// See batch_lock.go.
+	//
+	// AFTER cachePreview, and that order is load-bearing: the gate binds the
+	// plate's slots to a printer's trays, so a bed with no cached plate yet
+	// cannot be judged.
 	if strategy == production.StrategyColour {
 		s.lockFullBatches(ctx, created)
 	}
