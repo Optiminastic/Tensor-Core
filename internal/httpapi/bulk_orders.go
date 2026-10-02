@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
 // registerBulkOrders mounts the bulk-order routes.
@@ -114,9 +116,17 @@ type bulkOrderResponse struct {
 
 // sellableSKU is one option in the form's product dropdown.
 type sellableSKU struct {
-	VariantID   string `json:"variant_id"`
-	SKU         string `json:"sku"`
+	// VariantID is the registry variant this SKU maps to, when there is one.
+	// Null for the many Shopify SKUs the registry has never needed - a bulk
+	// order may quote anything the shop sells.
+	VariantID *string `json:"variant_id"`
+	SKU       string  `json:"sku"`
+	// ProductName is the full label a quotation line shows, product and variant
+	// together. Group is just the product, so a dropdown of 507 SKUs can be
+	// grouped into the 124 products they belong to rather than being one flat
+	// list nobody can scan.
 	ProductName string `json:"product_name"`
+	Group       string `json:"group"`
 	ProductCode string `json:"product_code"`
 	// UnitPrice is null when Shopify has no price for this SKU, which the form
 	// shows rather than hides: a line nobody can price is a line the operator
@@ -137,48 +147,25 @@ func (s *Server) listSellableSKUs(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// sellableSKUsFor joins the registry's SKUs to Shopify's prices.
+// sellableSKUsFor is every Shopify variant that carries a SKU and a price.
 //
-// The registry decides WHICH products can be quoted - those are the ones Tensor
-// can actually cost and produce - and Shopify decides what each COSTS, matched
-// by SKU. Joining on the SKU string is what makes the two catalogues agree
-// without a foreign key between them; a registry SKU Shopify has never heard of
-// comes back with a null price rather than being dropped.
+// SHOPIFY IS THE CATALOGUE HERE, not the registry. The first version of this
+// listed registry variants instead, on the reasoning that those are the
+// products Tensor can cost and produce - and the result was a dropdown of
+// fifteen options against a store holding 507 priced SKUs. A bulk order is a
+// commercial document, not a production plan: a customer may order anything the
+// shop sells, including the products Tensor has never had to render.
+//
+// The registry is still consulted, for one thing: where a Shopify SKU matches a
+// registry variant, that variant's id is carried onto the line, so a quotation
+// that later becomes production work already points at the right product. A SKU
+// the registry has never heard of simply has none, which is why the column is
+// nullable.
+//
+// Variants without a SKU are skipped - 396 of this store's 903 - because a SKU
+// is what a line is identified by and what an order is later matched on. One
+// without it could be quoted and then never produced.
 func (s *Server) sellableSKUsFor(ctx context.Context, slug string) ([]sellableSKU, error) {
-	variants, err := s.store.Q.ListSellableVariants(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("could not read the product registry")
-	}
-	prices, err := s.shopifyPricesBySKU(ctx, slug)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]sellableSKU, 0, len(variants))
-	for _, v := range variants {
-		// The query already excludes variants without a SKU, so anything here
-		// can be both quoted and priced.
-		sku := strings.TrimSpace(deref(v.Sku))
-		row := sellableSKU{
-			VariantID: v.ID.String(), SKU: sku,
-			ProductName: v.ProductName + " - " + v.VariantName,
-			ProductCode: v.ProductCode,
-		}
-		if price, found := prices[strings.ToUpper(sku)]; found {
-			p := price
-			row.UnitPrice = &p
-		}
-		out = append(out, row)
-	}
-	return out, nil
-}
-
-// shopifyPricesBySKU is every Shopify variant price for this brand, keyed by
-// upper-cased SKU.
-//
-// Upper-cased because the two catalogues are maintained by hand and a SKU typed
-// "dnp-red" in one place and "DNP-RED" in the other is the same product.
-func (s *Server) shopifyPricesBySKU(ctx context.Context, slug string) (map[string]float64, error) {
 	conn, err := s.store.Q.GetConnectionWithToken(ctx, gen.GetConnectionWithTokenParams{
 		BrandSlug: slug, Provider: shopifyProvider,
 	})
@@ -188,23 +175,63 @@ func (s *Server) shopifyPricesBySKU(ctx context.Context, slug string) (map[strin
 	}
 	products, err := s.shopify.ListProducts(ctx, shop, token, 0)
 	if err != nil {
-		return nil, fmt.Errorf("could not fetch prices from Shopify")
+		return nil, fmt.Errorf("could not fetch products from Shopify")
 	}
-	out := make(map[string]float64, len(products)*4)
+
+	// Registry variants by SKU, so a quotation line can point at one when it
+	// exists. Best-effort: a registry that cannot be read costs the linkage,
+	// not the dropdown.
+	registry := map[string]uuid.UUID{}
+	if variants, err := s.store.Q.ListSellableVariants(ctx); err == nil {
+		for _, v := range variants {
+			registry[strings.ToUpper(strings.TrimSpace(deref(v.Sku)))] = v.ID
+		}
+	} else {
+		obs.FromContext(ctx).Warn("registry unavailable; quotation lines will not link to variants",
+			"error", err)
+	}
+
+	out := make([]sellableSKU, 0, 512)
 	for _, p := range products {
 		for _, v := range p.Variants {
-			sku := strings.ToUpper(strings.TrimSpace(v.SKU))
-			if sku == "" || v.Price == "" {
+			sku := strings.TrimSpace(v.SKU)
+			if sku == "" {
 				continue
 			}
-			amount, err := strconv.ParseFloat(v.Price, 64)
-			if err != nil {
-				continue
+			row := sellableSKU{
+				SKU: sku, ProductName: productLabel(p.Title, v.Title),
+				Group: strings.TrimSpace(p.Title), ProductCode: p.Handle,
 			}
-			out[sku] = amount
+			if amount, err := strconv.ParseFloat(v.Price, 64); err == nil && v.Price != "" {
+				row.UnitPrice = &amount
+			}
+			if id, found := registry[strings.ToUpper(sku)]; found {
+				variantID := id.String()
+				row.VariantID = &variantID
+			}
+			out = append(out, row)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ProductName != out[j].ProductName {
+			return out[i].ProductName < out[j].ProductName
+		}
+		return out[i].SKU < out[j].SKU
+	})
 	return out, nil
+}
+
+// productLabel is how a line reads on the quotation: the product, then the
+// variant when it adds anything.
+//
+// Shopify calls a single-variant product's only variant "Default Title", which
+// is a database artefact rather than a name and must never reach a customer.
+func productLabel(product, variant string) string {
+	v := strings.TrimSpace(variant)
+	if v == "" || strings.EqualFold(v, "Default Title") {
+		return strings.TrimSpace(product)
+	}
+	return strings.TrimSpace(product) + " - " + v
 }
 
 func (s *Server) listBulkOrders(c *gin.Context) {
@@ -443,8 +470,10 @@ func (s *Server) priceBulkOrder(
 			sku: match.SKU, productName: match.ProductName,
 			quantity: l.Quantity, unitPrice: *match.UnitPrice, lineTotal: total,
 		}
-		if id, err := uuid.Parse(match.VariantID); err == nil {
-			line.variantID = &id
+		if match.VariantID != nil {
+			if id, err := uuid.Parse(*match.VariantID); err == nil {
+				line.variantID = &id
+			}
 		}
 		out = append(out, line)
 	}
