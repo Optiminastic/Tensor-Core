@@ -637,6 +637,14 @@ type UserAuthzState struct {
 	UpdatedAt          pgtype.Timestamptz
 }
 
+type UserBrandAccess struct {
+	UserID    string
+	BrandSlug string
+	GrantedBy *string
+	CreatedAt pgtype.Timestamptz
+	UpdatedAt pgtype.Timestamptz
+}
+
 type UserInvite struct {
 	ID             uuid.UUID
 	Email          string
@@ -649,6 +657,7 @@ type UserInvite struct {
 	CreatedBy      *string
 	CreatedAt      pgtype.Timestamptz
 	UpdatedAt      pgtype.Timestamptz
+	BrandSlugs     []string
 }
 
 type UserRole struct {

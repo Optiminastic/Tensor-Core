@@ -166,7 +166,7 @@ func TestIntegrationInviteLifecycle(t *testing.T) {
 	seedAll(t, store)
 	ctx := context.Background()
 
-	invite, token, err := auth.IssueInvite(ctx, store.Q, "  Designer@Opti.com ", auth.RoleDesigner, "usr_admin", auth.DefaultInviteTTL)
+	invite, token, err := auth.IssueInvite(ctx, store.Q, "  Designer@Opti.com ", auth.RoleDesigner, "usr_admin", auth.DefaultInviteTTL, nil)
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}

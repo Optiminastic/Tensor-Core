@@ -117,7 +117,12 @@ CREATE TABLE user_invites (
     revoked_at       timestamptz,
     created_by       varchar(64),
     created_at       timestamptz NOT NULL DEFAULT now(),
-    updated_at       timestamptz NOT NULL DEFAULT now()
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    -- The brands this invite promises, applied to user_brand_access when it is
+    -- accepted (the person has no user id before then). See migration 0086.
+    -- LAST, because the migration adds it with ALTER TABLE ADD COLUMN, which
+    -- appends - and this file has to describe the same table, order included.
+    brand_slugs      text[] NOT NULL DEFAULT '{}'
 );
 CREATE INDEX ix_user_invites_email ON user_invites (email);
 CREATE INDEX ix_user_invites_created ON user_invites (created_at DESC, id DESC);
@@ -154,6 +159,19 @@ CREATE TABLE projects (
 -- Per-brand connections to external ad and commerce platforms. Tokens are stored
 -- so the platform can be called on the brand's behalf; one row per (brand,
 -- provider). status is 'disconnected' | 'connected' | 'error'.
+-- Which brands a member may work in. The allow list for non-admins; an admin
+-- sees every brand by holding brand:read and has no rows here. See migration
+-- 0086 for the full reasoning.
+CREATE TABLE user_brand_access (
+    user_id     varchar(64) NOT NULL,
+    brand_slug  text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,
+    granted_by  varchar(64),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, brand_slug)
+);
+CREATE INDEX ix_user_brand_access_brand ON user_brand_access (brand_slug);
+
 CREATE TABLE brand_connections (
     id                  uuid PRIMARY KEY,
     brand_slug          text NOT NULL REFERENCES brands (slug) ON DELETE CASCADE,

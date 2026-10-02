@@ -9,8 +9,10 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 38 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 38 each", len(admin), len(AllPermissions))
+	// 39 since registry:read split reading the product registry away from
+	// reading cost configuration. See RegistryRead in catalog.go.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 39 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 39 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -19,16 +21,73 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	}
 }
 
-func TestOperatorNeverSeesCosts(t *testing.T) {
+// The operator's scope: the whole Production area, nothing outside it, no money.
+//
+// The cost half of this is unchanged and must stay that way - it is the oldest
+// rule in the matrix. What changed is the other half: the shop asked for an
+// operator on EVERY Production page, which added order:read, batch:read and the
+// new registry:read, and for an operator on NO other area, which removed
+// design:read.
+//
+// registry:read exists precisely so those two halves can both hold. The
+// Registry is a Production page and used to be gated on config:read, so before
+// it the only way to show an operator that page was to hand them cost
+// assumptions as well.
+func TestOperatorSeesAllOfProductionAndNoCosts(t *testing.T) {
 	op := PermissionsFor(RoleOperator)
 	for _, forbidden := range []string{"config:read", "config:manage", "pricing:read"} {
 		if has(op, forbidden) {
 			t.Errorf("operator must not have %s", forbidden)
 		}
 	}
-	for _, expected := range []string{"design:read", "production:read", "production:update", "production:fail", "machine:manage"} {
+	// One per page in the Production area, named as nav-config.ts gates them.
+	for _, expected := range []string{
+		"production:read",   // Overview, Production Jobs, Packaging
+		"order:read",        // Orders
+		"batch:read",        // Batch Management
+		"machine:read",      // Machine Management
+		"filament:read",     // Inventory
+		"registry:read",     // Registry
+		"production:update", // and the work itself
+		"production:fail",
+		"machine:manage",
+	} {
 		if !has(op, expected) {
 			t.Errorf("operator should have %s", expected)
+		}
+	}
+	// Outside Production. design:read was held until the shop said the operator
+	// sees Production only; it put the entire Designs area in their nav.
+	for _, forbidden := range []string{"design:read", "design:create", "user:read", "brand:manage"} {
+		if has(op, forbidden) {
+			t.Errorf("operator must not have %s - it is outside the Production area", forbidden)
+		}
+	}
+}
+
+// The designer's scope: Designs and Costing, and nothing else.
+//
+// pricing:read is what puts Costing in the nav. It is a READ - a designer sees
+// what a model costs and cannot generate, override or approve a price.
+func TestDesignerSeesDesignsAndCosting(t *testing.T) {
+	d := PermissionsFor(RoleDesigner)
+	for _, expected := range []string{
+		"design:read", "design:create", "design:update", "design:submit",
+		"pricing:read",
+	} {
+		if !has(d, expected) {
+			t.Errorf("designer should have %s", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		// Not Production, not the registry, not the workspace.
+		"production:read", "order:read", "batch:read", "machine:read", "registry:read",
+		"user:read", "brand:manage",
+		// Reads prices; does not set or approve them.
+		"pricing:generate", "pricing:override", "design:approve", "config:read",
+	} {
+		if has(d, forbidden) {
+			t.Errorf("designer must not have %s", forbidden)
 		}
 	}
 }
@@ -49,9 +108,18 @@ func TestPackagingQcScope(t *testing.T) {
 	}
 }
 
+// A designer READS prices and cannot set them.
+//
+// pricing:read moved out of this list when the shop put Costing in the
+// designer's nav - see TestDesignerSeesDesignsAndCosting. What stays forbidden
+// is every verb that CHANGES a price or a design's fate.
 func TestDesignerCannotApproveOrPrice(t *testing.T) {
 	d := PermissionsFor(RoleDesigner)
-	for _, forbidden := range []string{"design:approve", "pricing:read", "user:manage"} {
+	for _, forbidden := range []string{
+		"design:approve", "design:reject",
+		"pricing:generate", "pricing:override",
+		"user:manage",
+	} {
 		if has(d, forbidden) {
 			t.Errorf("designer must not have %s", forbidden)
 		}
@@ -64,8 +132,19 @@ func TestProjectLeadCannotManageUsers(t *testing.T) {
 	}
 }
 
-func TestProjectAndBrandAreAdminOnly(t *testing.T) {
-	adminOnly := []string{"project:read", "project:manage", "brand:read", "brand:manage"}
+// brand:read is NOT in this list any more, and that is deliberate.
+//
+// Designs, Costing and Production all live under /dashboard/<brand>/..., so a
+// role that cannot list brands cannot reach any page it is otherwise entitled
+// to - which is what happened: the switcher called GET /brands, got a 403, and
+// every non-admin saw an empty workspace. Asking which brands exist is now
+// allowed to everyone, and WHICH ones come back is scoped per member by
+// user_brand_access (see listBrands).
+//
+// brand:MANAGE - create, edit, delete - stays admin-only, which is the thing
+// this test was protecting.
+func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
+	adminOnly := []string{"project:read", "project:manage", "brand:manage"}
 	for _, role := range AllRoles {
 		if role == RoleAdmin {
 			continue
@@ -91,13 +170,22 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 38 (admin) + 4 (designer) + 26 (project lead) + 2 (marketer) + 9 (operator)
-	// + 5 (packaging_qc) = 84.
+	// 39 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 12 (operator)
+	// + 6 (packaging_qc) = 94.
+	//
+	// Moved from 84 when the shop restated three roles: +1 admin and +1 project
+	// lead for registry:read, +1 designer for pricing:read (Costing), and the
+	// operator went 9 -> 12 by losing design:read and gaining order:read,
+	// batch:read, registry:read and brand:read.
+	//
+	// brand:read then went to every role (+5), because without it no non-admin
+	// could list the brands their own pages live under - see
+	// TestProjectAndBrandManageAreAdminOnly.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 84 {
-		t.Fatalf("total grants = %d, want 84", total)
+	if total != 94 {
+		t.Fatalf("total grants = %d, want 94", total)
 	}
 }

@@ -117,7 +117,14 @@ type productDetailResponse struct {
 func (s *Server) registerRegistry(r *gin.Engine) {
 	g := r.Group("/registry")
 	g.Use(s.guards.RequireUser())
-	read := s.guards.RequirePermission(auth.ConfigRead.Key())
+	// READ is registry:read, not config:read, so an Operator can open every
+	// Production page without being handed cost assumptions - see RegistryRead
+	// in internal/auth/catalog.go. Everyone who held config:read before also
+	// holds registry:read now (Admin, Project Lead), so nobody lost a page.
+	//
+	// WRITE is still config:manage. Authoring the catalogue is a configuration
+	// act, and an editor who cannot see costs has not been asked for.
+	read := s.guards.RequirePermission(auth.RegistryRead.Key())
 	manage := s.guards.RequirePermission(auth.ConfigManage.Key())
 
 	g.GET("/products", read, s.listRegistryProducts)
@@ -195,6 +202,7 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 		return
 	}
 
+	showCosts := costsVisibleTo(c)
 	partsByVariant := map[uuid.UUID][]bomLineResponse{}
 	// Null once ANY part on the variant has no price, rather than summing what
 	// is known: a partial total is indistinguishable from a complete one on
@@ -296,6 +304,13 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 			cost := costByVariant[v.ID]
 			row.PartsCost = &cost
 		}
+		// Withheld from a caller without config:read. The parts, quantities and
+		// units all stay - that is what the registry is for - but the money
+		// does not leave the API, so the separation does not depend on the page.
+		if !showCosts {
+			stripBomCosts(row.Parts)
+			row.PartsCost = nil
+		}
 		out.Variants = append(out.Variants, row)
 	}
 	c.JSON(http.StatusOK, out)
@@ -326,6 +341,9 @@ func (s *Server) getVariantBom(c *gin.Context) {
 			line.LineCost = &cost
 		}
 		out = append(out, line)
+	}
+	if !costsVisibleTo(c) {
+		stripBomCosts(out)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -507,4 +525,30 @@ func (s *Server) deleteRegistryProduct(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// costsVisibleTo reports whether this caller may see money on a registry
+// response.
+//
+// registry:read opens the page; config:read is what opens the PRICES on it.
+// Splitting the two is the whole point of RegistryRead: an Operator needs to
+// know which parts a SKU takes, and has never been allowed to know what they
+// cost (TestOperatorNeverSeesCosts).
+//
+// Enforced here rather than in the frontend, because a permission the UI merely
+// honours is not a permission - the JSON is one curl away either way.
+func costsVisibleTo(c *gin.Context) bool {
+	user, ok := auth.UserFrom(c)
+	return ok && user.Has(auth.ConfigRead.Key())
+}
+
+// stripBomCosts blanks the money on a bill of materials, in place.
+//
+// Quantities, units and stock stay: they are what the part list is FOR, and
+// they say nothing about price.
+func stripBomCosts(lines []bomLineResponse) {
+	for i := range lines {
+		lines[i].UnitPrice = nil
+		lines[i].LineCost = nil
+	}
 }

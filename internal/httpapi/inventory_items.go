@@ -113,6 +113,21 @@ func (s *Server) listInventoryItems(c *gin.Context) {
 	for _, i := range rows {
 		out = append(out, toInventoryItemResponse(i))
 	}
+	// unit_price is money, and this list is gated on filament:read - which an
+	// Operator holds, because counting stock is their job. Counting stock is
+	// not the same as knowing what it cost, and "the operator never sees costs"
+	// is a rule this endpoint quietly broke: the Inventory page has been
+	// serving a price column to every role that can open it.
+	//
+	// Same treatment as the registry's parts_cost: the quantity, unit and code
+	// stay, the price is withheld unless the caller holds config:read. Stripped
+	// on the LIST because that is the page; the manage endpoints already
+	// require filament:manage and are a deliberate edit of the price.
+	if !costsVisibleTo(c) {
+		for i := range out {
+			out[i].UnitPrice = nil
+		}
+	}
 	c.JSON(http.StatusOK, out)
 }
 

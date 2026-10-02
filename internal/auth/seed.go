@@ -19,8 +19,20 @@ type SeedResult struct {
 // SyncAll projects the permission catalog into the database, idempotently. It
 // upserts every permission and role, then reconciles each role's grants:
 // inserting the ones the catalog says it should have and DELETING any stale ones
-// (revocation matters). Grants is the count of wanted grants (80 for the current
-// catalog: 37 admin + 4 + 25 + 2 + 8 + 4).
+// (revocation matters). Grants is the count of wanted grants (89 for the current
+// catalog: 39 admin + 5 + 27 + 2 + 11 + 5).
+//
+// IT MUST BE RUN AFTER ANY CHANGE TO catalog.go. The catalog is the source of
+// the intent and this table is the source of truth at runtime - ResolveUserAuthz
+// reads role_permissions, never the Go slice - so a deploy that ships a changed
+// matrix without running cmd/seed changes nothing at all. A new permission does
+// not exist, a withdrawn one is still granted.
+//
+// It does NOT bump permissions versions, deliberately: that is per user and this
+// is per role, and walking every user here would make a catalog sync a write
+// against the whole table. Tokens carry the old set until they are reminted,
+// which ResolveUserAuthz does on its own schedule (about every 15 minutes), so a
+// grant change reaches people within that window rather than instantly.
 func SyncAll(ctx context.Context, store *db.Store) (SeedResult, error) {
 	var result SeedResult
 	err := store.InTx(ctx, func(q *gen.Queries) error {

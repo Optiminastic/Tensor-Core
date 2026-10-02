@@ -118,14 +118,35 @@ func slugify(name string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// listBrands returns the brands this caller may work in.
+//
+// Every role holds brand:read now, because Designs, Costing and Production all
+// live under /dashboard/<brand>/... and a member who cannot list brands cannot
+// reach any of them. So the permission answers "may you ask?" and this function
+// answers "which ones?" - the two used to be the same question, which is why
+// the answer for a non-admin was none.
+//
+// An admin (brand:manage) sees every brand; everybody else sees what an admin
+// granted them on the People page. No grants means an empty list, deliberately:
+// access is given, not assumed. A brand-new member therefore sees nothing until
+// somebody says otherwise, which is the safe direction for the mistake.
 func (s *Server) listBrands(c *gin.Context) {
-	rows, err := s.store.Q.ListBrands(c.Request.Context())
+	ctx := c.Request.Context()
+	rows, err := s.store.Q.ListBrands(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list brands.")
 		return
 	}
+	allowed, scoped, err := s.brandScopeFor(c)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read your brand access.")
+		return
+	}
 	out := make([]brandResponse, 0, len(rows))
 	for _, r := range rows {
+		if scoped && !allowed[r.Slug] {
+			continue
+		}
 		dto, err := brandDTO(r.ID, r.Slug, r.Name, r.LogoUrl, r.StartingPrice, r.ShopifyUrl, r.Description,
 			r.IsActive, r.Ladder, r.CpGreenMax, r.CpYellowMax, r.EntryMachineHours, r.EntryRung,
 			r.CreatedAt, r.UpdatedAt)
@@ -141,6 +162,19 @@ func (s *Server) listBrands(c *gin.Context) {
 func (s *Server) getBrand(c *gin.Context) {
 	slug, ok := brandSlugParam(c)
 	if !ok {
+		return
+	}
+	// Same scope as the list, or a member could read any brand by typing its
+	// slug into the URL - the switcher would hide it and the API would serve it.
+	allowed, scoped, err := s.brandScopeFor(c)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read your brand access.")
+		return
+	}
+	if scoped && !allowed[slug] {
+		// The same answer as a brand that does not exist. Telling somebody a
+		// brand is there but not theirs leaks the brand list one slug at a time.
+		detail(c, http.StatusNotFound, notConfigured(pricing.Brand(slug)))
 		return
 	}
 	r, err := s.store.Q.GetBrandBySlug(c.Request.Context(), slug)
@@ -465,4 +499,32 @@ func validateLadderSlice(c *gin.Context, ladder []int) bool {
 		}
 	}
 	return true
+}
+
+// brandScopeFor is the set of brand slugs this caller may see.
+//
+// scoped is false for an admin, meaning "no restriction" - distinct from an
+// empty allowed set, which means "restricted, and granted nothing". Collapsing
+// the two would make an admin with no rows see no brands, or a new member see
+// all of them; they are opposite failures and both are bad.
+func (s *Server) brandScopeFor(c *gin.Context) (allowed map[string]bool, scoped bool, err error) {
+	user, ok := auth.UserFrom(c)
+	if !ok {
+		return nil, true, nil
+	}
+	// brand:manage rather than a role name: this file guards on permissions,
+	// and the permission that means "owns the brand list" is the one that can
+	// change it.
+	if user.Has(auth.BrandManage.Key()) {
+		return nil, false, nil
+	}
+	slugs, err := s.store.Q.ListUserBrandSlugs(c.Request.Context(), user.ID)
+	if err != nil {
+		return nil, true, err
+	}
+	allowed = make(map[string]bool, len(slugs))
+	for _, slug := range slugs {
+		allowed[slug] = true
+	}
+	return allowed, true, nil
 }
