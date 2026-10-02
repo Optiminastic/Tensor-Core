@@ -500,7 +500,8 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 			detail(c, http.StatusInternalServerError, "Could not list production jobs.")
 			return
 		}
-		c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
+		c.JSON(http.StatusOK,
+			filterByPipelineStage(s.productionJobsDTO(ctx, asProductionJobs(rows)), stageFilter))
 		return
 	}
 
@@ -518,7 +519,35 @@ func (s *Server) listProductionJobs(c *gin.Context) {
 	if n := len(rows); n > 0 {
 		setNextCursor(c, n, page.limit, db.Time(rows[n-1].CreatedAt), rows[n-1].ID)
 	}
-	c.JSON(http.StatusOK, filterByPipelineStage(s.productionJobsDTO(ctx, rows), stageFilter))
+	c.JSON(http.StatusOK,
+		filterByPipelineStage(s.productionJobsDTO(ctx, asPagedProductionJobs(rows)), stageFilter))
+}
+
+// asProductionJobs and asPagedProductionJobs convert the list queries' rows to
+// the shared job type.
+//
+// sqlc gives each of those queries its own Row struct, because their
+// projections select personalisation_properties as a constant rather than
+// reading the column - see the note on ListProductionJobs. The structs are
+// otherwise field-for-field identical to gen.ProductionJob, which is what makes
+// the conversion legal and free: Go converts between struct types with the same
+// fields, types and tags.
+//
+// The alternative was to keep shipping 139 kB of JSON the list never reads.
+func asProductionJobs(rows []gen.ListProductionJobsRow) []gen.ProductionJob {
+	out := make([]gen.ProductionJob, len(rows))
+	for i, r := range rows {
+		out[i] = gen.ProductionJob(r)
+	}
+	return out
+}
+
+func asPagedProductionJobs(rows []gen.ListProductionJobsPageRow) []gen.ProductionJob {
+	out := make([]gen.ProductionJob, len(rows))
+	for i, r := range rows {
+		out[i] = gen.ProductionJob(r)
+	}
+	return out
 }
 
 func (s *Server) getProductionJob(c *gin.Context) {

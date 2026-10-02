@@ -1227,7 +1227,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title,
+          '[]'::jsonb AS personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
@@ -1263,6 +1264,82 @@ type ListProductionJobsParams struct {
 	Search          *string
 }
 
+type ListProductionJobsRow struct {
+	ID                         uuid.UUID
+	JobNumber                  string
+	OrderID                    *uuid.UUID
+	BatchID                    *uuid.UUID
+	Description                string
+	Quantity                   int32
+	Status                     string
+	AssemblyStatus             string
+	FinishingStatus            string
+	QcStatus                   string
+	PackagingStatus            string
+	ShopifyOrderID             *int64
+	Sku                        *string
+	ProductName                *string
+	Material                   *string
+	Colour                     *string
+	NozzleProfile              *string
+	FilamentGramsRequired      pgtype.Numeric
+	PrintFileID                *uuid.UUID
+	EstimatedPrintTimeMinutes  *int32
+	DueDate                    pgtype.Timestamptz
+	Priority                   int32
+	PersonalisationName        *string
+	PersonalisationFont        *string
+	PersonalisationColour      *string
+	PersonalisationVariant     *string
+	PersonalisationStatus      string
+	NameConfirmed              bool
+	PhotoConfirmed             bool
+	FontConfirmed              bool
+	ColourConfirmed            bool
+	VariantConfirmed           bool
+	CustomerApprovalReceived   bool
+	PersonalisationNotes       *string
+	PersonalisationPhotoFileID *uuid.UUID
+	PersonalisationValidatedBy *string
+	PersonalisationValidatedAt pgtype.Timestamptz
+	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
+	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	VariantTitle               *string
+	PersonalisationProperties  []byte
+	PartRole                   string
+	ModelError                 *string
+	ModelErrorAt               pgtype.Timestamptz
+	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	BulkOrderID                *uuid.UUID
+}
+
+// personalisation_properties is NOT sent by this list, and that is the single
+// biggest thing about its cost: it is 139 kB of the table's 304 kB, 46% of every
+// byte this endpoint moves, and nothing on the list screen reads it. Only the
+// job DETAIL page does, through GetProductionJobByID, which still carries it.
+//
+// Selected as a constant rather than dropped, because the projection has to
+// stay column-for-column identical to the table or sqlc stops mapping it to
+// gen.ProductionJob and every caller changes shape.
 // Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
 // packaging_status filters (null = any).
 // Newest ORDER first, matching the Orders page, not newest job.
@@ -1277,7 +1354,7 @@ type ListProductionJobsParams struct {
 // A subquery rather than a join: the column list above is the whole
 // production_jobs row, and joining would change the result shape into a Row
 // type instead of the shared ProductionJob one.
-func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobsParams) ([]ProductionJob, error) {
+func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobsParams) ([]ListProductionJobsRow, error) {
 	rows, err := q.db.Query(ctx, listProductionJobs,
 		arg.Status,
 		arg.AssemblyStatus,
@@ -1292,9 +1369,9 @@ func (q *Queries) ListProductionJobs(ctx context.Context, arg ListProductionJobs
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ProductionJob{}
+	items := []ListProductionJobsRow{}
 	for rows.Next() {
-		var i ProductionJob
+		var i ListProductionJobsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.JobNumber,
@@ -1382,7 +1459,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title,
+          '[]'::jsonb AS personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
@@ -1426,8 +1504,84 @@ type ListProductionJobsPageParams struct {
 	PageLimit       int32
 }
 
+type ListProductionJobsPageRow struct {
+	ID                         uuid.UUID
+	JobNumber                  string
+	OrderID                    *uuid.UUID
+	BatchID                    *uuid.UUID
+	Description                string
+	Quantity                   int32
+	Status                     string
+	AssemblyStatus             string
+	FinishingStatus            string
+	QcStatus                   string
+	PackagingStatus            string
+	ShopifyOrderID             *int64
+	Sku                        *string
+	ProductName                *string
+	Material                   *string
+	Colour                     *string
+	NozzleProfile              *string
+	FilamentGramsRequired      pgtype.Numeric
+	PrintFileID                *uuid.UUID
+	EstimatedPrintTimeMinutes  *int32
+	DueDate                    pgtype.Timestamptz
+	Priority                   int32
+	PersonalisationName        *string
+	PersonalisationFont        *string
+	PersonalisationColour      *string
+	PersonalisationVariant     *string
+	PersonalisationStatus      string
+	NameConfirmed              bool
+	PhotoConfirmed             bool
+	FontConfirmed              bool
+	ColourConfirmed            bool
+	VariantConfirmed           bool
+	CustomerApprovalReceived   bool
+	PersonalisationNotes       *string
+	PersonalisationPhotoFileID *uuid.UUID
+	PersonalisationValidatedBy *string
+	PersonalisationValidatedAt pgtype.Timestamptz
+	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
+	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	VariantTitle               *string
+	PersonalisationProperties  []byte
+	PartRole                   string
+	ModelError                 *string
+	ModelErrorAt               pgtype.Timestamptz
+	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	BulkOrderID                *uuid.UUID
+}
+
+// personalisation_properties is NOT sent by this list, and that is the single
+// biggest thing about its cost: it is 139 kB of the table's 304 kB, 46% of every
+// byte this endpoint moves, and nothing on the list screen reads it. Only the
+// job DETAIL page does, through GetProductionJobByID, which still carries it.
+//
+// Selected as a constant rather than dropped, because the projection has to
+// stay column-for-column identical to the table or sqlc stops mapping it to
+// gen.ProductionJob and every caller changes shape.
 // Keyset page over (created_at, id) with the same optional filters.
-func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProductionJobsPageParams) ([]ProductionJob, error) {
+func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProductionJobsPageParams) ([]ListProductionJobsPageRow, error) {
 	rows, err := q.db.Query(ctx, listProductionJobsPage,
 		arg.Status,
 		arg.AssemblyStatus,
@@ -1445,9 +1599,9 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ProductionJob{}
+	items := []ListProductionJobsPageRow{}
 	for rows.Next() {
-		var i ProductionJob
+		var i ListProductionJobsPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.JobNumber,

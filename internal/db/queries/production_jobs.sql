@@ -94,6 +94,14 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs WHERE job_number = sqlc.arg('job_number');
 
 -- name: ListProductionJobs :many
+-- personalisation_properties is NOT sent by this list, and that is the single
+-- biggest thing about its cost: it is 139 kB of the table's 304 kB, 46% of every
+-- byte this endpoint moves, and nothing on the list screen reads it. Only the
+-- job DETAIL page does, through GetProductionJobByID, which still carries it.
+--
+-- Selected as a constant rather than dropped, because the projection has to
+-- stay column-for-column identical to the table or sqlc stops mapping it to
+-- gen.ProductionJob and every caller changes shape.
 -- Full list, newest first, with optional status / assembly_status / finishing_status / qc_status /
 -- packaging_status filters (null = any).
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
@@ -105,7 +113,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title,
+          '[]'::jsonb AS personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
@@ -142,6 +151,14 @@ ORDER BY COALESCE(
 ) DESC, created_at DESC, id DESC;
 
 -- name: ListProductionJobsPage :many
+-- personalisation_properties is NOT sent by this list, and that is the single
+-- biggest thing about its cost: it is 139 kB of the table's 304 kB, 46% of every
+-- byte this endpoint moves, and nothing on the list screen reads it. Only the
+-- job DETAIL page does, through GetProductionJobByID, which still carries it.
+--
+-- Selected as a constant rather than dropped, because the projection has to
+-- stay column-for-column identical to the table or sqlc stops mapping it to
+-- gen.ProductionJob and every caller changes shape.
 -- Keyset page over (created_at, id) with the same optional filters.
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
@@ -152,7 +169,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title,
+          '[]'::jsonb AS personalisation_properties, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
