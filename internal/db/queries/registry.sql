@@ -433,3 +433,17 @@ RETURNING *;
 DELETE FROM sku_slicer_pipelines
 WHERE lower(sku) = lower(sqlc.arg('sku')::text)
   AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
+
+-- name: ListSellableVariants :many
+-- Every variant that carries a SKU, with its product's name and code.
+--
+-- A SKU is what a quotation line and a Shopify price are both keyed by, so a
+-- variant without one cannot appear on either side and is excluded here rather
+-- than filtered in Go.
+SELECT v.id, v.sku, v.name AS variant_name, v.status,
+       p.name AS product_name, p.code AS product_code
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE v.sku IS NOT NULL AND btrim(v.sku) <> ''
+  AND v.status = 'active' AND p.status = 'active'
+ORDER BY p.name, v.name;

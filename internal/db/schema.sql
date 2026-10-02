@@ -930,3 +930,44 @@ CREATE UNIQUE INDEX uq_design_template_active
     ON design_templates (lower(template_key)) WHERE status = 'active';
 CREATE INDEX ix_design_templates_key
     ON design_templates (lower(template_key), version DESC);
+
+-- Bulk orders and the quotations they produce. Prices are snapshotted onto each
+-- line: a quotation is a number somebody was given on a date. See migration
+-- 0088 for the full reasoning.
+CREATE TABLE bulk_orders (
+    id              uuid PRIMARY KEY,
+    quotation_number varchar(32) NOT NULL UNIQUE,
+    brand_slug      text NOT NULL REFERENCES brands (slug) ON DELETE RESTRICT,
+    customer_name   varchar(200) NOT NULL,
+    customer_email  varchar(255),
+    customer_phone  varchar(40),
+    notes           text,
+    order_date      date NOT NULL,
+    valid_until     date,
+    status          varchar(16) NOT NULL DEFAULT 'draft'
+                    CHECK (status IN ('draft', 'sent', 'accepted', 'cancelled')),
+    discount_percent numeric(5, 2) NOT NULL DEFAULT 0
+                     CHECK (discount_percent >= 0 AND discount_percent <= 100),
+    subtotal        numeric(12, 2) NOT NULL DEFAULT 0,
+    discount_amount numeric(12, 2) NOT NULL DEFAULT 0,
+    total           numeric(12, 2) NOT NULL DEFAULT 0,
+    currency        varchar(8) NOT NULL DEFAULT 'INR',
+    created_by      varchar(64),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_bulk_orders_brand ON bulk_orders (brand_slug, created_at DESC);
+
+CREATE TABLE bulk_order_lines (
+    id             uuid PRIMARY KEY,
+    bulk_order_id  uuid NOT NULL REFERENCES bulk_orders (id) ON DELETE CASCADE,
+    variant_id     uuid REFERENCES product_variants (id) ON DELETE SET NULL,
+    sku            varchar(128) NOT NULL,
+    product_name   varchar(300) NOT NULL,
+    quantity       integer NOT NULL CHECK (quantity > 0),
+    unit_price     numeric(12, 2) NOT NULL CHECK (unit_price >= 0),
+    line_total     numeric(12, 2) NOT NULL CHECK (line_total >= 0),
+    position       integer NOT NULL DEFAULT 0,
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_bulk_order_lines_order ON bulk_order_lines (bulk_order_id, position);

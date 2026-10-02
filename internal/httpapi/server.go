@@ -218,6 +218,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)
 	s.registerShopify(r)
+	s.registerBulkOrders(r)
 	s.registerBambuBuddyEvents(r)
 	s.registerInternal(r)
 

@@ -950,6 +950,57 @@ func (q *Queries) ListSKUPipelines(ctx context.Context) ([]ListSKUPipelinesRow, 
 	return items, nil
 }
 
+const listSellableVariants = `-- name: ListSellableVariants :many
+SELECT v.id, v.sku, v.name AS variant_name, v.status,
+       p.name AS product_name, p.code AS product_code
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE v.sku IS NOT NULL AND btrim(v.sku) <> ''
+  AND v.status = 'active' AND p.status = 'active'
+ORDER BY p.name, v.name
+`
+
+type ListSellableVariantsRow struct {
+	ID          uuid.UUID
+	Sku         *string
+	VariantName string
+	Status      string
+	ProductName string
+	ProductCode string
+}
+
+// Every variant that carries a SKU, with its product's name and code.
+//
+// A SKU is what a quotation line and a Shopify price are both keyed by, so a
+// variant without one cannot appear on either side and is excluded here rather
+// than filtered in Go.
+func (q *Queries) ListSellableVariants(ctx context.Context) ([]ListSellableVariantsRow, error) {
+	rows, err := q.db.Query(ctx, listSellableVariants)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSellableVariantsRow{}
+	for rows.Next() {
+		var i ListSellableVariantsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sku,
+			&i.VariantName,
+			&i.Status,
+			&i.ProductName,
+			&i.ProductCode,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVariantBom = `-- name: ListVariantBom :many
 SELECT b.id, b.variant_id, b.inventory_item_id, b.quantity, b.created_at, i.name AS item_name, i.code AS item_code, i.unit,
        i.unit_price, i.quantity AS stock_quantity

@@ -83,6 +83,40 @@ type BrandConnection struct {
 	UpdatedAt         pgtype.Timestamptz
 }
 
+type BulkOrder struct {
+	ID              uuid.UUID
+	QuotationNumber string
+	BrandSlug       string
+	CustomerName    string
+	CustomerEmail   *string
+	CustomerPhone   *string
+	Notes           *string
+	OrderDate       pgtype.Date
+	ValidUntil      pgtype.Date
+	Status          string
+	DiscountPercent pgtype.Numeric
+	Subtotal        pgtype.Numeric
+	DiscountAmount  pgtype.Numeric
+	Total           pgtype.Numeric
+	Currency        string
+	CreatedBy       *string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+type BulkOrderLine struct {
+	ID          uuid.UUID
+	BulkOrderID uuid.UUID
+	VariantID   *uuid.UUID
+	Sku         string
+	ProductName string
+	Quantity    int32
+	UnitPrice   pgtype.Numeric
+	LineTotal   pgtype.Numeric
+	Position    int32
+	CreatedAt   pgtype.Timestamptz
+}
+
 type ColourMap struct {
 	ID          uuid.UUID
 	ColourName  string

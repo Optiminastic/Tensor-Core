@@ -326,6 +326,11 @@ type VariantSummary struct {
 	// SKU is empty when the variant carries none, which is a real state worth
 	// showing: such a variant can never be matched to an order.
 	SKU string
+	// Price is this variant's own price as a decimal string, e.g. "1499.00".
+	// Carried as a string because that is what Shopify returns and what the
+	// numeric column wants - parsing to float here would round money twice for
+	// no gain. Empty when Shopify reports none.
+	Price string
 }
 
 type ProductSummary struct {
@@ -370,7 +375,7 @@ const listProductsQuery = `query ListProducts($first: Int!) {
       # carries 64 - and a product past that is asking a different question
       # than "which of my products should Tensor render".
       variants(first: 100) {
-        nodes { id title sku }
+        nodes { id title sku price }
       }
     }
   }
@@ -417,6 +422,11 @@ func (c *Client) ListProducts(ctx context.Context, shop, token string, limit int
 							ID    string  `json:"id"`
 							Title string  `json:"title"`
 							SKU   *string `json:"sku"`
+							// The variant's OWN price, which priceRangeV2 cannot
+							// give: that is the product's min and max across
+							// every variant, so a line with 64 colourways has a
+							// range where a quotation needs one number.
+							Price *string `json:"price"`
 						} `json:"nodes"`
 					} `json:"variants"`
 				} `json:"nodes"`
@@ -453,8 +463,12 @@ func (c *Client) ListProducts(ctx context.Context, shop, token string, limit int
 			if v.SKU != nil {
 				sku = strings.TrimSpace(*v.SKU)
 			}
+			var price string
+			if v.Price != nil {
+				price = strings.TrimSpace(*v.Price)
+			}
 			p.Variants = append(p.Variants, VariantSummary{
-				GID: v.ID, Title: v.Title, SKU: sku,
+				GID: v.ID, Title: v.Title, SKU: sku, Price: price,
 			})
 		}
 		products = append(products, p)
