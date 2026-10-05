@@ -129,6 +129,27 @@ func main() {
 	// sliced plate has to be schedulable from here too.
 	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(riverClient))
 
+	// And the dispatch pass itself, for the same reason as the two above.
+	//
+	// Six call sites ask for a pass the moment a bed becomes sendable - locking
+	// one, editing one, re-plating one, topping one up, fulfilling an order,
+	// finishing a print - and triggerDispatch is what makes "the periodic pass
+	// would find it eventually" mean seconds instead of up to seven minutes.
+	// Every one of those six is an HTTP handler, so they all run HERE, where
+	// s.dispatchEnqueuer was nil: EnableBatchDispatchQueue was called only from
+	// workerset, which a deployment with a dedicated worker host never runs in
+	// this process. So every trigger returned at its first line and did nothing,
+	// and the only thing that ever dispatched a bed was the seven-minute tick.
+	//
+	// It shows up most plainly on the new Lock action. Locking a Draft by hand
+	// is meant to be the same event as the planner locking a full one, and the
+	// planner's lock is noticed in the same pass that made it; a hand-locked bed
+	// sat for minutes with nothing on screen to say it was waiting rather than
+	// stuck. Same client as everything else above - one insert-only client
+	// enqueues any registered Kind.
+	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(
+		riverClient, time.Duration(cfg.BatchPlanDebounceSeconds)*time.Second))
+
 	// The API enqueues renders (a manual retry from the jobs page) but never
 	// runs them; cmd/productionworker is where the OpenSCAD subprocess lives.
 	if cfg.OpenSCADBin != "" {
