@@ -51,9 +51,22 @@ func TestNextDispatchStepApprovesAFullDraft(t *testing.T) {
 	}
 }
 
-func TestNextDispatchStepSendsALockedIdleBed(t *testing.T) {
+// A locked bed sends, however thin it is - note readyToLock is FALSE here.
+//
+// The three-unit floor gates one thing only: whether the dispatcher may freeze a
+// DRAFT. Once a bed is locked that question has been answered, so it is never
+// asked again, and this case is what makes the Lock action in the batch
+// three-dot menu mean anything. Somebody locking a bed holding one plank is
+// saying "stop waiting for company, print this" - if the floor were re-checked
+// here, that bed would lock, reserve its filament, leave the replanning pool and
+// then sit for ever, which is worse than refusing the lock outright.
+//
+// The send still refuses a printer that cannot print it. "Thin" is allowed;
+// "nowhere to put it" is not.
+func TestNextDispatchStepSendsALockedIdleBedHoweverThinItIs(t *testing.T) {
 	if got := nextDispatchStep(bed(production.BatchOpen), false, now); got != stepSend {
-		t.Errorf("step = %v, want stepSend", got)
+		t.Errorf("step = %v, want stepSend - a hand-locked bed under the unit floor "+
+			"must still reach a printer, or the Lock action silently does nothing", got)
 	}
 }
 
