@@ -94,6 +94,18 @@ type batchResponse struct {
 	// and a UI that guessed would either hide the only way to send a bed or
 	// keep offering a button for work already done.
 	AutoQueue bool `json:"auto_queue"`
+	// Stage is where the bed is between locking and coming off the printer,
+	// derived from the dispatcher's own marker columns - see batch_stage.go.
+	//
+	// status says 'open' for a bed uploading, a bed slicing, a bed sitting in a
+	// printer's queue and a bed waiting on a spool nobody has loaded. Those are
+	// four different things to an operator and one word on the board, which is
+	// why a locked bed looked identical whether it was working or stuck.
+	//
+	// Derived, never stored: there is no stage column to fall out of step with
+	// the markers, and the Kanban keeps its four draggable statuses.
+	Stage      string `json:"stage"`
+	StageLabel string `json:"stage_label"`
 	// QueueItemID is BambuBuddy's queue item, so a sent batch can be followed
 	// rather than only observed at the moment of sending.
 	QueueItemID *int32 `json:"queue_item_id"`
@@ -111,6 +123,7 @@ type batchResponse struct {
 func (s *Server) batchDTO(b gen.Batch) batchResponse {
 	utilisation := db.NumFloatPtr(b.BedUtilizationPercent)
 	occupied, free := occupiedFreeArea(utilisation)
+	stage := batchStageOf(b, time.Now())
 	return batchResponse{
 		ID: b.ID.String(), BatchNumber: b.BatchNumber, MachineID: uuidPtrStr(b.MachineID),
 		Status: b.Status, ApprovedBy: b.ApprovedBy, ApprovedAt: db.TimePtr(b.ApprovedAt),
@@ -122,6 +135,7 @@ func (s *Server) batchDTO(b gen.Batch) batchResponse {
 		PackingStrategy: b.PackingStrategy, CreatedAt: db.Time(b.CreatedAt), UpdatedAt: db.Time(b.UpdatedAt),
 		PlateSlicedAt: db.TimePtr(b.PlateSlicedAt), PlateSliceError: b.PlateSliceError,
 		PrintError: b.PrintError, QueueItemID: b.QueueItemID,
+		Stage: string(stage), StageLabel: stageLabel[stage],
 		AutoQueue:   s.cfg.BatchAutoDispatch,
 		TotalLayers: b.TotalLayers, SupportGrams: db.NumFloatPtr(b.SupportGrams),
 		PurgeGrams: db.NumFloatPtr(b.PurgeGrams), ColourChanges: b.ColourChanges,
