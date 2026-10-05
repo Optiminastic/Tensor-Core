@@ -230,7 +230,24 @@ func colourBedKey(j PlanJob) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	return key + "|" + j.Material + "|" + j.MachineFamily + "|" + j.SlicingKey, true
+	// Colour, material, machine class. NOT the SKU.
+	//
+	// The SKU's slicer-pipeline token used to be part of this, and it split
+	// beds that the shop considers one job. DNP-GLD and DNPWL-GLD are the same
+	// Dual Name Plank in the same gold: the only difference is whether an LED
+	// base ships in the box, which colourFromVariant already discards as "a
+	// fulfilment extra, not something that changes which filament goes in the
+	// printer". Mapped to different pipelines, they produced different tokens
+	// and therefore two beds - one of one unit and one of two, neither of them
+	// reaching the floor of three, so neither ever locked and neither ever
+	// printed. Three gold planks sat waiting for a fourth that would have gone
+	// to a third bed.
+	//
+	// What a plate physically needs is one filament load and one printer class,
+	// and that is what is left here. Which process a SKU slices with is settled
+	// where the plate is actually sliced - see mappedPipelineFor, which now
+	// resolves a bed whose SKUs disagree rather than refusing it.
+	return key + "|" + j.Material + "|" + j.MachineFamily, true
 }
 
 // NormalisedColourKey is the canonical form of a job's colour set: each colour

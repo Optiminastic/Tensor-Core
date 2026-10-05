@@ -524,50 +524,19 @@ func (s *Server) approveBatch(c *gin.Context) {
 
 // --- job membership editing (Draft batches only) -------------------------
 
-// slicingKeys maps a SKU to the token standing for its slicer-pipeline mapping.
-//
-// Read whole, once per operation, rather than per job: the compatibility key is
-// computed in loops over candidate pools running to hundreds of jobs, and the
-// table holds at most one row per SKU per machine class.
-//
-// Best-effort. A mapping Tensor cannot read must not stop beds being planned -
-// the cost of missing it is that two SKUs which slice differently may be
-// offered one bed, which the send path still refuses by name.
-func (s *Server) slicingKeys(ctx context.Context) map[string]string {
-	rows, err := s.store.Q.ListAllPipelineMappings(ctx)
-	if err != nil {
-		obs.FromContext(ctx).Warn("could not read the SKU slicing map", "error", err)
-		return nil
-	}
-	out := make(map[string]string, len(rows))
-	for _, r := range rows {
-		// family:pipeline pairs, in the query's order, so the token is stable
-		// and two SKUs mapped identically produce the same string.
-		out[r.Sku] += fmt.Sprintf("%s=%d;", strings.ToUpper(r.MachineFamily), r.PipelineID)
-	}
-	return out
-}
-
-// slicingKeyOf is one job's slicing token, or empty when its SKU is unmapped.
-func slicingKeyOf(j gen.ProductionJob, keys map[string]string) string {
-	return keys[strings.ToLower(strings.TrimSpace(deref(j.Sku)))]
-}
-
 // compatibilityKeyOf builds a job's "same machine configuration" signature
 // (see production.CompatibilityKey) from its already-loaded row.
-func compatibilityKeyOf(j gen.ProductionJob, keys map[string]string) production.CompatibilityKey {
-	return compatibilityKeyWith(j, slicingKeyOf(j, keys))
-}
-
-// compatibilityKeyWith is compatibilityKeyOf with the slicing token supplied,
-// for callers that already resolved it.
-func compatibilityKeyWith(j gen.ProductionJob, slicingKey string) production.CompatibilityKey {
+//
+// It took a SKU-to-pipeline map until the shop's rule was stated plainly:
+// batching is by COLOUR, not by SKU. Two SKUs printing the same plank in the
+// same gold now share a bed, and which process the plate slices with is
+// settled at slice time by mappedPipelineFor.
+func compatibilityKeyOf(j gen.ProductionJob) production.CompatibilityKey {
 	return production.CompatibilityKey{
 		Material: deref(j.Material), Colour: jobColourKey(j),
 		NozzleLeft:  numAsString(j.LeftNozzleMm),
 		NozzleRight: numAsString(j.RightNozzleMm), QualityMM: numAsString(j.QualityMm),
 		MachineFamily: deref(j.MachineFamily),
-		SlicingKey:    slicingKey,
 	}
 }
 
@@ -608,8 +577,7 @@ func (s *Server) listCompatibleJobs(c *gin.Context) {
 		return
 	}
 	ref := jobs[0]
-	keys := s.slicingKeys(ctx)
-	key := compatibilityKeyOf(ref, keys)
+	key := compatibilityKeyOf(ref)
 	if key.Colour == "" {
 		// The planner's ReasonNoColour, at this end: colour decides which jobs
 		// may share a plate, so a bed that records none has nothing to match
@@ -636,7 +604,7 @@ func (s *Server) listCompatibleJobs(c *gin.Context) {
 	// in Go costs nothing and leaves one definition of colour compatibility.
 	compatible := make([]gen.ProductionJob, 0, len(rows))
 	for _, r := range rows {
-		if compatibilityKeyOf(r, keys) == key {
+		if compatibilityKeyOf(r) == key {
 			compatible = append(compatible, r)
 		}
 	}
@@ -699,8 +667,7 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 		detail(c, http.StatusUnprocessableEntity, "This batch has no jobs yet to derive a compatible configuration from.")
 		return
 	}
-	addKeys := s.slicingKeys(ctx)
-	key := compatibilityKeyOf(existing[0], addKeys)
+	key := compatibilityKeyOf(existing[0])
 
 	ids := make([]uuid.UUID, 0, len(req.JobIDs))
 	adding := 0
@@ -719,7 +686,7 @@ func (s *Server) addJobsToBatch(c *gin.Context) {
 			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("Job %s is already assigned to a batch.", job.JobNumber))
 			return
 		}
-		if compatibilityKeyOf(job, addKeys) != key {
+		if compatibilityKeyOf(job) != key {
 			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("Job %s's material/colour/nozzle/machine profile or slicing settings don't match this batch.", job.JobNumber))
 			return
 		}
@@ -1376,9 +1343,6 @@ func numAsString(n pgtype.Numeric) string {
 // bounding box (a job with no measurable file gets a zero footprint, which the
 // planner reports as unbatchable).
 func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]production.PlanJob, error) {
-	// One read for the whole run: the planner groups hundreds of jobs and each
-	// needs to know whether its SKU slices differently from its neighbours.
-	keys := s.slicingKeys(ctx)
 	out := make([]production.PlanJob, 0, len(jobs))
 	for _, j := range jobs {
 		var box bedpack.UnitFootprint
@@ -1399,7 +1363,6 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 			Material: deref(j.Material), Colours: decodeColours(j.Colours),
 			NozzleLeft: numAsString(j.LeftNozzleMm), NozzleRight: numAsString(j.RightNozzleMm),
 			QualityMM: numAsString(j.QualityMm), MachineFamily: deref(j.MachineFamily),
-			SlicingKey:  slicingKeyOf(j, keys),
 			SupportUsed: j.SupportUsed != nil && *j.SupportUsed,
 			InfillPct:   db.NumFloat(j.InfillPct), Priority: int(j.Priority),
 			Quantity: int(j.Quantity), EstimatedMinutes: int32PtrToIntPtr(j.EstimatedPrintTimeMinutes),

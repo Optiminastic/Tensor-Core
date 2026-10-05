@@ -161,18 +161,19 @@ type CompatibilityKey struct {
 	NozzleRight   string
 	QualityMM     string
 	MachineFamily string
-	// SlicingKey is the SKU's slicer-pipeline mapping, as a token.
+	// There is deliberately no SlicingKey here any more.
 	//
-	// Here for the same reason Colour is: a plate is sliced ONCE, with one
-	// process preset, so two SKUs that print with different settings describe a
-	// plate that cannot be made. Empty for a SKU nobody has mapped, which is
-	// most of them - and all of those share a value, so nothing splits until
-	// somebody maps something.
+	// It held the SKU's slicer-pipeline token, on the reasoning that a plate is
+	// sliced once with one process preset, so two SKUs that print with
+	// different settings describe a plate that cannot be made. True, but it
+	// made the SKU decide what shares a bed - and the shop batches by COLOUR.
+	// Two gold Dual Name Planks that differ only by whether an LED ships in the
+	// box went to separate beds, and neither reached the three-unit floor.
 	//
-	// Built from the mapping rather than from the SKU deliberately: several
-	// SKUs pointed at one pipeline produce one token and go on sharing a bed,
-	// which is the whole point of being able to map them together.
-	SlicingKey string
+	// The constraint it protected is real and still enforced, just later and by
+	// the code that can actually see the plate: mappedPipelineFor resolves a
+	// bed whose SKUs map to different pipelines, slicing the whole plate with
+	// the one most of its units ask for and saying so on the bed.
 }
 
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.
