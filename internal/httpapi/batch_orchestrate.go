@@ -111,7 +111,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		// One colour per bed, at most four products on it, oldest order first.
 		// No held list: the whole point of this strategy is that an under-full
 		// bed prints rather than waiting for volume that may never arrive.
-		planned, unbatchable = production.GroupByColour(planJobs, s.cfg.BatchMaxUnitsPerBed, production.DefaultBedNester)
+		planned, unbatchable = production.GroupByColour(planJobs, s.bedUnitCap(), production.DefaultBedNester)
 	} else {
 		planned, unbatchable, held, deferred = production.PlanWithReasons(planJobs, now, gate, production.DefaultNester)
 	}
@@ -583,41 +583,60 @@ func (s *Server) batchStrategy() string {
 // batchStrategyPlanner selects the multi-strategy optimiser in planner.go.
 const batchStrategyPlanner = "planner"
 
-// batchMachineFamily is the one machine family every job on a bed needs, and
-// whether they agree on it.
+// batchMachineFamily is the printer class a bed is assigned to.
 //
-// Jobs with no family recorded are ignored rather than treated as a distinct
-// family: an unset value means "unknown", not "different", and a bed of
-// entirely-unknown jobs correctly yields ("", false) so nothing is assigned.
+// It used to require every job to agree and refused the bed otherwise. That
+// made the design's printer profile decide what could share a bed, which is
+// backwards: the class is chosen when the bed is queued, against the fleet as
+// it actually is, and BedFamilyForUnits overrides this from the unit count
+// when the plate is packed anyway.
 //
-// This exists because machineFamily was removed from production.groupKey - the
-// fleet is one family with one bed size today, so it was pure fragmentation.
-// The day a second bed size arrives, put it back in the key and this becomes
-// dead weight rather than a guard.
-// why names which of the two failures happened, for the caller's log. The
-// distinction matters more than it looks: both leave the batch unassigned and
-// therefore invisible to every machine for ever, but "no family at all" points
-// at the design catalogue (a design with no printer profile) while "disagree"
-// points at the planner's grouping. Reporting the first as the second sends
-// whoever is debugging a stalled floor looking for a mixed bed that does not
-// exist - which is exactly what happened.
+// So it resolves instead, by UNITS rather than by jobs - the class most of the
+// plate is configured for wins, and a single odd plank rides along rather than
+// dictating. Ties go to the earliest job, which is oldest-order-first, so the
+// answer is stable across planning passes.
+//
+// Still refused when NO job records a family at all: that is not a mixed bed,
+// it is a bed whose designs have no printer profile, and there is nothing to
+// resolve between.
 func batchMachineFamily(jobs []production.PlanJob) (family string, ok bool, why string) {
-	for _, j := range jobs {
+	type tally struct {
+		units int
+		first int
+	}
+	byFamily := map[string]*tally{}
+	for i, j := range jobs {
 		if j.MachineFamily == "" {
 			continue
 		}
-		if family == "" {
-			family = j.MachineFamily
+		t, seen := byFamily[j.MachineFamily]
+		if !seen {
+			byFamily[j.MachineFamily] = &tally{units: quantityOfPlan(j), first: i}
 			continue
 		}
-		if j.MachineFamily != family {
-			return "", false, "its jobs disagree on machine family"
-		}
+		t.units += quantityOfPlan(j)
 	}
-	if family == "" {
+	if len(byFamily) == 0 {
 		return "", false, "no job on it records a machine family, so their designs have no printer profile"
 	}
-	return family, true, ""
+
+	best := ""
+	for name, t := range byFamily {
+		if best == "" || t.units > byFamily[best].units ||
+			(t.units == byFamily[best].units && t.first < byFamily[best].first) {
+			best = name
+		}
+	}
+	return best, true, ""
+}
+
+// quantityOfPlan is a planned job's unit count, clamped like every other
+// capacity read in the system.
+func quantityOfPlan(j production.PlanJob) int {
+	if j.Quantity < 1 {
+		return 1
+	}
+	return j.Quantity
 }
 
 // idleMachineCount is how many printers could start a plate right now: fleet
@@ -684,16 +703,61 @@ func (s *Server) poolSignature(ctx context.Context) (string, bool) {
 // planColoursFromJobs is planColours for already-loaded job rows: the distinct
 // colours on a bed, in first-seen order. Used to label the plate's filament
 // split, since the slicer reports per extruder rather than per colour name.
-// batchMaterialFromRows is batchMaterial for job rows - the first material any
-// job on the bed records. One bed is one filament load, so the first is the
-// bed's, and a bed whose jobs all record none returns nil.
+// batchMaterialFromRows is the filament a bed is loaded with.
+//
+// One bed is one filament load - the plate is stamped with this material for
+// every part - so when a bed holds more than one, something has to win. It
+// used to be whichever job happened to come first, silently.
+//
+// It is the material most of the PLATE is, now, and a mixed bed says so in the
+// log. That matters more than the other resolvers in this file: one plate is
+// printed at one bed temperature, and PLA wants about 55C where PETG wants 70
+// and ABS 90. A mixed bed does not merely slice with the wrong profile, it
+// warps one of the two materials. The shop prints PLA, so this is a guard for
+// the day it does not rather than a thing that fires today - but when it does
+// fire it must be visible, because the evidence otherwise is a ruined plate.
 func batchMaterialFromRows(jobs []gen.ProductionJob) *string {
-	for _, j := range jobs {
-		if m := strings.TrimSpace(deref(j.Material)); m != "" {
-			return &m
+	type tally struct {
+		units int
+		first int
+	}
+	byMaterial := map[string]*tally{}
+	for i, j := range jobs {
+		m := strings.TrimSpace(deref(j.Material))
+		if m == "" {
+			continue
+		}
+		t, seen := byMaterial[m]
+		if !seen {
+			byMaterial[m] = &tally{units: int(jobQuantity(j.Quantity)), first: i}
+			continue
+		}
+		t.units += int(jobQuantity(j.Quantity))
+	}
+	if len(byMaterial) == 0 {
+		return nil
+	}
+
+	best := ""
+	for name, t := range byMaterial {
+		if best == "" || t.units > byMaterial[best].units ||
+			(t.units == byMaterial[best].units && t.first < byMaterial[best].first) {
+			best = name
 		}
 	}
-	return nil
+	if len(byMaterial) > 1 {
+		others := make([]string, 0, len(byMaterial)-1)
+		for name, t := range byMaterial {
+			if name != best {
+				others = append(others, fmt.Sprintf("%s (%d units)", name, t.units))
+			}
+		}
+		sort.Strings(others)
+		obs.FromContext(context.Background()).Warn(
+			"this bed holds more than one material; the whole plate will print as the one most of it is",
+			"chosen", best, "chosen_units", byMaterial[best].units, "others", others)
+	}
+	return &best
 }
 
 func planColoursFromJobs(jobs []gen.ProductionJob) []string {

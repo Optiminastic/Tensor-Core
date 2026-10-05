@@ -15,7 +15,7 @@ package production
 // means somebody changes the spool mid-plate.
 //
 // So the rule here is stated rather than searched for: one colour per bed, at
-// most MaxColourBatchUnits products on it, oldest order first. It is not an
+// most MaxBedUnits products on it, oldest order first. It is not an
 // approximation of the optimiser - it is a different, deliberately simpler
 // policy, and the optimiser is kept intact beside it (see BatchStrategy) for the
 // day the catalogue is mixed enough to need it again.
@@ -26,14 +26,6 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
 )
-
-// MaxColourBatchUnits is how many products may share one bed.
-//
-// Four, per the shop's own instruction. It is a policy number, not a geometric
-// one: four planks physically fit with room to spare, and the cap exists so a
-// bed is a manageable, quickly-turned-around unit of work rather than the most
-// the packer could cram on.
-const MaxColourBatchUnits = 4
 
 // StrategyColour is the packing_strategy recorded on batches this produces, so a
 // batch on the floor says which policy built it. Batches from the optimiser keep
@@ -230,7 +222,31 @@ func colourBedKey(j PlanJob) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	return key + "|" + j.Material + "|" + j.MachineFamily + "|" + j.SlicingKey, true
+	// THE COLOUR. That is the whole key.
+	//
+	// A bed is a filament load, and which printer loads it is decided later -
+	// at queue time, against the fleet as it actually is. Deciding it here,
+	// while planning, only ever split work that belonged together.
+	//
+	// Three things have come out of this key, each for the same reason:
+	//
+	//   The SKU's slicer-pipeline token. DNP-GLD and DNPWL-GLD are one gold
+	//   plank differing by whether an LED ships in the box, and they went to
+	//   two beds that each stalled under the three-unit floor.
+	//
+	//   The machine family. It is the design's printer profile, not a fact
+	//   about the plate - and BedFamilyForUnits already overrides it from the
+	//   unit count when the plate is packed, so keeping it here split beds on
+	//   a value the packer then ignored.
+	//
+	//   The material. The shop prints PLA, so this split nothing in practice.
+	//
+	// None of those constraints is gone; they have moved to where the plate is
+	// actually made, and each now RESOLVES a mixed bed rather than refusing or
+	// silently picking: mappedPipelineFor for the process, batchMachineFamily
+	// for the class, batchMaterialFromRows for the filament. All three choose
+	// by units and say so in the log.
+	return key, true
 }
 
 // NormalisedColourKey is the canonical form of a job's colour set: each colour

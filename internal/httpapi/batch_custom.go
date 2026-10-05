@@ -176,7 +176,7 @@ func (s *Server) listBatchableJobs(c *gin.Context) {
 	if search == "" {
 		pool = stillToPlace(pool, beds)
 	}
-	rows := jobRows(pool, beds, numbers, s.slicingKeys(ctx))
+	rows := jobRows(pool, beds, numbers)
 	if search == "" && key != "" {
 		rows = onlyMatching(rows, key)
 	}
@@ -270,7 +270,6 @@ func jobRows(
 	jobs []gen.ProductionJob,
 	beds map[uuid.UUID]gen.ListBatchIdentityForIDsRow,
 	numbers map[uuid.UUID]string,
-	keys map[string]string,
 ) []batchableJob {
 	out := make([]batchableJob, 0, len(jobs))
 	for _, j := range jobs {
@@ -284,7 +283,7 @@ func jobRows(
 			OrderNumber:      orderTagFor(orderNumberPtr(numbers, j.OrderID), j.JobNumber),
 			Product:          deref(j.ProductName),
 			Units:            int(jobQuantity(j.Quantity)),
-			CompatibilityKey: compatibilityKeyString(j, keys),
+			CompatibilityKey: compatibilityKeyString(j),
 			ColourLabel:      jobColourKey(j),
 			Available:        true,
 			OnBed:            bed.BatchNumber,
@@ -433,7 +432,7 @@ func (s *Server) createCustomBatch(c *gin.Context) {
 		writeStatusError(c, err, "Could not read the chosen jobs.")
 		return
 	}
-	if err := checkOneBedWorth(jobs, s.bedUnitCap(), s.slicingKeys(ctx)); err != nil {
+	if err := checkOneBedWorth(jobs, s.bedUnitCap()); err != nil {
 		detail(c, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -713,17 +712,17 @@ func batchableNow(j gen.ProductionJob) error {
 // The same two rules the planner and the add-to-batch path enforce, for the
 // same reason: a plate declares one filament per slot and holds a fixed number
 // of places, and neither becomes negotiable because a person did the choosing.
-func checkOneBedWorth(jobs []gen.ProductionJob, unitCap int, keys map[string]string) error {
+func checkOneBedWorth(jobs []gen.ProductionJob, unitCap int) error {
 	if len(jobs) == 0 {
 		return fmt.Errorf("choose at least one product for this bed")
 	}
-	key := compatibilityKeyOf(jobs[0], keys)
+	key := compatibilityKeyOf(jobs[0])
 	if key.Colour == "" {
 		return fmt.Errorf("%s records no filament colour, so nothing can be matched to it",
 			jobs[0].JobNumber)
 	}
 	for _, j := range jobs[1:] {
-		if compatibilityKeyOf(j, keys) != key {
+		if compatibilityKeyOf(j) != key {
 			return fmt.Errorf(
 				"%s does not match %s - a bed holds one colour, material, nozzle setup and slicing profile",
 				j.JobNumber, jobs[0].JobNumber)
@@ -742,6 +741,6 @@ func checkOneBedWorth(jobs []gen.ProductionJob, unitCap int, keys map[string]str
 // itself - at which point the rule lives in two languages and one of them is
 // wrong. fmt's %v over the struct changes if the struct does, which is the
 // correct coupling: a new field that splits beds must split them here too.
-func compatibilityKeyString(j gen.ProductionJob, keys map[string]string) string {
-	return fmt.Sprintf("%v", compatibilityKeyOf(j, keys))
+func compatibilityKeyString(j gen.ProductionJob) string {
+	return fmt.Sprintf("%v", compatibilityKeyOf(j))
 }

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -722,18 +723,40 @@ func (s *Server) pipelineForBed(
 		mapped.PipelineName)
 }
 
-// mappedPipelineFor is the mapping every job on the bed agrees on, or nil when
-// no job has one.
+// mappedPipelineFor is the pipeline this bed slices with, or nil when no job
+// on it has a mapping.
 //
-// Disagreement is refused rather than resolved. compatibilityKeyOf keeps
-// differently-mapped SKUs off one plate, so a planned bed cannot reach this;
-// a bed assembled by hand can, and picking one of two answers would slice half
-// the plate wrong.
+// A bed can now legitimately hold SKUs mapped to different pipelines. Batching
+// is by COLOUR - the SKU stopped deciding what shares a plate, because two gold
+// Dual Name Planks differing only by whether an LED ships in the box were going
+// to separate beds and neither reached the three-unit floor.
+//
+// This used to refuse such a bed outright, on the reasoning that picking one of
+// two answers would slice half the plate wrong. That reasoning was sound while
+// the planner guaranteed the case could not arise; with the SKU out of the
+// grouping key it arises by design, and refusing would be worse than choosing -
+// the bed would be planned, locked, have its filament reserved and its plate
+// built, then fail at the last step with nothing an operator could do but take
+// it apart by hand.
+//
+// So it chooses, by UNITS rather than by jobs: the pipeline most of the plate
+// actually asks for wins, and a single odd plank rides along on its neighbours'
+// settings rather than dictating to them. Ties go to the earliest job, which is
+// oldest-order-first, so the answer is stable across passes and does not depend
+// on map iteration. Disagreement is logged with both names and recorded on the
+// bed, because "this plate was sliced with the other product's process" is
+// exactly the kind of thing that must not be silent.
 func (s *Server) mappedPipelineFor(
 	ctx context.Context, jobs []gen.ProductionJob, model string,
 ) (*gen.SkuSlicerPipeline, error) {
-	var found *gen.SkuSlicerPipeline
-	for _, j := range jobs {
+	type tally struct {
+		row   gen.SkuSlicerPipeline
+		units int
+		first int
+	}
+	byPipeline := map[int32]*tally{}
+
+	for i, j := range jobs {
 		sku := strings.TrimSpace(deref(j.Sku))
 		if sku == "" {
 			continue
@@ -744,18 +767,43 @@ func (s *Server) mappedPipelineFor(
 		if err != nil {
 			continue // no mapping for this SKU on this class
 		}
-		if found == nil {
-			found = &row
+		t, seen := byPipeline[row.PipelineID]
+		if !seen {
+			byPipeline[row.PipelineID] = &tally{row: row, units: int(jobQuantity(j.Quantity)), first: i}
 			continue
 		}
-		if found.PipelineID != row.PipelineID {
-			return nil, fmt.Errorf(
-				"this bed holds SKUs set to slice with different pipelines (%s and %s), "+
-					"so it cannot be sliced as one plate",
-				found.PipelineName, row.PipelineName)
-		}
+		t.units += int(jobQuantity(j.Quantity))
 	}
-	return found, nil
+
+	if len(byPipeline) == 0 {
+		return nil, nil
+	}
+
+	var best *tally
+	for _, t := range byPipeline {
+		switch {
+		case best == nil:
+		case t.units > best.units:
+		case t.units == best.units && t.first < best.first:
+		default:
+			continue
+		}
+		best = t
+	}
+
+	if len(byPipeline) > 1 {
+		others := make([]string, 0, len(byPipeline)-1)
+		for id, t := range byPipeline {
+			if id != best.row.PipelineID {
+				others = append(others, fmt.Sprintf("%s (%d units)", t.row.PipelineName, t.units))
+			}
+		}
+		sort.Strings(others)
+		obs.FromContext(ctx).Warn("this bed's SKUs are mapped to different pipelines; slicing it with the one most of the plate asks for",
+			"chosen", best.row.PipelineName, "chosen_units", best.units, "others", others)
+	}
+
+	return &best.row, nil
 }
 
 // replateForMachine lays a bed's plate out for the class it is being sent to.

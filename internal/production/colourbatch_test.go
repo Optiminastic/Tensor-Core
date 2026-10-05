@@ -35,7 +35,7 @@ func colourOf(t *testing.T, b PlannedBatch) string {
 	return ""
 }
 
-// The rule in one test: one colour per bed, never more than four on it.
+// The rule in one test: one colour per bed, never more than MaxBedUnits on it.
 func TestGroupByColourNeverMixesColoursOrExceedsTheCap(t *testing.T) {
 	var jobs []PlanJob
 	// Interleaved deliberately - if grouping were positional rather than by
@@ -45,15 +45,15 @@ func TestGroupByColourNeverMixesColoursOrExceedsTheCap(t *testing.T) {
 		jobs = append(jobs, plankJob(fmt.Sprintf("j%d", i), colour))
 	}
 
-	batches, unb := GroupByColour(jobs, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 0 {
 		t.Fatalf("unbatchable = %v, want none", unb)
 	}
 	placed := 0
 	for _, b := range batches {
 		colourOf(t, b) // fails the test if the bed mixes colours
-		if b.UnitsPerBed > MaxColourBatchUnits {
-			t.Errorf("bed holds %d units, over the cap of %d", b.UnitsPerBed, MaxColourBatchUnits)
+		if b.UnitsPerBed > MaxBedUnits {
+			t.Errorf("bed holds %d units, over the cap of %d", b.UnitsPerBed, MaxBedUnits)
 		}
 		if b.PackingStrategy != StrategyColour {
 			t.Errorf("strategy = %q, want %q", b.PackingStrategy, StrategyColour)
@@ -67,20 +67,21 @@ func TestGroupByColourNeverMixesColoursOrExceedsTheCap(t *testing.T) {
 
 // Oldest order first, and served in order: the caller hands jobs over in the
 // order they should print, so the first bed of a colour must hold that colour's
-// first four jobs - not whichever four a map iteration happened to reach.
+// oldest jobs - not whichever ones a map iteration happened to reach.
 func TestGroupByColourServesInInputOrder(t *testing.T) {
 	var jobs []PlanJob
-	for i := range 6 {
+	for i := range MaxBedUnits + 1 {
 		jobs = append(jobs, plankJob(fmt.Sprintf("blue%d", i), "BLUE"))
 	}
 
-	batches, _ := GroupByColour(jobs, MaxColourBatchUnits, DefaultBedNester)
+	batches, _ := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
 	if len(batches) != 2 {
-		t.Fatalf("got %d beds for 6 planks at 4 per bed, want 2", len(batches))
+		t.Fatalf("got %d beds for %d planks at %d per bed, want 2",
+			len(batches), MaxBedUnits+1, MaxBedUnits)
 	}
 	want := [][]string{
-		{"blue0", "blue1", "blue2", "blue3"},
-		{"blue4", "blue5"},
+		{"blue0", "blue1", "blue2", "blue3", "blue4"},
+		{"blue5"},
 	}
 	for i, b := range batches {
 		var got []string
@@ -93,31 +94,32 @@ func TestGroupByColourServesInInputOrder(t *testing.T) {
 	}
 }
 
-// Four planks must actually fit, and the utilisation the batch records must be
-// the truth about them - roughly 38% of a 330x320 bed, well under the optimiser's
-// 80% target. That gap is exactly why the optimiser held these jobs, and the
-// number is kept honest rather than inflated to make the bed look full.
-func TestGroupByColourFourPlanksFitAtTheirRealUtilisation(t *testing.T) {
+// A full bed must actually fit, and the utilisation the batch records must be
+// the truth about them - roughly 52% of a 330x320 bed, still under the
+// optimiser's 80% target. That gap is exactly why the optimiser held these
+// jobs, and the number is kept honest rather than inflated to make the bed look
+// full.
+func TestGroupByColourAFullBedFitsAtItsRealUtilisation(t *testing.T) {
 	var jobs []PlanJob
-	for i := range MaxColourBatchUnits {
+	for i := range MaxBedUnits {
 		jobs = append(jobs, plankJob(fmt.Sprintf("j%d", i), "BLUE"))
 	}
-	batches, unb := GroupByColour(jobs, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 0 || len(batches) != 1 {
 		t.Fatalf("got %d beds and %d unbatchable, want 1 and 0", len(batches), len(unb))
 	}
 	b := batches[0]
-	if b.UnitsPerBed != MaxColourBatchUnits {
-		t.Errorf("units = %d, want %d", b.UnitsPerBed, MaxColourBatchUnits)
+	if b.UnitsPerBed != MaxBedUnits {
+		t.Errorf("units = %d, want %d", b.UnitsPerBed, MaxBedUnits)
 	}
-	if len(b.Placements) != MaxColourBatchUnits {
+	if len(b.Placements) != MaxBedUnits {
 		t.Errorf("packed %d units onto the bed, want all %d - the merged plate re-packs "+
 			"independently and 409s on a bed that does not fit",
-			len(b.Placements), MaxColourBatchUnits)
+			len(b.Placements), MaxBedUnits)
 	}
-	// 4 * 200 * 50 / (330 * 320) = 37.88%.
-	if b.BedUtilisationPercent < 37 || b.BedUtilisationPercent > 39 {
-		t.Errorf("utilisation = %.2f%%, want about 37.88%%", b.BedUtilisationPercent)
+	// 5 * 200 * 50 / (330 * 320) = 52.08%.
+	if b.BedUtilisationPercent < 51 || b.BedUtilisationPercent > 53 {
+		t.Errorf("utilisation = %.2f%%, want about 52.08%%", b.BedUtilisationPercent)
 	}
 	if b.BedUtilisationPercent >= TargetBedUtilisationPercent {
 		t.Errorf("utilisation %.2f%% is at or over the old %.0f%% target; this test's "+
@@ -132,7 +134,7 @@ func TestGroupByColourFourPlanksFitAtTheirRealUtilisation(t *testing.T) {
 func TestGroupByColourRejectsAColourlessJob(t *testing.T) {
 	j := plankJob("nocolour", "")
 	j.Colours = nil
-	batches, unb := GroupByColour([]PlanJob{j, plankJob("blue", "BLUE")}, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour([]PlanJob{j, plankJob("blue", "BLUE")}, MaxBedUnits, DefaultBedNester)
 
 	if len(unb) != 1 || unb[0].JobID != "nocolour" {
 		t.Fatalf("unbatchable = %v, want just the colourless job", unb)
@@ -153,7 +155,7 @@ func TestGroupByColourSplitsAJobAcrossBeds(t *testing.T) {
 	j := plankJob("bulk", "BLUE")
 	j.Quantity = 6
 
-	batches, unb := GroupByColour([]PlanJob{j}, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour([]PlanJob{j}, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 0 {
 		t.Fatalf("unbatchable = %v, want none", unb)
 	}
@@ -166,7 +168,7 @@ func TestGroupByColourSplitsAJobAcrossBeds(t *testing.T) {
 			t.Fatalf("bed %d holds %d job fragments, want 1", i, len(b.Jobs))
 		}
 		total += b.Jobs[0].Quantity
-		if b.UnitsPerBed > MaxColourBatchUnits {
+		if b.UnitsPerBed > MaxBedUnits {
 			t.Errorf("bed %d holds %d units, over the cap", i, b.UnitsPerBed)
 		}
 	}
@@ -181,7 +183,7 @@ func TestGroupByColourRejectsAnOversizedUnit(t *testing.T) {
 	huge := plankJob("huge", "BLUE")
 	huge.Footprint = bedpack.UnitFootprint{RefID: "huge", XMM: 900, YMM: 900, ZMM: 40}
 
-	batches, unb := GroupByColour([]PlanJob{huge, plankJob("ok", "BLUE")}, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour([]PlanJob{huge, plankJob("ok", "BLUE")}, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 1 || unb[0].Reason != ReasonTooLargeForBed {
 		t.Fatalf("unbatchable = %v, want the oversized job with %q", unb, ReasonTooLargeForBed)
 	}
@@ -190,28 +192,47 @@ func TestGroupByColourRejectsAnOversizedUnit(t *testing.T) {
 	}
 }
 
-// Material and machine family are physical, not preferences: one plate is
-// sliced once with one filament and printed on one machine. A bed mixing them
-// describes a print that cannot happen - and one whose jobs disagree on family
-// is left permanently unassigned by batchMachineFamily, so no printer ever
-// picks it up.
-func TestGroupByColourStillSeparatesWhatCannotPhysicallyShareABed(t *testing.T) {
+// One colour is one bed, whatever else the jobs disagree about.
+//
+// This asserted the opposite until the shop stated the rule plainly: three
+// BLUE planks differing in material and machine class made three beds, none of
+// which reached the three-unit floor, so none of them printed. The printer is
+// chosen when the bed is queued - deciding it while planning only split work
+// that belonged together.
+//
+// The constraints have not vanished. batchMaterialFromRows and
+// batchMachineFamily resolve a mixed bed by units and log it; they are tested
+// where they live.
+func TestGroupByColourPutsOneColourOnOneBed(t *testing.T) {
 	pla := plankJob("pla", "BLUE")
 	petg := plankJob("petg", "BLUE")
 	petg.Material = "PETG"
 	other := plankJob("other", "BLUE")
 	other.MachineFamily = "P2S"
 
-	batches, _ := GroupByColour([]PlanJob{pla, petg, other}, MaxColourBatchUnits, DefaultBedNester)
-	if len(batches) != 3 {
-		t.Fatalf("got %d beds, want 3 - same colour, but different material and family", len(batches))
+	batches, unb := GroupByColour([]PlanJob{pla, petg, other}, MaxBedUnits, DefaultBedNester)
+	if len(unb) != 0 {
+		t.Fatalf("unbatchable = %v, want none", unb)
+	}
+	if len(batches) != 1 {
+		t.Fatalf("got %d beds for three BLUE planks, want 1", len(batches))
+	}
+	if got := batches[0].UnitsPerBed; got != 3 {
+		t.Errorf("units = %d, want 3 - all three belong to the one blue bed", got)
+	}
+
+	// And a different colour still opens its own bed.
+	withRed := append([]PlanJob{pla, petg, other}, plankJob("red", "RED"))
+	batches, _ = GroupByColour(withRed, MaxBedUnits, DefaultBedNester)
+	if len(batches) != 2 {
+		t.Fatalf("got %d beds for BLUE+RED, want 2", len(batches))
 	}
 }
 
 // The whole reason the optimiser was turned off: a partial bed prints rather
 // than waiting for volume that may never arrive.
 func TestGroupByColourCreatesAnUnderFullBed(t *testing.T) {
-	batches, _ := GroupByColour([]PlanJob{plankJob("lonely", "YELLOW")}, MaxColourBatchUnits, DefaultBedNester)
+	batches, _ := GroupByColour([]PlanJob{plankJob("lonely", "YELLOW")}, MaxBedUnits, DefaultBedNester)
 	if len(batches) != 1 {
 		t.Fatalf("got %d beds for a single plank, want 1", len(batches))
 	}
@@ -235,7 +256,7 @@ func TestGroupByColourNeverPlacesAJobTwice(t *testing.T) {
 	bulk.Quantity = 6
 	jobs = append(jobs, bulk)
 
-	batches, unb := GroupByColour(jobs, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 0 {
 		t.Fatalf("unbatchable = %v, want none", unb)
 	}
@@ -284,30 +305,35 @@ func TestGroupByColourNeverPlacesAJobTwice(t *testing.T) {
 
 // Oldest first, and a full bed before a partial one.
 //
-// The rule the shop stated: fill four from the oldest orders, keep filling
-// while there are four to be had, and let whatever is left over sit as an
+// The rule the shop stated: fill a bed from the oldest orders, keep filling
+// while there are enough to fill one, and let whatever is left over sit as an
 // under-full bed that the next order in that colour completes.
 func TestGroupByColourFillsFullBedsBeforeLeavingARemainder(t *testing.T) {
-	// Nine blue planks in order: two full beds and a remainder of one.
+	// Eleven blue planks in order: two full beds and a remainder of one.
+	// Written as 2*cap+1 rather than as a number, so the cap can move again
+	// without the arithmetic silently going stale - which is exactly what
+	// happened when it moved from four to five.
+	planks := 2*MaxBedUnits + 1
 	var jobs []PlanJob
-	for i := range 9 {
+	for i := range planks {
 		jobs = append(jobs, plankJob(fmt.Sprintf("blue%d", i), "BLUE"))
 	}
 
-	batches, unb := GroupByColour(jobs, MaxColourBatchUnits, DefaultBedNester)
+	batches, unb := GroupByColour(jobs, MaxBedUnits, DefaultBedNester)
 	if len(unb) != 0 {
 		t.Fatalf("unbatchable = %v, want none", unb)
 	}
 	if len(batches) != 3 {
-		t.Fatalf("got %d beds for 9 planks at 4 per bed, want 3", len(batches))
+		t.Fatalf("got %d beds for %d planks at %d per bed, want 3",
+			len(batches), planks, MaxBedUnits)
 	}
 
 	// The full beds come first and hold the OLDEST planks; the remainder is
 	// last and holds the newest.
 	want := [][]string{
-		{"blue0", "blue1", "blue2", "blue3"},
-		{"blue4", "blue5", "blue6", "blue7"},
-		{"blue8"},
+		{"blue0", "blue1", "blue2", "blue3", "blue4"},
+		{"blue5", "blue6", "blue7", "blue8", "blue9"},
+		{"blue10"},
 	}
 	for i, b := range batches {
 		var got []string
@@ -327,7 +353,7 @@ func TestGroupByColourFillsFullBedsBeforeLeavingARemainder(t *testing.T) {
 //
 // bedpack's bestFit accepts a 0x0 unit into any free rectangle, because
 // `o.w > fr.w` is false for a zero width. So before this guard an unmeasurable
-// job silently took one of the four places on a real bed, added nothing to the
+// job silently took one of the places on a real bed, added nothing to the
 // utilisation figure, and blew up later at buildMergedPlate - where the whole
 // bed fails rather than the one job that caused it. PlanWithReasons has always
 // had this check; the colour path is the one that lost it.

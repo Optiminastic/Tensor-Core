@@ -65,37 +65,61 @@ func TestColourBedKeyIsBuiltFromTheNormalisedColourKey(t *testing.T) {
 	if ka != kb {
 		t.Errorf("bed keys differ for the same colour set: %q vs %q", ka, kb)
 	}
-	if want := NormalisedColourKey(a.Colours) + "|PLA|A2L|"; ka != want {
-		t.Errorf("bed key = %q, want %q - it must be the normalised colour set plus "+
-			"material, family and the SKU's slicing mapping", ka, want)
+	if want := NormalisedColourKey(a.Colours); ka != want {
+		t.Errorf("bed key = %q, want %q - the normalised colour set, and nothing else", ka, want)
+	}
+}
+
+// The SKU does NOT split a bed, and that is the shop's rule stated plainly:
+// batching is by colour.
+//
+// It used to. The key carried the SKU's slicer-pipeline token, so DNP-GLD and
+// DNPWL-GLD - the same Dual Name Plank in the same gold, differing only by
+// whether an LED base ships in the box - went to two beds. One held a single
+// plank and the other two; neither reached the three-unit floor, so neither
+// locked and neither printed, while three gold planks sat waiting for a fourth
+// that would have opened a third bed.
+//
+// colourFromVariant already discards the light option as "a fulfilment extra,
+// not something that changes which filament goes in the printer". This makes
+// the bed key agree with it.
+func TestTheSKUDoesNotDecideWhatSharesABed(t *testing.T) {
+	// Same colour, same material, same class. Different products.
+	plank := PlanJob{Colours: []string{"GOLD"}, Material: "PLA", MachineFamily: "H2C"}
+	plankWithLight := PlanJob{Colours: []string{"GOLD"}, Material: "PLA", MachineFamily: "H2C"}
+
+	kp, okP := colourBedKey(plank)
+	kl, okL := colourBedKey(plankWithLight)
+	if !okP || !okL {
+		t.Fatal("both jobs record a colour")
+	}
+	if kp != kl {
+		t.Errorf("two gold planks got different beds: %q vs %q", kp, kl)
 	}
 
-	// The slicing mapping splits a bed the same way colour does: one plate is
-	// sliced once, with one process preset. Two SKUs mapped to the SAME
-	// pipeline keep sharing, which is why the token is built from the mapping
-	// and not from the SKU.
-	mapped := PlanJob{Colours: []string{"BLUE", "WHITE"}, Material: "PLA",
-		MachineFamily: "A2L", SlicingKey: "H2C=5;"}
-	sameMapping := mapped
-	other := PlanJob{Colours: []string{"BLUE", "WHITE"}, Material: "PLA",
-		MachineFamily: "A2L", SlicingKey: "H2C=2;"}
-
-	km, _ := colourBedKey(mapped)
-	ks, _ := colourBedKey(sameMapping)
-	ko, _ := colourBedKey(other)
-	if km != ks {
-		t.Errorf("two SKUs mapped to one pipeline got different beds: %q vs %q", km, ks)
-	}
-	if km == ko {
-		t.Errorf("SKUs mapped to different pipelines shared a bed key: %q", km)
-	}
-	if km == ka {
-		t.Error("a mapped SKU shared a bed key with an unmapped one")
+	// Neither does the material or the machine class. The shop batches by
+	// colour and chooses the printer afterwards, at queue time, against the
+	// fleet as it actually is.
+	for _, c := range []struct {
+		name string
+		job  PlanJob
+	}{
+		{"a different material", PlanJob{Colours: []string{"GOLD"}, Material: "PETG", MachineFamily: "H2C"}},
+		{"a different machine class", PlanJob{Colours: []string{"GOLD"}, Material: "PLA", MachineFamily: "P2S"}},
+		{"no material or class at all", PlanJob{Colours: []string{"GOLD"}}},
+	} {
+		t.Run(c.name+" still shares the bed", func(t *testing.T) {
+			k, _ := colourBedKey(c.job)
+			if k != kp {
+				t.Errorf("%s was split from the gold plank: %q vs %q", c.name, k, kp)
+			}
+		})
 	}
 
-	// A colourless job still has no bed, which is what ReasonNoColour reports.
-	if _, ok := colourBedKey(PlanJob{Material: "PLA", MachineFamily: "A2L"}); ok {
-		t.Error("a job recording no colour was given a bed key")
+	// The colour is the one thing that still separates beds, because a plate
+	// is one filament load.
+	if k, _ := colourBedKey(PlanJob{Colours: []string{"RED"}, Material: "PLA", MachineFamily: "H2C"}); k == kp {
+		t.Error("a RED plank shared a bed with a GOLD one")
 	}
 }
 

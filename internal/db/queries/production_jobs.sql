@@ -369,11 +369,18 @@ WHERE batch_id IS NULL
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
   AND held = false
-  AND material IS NOT DISTINCT FROM sqlc.narg('material')::text
-  AND left_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('left_nozzle_mm')::float8
-  AND right_nozzle_mm::float8 IS NOT DISTINCT FROM sqlc.narg('right_nozzle_mm')::float8
-  AND quality_mm::float8 IS NOT DISTINCT FROM sqlc.narg('quality_mm')::float8
-  AND machine_family IS NOT DISTINCT FROM sqlc.narg('machine_family')::text
+-- No material, nozzle, quality or machine_family predicate.
+--
+-- A bed is a COLOUR. Those five narrowed the offer to jobs whose design
+-- matched the bed's in every respect, which is how two gold Dual Name Planks
+-- differing only by an LED in the box ended up unable to share a plate. The
+-- printer is chosen when the bed is queued, and the filament the plate is
+-- stamped with is settled by batchMaterialFromRows.
+--
+-- Colour is filtered in Go by the caller rather than here - see
+-- listCompatibleJobs, which explains why: the predicate would be a second
+-- implementation of NormalisedColourKey in another language, and Go sorts by
+-- byte where Postgres sorts by collation.
 ORDER BY created_at ASC, id ASC;
 
 -- name: RemoveJobFromBatch :one

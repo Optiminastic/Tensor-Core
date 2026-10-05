@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -48,10 +49,21 @@ func TestBatchMachineFamilyDistinguishesItsTwoFailures(t *testing.T) {
 			wantWhy:  "no printer profile",
 		},
 		{
-			name:     "jobs genuinely disagree",
-			families: []string{"H2C", "H2S"},
-			wantOK:   false,
-			wantWhy:  "disagree",
+			// Disagreement is RESOLVED, not refused. The class is chosen when
+			// the bed is queued, and refusing here stranded a bed nobody
+			// could see. Two H2C units against one H2S: the H2C wins.
+			name:       "jobs disagree and the majority of units wins",
+			families:   []string{"H2C", "H2S", "H2C"},
+			wantFamily: "H2C",
+			wantOK:     true,
+		},
+		{
+			// Tie broken by the earliest job, which is oldest-order-first, so
+			// the answer does not move between planning passes.
+			name:       "an even split goes to the earliest job",
+			families:   []string{"H2S", "H2C"},
+			wantFamily: "H2S",
+			wantOK:     true,
 		},
 	}
 
@@ -82,5 +94,55 @@ func TestBatchMachineFamilyDistinguishesItsTwoFailures(t *testing.T) {
 					why, tc.wantWhy)
 			}
 		})
+	}
+}
+
+// The filament a mixed bed prints in, and why it has to be said out loud.
+//
+// One plate is stamped with one material for every part and printed at one bed
+// temperature. Now that a bed is a colour and nothing else, a bed CAN hold two
+// materials - so something has to win, and it used to be whichever job came
+// first, silently. It is the material most of the plate is, and a mixed bed
+// logs it: PLA wants about 55C where PETG wants 70 and ABS 90, so getting this
+// wrong does not merely slice badly, it warps one of the two.
+func TestBatchMaterialTakesWhatMostOfThePlateIs(t *testing.T) {
+	row := func(material string, qty int32) gen.ProductionJob {
+		j := gen.ProductionJob{Quantity: qty}
+		if material != "" {
+			m := material
+			j.Material = &m
+		}
+		return j
+	}
+
+	for _, c := range []struct {
+		name string
+		jobs []gen.ProductionJob
+		want string
+	}{
+		{"one material", []gen.ProductionJob{row("PLA", 1), row("PLA", 2)}, "PLA"},
+		// By UNITS, not by jobs: one PETG job of three planks outweighs two
+		// PLA jobs of one each, because most of the plate is PETG.
+		{"units decide, not job count", []gen.ProductionJob{row("PLA", 1), row("PETG", 3), row("PLA", 1)}, "PETG"},
+		// A tie goes to the earliest job, so the answer is stable.
+		{"a tie goes to the earliest", []gen.ProductionJob{row("PETG", 2), row("PLA", 2)}, "PETG"},
+		// A job recording nothing is ignored rather than counted as a material.
+		{"blank materials are ignored", []gen.ProductionJob{row("", 5), row("PLA", 1)}, "PLA"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := batchMaterialFromRows(c.jobs)
+			if got == nil {
+				t.Fatalf("material = nil, want %q", c.want)
+			}
+			if *got != c.want {
+				t.Errorf("material = %q, want %q", *got, c.want)
+			}
+		})
+	}
+
+	// A bed whose jobs record nothing has no material, which is not the same
+	// as a bed that prints in the first thing we thought of.
+	if got := batchMaterialFromRows([]gen.ProductionJob{row("", 1), row("", 2)}); got != nil {
+		t.Errorf("material = %q, want nil when no job records one", *got)
 	}
 }

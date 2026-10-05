@@ -34,6 +34,13 @@ const (
 	// MaxBedUnits is the fullest a bed gets. Five, not the seven an H2C could
 	// hold, because the classes below it must be able to take a bed too - and
 	// a bed nothing but the three H2Cs can print is a bed that waits.
+	//
+	// It is the ONLY cap. There used to be a second constant saying four and a
+	// third fallback in cmd/reformbeds saying four as well, so "how full is
+	// full" had three answers depending on who asked: the live floor locked at
+	// five, the test suite asserted four, and a doc comment described four. The
+	// shop's rule is three to five, so five is the answer and the others are
+	// gone.
 	MaxBedUnits = 5
 )
 

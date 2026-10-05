@@ -158,11 +158,11 @@ type Settings struct {
 	BambuBuddyWebhookSecret string
 
 	// BatchMaxUnitsPerBed caps how many products share one bed under the colour
-	// strategy. Zero uses production.MaxColourBatchUnits.
+	// strategy. Zero uses production.MaxBedUnits, which is five.
 	//
-	// A policy number, not a geometric one - four planks fit with room to
-	// spare. It exists so a bed is a manageable unit of work rather than the
-	// most the packer could fit.
+	// A policy number, not a geometric one - an H2C would hold seven. It exists
+	// so a bed is a manageable unit of work, and so that the smaller classes
+	// can take a bed at all.
 	BatchMaxUnitsPerBed int
 
 	// BatchMinUnitsPerBed is how empty a bed may be and still lock.
@@ -182,10 +182,16 @@ type Settings struct {
 	// machine and queues the plate slice) and sending a sliced plate to
 	// BambuBuddy, oldest order first.
 	//
-	// Off would mean every bed waits for someone to press two buttons. On means
-	// an order placed overnight can be printing before anyone arrives - which is
-	// the point - but it also means filament is committed with no human in the
-	// loop, so it is a switch rather than a hard-coded behaviour.
+	// On means an order placed overnight can be printing before anyone arrives,
+	// which is the point. It also means filament is committed with no human in
+	// the loop, so it stays a switch rather than a hard-coded behaviour.
+	//
+	// It defaults to ON, which it did not used to. The Queue button was the
+	// other way a bed reached a printer, and with the button gone this flag is
+	// the ONLY one: a floor with BATCH_AUTO_DISPATCH unset would plan beds,
+	// lock them and never print a single one, with nothing on screen saying
+	// why. Opting out is still a line in the environment; opting in no longer
+	// is, because forgetting it now costs the whole pipeline.
 	BatchAutoDispatch bool
 
 	// BatchAutoDispatchMax caps how many batches one pass advances. Zero uses
@@ -460,7 +466,7 @@ func Load() Settings {
 		BatchReplanMinImprovementPercent: floatEnvOr("BATCH_REPLAN_MIN_IMPROVEMENT_PERCENT", 2),
 		BatchHorizonJobs:                 intEnvOr("BATCH_HORIZON_JOBS", 250),
 		ModelGenConcurrency:              intEnvOr("MODEL_GEN_CONCURRENCY", 0),
-		BatchAutoDispatch:                boolEnvOr("BATCH_AUTO_DISPATCH", false),
+		BatchAutoDispatch:                boolEnvOr("BATCH_AUTO_DISPATCH", true),
 		BatchAutoDispatchMax:             intEnvOr("BATCH_AUTO_DISPATCH_MAX", 0),
 		BatchAutoComplete:                boolEnvOr("BATCH_AUTO_COMPLETE", true),
 		ArchiveReconcileLimit:            intEnvOr("ARCHIVE_RECONCILE_LIMIT", 0),

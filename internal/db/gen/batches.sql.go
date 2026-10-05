@@ -1582,13 +1582,19 @@ UPDATE batches SET
     queue_item_id   = NULL,
     pipeline_run_id = NULL,
     print_outcome   = NULL,
-    print_error     = NULL,
-    print_error_at  = NULL,
+    print_error     = $1,
+    print_error_at  = now(),
     updated_at      = now()
-WHERE id = $1
+WHERE id = $2
 `
 
-// Puts a bed back where it can be sent again after a print that did not finish.
+type ReleaseBatchAfterFailedPrintParams struct {
+	PrintError *string
+	ID         uuid.UUID
+}
+
+// Puts a bed back where it can be sent again after a print that did not finish,
+// and says why it did not.
 //
 // A cancelled or failed print used to leave queue_item_id and pipeline_run_id
 // set, and those two are exactly what SendBatchToPrinter's double-send guard
@@ -1603,8 +1609,26 @@ WHERE id = $1
 // print_outcome goes too, because RecordBatchPrintOutcome claims a bed exactly
 // once by testing it for null: left set, the next real print of this bed could
 // never be recorded.
-func (q *Queries) ReleaseBatchAfterFailedPrint(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, releaseBatchAfterFailedPrint, id)
+//
+// But print_error STAYS, and that is the change. Clearing it alongside the ids
+// made the bed indistinguishable from one that had never been sent: it re-entered
+// ListBatchesToDispatch on the very next pass with nothing to rest on, so a plate
+// that fails for a reason re-sending cannot fix - spaghetti on the same geometry,
+// a wipe tower colliding with its models, an AMS that cannot bind the colour -
+// was submitted again within seconds, failed again, and spent the whole per-run
+// cap doing it while the beds behind it waited.
+//
+// Writing the reason is what stops that, because sendCooldown already keys on
+// print_error_at: the bed rests fifteen minutes, then retries, which is what the
+// shop asked for. It also puts BambuBuddy's own wording on the row, where the
+// floor can read it, instead of only in a log nobody on the floor opens.
+//
+// This matters more than it did. The Queue button was the manual way past a bed
+// the dispatcher kept refusing, and it is gone; automatic dispatch is now the
+// only road to a printer, so "retry for ever, instantly, silently" is no longer
+// a bad case somebody can click around.
+func (q *Queries) ReleaseBatchAfterFailedPrint(ctx context.Context, arg ReleaseBatchAfterFailedPrintParams) error {
+	_, err := q.db.Exec(ctx, releaseBatchAfterFailedPrint, arg.PrintError, arg.ID)
 	return err
 }
 
