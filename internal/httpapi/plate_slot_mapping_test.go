@@ -516,3 +516,148 @@ func TestARecognisedHexDoesNotNeedTheBedsColour(t *testing.T) {
 		t.Fatalf("a plate hex the map recognises was refused: %v", err)
 	}
 }
+
+// A colour sitting in the colour map is never "unmapped", however few hexes it
+// has and whatever the printers are reporting.
+//
+// Straight off the floor. WHITE was mapped to #FFFFFF - visible in Inventory,
+// correct, primary - and every locked bed still said "No spool has been
+// confirmed as #FFFFFF. Map it under Inventory." An operator looking at the row
+// they had already created, being told to create it.
+//
+// The cause was a count. acceptedHexes seeds itself with the plate's own hex,
+// so a confirmed colour whose only hex is that one still totals one, and the
+// old test read one as "nobody has named this". Most colours have exactly one
+// hex, so this misfired on most colours the moment no printer reported them -
+// which, with BambuBuddy unreachable, was all of them at once.
+func TestAConfirmedColourIsNotCalledUnmappedJustBecauseNobodyHoldsIt(t *testing.T) {
+	// Exactly what the shop's map holds: one name, one hex, nothing else.
+	white := []colourIdentity{{Name: "WHITE", Hexes: []string{"#FFFFFF"}}}
+
+	// A fleet reporting NOTHING is not covered here: bindPlateToTrays refuses
+	// that earlier with "holds 0 spools; this bed needs 1", which is its own
+	// clear sentence. These are the cases that reach the colour reasoning.
+	for _, c := range []struct {
+		name  string
+		trays []loadedTray
+	}{
+		// The printer holds something else entirely.
+		{"a printer holding another colour", []loadedTray{trayAt(0, 0, "#2850E0", "PLA")}},
+		// The case that actually bit: the white spool IS loaded, and reports a
+		// slightly different number. Only #FFFFFF is confirmed as WHITE, so the
+		// slot does not bind - but the colour is mapped, and saying otherwise
+		// hides the real fix, which is to add this hex as an alternative.
+		{"a white spool reporting its own near-miss hex",
+			[]loadedTray{trayAt(0, 0, "#F4F4F4", "PLA")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := bindPlateToTrays(
+				[]meshio.Slot{plateSlot("#FFFFFF", "PLA")}, c.trays, white, bedColours{})
+
+			var unserved slotUnservedError
+			if !errors.As(err, &unserved) {
+				t.Fatalf("err = %v, want a slot refusal", err)
+			}
+			if unserved.Reason == slotUnmapped {
+				t.Errorf("reason = %q for a colour the map confirms; this sends somebody "+
+					"to Inventory to add a row that is already there, and the real fix - "+
+					"load the spool, or reconnect the fleet - goes unsaid", unserved.Reason)
+			}
+			if unserved.Reason != slotNotLoaded {
+				t.Errorf("reason = %q, want %q", unserved.Reason, slotNotLoaded)
+			}
+		})
+	}
+}
+
+// The other half of the same rule: the built-in table naming a hex is NOT
+// confirmation, so that case must stay unmapped.
+//
+// A plate built before anybody mapped gold carries #D4AF37, which fallbackColours
+// produces for "gold" and no printer has ever reported. Something can put a word
+// to it, but nobody has confirmed a spool, and going to Inventory to say "our
+// gold is #D3C5A3" is exactly the fix. Widening the rule to "anything that can
+// name it" would have silenced this one.
+func TestTheBuiltInTableNamingAHexIsNotTheSameAsConfirmingIt(t *testing.T) {
+	_, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#D4AF37", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#D3C5A3", "PLA")},
+		nil, bedColours{},
+	)
+
+	var unserved slotUnservedError
+	if !errors.As(err, &unserved) {
+		t.Fatalf("err = %v, want a slot refusal", err)
+	}
+	if unserved.Reason != slotUnmapped {
+		t.Errorf("reason = %q, want %q; the built-in table knows the WORD gold, but "+
+			"nobody has said which spool is gold, and that is Inventory's job",
+			unserved.Reason, slotUnmapped)
+	}
+}
+
+// "Does not hold #FFFFFF" is true and useless when a white spool is loaded.
+//
+// The refusal an operator actually gets has to distinguish "no white in this
+// machine" from "white is in this machine and reports a number nobody has
+// confirmed". They look identical from the outside and need opposite actions:
+// go and load a spool, versus add one hex as an alternative under WHITE.
+func TestARefusalNamesTheNearMissSpoolSoTheFixIsObvious(t *testing.T) {
+	white := []colourIdentity{{Name: "WHITE", Hexes: []string{"#FFFFFF"}}}
+
+	_, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#FFFFFF", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#F4F4F4", "PLA")},
+		white, bedColours{},
+	)
+	var unserved slotUnservedError
+	if !errors.As(err, &unserved) {
+		t.Fatalf("err = %v, want a slot refusal", err)
+	}
+	if unserved.NearestHex != "#F4F4F4" {
+		t.Errorf("NearestHex = %q, want #F4F4F4 - the spool that is almost certainly "+
+			"the white this bed wants", unserved.NearestHex)
+	}
+	if !strings.Contains(unserved.Error(), "#F4F4F4") {
+		t.Errorf("message %q does not name the near miss, so the fix stays invisible",
+			unserved.Error())
+	}
+}
+
+// Bounded, or it becomes the near-enough matching that scraps planks.
+//
+// Red is not a near miss for white. Naming it would read as "these are probably
+// the same spool", which is the suggestion this hint exists to make - so it must
+// only appear when it is credible.
+func TestADistantColourIsNotOfferedAsANearMiss(t *testing.T) {
+	white := []colourIdentity{{Name: "WHITE", Hexes: []string{"#FFFFFF"}}}
+
+	_, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#FFFFFF", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#F72323", "PLA")},
+		white, bedColours{},
+	)
+	var unserved slotUnservedError
+	if !errors.As(err, &unserved) {
+		t.Fatalf("err = %v, want a slot refusal", err)
+	}
+	if unserved.NearestHex != "" {
+		t.Errorf("NearestHex = %q; red is not a near miss for white, and saying so "+
+			"invites binding two colours that are genuinely different", unserved.NearestHex)
+	}
+}
+
+// The hint changes the WORDING, never the decision. A near miss is still
+// refused: it is a suggestion for a person, not a licence to bind.
+func TestANearMissIsStillRefused(t *testing.T) {
+	white := []colourIdentity{{Name: "WHITE", Hexes: []string{"#FFFFFF"}}}
+
+	if _, err := bindPlateToTrays(
+		[]meshio.Slot{plateSlot("#FFFFFF", "PLA")},
+		[]loadedTray{trayAt(0, 0, "#F4F4F4", "PLA")},
+		white, bedColours{},
+	); err == nil {
+		t.Fatal("bound a slot to a spool nothing confirms as its colour; a near-enough " +
+			"colour is a scrapped plank, and the hint must not have widened the gate")
+	}
+}

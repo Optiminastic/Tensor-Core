@@ -375,6 +375,15 @@ type slotUnservedError struct {
 	Material     string
 	TrayMaterial string
 	Reason       string
+	// NearestHex is the closest colour this printer actually reports, when the
+	// bed's own hex is not among them and something close is.
+	//
+	// It exists because the commonest cause of a bed that will not bind is not
+	// a missing spool but a spool reporting a number nobody confirmed: WHITE is
+	// mapped to #FFFFFF, the printers' white reports #F4F4F4, and "does not
+	// hold #FFFFFF" is then true, useless, and indistinguishable from an empty
+	// slot. Naming the near miss turns it into the one-click fix it is.
+	NearestHex string
 }
 
 func (e slotUnservedError) Error() string {
@@ -386,8 +395,41 @@ func (e slotUnservedError) Error() string {
 	case slotTrayTaken:
 		return fmt.Sprintf("has only one spool of %s, and this bed needs two slots of it", e.Hex)
 	default:
+		if e.NearestHex != "" {
+			return fmt.Sprintf(
+				"does not hold %s; its closest spool is %s, which nothing confirms as this colour",
+				e.Hex, e.NearestHex)
+		}
 		return fmt.Sprintf("does not hold %s", e.Hex)
 	}
+}
+
+// nearestUnacceptedHex is the closest colour this printer reports that does NOT
+// already count as the wanted one.
+//
+// Bounded, because "closest" over a whole fleet is always SOMETHING and a red
+// spool is not a near miss for white. The threshold is deliberately tight: this
+// is a hint that two numbers are probably the same physical spool, and a loose
+// one would invite exactly the near-enough colour matching that scraps planks.
+// Rejected candidates stay rejected either way - this only changes the wording.
+func nearestUnacceptedHex(wanted string, trays []loadedTray, accepted map[string]bool) string {
+	const maxSquaredDistance = 1200 // about 20 per channel
+
+	best, bestAt := "", 0
+	for _, t := range trays {
+		hex, ok := normaliseHex(t.Colour)
+		if !ok || accepted[hex] {
+			continue
+		}
+		d, measurable := nearestColourDistance(wanted, []string{hex})
+		if !measurable || d > maxSquaredDistance {
+			continue
+		}
+		if best == "" || d < bestAt {
+			best, bestAt = hex, d
+		}
+	}
+	return best
 }
 
 // unservedSlotError works out which of the four refusals applies.
@@ -424,15 +466,55 @@ func unservedSlotError(
 	switch {
 	case wrongMaterial:
 		out.Reason = slotWrongMaterial
-	case len(accepted) == 1 && !anyTrayHolds(wanted, trays):
-		// Only the plate's own hex counts as this colour - no colour-map row
-		// names it - and no printer reports that hex either. Nothing in the
-		// system knows what this colour is.
+	case !confirmedByMap(wanted, identities, bed) && !anyTrayHolds(wanted, trays):
+		// NOBODY HAS CONFIRMED A SPOOL for this colour - no colour-map row
+		// names this hex or any name it could go by - and no printer reports
+		// it either. That is an unmapped colour, and Inventory is the fix.
+		//
+		// This used to test len(accepted) == 1, which is a different question.
+		// acceptedHexes seeds itself with the plate's own hex, so a colour that
+		// IS confirmed but happens to have exactly one hex also comes to one -
+		// and most colours have exactly one. WHITE is mapped to #FFFFFF and
+		// nothing else, so every bed whose white body no printer reported was
+		// told "no spool has been confirmed as #FFFFFF. Map it under Inventory"
+		// about a row sitting in the colour map, correct, as the operator could
+		// plainly see.
+		//
+		// The two situations need opposite actions. "Nobody has said what this
+		// colour is" is a colour-map job. "We know exactly what it is and no
+		// printer is holding it" is a spool to load, or a fleet to reconnect.
 		out.Reason = slotUnmapped
 	default:
 		out.Reason = slotNotLoaded
+		out.NearestHex = nearestUnacceptedHex(wanted, trays, accepted)
 	}
 	return out
+}
+
+// confirmedByMap reports whether the shop has confirmed a spool for this
+// colour - not merely whether something can put a word to the hex.
+//
+// The difference decides which of two opposite instructions an operator gets,
+// so it is worth being exact about. coloursMeaning answers "what could this hex
+// be called", and it answers generously on purpose: it reads the BUILT-IN table
+// as well as the colour map, so a plate carrying #D4AF37 is understood to mean
+// gold even though that number came from a lookup table and no printer has ever
+// reported it. Generous is right for binding and wrong for blame.
+//
+// So this asks the narrower question: of the names this hex could go by, has
+// anybody actually confirmed a spool under one of them? A hex the built-in
+// table names and the colour map does not is still unmapped - that is exactly
+// the "GOLD means #D4AF37 and the real spools are #D3C5A3" case, where going to
+// Inventory IS the fix.
+func confirmedByMap(wanted string, identities []colourIdentity, bed bedColours) bool {
+	for _, name := range coloursMeaning(wanted, identities, bed) {
+		for _, id := range identities {
+			if id.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func anyTrayHolds(hex string, trays []loadedTray) bool {
