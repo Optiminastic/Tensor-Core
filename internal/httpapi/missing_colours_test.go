@@ -9,10 +9,36 @@ package httpapi
 // pessimistic than the floor about the same machine.
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 )
+
+// machineReporting builds a machine whose mirror reports these tray colours.
+//
+// Distinct from machineHolding, which takes raw JSON: these cases care only
+// about which colours a printer reports, not about tray positions.
+//
+// No arguments means a machine reporting NOTHING - which is what every machine
+// looks like once the fleet sync stops refreshing machines.filaments, and is a
+// different thing from a machine whose spools are empty.
+func machineReporting(hexes ...string) gen.Machine {
+	trays := make([]map[string]any, 0, len(hexes))
+	for i, hex := range hexes {
+		ams, tray := 0, i
+		trays = append(trays, map[string]any{
+			"colour": hex, "type": "PLA", "ams_id": ams, "tray_id": tray,
+		})
+	}
+	raw, err := json.Marshal(trays)
+	if err != nil {
+		panic(err)
+	}
+	return gen.Machine{Filaments: raw}
+}
 
 // goldIdentity is the shop's real situation: one colour, two spools, two hexes.
 //
@@ -107,11 +133,11 @@ func TestLoadedHexesAreNormalisedBeforeComparing(t *testing.T) {
 // each machine's refusal and the order's own word for it is on the bed, so the
 // note can say both.
 func TestTheRefusalNamesTheSpoolNobodyHasConfirmed(t *testing.T) {
-	gold := bedColours{Names: []string{"GOLD"}}
+	gold := []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}}
 	refused := []machineOption{
-		{Refusal: "no spool has been confirmed as #D3C5A3"},
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as #D3C5A3"},
 		// A second printer refusing for the same reason must not say it twice.
-		{Refusal: "no spool has been confirmed as #D3C5A3"},
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as #D3C5A3"},
 	}
 
 	note := noPrinterNote(refused, gold)
@@ -123,31 +149,48 @@ func TestTheRefusalNamesTheSpoolNobodyHasConfirmed(t *testing.T) {
 	if strings.Count(note, "#D3C5A3") != 1 {
 		t.Errorf("note = %q repeats the hex; every printer refuses for the same spool", note)
 	}
-	// The instruction to press a button that no longer exists must stay gone.
 	if strings.Contains(strings.ToLower(note), "queue this bed") {
 		t.Errorf("note = %q names a button that was deleted", note)
 	}
 }
 
-// Two colours on a bed means no name can be attached to a hex safely.
+// The bug this shipped with, caught on the floor.
 //
-// The bed knows it needs GOLD and RED; the refusal knows one hex is missing.
-// Pairing them is a coin flip, and guessing wrong sends somebody to rename the
-// spool that was already correct. The hex alone is still actionable.
-func TestAMultiColourBedNamesTheHexWithoutGuessingTheColour(t *testing.T) {
-	twoColours := bedColours{Names: []string{"GOLD", "RED"}}
+// A plank is a WHITE body plus a lettering colour, so the plate has two slots
+// while the bed names one colour - bedColours omits the body deliberately,
+// because white matches itself. A machine that could not bind the body refused
+// with "confirmed as #FFFFFF", the first version counted one lettering colour
+// and concluded that hex must be it, and the note read "#FFFFFF (GOLD)".
+//
+// White is not gold. It sent an operator to rename a gold spool over a white
+// slot. The name is now matched by hex, so a hex no bed colour claims keeps the
+// bare number.
+func TestTheWhiteBodySlotIsNeverNamedAfterTheLetteringColour(t *testing.T) {
+	gold := []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}}
 	note := noPrinterNote([]machineOption{
-		{Refusal: "no spool has been confirmed as #D3C5A3"},
-	}, twoColours)
+		{Machine: machineReporting("#D3C5A3"), Refusal: "no spool has been confirmed as #FFFFFF"},
+	}, gold)
 
-	if !strings.Contains(note, "#D3C5A3") {
-		t.Errorf("note = %q, want the hex", note)
+	if !strings.Contains(note, "#FFFFFF") {
+		t.Errorf("note = %q, want the hex that is actually missing", note)
 	}
-	for _, guess := range []string{"GOLD", "RED"} {
-		if strings.Contains(note, guess) {
-			t.Errorf("note = %q guesses %q; with two colours on the bed there is no way "+
-				"to tell which one this hex is, and the wrong guess renames a good spool",
-				note, guess)
+	if strings.Contains(note, "GOLD") {
+		t.Errorf("note = %q calls #FFFFFF gold; it is the white plank body, and this "+
+			"sends somebody to rename a spool that was never the problem", note)
+	}
+}
+
+// Two colours missing: each is named from its own hex, not by position.
+func TestEachMissingHexIsNamedFromItsOwnColour(t *testing.T) {
+	colours := []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}, {Name: "RED", Hex: "#F72323"}}
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as #D3C5A3"},
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as #F72323"},
+	}, colours)
+
+	for _, want := range []string{"#D3C5A3 (GOLD)", "#F72323 (RED)"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note = %q, want it to contain %q", note, want)
 		}
 	}
 }
@@ -155,9 +198,50 @@ func TestAMultiColourBedNamesTheHexWithoutGuessingTheColour(t *testing.T) {
 // Falls back rather than inventing. A refusal carrying no hex still produces
 // the old sentence - vague, but never wrong.
 func TestTheRefusalFallsBackWhenNoHexIsAvailable(t *testing.T) {
-	note := noPrinterNote([]machineOption{{Refusal: "no spool has been confirmed as banana"}},
-		bedColours{Names: []string{"GOLD"}})
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as banana"},
+	}, []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}})
 	if !strings.Contains(note, "one of this bed's colours") {
 		t.Errorf("note = %q, want the generic fallback for an unreadable hex", note)
+	}
+}
+
+// A fleet Tensor cannot read is not a fleet that needs mapping.
+//
+// Every branch below the first assumes machines.filaments reflects the floor.
+// When BambuBuddy goes unreachable the sync stops refreshing it, every slot
+// binds against zero trays, and every bed reads "no spool has been confirmed as
+// ..." - so two beds asked an operator to go and confirm #FFFFFF, white, the
+// plank body, loaded in most of the fleet. The spools were fine. Saying
+// "Inventory" there costs somebody half an hour looking for a problem that is
+// not in the colour map.
+func TestAFleetWithNoReadableTraysBlamesTheConnectionNotTheColourMap(t *testing.T) {
+	blind := []machineOption{
+		{Machine: machineReporting(), Refusal: "no spool has been confirmed as #FFFFFF"},
+		{Machine: machineReporting(), Refusal: "no spool has been confirmed as #FFFFFF"},
+	}
+	note := noPrinterNote(blind, []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}})
+
+	if !strings.Contains(note, "BambuBuddy") {
+		t.Errorf("note = %q, want it to name the unreachable service", note)
+	}
+	if strings.Contains(note, "Inventory") {
+		t.Errorf("note = %q sends somebody to map a colour, but Tensor cannot see any "+
+			"printer - nothing it maps there can change the answer", note)
+	}
+}
+
+// One readable tray anywhere means the fleet IS being read, and a genuine
+// colour problem must still be reported as one. A single printer offline is
+// ordinary; the ranking already accounts for it.
+func TestOneReadableTrayIsEnoughToTrustTheFleet(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting(), Refusal: "no spool has been confirmed as #D3C5A3"},
+		{Machine: machineReporting("#2850E0"), Refusal: "no spool has been confirmed as #D3C5A3"},
+	}, []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}})
+
+	if !strings.Contains(note, "Inventory") {
+		t.Errorf("note = %q; one printer reporting trays means the mirror is live, so an "+
+			"unmapped colour is a real unmapped colour", note)
 	}
 }

@@ -130,7 +130,8 @@ func (s *Server) bedHasFreePrinter(
 		return uuid.Nil, false, "the bed's jobs could not be read"
 	}
 
-	bed := bedColoursOf(s.queueColoursFor(ctx, jobs))
+	colours := s.queueColoursFor(ctx, jobs)
+	bed := bedColoursOf(colours)
 	family := deref(b.MachineFamily)
 	plate := plateSlotsOf(slots)
 
@@ -150,5 +151,5 @@ func (s *Server) bedHasFreePrinter(
 	if best := chooseMachine(options); best >= 0 {
 		return options[best].Machine.ID, true, ""
 	}
-	return uuid.Nil, false, noPrinterNote(options, bed)
+	return uuid.Nil, false, noPrinterNote(options, colours)
 }

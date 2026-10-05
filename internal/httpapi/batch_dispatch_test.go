@@ -222,10 +222,10 @@ func TestABedWaitingOnASpoolIsNotHeldByTheCooldown(t *testing.T) {
 func TestTheNoteBlamesTheClassWhenAPrinterHoldsTheColours(t *testing.T) {
 	note := noPrinterNote([]machineOption{
 		// A P2S that holds the colours but cannot take an A2L plate.
-		{Refusal: "this bed is laid out for a A2L", HoldsColours: true},
+		{Machine: machineReporting("#F72323"), Refusal: "this bed is laid out for a A2L", HoldsColours: true},
 		// And an A2L whose spool is simply not mapped.
-		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
-	}, bedColours{})
+		{Machine: machineReporting("#2850E0"), Refusal: "no tray is confirmed as RED", HoldsColours: false},
+	}, nil)
 	if !strings.Contains(note, "too small") {
 		t.Errorf("note = %q; it should name the size, not send somebody to Inventory", note)
 	}
@@ -247,7 +247,7 @@ func TestNoRefusalSendsSomebodyToAButtonThatIsGone(t *testing.T) {
 		{{Refusal: "this bed is laid out for a A2L", HoldsColours: true}},
 		{},
 	} {
-		note := noPrinterNote(opts, bedColours{Names: []string{"GOLD"}})
+		note := noPrinterNote(opts, []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}})
 		for _, gone := range []string{"queue this bed", "press Queue", "then queue"} {
 			if strings.Contains(strings.ToLower(note), strings.ToLower(gone)) {
 				t.Errorf("note = %q names %q; the Queue button was deleted, and the bed "+
@@ -257,7 +257,9 @@ func TestNoRefusalSendsSomebodyToAButtonThatIsGone(t *testing.T) {
 	}
 
 	// And the one that has a real fix still names it.
-	note := noPrinterNote([]machineOption{{Refusal: "no tray is confirmed as RED"}}, bedColours{})
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#2850E0"), Refusal: "no tray is confirmed as RED"},
+	}, nil)
 	if !strings.Contains(note, "Inventory") {
 		t.Errorf("note = %q; an unmapped colour must still send somebody to Inventory", note)
 	}
@@ -269,7 +271,7 @@ func TestTheNoteStillBlamesColourWhenTheWrongClassCouldNotHavePrintedItEither(t 
 	note := noPrinterNote([]machineOption{
 		{Refusal: "this bed is laid out for a A2L", HoldsColours: false},
 		{Refusal: "no tray is confirmed as RED", HoldsColours: false},
-	}, bedColours{})
+	}, nil)
 	if strings.Contains(note, "too small") {
 		t.Errorf("note = %q; the class is not the reason when that printer lacked the colour too", note)
 	}

@@ -200,9 +200,9 @@ func (s *Server) chooseTargetFor(ctx context.Context, batch gen.Batch) (queueTar
 		return queueTarget{}, statusErr(http.StatusInternalServerError,
 			"Could not read the batch's jobs.")
 	}
-	bed := bedColoursOf(s.queueColoursFor(ctx, jobs))
+	colours := s.queueColoursFor(ctx, jobs)
 	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(slots),
-		bed, deref(batch.MachineFamily))
+		bedColoursOf(colours), deref(batch.MachineFamily))
 	if err != nil {
 		return queueTarget{}, statusErr(http.StatusBadGateway, "Could not read the fleet.")
 	}
@@ -211,7 +211,7 @@ func (s *Server) chooseTargetFor(ctx context.Context, batch gen.Batch) (queueTar
 		// print its colours is the failure this whole path exists to prevent,
 		// so the answer names what is missing instead.
 		return queueTarget{}, statusErrf(
-			http.StatusConflict, noPrinterNote(options, bed), errNoPrinter)
+			http.StatusConflict, noPrinterNote(options, colours), errNoPrinter)
 	}
 	obs.FromContext(ctx).Info("chose a printer for a bed",
 		"batch", batch.BatchNumber, "printer", plan.Machine.Name, "why", plan.Reason)

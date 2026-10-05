@@ -271,7 +271,7 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	case len(out.Slots) == 0:
 		out.Note = "This bed's plate declares no filament. Rebuild the bed before sending it."
 	case eligible == 0:
-		out.Note = noPrinterNote(options, bed)
+		out.Note = noPrinterNote(options, out.Colours)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -294,7 +294,7 @@ func plateSlotsOf(slots []queueSlot) []meshio.Slot {
 // "No printer can take this bed" is true and useless. The causes need different
 // people to do different things - map a colour, load a spool, or simply wait -
 // so the note names whichever one accounts for the fleet.
-func noPrinterNote(options []machineOption, bed bedColours) string {
+func noPrinterNote(options []machineOption, colours []queueColour) string {
 	var unmapped, loadable, wrongClassWithColours int
 	for _, o := range options {
 		switch {
@@ -312,6 +312,24 @@ func noPrinterNote(options []machineOption, bed bedColours) string {
 		}
 	}
 	switch {
+	// Said FIRST, ahead of everything, when NO printer reported a single tray.
+	//
+	// Every other branch below assumes Tensor can see what the fleet is
+	// holding. When the fleet mirror is empty that assumption is false, and
+	// each branch then draws the wrong conclusion from it: a slot binds
+	// against zero trays, so anyTrayHolds is false for every colour, so every
+	// bed reads as "no spool has been confirmed as ..." and sends somebody to
+	// Inventory to map a colour that is very probably already mapped.
+	//
+	// It happened exactly that way: BambuBuddy went unreachable, the fleet
+	// sync stopped refreshing machines.filaments, and two beds asked an
+	// operator to go and confirm #FFFFFF - white, the plank body, loaded in
+	// most of the fleet. The spools were fine. Tensor simply could not see
+	// them, and said the one thing guaranteed to waste the next half hour.
+	case len(options) > 0 && !anyMachineReportsTrays(options):
+		return "Tensor cannot read what any printer is holding, so it will not " +
+			"send a bed it cannot bind. Check that BambuBuddy is reachable; " +
+			"nothing needs mapping until it is."
 	// Said FIRST, ahead of the colour reasons, when a printer holding this
 	// bed's colours was refused for its size. That is the whole story for the
 	// bed even if other printers also lack the colour: mapping a swatch or
@@ -336,7 +354,7 @@ func noPrinterNote(options []machineOption, bed bedColours) string {
 		// an exercise, on a page listing every colour in the building. The hex
 		// is already in each refusal and the order's own word for it is in the
 		// bed, so both are named here.
-		return "No spool has been confirmed as " + describeMissing(options, bed) + ". " +
+		return "No spool has been confirmed as " + describeMissing(options, colours) + ". " +
 			"Map it under Inventory and this bed goes on its own."
 	case loadable > 0:
 		return "No printer has this bed's colours loaded. Load a spool, or wait for one to free up."
@@ -523,6 +541,20 @@ func missingColours(
 	return missing
 }
 
+// anyMachineReportsTrays says whether Tensor can see the fleet at all.
+//
+// One tray anywhere is enough: a single printer being offline is ordinary and
+// the ranking already accounts for it. Zero trays across every machine is not a
+// fleet with no filament in it, it is a fleet Tensor is not reading.
+func anyMachineReportsTrays(options []machineOption) bool {
+	for _, o := range options {
+		if len(loadedColours(o.Machine)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // describeMissing names the colour nobody has confirmed, as precisely as the
 // evidence allows.
 //
@@ -530,13 +562,22 @@ func missingColours(
 //
 //   - "#D3C5A3 (GOLD)" - the hex a printer would have to report, and the word
 //     the order used. Everything somebody needs to find the spool and name it.
-//   - "#D3C5A3" - the hex alone, when the bed's colours cannot be read.
+//   - "#D3C5A3" - the hex alone, when no bed colour resolves to it.
 //   - "one of this bed's colours" - the old sentence, when even the refusals
 //     carry no hex. Vague, but never wrong.
 //
 // The hexes come from the refusals themselves, which already end "confirmed as
 // #RRGGBB", so there is no second source to disagree with the first.
-func describeMissing(options []machineOption, bed bedColours) string {
+//
+// A name is attached only when that colour's OWN hex is the missing one. The
+// first version counted instead - one lettering colour on the bed meant the one
+// missing hex must be it - and that was wrong on the commonest bed there is. A
+// plank is a white body plus a lettering colour, so a plate has two slots while
+// the bed names one colour (bedColours omits the body, deliberately, because
+// white matches itself). A machine that could not bind the BODY produced "no
+// spool has been confirmed as #FFFFFF", the count said one, and the note read
+// "#FFFFFF (GOLD)" - sending somebody to rename a gold spool over a white slot.
+func describeMissing(options []machineOption, colours []queueColour) string {
 	seen := map[string]bool{}
 	var hexes []string
 	for _, o := range options {
@@ -555,15 +596,25 @@ func describeMissing(options []machineOption, bed bedColours) string {
 		return "one of this bed's colours"
 	}
 	sort.Strings(hexes) // stable wording, so the note does not churn between passes
-	joined := strings.Join(hexes, " or ")
 
-	// Named only when the bed asks for ONE colour. With two there is no way to
-	// tell which name belongs to which hex, and pairing them the wrong way
-	// round would send somebody to rename the spool that was already right.
-	if len(bed.Names) == 1 {
-		return joined + " (" + bed.Names[0] + ")"
+	// Matched by hex, never by position or count. A colour whose own hex is
+	// missing is named; anything else - above all the white body, which is a
+	// plate slot and not a bed colour - keeps the bare hex.
+	nameOf := make(map[string]string, len(colours))
+	for _, c := range colours {
+		if hex, ok := normaliseHex(c.Hex); ok && c.Name != "" {
+			nameOf[hex] = c.Name
+		}
 	}
-	return joined
+	described := make([]string, 0, len(hexes))
+	for _, hex := range hexes {
+		if name, ok := nameOf[hex]; ok {
+			described = append(described, hex+" ("+name+")")
+			continue
+		}
+		described = append(described, hex)
+	}
+	return strings.Join(described, " or ")
 }
 
 // nearestColourDistance is how far the closest loaded spool is from want, as a
