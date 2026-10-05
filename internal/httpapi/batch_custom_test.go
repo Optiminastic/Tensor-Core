@@ -164,11 +164,15 @@ func TestCompatibilityKeyStringSeparatesWhatCannotShareABed(t *testing.T) {
 		t.Error("BLUE and GOLD produced the same key, so the dialog would offer a plate that cannot print")
 	}
 
+	// The material does NOT separate them any more. One colour is one bed,
+	// and which filament the plate is actually stamped with is resolved by
+	// batchMaterialFromRows, which takes the material most of the plate is and
+	// logs the disagreement.
 	petg := batchableJobRow("JOB-4", `["BLUE"]`)
 	material := "PETG"
 	petg.Material = &material
-	if compatibilityKeyString(blue) == compatibilityKeyString(petg) {
-		t.Error("PLA and PETG produced the same key")
+	if compatibilityKeyString(blue) != compatibilityKeyString(petg) {
+		t.Error("two BLUE planks were split by their material; the bed is the colour")
 	}
 }
 

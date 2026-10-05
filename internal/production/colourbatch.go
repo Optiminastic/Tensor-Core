@@ -230,24 +230,31 @@ func colourBedKey(j PlanJob) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	// Colour, material, machine class. NOT the SKU.
+	// THE COLOUR. That is the whole key.
 	//
-	// The SKU's slicer-pipeline token used to be part of this, and it split
-	// beds that the shop considers one job. DNP-GLD and DNPWL-GLD are the same
-	// Dual Name Plank in the same gold: the only difference is whether an LED
-	// base ships in the box, which colourFromVariant already discards as "a
-	// fulfilment extra, not something that changes which filament goes in the
-	// printer". Mapped to different pipelines, they produced different tokens
-	// and therefore two beds - one of one unit and one of two, neither of them
-	// reaching the floor of three, so neither ever locked and neither ever
-	// printed. Three gold planks sat waiting for a fourth that would have gone
-	// to a third bed.
+	// A bed is a filament load, and which printer loads it is decided later -
+	// at queue time, against the fleet as it actually is. Deciding it here,
+	// while planning, only ever split work that belonged together.
 	//
-	// What a plate physically needs is one filament load and one printer class,
-	// and that is what is left here. Which process a SKU slices with is settled
-	// where the plate is actually sliced - see mappedPipelineFor, which now
-	// resolves a bed whose SKUs disagree rather than refusing it.
-	return key + "|" + j.Material + "|" + j.MachineFamily, true
+	// Three things have come out of this key, each for the same reason:
+	//
+	//   The SKU's slicer-pipeline token. DNP-GLD and DNPWL-GLD are one gold
+	//   plank differing by whether an LED ships in the box, and they went to
+	//   two beds that each stalled under the three-unit floor.
+	//
+	//   The machine family. It is the design's printer profile, not a fact
+	//   about the plate - and BedFamilyForUnits already overrides it from the
+	//   unit count when the plate is packed, so keeping it here split beds on
+	//   a value the packer then ignored.
+	//
+	//   The material. The shop prints PLA, so this split nothing in practice.
+	//
+	// None of those constraints is gone; they have moved to where the plate is
+	// actually made, and each now RESOLVES a mixed bed rather than refusing or
+	// silently picking: mappedPipelineFor for the process, batchMachineFamily
+	// for the class, batchMaterialFromRows for the filament. All three choose
+	// by units and say so in the log.
+	return key, true
 }
 
 // NormalisedColourKey is the canonical form of a job's colour set: each colour

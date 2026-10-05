@@ -532,12 +532,7 @@ func (s *Server) approveBatch(c *gin.Context) {
 // same gold now share a bed, and which process the plate slices with is
 // settled at slice time by mappedPipelineFor.
 func compatibilityKeyOf(j gen.ProductionJob) production.CompatibilityKey {
-	return production.CompatibilityKey{
-		Material: deref(j.Material), Colour: jobColourKey(j),
-		NozzleLeft:  numAsString(j.LeftNozzleMm),
-		NozzleRight: numAsString(j.RightNozzleMm), QualityMM: numAsString(j.QualityMm),
-		MachineFamily: deref(j.MachineFamily),
-	}
+	return production.CompatibilityKey{Colour: jobColourKey(j)}
 }
 
 // jobColourKey is a job's canonical colour set.
@@ -586,22 +581,21 @@ func (s *Server) listCompatibleJobs(c *gin.Context) {
 			"This batch's jobs record no filament colour, so no job can be matched to it.")
 		return
 	}
-	rows, err := s.store.Q.ListUnassignedCompatibleJobs(ctx, gen.ListUnassignedCompatibleJobsParams{
-		Material: ref.Material, LeftNozzleMm: db.NumFloatPtr(ref.LeftNozzleMm),
-		RightNozzleMm: db.NumFloatPtr(ref.RightNozzleMm), QualityMm: db.NumFloatPtr(ref.QualityMm),
-		MachineFamily: ref.MachineFamily,
-	})
+	rows, err := s.store.Q.ListUnassignedCompatibleJobs(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list compatible jobs.")
 		return
 	}
 
-	// Colour is filtered here rather than in the SQL above. The predicate would
-	// be a second implementation of NormalisedColourKey in another language -
-	// and Go sorts by byte, Postgres by collation, so the two would disagree on
-	// non-ASCII names without an explicit COLLATE "C". The query has already
-	// narrowed this to jobs of one material, nozzle and family; filtering those
-	// in Go costs nothing and leaves one definition of colour compatibility.
+	// Colour is filtered here rather than in the SQL above, and it is now the
+	// only filter there is. The predicate would be a second implementation of
+	// NormalisedColourKey in another language - and Go sorts by byte where
+	// Postgres sorts by collation, so the two would disagree on non-ASCII
+	// names without an explicit COLLATE "C". One definition, in one place.
+	//
+	// The query used to narrow by material, nozzle, quality and machine family
+	// first. Those are gone: a bed is a colour, and the offer should hold every
+	// unassigned job that can share the filament load.
 	compatible := make([]gen.ProductionJob, 0, len(rows))
 	for _, r := range rows {
 		if compatibilityKeyOf(r) == key {

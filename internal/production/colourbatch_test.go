@@ -190,21 +190,40 @@ func TestGroupByColourRejectsAnOversizedUnit(t *testing.T) {
 	}
 }
 
-// Material and machine family are physical, not preferences: one plate is
-// sliced once with one filament and printed on one machine. A bed mixing them
-// describes a print that cannot happen - and one whose jobs disagree on family
-// is left permanently unassigned by batchMachineFamily, so no printer ever
-// picks it up.
-func TestGroupByColourStillSeparatesWhatCannotPhysicallyShareABed(t *testing.T) {
+// One colour is one bed, whatever else the jobs disagree about.
+//
+// This asserted the opposite until the shop stated the rule plainly: three
+// BLUE planks differing in material and machine class made three beds, none of
+// which reached the three-unit floor, so none of them printed. The printer is
+// chosen when the bed is queued - deciding it while planning only split work
+// that belonged together.
+//
+// The constraints have not vanished. batchMaterialFromRows and
+// batchMachineFamily resolve a mixed bed by units and log it; they are tested
+// where they live.
+func TestGroupByColourPutsOneColourOnOneBed(t *testing.T) {
 	pla := plankJob("pla", "BLUE")
 	petg := plankJob("petg", "BLUE")
 	petg.Material = "PETG"
 	other := plankJob("other", "BLUE")
 	other.MachineFamily = "P2S"
 
-	batches, _ := GroupByColour([]PlanJob{pla, petg, other}, MaxColourBatchUnits, DefaultBedNester)
-	if len(batches) != 3 {
-		t.Fatalf("got %d beds, want 3 - same colour, but different material and family", len(batches))
+	batches, unb := GroupByColour([]PlanJob{pla, petg, other}, MaxColourBatchUnits, DefaultBedNester)
+	if len(unb) != 0 {
+		t.Fatalf("unbatchable = %v, want none", unb)
+	}
+	if len(batches) != 1 {
+		t.Fatalf("got %d beds for three BLUE planks, want 1", len(batches))
+	}
+	if got := batches[0].UnitsPerBed; got != 3 {
+		t.Errorf("units = %d, want 3 - all three belong to the one blue bed", got)
+	}
+
+	// And a different colour still opens its own bed.
+	withRed := append([]PlanJob{pla, petg, other}, plankJob("red", "RED"))
+	batches, _ = GroupByColour(withRed, MaxColourBatchUnits, DefaultBedNester)
+	if len(batches) != 2 {
+		t.Fatalf("got %d beds for BLUE+RED, want 2", len(batches))
 	}
 }
 

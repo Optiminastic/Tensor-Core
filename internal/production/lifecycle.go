@@ -140,40 +140,27 @@ var machineStatuses = set(MachineOnline, MachineBusy, MachineOffline, MachineMai
 // on them. A plain comparable struct - build one from a job's already-loaded
 // fields and compare with ==.
 type CompatibilityKey struct {
-	Material string
-	// Colour is NormalisedColourKey of the job's colour set.
+	// Colour, and nothing else.
 	//
-	// It is here for the same reason Material is, and NOT as one of the packing
-	// heuristics the comment above deliberately excludes: one plate is sliced
-	// once against one filament load, so a bed mixing colours describes a print
-	// that cannot happen. Without it this key offered - and accepted - a RED
-	// plank onto a BLUE bed, which the planner's own colourBedKey has always
-	// refused. Both now read the same NormalisedColourKey, so they cannot
-	// disagree about which jobs may share a plate.
+	// NormalisedColourKey of the job's colour set, so "SKY BLUE" and "BLUE"
+	// are one key and a RED plank is still refused onto a BLUE bed. A plate is
+	// one filament load; that is the rule, and it is the only one left here.
 	//
-	// Note for the non-default BATCH_STRATEGY=planner: that optimiser allows up
-	// to maxGroupColours colours on one bed, so this is stricter than it needs
-	// to be there and would refuse a legitimate second colour. Accepted
-	// deliberately - the failure modes are not symmetric. Refusing one costs an
-	// extra bed; accepting one costs a ruined plate and a reprint.
-	Colour        string
-	NozzleLeft    string
-	NozzleRight   string
-	QualityMM     string
-	MachineFamily string
-	// There is deliberately no SlicingKey here any more.
+	// Material, MachineFamily, NozzleLeft, NozzleRight, QualityMM and
+	// SlicingKey have all been removed, in that order of discovery, for one
+	// reason: each made something OTHER than the colour decide what may share
+	// a bed, and each of them split work the shop considers one job. The SKU
+	// sent two gold Dual Name Planks to separate beds that both stalled under
+	// the three-unit floor. The machine family is the design's printer
+	// profile, which BedFamilyForUnits overrides from the unit count anyway.
 	//
-	// It held the SKU's slicer-pipeline token, on the reasoning that a plate is
-	// sliced once with one process preset, so two SKUs that print with
-	// different settings describe a plate that cannot be made. True, but it
-	// made the SKU decide what shares a bed - and the shop batches by COLOUR.
-	// Two gold Dual Name Planks that differ only by whether an LED ships in the
-	// box went to separate beds, and neither reached the three-unit floor.
-	//
-	// The constraint it protected is real and still enforced, just later and by
-	// the code that can actually see the plate: mappedPipelineFor resolves a
-	// bed whose SKUs map to different pipelines, slicing the whole plate with
-	// the one most of its units ask for and saying so on the bed.
+	// None of the constraints is gone. They are enforced where the plate is
+	// actually made, and each resolves a mixed bed by units rather than
+	// refusing it or silently picking - see mappedPipelineFor,
+	// batchMachineFamily and batchMaterialFromRows. Enforcing them HERE meant
+	// refusing a bed before anyone could see it; enforcing them there means
+	// one plate is sliced one way and the log says which.
+	Colour string
 }
 
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.

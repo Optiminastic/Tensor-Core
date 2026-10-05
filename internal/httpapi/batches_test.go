@@ -603,10 +603,10 @@ func TestIntegrationHeldJobsNeverReachBatching(t *testing.T) {
 	})
 
 	t.Run("ListUnassignedCompatibleJobs", func(t *testing.T) {
-		material, nozzle, family := "PLA Basics", 0.4, "H2C"
-		rows, err := store.Q.ListUnassignedCompatibleJobs(ctx, gen.ListUnassignedCompatibleJobsParams{
-			Material: &material, LeftNozzleMm: &nozzle, MachineFamily: &family,
-		})
+		// No narrowing arguments any more: a bed is a colour, so the query
+		// offers every unassigned, batchable job and the caller filters by
+		// colour in Go. What it must STILL exclude is a held job.
+		rows, err := store.Q.ListUnassignedCompatibleJobs(ctx)
 		if err != nil {
 			t.Fatalf("ListUnassignedCompatibleJobs: %v", err)
 		}
@@ -642,7 +642,10 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 	compatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J2", jobConfig{
 		material: "PLA", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
-	incompatible := seedConfiguredJob(t, store, "BATCH-ADD-1-J3", jobConfig{
+	// Same colour, different material. This USED to be incompatible; a bed is
+	// the colour now, and batchMaterialFromRows settles which filament the
+	// plate is stamped with.
+	otherMaterial := seedConfiguredJob(t, store, "BATCH-ADD-1-J3", jobConfig{
 		material: "PETG", colour: "BLUE", leftNozzleMm: 0.4, machineFamily: "H2C", printFileID: &fileID,
 	})
 	// Same machine configuration, different filament. Before colour joined the
@@ -662,21 +665,33 @@ func TestIntegrationBatchCompatibleJobsAndAdd(t *testing.T) {
 
 	manage := minter.mint(t, []string{"batch:manage", "batch:read"})
 
-	// Only the compatible, unassigned job is offered.
+	// Every unassigned BLUE job is offered, whatever else differs about it.
 	rr := doJSON(router, http.MethodGet, "/batches/"+b.ID.String()+"/compatible-jobs", manage, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("compatible-jobs = %d body=%s", rr.Code, rr.Body.String())
 	}
 	var jobs []jobView
 	_ = json.Unmarshal(rr.Body.Bytes(), &jobs)
-	if len(jobs) != 1 || jobs[0].ID != compatible.String() {
-		t.Fatalf("compatible-jobs = %+v, want only %s", jobs, compatible)
+	offered := map[string]bool{}
+	for _, j := range jobs {
+		offered[j.ID] = true
+	}
+	if !offered[compatible.String()] || !offered[otherMaterial.String()] {
+		t.Fatalf("compatible-jobs = %+v, want both BLUE jobs (%s, %s)", jobs, compatible, otherMaterial)
+	}
+	if offered[wrongColour.String()] {
+		t.Error("a RED plank was offered for a BLUE bed")
+	}
+	if offered[alreadyAssigned.String()] {
+		t.Error("a job already on another bed was offered")
 	}
 
-	// Rejects an incompatible job.
+	// A different material no longer blocks the add: 503 here is this file's
+	// "the rule let it through, and then there was no object storage to build
+	// the plate with", the same idiom the capacity tests use.
 	if rr := doJSON(router, http.MethodPost, "/batches/"+b.ID.String()+"/jobs", manage,
-		map[string]any{"job_ids": []string{incompatible.String()}}); rr.Code != http.StatusUnprocessableEntity {
-		t.Errorf("add incompatible = %d, want 422", rr.Code)
+		map[string]any{"job_ids": []string{otherMaterial.String()}}); rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("add another material = %d, want 503 (accepted by the rule, refused for storage)", rr.Code)
 	}
 	// Rejects a job whose only difference is its filament colour. One plate is
 	// sliced once against one filament load, so this is as physical a mismatch

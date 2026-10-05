@@ -65,9 +65,8 @@ func TestColourBedKeyIsBuiltFromTheNormalisedColourKey(t *testing.T) {
 	if ka != kb {
 		t.Errorf("bed keys differ for the same colour set: %q vs %q", ka, kb)
 	}
-	if want := NormalisedColourKey(a.Colours) + "|PLA|A2L"; ka != want {
-		t.Errorf("bed key = %q, want %q - the normalised colour set, the material "+
-			"and the machine class, and nothing else", ka, want)
+	if want := NormalisedColourKey(a.Colours); ka != want {
+		t.Errorf("bed key = %q, want %q - the normalised colour set, and nothing else", ka, want)
 	}
 }
 
@@ -98,21 +97,29 @@ func TestTheSKUDoesNotDecideWhatSharesABed(t *testing.T) {
 		t.Errorf("two gold planks got different beds: %q vs %q", kp, kl)
 	}
 
-	// What still separates beds is what a plate physically cannot mix.
+	// Neither does the material or the machine class. The shop batches by
+	// colour and chooses the printer afterwards, at queue time, against the
+	// fleet as it actually is.
 	for _, c := range []struct {
 		name string
 		job  PlanJob
 	}{
-		{"a different colour", PlanJob{Colours: []string{"RED"}, Material: "PLA", MachineFamily: "H2C"}},
 		{"a different material", PlanJob{Colours: []string{"GOLD"}, Material: "PETG", MachineFamily: "H2C"}},
 		{"a different machine class", PlanJob{Colours: []string{"GOLD"}, Material: "PLA", MachineFamily: "P2S"}},
+		{"no material or class at all", PlanJob{Colours: []string{"GOLD"}}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(c.name+" still shares the bed", func(t *testing.T) {
 			k, _ := colourBedKey(c.job)
-			if k == kp {
-				t.Errorf("%s shared a bed with the gold plank: %q", c.name, k)
+			if k != kp {
+				t.Errorf("%s was split from the gold plank: %q vs %q", c.name, k, kp)
 			}
 		})
+	}
+
+	// The colour is the one thing that still separates beds, because a plate
+	// is one filament load.
+	if k, _ := colourBedKey(PlanJob{Colours: []string{"RED"}, Material: "PLA", MachineFamily: "H2C"}); k == kp {
+		t.Error("a RED plank shared a bed with a GOLD one")
 	}
 }
 

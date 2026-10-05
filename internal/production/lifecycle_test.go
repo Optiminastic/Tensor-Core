@@ -95,39 +95,41 @@ func TestAllowedPatchFieldsByRole(t *testing.T) {
 }
 
 func TestCompatibilityKeyEquality(t *testing.T) {
-	base := CompatibilityKey{
-		Material: "PLA", Colour: "BLUE",
-		NozzleLeft: "0.4", NozzleRight: "", QualityMM: "0.2", MachineFamily: "H2C",
-	}
-	same := base
-	if same != base {
+	// The key is the colour, and only the colour. Material, machine family,
+	// nozzle and quality were all removed because each made something other
+	// than the colour decide what may share a bed - and each split work this
+	// shop considers one job. The constraints they stood for are enforced
+	// where the plate is made, by resolvers that pick by units and log the
+	// disagreement, rather than by refusing a bed nobody has seen yet.
+	base := CompatibilityKey{Colour: "BLUE"}
+	if same := base; same != base {
 		t.Error("identical keys should be equal")
 	}
 
-	tests := []struct {
-		name  string
-		other CompatibilityKey
-	}{
-		{"different material", CompatibilityKey{Material: "PETG", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
-		{"different left nozzle", CompatibilityKey{Material: "PLA", NozzleLeft: "0.6", QualityMM: "0.2", MachineFamily: "H2C"}},
-		{"different quality", CompatibilityKey{Material: "PLA", NozzleLeft: "0.4", QualityMM: "0.12", MachineFamily: "H2C"}},
-		{"different machine family", CompatibilityKey{Material: "PLA", Colour: "BLUE", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2S"}},
+	t.Run("a different colour is a different bed", func(t *testing.T) {
+		// One plate is one filament load. This is the rule that remains.
+		if base == (CompatibilityKey{Colour: "RED"}) {
+			t.Error("a RED plank was offered for a BLUE bed")
+		}
+	})
 
-		// One plate is sliced once against one filament load, so a different
-		// colour is as physical a mismatch as a different material. Without
-		// this field the endpoint offered a RED plank for a BLUE bed.
-		{"different colour", CompatibilityKey{Material: "PLA", Colour: "RED", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
-		// A colourless job is not a wildcard that matches every bed - it is its
-		// own value, and the planner will not bed it at all.
-		{"no colour", CompatibilityKey{Material: "PLA", Colour: "", NozzleLeft: "0.4", QualityMM: "0.2", MachineFamily: "H2C"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if base == tc.other {
-				t.Errorf("keys should differ: %+v vs %+v", base, tc.other)
-			}
-		})
-	}
+	t.Run("a colourless job is not a wildcard", func(t *testing.T) {
+		// It is its own value, and the planner will not bed it at all.
+		if base == (CompatibilityKey{Colour: ""}) {
+			t.Error("a colourless job matched a BLUE bed")
+		}
+	})
+
+	t.Run("the colour set is normalised, not compared raw", func(t *testing.T) {
+		// Built through NormalisedColourKey by its callers, so an alias and a
+		// reordered set are one key - "SKY BLUE" prints from the blue spool.
+		if NormalisedColourKey([]string{"SKY BLUE"}) != NormalisedColourKey([]string{"BLUE"}) {
+			t.Error("an alias produced a different bed from the colour it aliases")
+		}
+		if NormalisedColourKey([]string{"WHITE", "GOLD"}) != NormalisedColourKey([]string{"GOLD", "WHITE"}) {
+			t.Error("the same two colours in the other order produced a different bed")
+		}
+	})
 }
 
 func TestStatusPatchTargetExcludesFailed(t *testing.T) {
