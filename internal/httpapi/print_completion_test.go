@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -165,8 +166,16 @@ func TestIntegrationReconcilingTwiceIsHarmless(t *testing.T) {
 //
 // The rule that matters most here. The bed keeps its status and gains
 // BambuBuddy's own words; the planks stay queued and never reach Assembly; and
-// the bed drops out of the automatic dispatcher so it is not immediately sent
-// again into whatever went wrong.
+// the automatic dispatcher does not send it straight back into whatever went
+// wrong.
+//
+// That last part is asserted against nextDispatchStep rather than against
+// ListBatchesToDispatch, because the bed is deliberately still IN that list. It
+// has to be: the query excludes a bed with a print_outcome, and leaving the
+// outcome set is what stranded seven beds that nobody could ever send again. So
+// the outcome is cleared, the bed stays visible, and what holds it back is the
+// cooldown on print_error_at - which only works if the reason was written, which
+// is the other half of this test.
 func TestIntegrationAFailedPrintReleasesNothing(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
@@ -201,16 +210,37 @@ func TestIntegrationAFailedPrintReleasesNothing(t *testing.T) {
 		}
 	}
 
-	// And the dispatcher will not pick it up again on its own.
+	// And the dispatcher will not send it again on its own.
+	//
+	// It is still offered - that is what keeps it recoverable - so the guard
+	// that matters is the walk's, and the walk reads the error's age.
 	rows, err := store.Q.ListBatchesToDispatch(ctx)
 	if err != nil {
 		t.Fatalf("list to dispatch: %v", err)
 	}
+	var offered bool
 	for _, r := range rows {
-		if r.ID == batchID {
-			t.Error("a bed whose print failed is still offered to the automatic " +
-				"dispatcher; it would be sent straight back into the same failure")
+		if r.ID != batchID {
+			continue
 		}
+		offered = true
+		if step := nextDispatchStep(r, true, time.Now()); step != stepNone {
+			t.Errorf("a bed whose print just failed is step %v, want stepNone; it "+
+				"would be sent straight back into the same failure, and with no "+
+				"Queue button there is nothing a person could do about it", step)
+		}
+		// The rest lapses, because the shop asked for retries - just not nine
+		// an hour. A bed stuck on a colour nobody has loaded goes the moment
+		// the spool arrives.
+		later := time.Now().Add(sendCooldown + time.Minute)
+		if step := nextDispatchStep(r, true, later); step != stepSend {
+			t.Errorf("after the cooldown the bed is step %v, want stepSend; a "+
+				"failure must rest the bed, not retire it", step)
+		}
+	}
+	if !offered {
+		t.Error("a bed whose print failed left the dispatch list entirely; that is " +
+			"how seven beds became unsendable without a hand-written UPDATE")
 	}
 }
 

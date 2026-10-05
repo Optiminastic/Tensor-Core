@@ -111,7 +111,7 @@ func (s *Server) AutoCreateBatches(ctx context.Context) ([]gen.Batch, []producti
 		// One colour per bed, at most four products on it, oldest order first.
 		// No held list: the whole point of this strategy is that an under-full
 		// bed prints rather than waiting for volume that may never arrive.
-		planned, unbatchable = production.GroupByColour(planJobs, s.cfg.BatchMaxUnitsPerBed, production.DefaultBedNester)
+		planned, unbatchable = production.GroupByColour(planJobs, s.bedUnitCap(), production.DefaultBedNester)
 	} else {
 		planned, unbatchable, held, deferred = production.PlanWithReasons(planJobs, now, gate, production.DefaultNester)
 	}

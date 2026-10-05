@@ -306,9 +306,17 @@ func (s *Server) completePrintedBatch(
 // Seven beds were stranded that way.
 //
 // The guard is right; leaving the ids behind was not. A cancelled print is not a
-// dispatched plate. So the bed is released - ids, outcome and error all cleared -
-// and the reason lives in the log, where it explains what happened without
-// standing in the way of printing it again.
+// dispatched plate. So the bed is released - ids and outcome cleared - and it can
+// be sent again.
+//
+// The reason is written to the bed, not only logged. Clearing print_error along
+// with the ids left the bed looking like one that had never been sent: it was
+// back in ListBatchesToDispatch on the next pass with nothing to rest on, and a
+// plate that fails for a reason re-sending cannot fix went straight back into the
+// same failure, seconds later, for as long as the queue ran. sendCooldown keys on
+// print_error_at, so recording it is what turns "immediately, for ever" into
+// "four times an hour" - and puts BambuBuddy's words on the row where the floor
+// reads them.
 //
 // Safe against reprocessing: ListBatchesInFlight requires one of those two ids,
 // so a released bed leaves the reconciliation set rather than being claimed
@@ -328,7 +336,9 @@ func (s *Server) recordFailedPrint(
 	if reason == "" {
 		reason = fmt.Sprintf("The print %s on BambuBuddy.", a.Status)
 	}
-	if err := s.store.Q.ReleaseBatchAfterFailedPrint(ctx, b.ID); err != nil {
+	if err := s.store.Q.ReleaseBatchAfterFailedPrint(ctx, gen.ReleaseBatchAfterFailedPrintParams{
+		ID: b.ID, PrintError: &reason,
+	}); err != nil {
 		obs.FromContext(ctx).Error("could not release a bed after a failed print",
 			"batch", b.BatchNumber, "error", err)
 		return false

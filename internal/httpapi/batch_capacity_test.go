@@ -4,10 +4,16 @@ package httpapi
 // the bed.
 //
 // addJobsToBatch asked bedIsFull before the add and nothing after it, so a bed
-// at three of four accepted any number of jobs - or one job of quantity ten -
-// and went to a printer holding more planks than a plate has places. The area
-// check beside it cannot catch this: four 200x50 planks cover 37.9% of the bed,
-// so the 80% utilisation gate never fires under colour batching.
+// one short of the cap accepted any number of jobs - or one job of quantity ten
+// - and went to a printer holding more planks than a plate has places. The area
+// check beside it cannot catch this: five 200x50 planks cover 52% of the bed, so
+// the 80% utilisation gate never fires under colour batching.
+//
+// The fixture is built from production.MaxBedUnits rather than from a written-in
+// number. It used to seed three jobs and call that "one place free", which was
+// true only while the cap was four; when the cap became five the bed had two
+// free places, the add the test expected to be refused was legitimately
+// accepted, and the failure read as a capacity bug that did not exist.
 //
 // These use the "validation passed, then storage refused it" idiom the
 // batch-edit tests use: this server has no object storage, so an add that gets
@@ -16,6 +22,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -42,7 +49,7 @@ func TestIntegrationAddJobsCountsTheUnitsBeingAdded(t *testing.T) {
 		}
 	}
 
-	// A bed holding three of its four places.
+	// A bed with exactly one place left, whatever the cap happens to be.
 	b, err := store.Q.InsertBatch(ctx, gen.InsertBatchParams{
 		ID: uuid.New(), BatchNumber: "BATCH-CAP-1",
 		Status: production.BatchPendingApproval, MaterialShortage: false,
@@ -50,8 +57,8 @@ func TestIntegrationAddJobsCountsTheUnitsBeingAdded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert batch: %v", err)
 	}
-	for _, n := range []string{"BATCH-CAP-1-A", "BATCH-CAP-1-B", "BATCH-CAP-1-C"} {
-		seedConfiguredJob(t, store, n, cfg(&b.ID, 1))
+	for i := range production.MaxBedUnits - 1 {
+		seedConfiguredJob(t, store, fmt.Sprintf("BATCH-CAP-1-%d", i), cfg(&b.ID, 1))
 	}
 
 	add := func(t *testing.T, ids ...uuid.UUID) int {

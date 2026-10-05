@@ -76,7 +76,7 @@ func main() {
 
 	cap := cfg.BatchMaxUnitsPerBed
 	if cap < 1 {
-		cap = production.MaxColourBatchUnits
+		cap = production.MaxBedUnits
 	}
 
 	rows, err := store.Pool.Query(ctx, `

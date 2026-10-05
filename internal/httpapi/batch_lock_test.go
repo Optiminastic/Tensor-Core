@@ -33,9 +33,15 @@ func seedBedWith(t *testing.T, store *db.Store, batchNumber string, n int) uuid.
 	return batchID
 }
 
-// Four products is full; three is not. bedIsFull is what the planner, the
+// Five products is full; four is not. bedIsFull is what the planner, the
 // dispatcher and the add-jobs endpoint all ask, so this is the single rule
 // behind "locked" everywhere it appears.
+//
+// The number is read from srv.bedUnitCap() rather than written in, and the
+// guard below pins that accessor to production.MaxBedUnits. It used to pin it
+// to a second constant that said four while the floor locked at five, so this
+// test failed on a correct system and said the cap was wrong when the
+// expectation was.
 func TestIntegrationBedIsFullAtTheUnitCap(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
@@ -46,9 +52,9 @@ func TestIntegrationBedIsFullAtTheUnitCap(t *testing.T) {
 	// One cap for the whole fleet: a plate is built before anything knows which
 	// printer will take it, so it has to fit the smallest bed.
 	cap := srv.bedUnitCap()
-	if cap != production.MaxColourBatchUnits {
+	if cap != production.MaxBedUnits {
 		t.Fatalf("bed cap = %d, want %d - this test's numbers assume the default",
-			cap, production.MaxColourBatchUnits)
+			cap, production.MaxBedUnits)
 	}
 	partial := seedBedWith(t, store, "BATCH-LOCK-PARTIAL", cap-1)
 	full := seedBedWith(t, store, "BATCH-LOCK-FULL", cap)

@@ -15,7 +15,7 @@ package production
 // means somebody changes the spool mid-plate.
 //
 // So the rule here is stated rather than searched for: one colour per bed, at
-// most MaxColourBatchUnits products on it, oldest order first. It is not an
+// most MaxBedUnits products on it, oldest order first. It is not an
 // approximation of the optimiser - it is a different, deliberately simpler
 // policy, and the optimiser is kept intact beside it (see BatchStrategy) for the
 // day the catalogue is mixed enough to need it again.
@@ -26,14 +26,6 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
 )
-
-// MaxColourBatchUnits is how many products may share one bed.
-//
-// Four, per the shop's own instruction. It is a policy number, not a geometric
-// one: four planks physically fit with room to spare, and the cap exists so a
-// bed is a manageable, quickly-turned-around unit of work rather than the most
-// the packer could cram on.
-const MaxColourBatchUnits = 4
 
 // StrategyColour is the packing_strategy recorded on batches this produces, so a
 // batch on the floor says which policy built it. Batches from the optimiser keep
