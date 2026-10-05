@@ -193,8 +193,9 @@ func (s *Server) sendBatchToMachine(
 	if err != nil {
 		var reason bambubuddy.ReasonError
 		if errors.As(err, &reason) {
-			s.recordPrintError(ctx, batch.ID, reason.Reason)
-			return out, statusErr(http.StatusUnprocessableEntity, reason.Reason)
+			why := withPipelineContext(reason.Reason, pipeline)
+			s.recordPrintError(ctx, batch.ID, why)
+			return out, statusErr(http.StatusUnprocessableEntity, why)
 		}
 		s.recordPrintError(ctx, batch.ID, "Could not start slicing on BambuBuddy.")
 		return out, statusErr(http.StatusBadGateway, "Could not start slicing on BambuBuddy.")
@@ -457,6 +458,56 @@ func filamentPresetOf(p bambubuddy.Pipeline) bambubuddy.PresetVal {
 		return p.FilamentPresets[0]
 	}
 	return bambubuddy.PresetVal{}
+}
+
+// withPipelineContext says WHICH pipeline a slicer complaint is about.
+//
+// BambuBuddy answers a cloud-preset problem with "Cloud preset selected for
+// filament, but no Bambu Cloud session is stored. Sign in to Bambu Cloud and
+// retry." True, and unactionable on a floor with several pipelines and no way
+// to tell which one a bed used - the natural reading is "Tensor wants a cloud
+// account", when Tensor wants nothing of the sort: it reads the pipeline's own
+// presets out of BambuBuddy and passes them straight back, so a cloud preset is
+// in the pipeline because somebody put it there.
+//
+// Tensor knows which pipeline it chose and which of its presets came back
+// marked source "cloud", so it says so. Appended rather than substituted: the
+// slicer's own words are the authoritative part and must survive intact.
+func withPipelineContext(reason string, p bambubuddy.Pipeline) string {
+	if !strings.Contains(strings.ToLower(reason), "cloud preset") {
+		return reason
+	}
+	cloud := cloudPresetsOf(p)
+	if len(cloud) == 0 {
+		return reason
+	}
+	return fmt.Sprintf(
+		"%s The pipeline %q uses %s. Point it at the built-in preset of the same name, "+
+			"or sign in to Bambu Cloud in BambuBuddy.",
+		reason, p.Name, strings.Join(cloud, " and "))
+}
+
+// cloudPresetsOf names the pipeline's presets that live in a Bambu Cloud
+// account rather than in BambuBuddy.
+func cloudPresetsOf(p bambubuddy.Pipeline) []string {
+	var out []string
+	if v := p.PrinterPreset; v != nil && strings.EqualFold(v.Source, "cloud") {
+		out = append(out, fmt.Sprintf("the cloud printer preset %q", v.ID))
+	}
+	if v := p.ProcessPreset; v != nil && strings.EqualFold(v.Source, "cloud") {
+		out = append(out, fmt.Sprintf("the cloud process preset %q", v.ID))
+	}
+	// Deduplicated: one preset repeated per plate slot is still one preset, and
+	// naming it four times would read as four separate problems.
+	seen := map[string]bool{}
+	for _, v := range p.FilamentPresets {
+		if !strings.EqualFold(v.Source, "cloud") || seen[v.ID] {
+			continue
+		}
+		seen[v.ID] = true
+		out = append(out, fmt.Sprintf("the cloud filament preset %q", v.ID))
+	}
+	return out
 }
 
 // liveTraysFor reads one printer's AMS now, falling back to the mirrored row.
