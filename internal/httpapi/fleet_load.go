@@ -26,10 +26,25 @@ import (
 // queueLoad is the work standing in front of one printer.
 type queueLoad struct {
 	// Items is how many plates this printer owes, the one it is PRINTING
-	// included. That inclusion is the shop's one-bed-per-machine rule: a
-	// printer laying plastic already has its batch, so it is not offered
-	// another until that plate is off the bed.
+	// included. Used for RANKING: a printer laying plastic is busier than an
+	// idle one, and between two printers with the same projected finish the
+	// emptier queue should win.
+	//
+	// It is no longer the one-bed-per-machine rule - see Pending.
 	Items int
+	// Pending is how many plates are WAITING in this printer's queue, with the
+	// one on the bed excluded.
+	//
+	// This is the shop's rule: at most one QUEUED batch per machine on
+	// BambuBuddy. A printer that is printing may still be handed its next bed,
+	// which then starts the moment the current plate comes off - that is the
+	// point of a queue, and it is how a machine stops idling between plates.
+	//
+	// It used to be Items, counting the printing plate as the machine's one
+	// bed, so a fleet of thirteen printers that were all mid-print accepted
+	// nothing at all. With an empty BambuBuddy queue and every printer running,
+	// every bed in Tensor waited on a queue that nobody was filling.
+	Pending int
 	// Minutes is how long the WAITING ones will take. The plate on the bed is
 	// deliberately absent - its remaining time is carried by
 	// machines.remaining_minutes and counting it here would charge the printer
@@ -59,11 +74,10 @@ func (s *Server) fleetQueueLoad(ctx context.Context) map[int]queueLoad {
 // The two halves of a queueLoad count different things, and the asymmetry is
 // the point.
 //
-// ITEMS count QueuePending and QueuePrinting alike, because the shop's rule is
-// one bed per machine: a printer with a plate on the bed has its batch, and the
-// next one goes when that plate comes off. Counting only the pending ones made
-// a printing machine read as having nothing on it, which is how a printer took
-// a second bed while the first was still running.
+// ITEMS count QueuePending and QueuePrinting alike, because they rank a
+// printer's busyness and a plate on the bed is real work in front of the next
+// one. PENDING counts only what is waiting, because that is what the shop's
+// one-queued-batch-per-machine rule is about.
 //
 // MINUTES count only the pending ones. A QueuePrinting item's REMAINING time is
 // already carried by machines.remaining_minutes, so adding its full print time
@@ -83,6 +97,7 @@ func queueMinutesByPrinter(items []bambubuddy.QueueItem) map[int]queueLoad {
 		case bambubuddy.QueuePending:
 			load := out[*it.PrinterID]
 			load.Items++
+			load.Pending++
 			load.Minutes += queueItemMinutes(it)
 			out[*it.PrinterID] = load
 		case bambubuddy.QueuePrinting:

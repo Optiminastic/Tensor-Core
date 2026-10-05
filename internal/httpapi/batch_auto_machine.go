@@ -44,7 +44,16 @@ type machineOption struct {
 	FreeAt time.Time
 	// PendingItems is how many plates are waiting on it, for the tie-break.
 	PendingItems int
-	Eligible     bool
+	// QueuedAhead is how many beds are already QUEUED for this printer - the
+	// plate on the bed excluded - counting both BambuBuddy's own pending items
+	// and beds Tensor has sent but not yet seen land.
+	//
+	// This is what the one-bed-per-machine cap is measured against. Separate
+	// from PendingItems because that one ranks busyness, where a plate on the
+	// bed counts, and this one answers "may this printer be given another bed",
+	// where it does not.
+	QueuedAhead int
+	Eligible    bool
 	// Refusal says why not, in words an operator can act on.
 	Refusal string
 	// HoldsColours is whether this printer's trays could have printed the bed,
@@ -186,24 +195,29 @@ type weighInputs struct {
 	BedFamily string
 }
 
-// maxBedsPerMachine is how many beds one printer may hold at a time.
+// maxBedsPerMachine is how many beds may be QUEUED on one printer at a time.
 //
-// ONE, counting the plate it is printing, at the shop's instruction: "for every
-// machine just queue max only 1 batch, not more than that". A printer is
-// offered a bed when it is standing EMPTY and not before.
+// ONE, at the shop's instruction: "every machine have only one queue batch,
+// means only one queue batch on bambubuddy for every machine". The plate
+// currently on the bed is NOT counted - a printer that is printing still gets
+// its next bed, which starts as that one comes off.
 //
-// It used to mean one bed WAITING, with a printing plate uncounted - so a
-// machine took its next bed the moment the current one started. That is a
-// deeper queue than the shop runs, and it commits a bed to a machine hours
-// before it prints, which is exactly when the reason for choosing that machine
-// stops being true: the spools get swapped, a job goes on hold, a faster
-// printer frees up. Holding the bed as a Draft instead keeps all those options
-// open, and keeps the bed absorbing work (see readyToLock).
+// This reverses an earlier reading of the same rule. It used to count the
+// printing plate too, so a printer was offered a bed only when standing empty.
+// That reading has a real argument behind it, and it is worth keeping visible:
+// committing a bed to a machine hours before it prints is committing it at
+// exactly the moment the reason for choosing that machine stops being true -
+// spools get swapped, a job goes on hold, a faster printer frees up. Holding
+// the bed as a Draft keeps those options open.
 //
-// Counted from BambuBuddy's queue - pending AND printing, see
-// queueMinutesByPrinter - plus the beds Tensor has sent that its queue cannot
-// see yet, plus the printer's own live state, because a plate started in
-// BambuBuddy's own UI occupies the machine just the same.
+// It was still wrong, and the floor showed why: with every printer mid-print
+// and BambuBuddy's queue empty, NOTHING could be queued anywhere. Thirteen
+// printers, nothing waiting on any of them, and every bed in Tensor held back
+// from a queue nobody was allowed to fill. A queue one deep is the thing that
+// stops a machine idling between plates, which is the whole reason to have one.
+//
+// Counted from BambuBuddy's PENDING items - see queueLoad.Pending - plus the
+// beds Tensor has sliced and sent that its queue cannot see yet.
 const maxBedsPerMachine = 1
 
 // weighMachine decides whether one printer can take the bed, and how soon.
@@ -262,39 +276,33 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 	}
 	// How much this printer already owes, needed both for the rule below and
 	// for ranking the ones that survive it.
-	opt.FreeAt, opt.PendingItems = freeAtFor(in, machine)
+	opt.FreeAt, opt.PendingItems, opt.QueuedAhead = freeAtFor(in, machine)
 
-	// ONE BED PER MACHINE, and the printer must be EMPTY.
+	// ONE QUEUED BED PER MACHINE.
+	//
+	// The rule is about the depth of this printer's queue on BambuBuddy, not
+	// about whether it is currently laying plastic. A printer that is printing
+	// may still be handed its NEXT bed; that plate starts the moment the
+	// current one comes off, which is the entire purpose of a queue and the
+	// only way a machine does not idle between plates.
+	//
+	// It used to also refuse any printer whose live status was running, and to
+	// count the printing plate itself against the cap. Both came from reading
+	// the rule as "a printer gets a bed only when it is empty". The shop's rule
+	// is "only one queued batch on BambuBuddy for every machine", and the
+	// difference is not academic: with every printer mid-print and BambuBuddy's
+	// queue empty, the old reading accepted NOTHING anywhere, so beds sat in
+	// Tensor waiting for a queue that nobody was allowed to fill.
 	//
 	// Here, with the other availability refusals, rather than last. It used to
-	// sit at the end of this function on the reasoning that it is not a fault -
-	// the printer is fine, it simply already has work. But that put it BEHIND
-	// the colour gate, and the consequence showed up the moment the rule was
-	// checked against the live fleet: A5 was mid-print and the dialog said "no
-	// spool has been confirmed as #FFFFFF", because binding failed first. The
-	// rule had become unobservable, and the operator was told the less useful
-	// of two true things.
-	//
-	// This file's own convention settles it - "a printer that is off says it is
-	// off, not that its spools are wrong". Being busy is availability, like off,
-	// offline and maintenance, and availability comes before anything about the
-	// bed. HoldsColours is computed above the switch precisely so a printer
-	// refused here is still reported as holding the colours (see chosenReason),
-	// so nothing is lost by refusing earlier.
-	if cap := in.WaitingCap; cap > 0 {
-		// The printer's own live state as well as its queue. A plate started
-		// from BambuBuddy's UI, or one whose queue item has already been
-		// retired, leaves the machine running with nothing queued against it -
-		// and "running" is the signal that cannot be missed, because it means
-		// something is physically on the bed.
-		if r.Status == production.FleetMachineRunning {
-			opt.Refusal = "this printer is printing"
-			return opt
-		}
-		if opt.PendingItems >= cap {
-			opt.Refusal = "this printer already has a bed"
-			return opt
-		}
+	// sit at the end of this function, which put it BEHIND the colour gate: A5
+	// was mid-print and the dialog said "no spool has been confirmed as
+	// #FFFFFF", because binding failed first. HoldsColours is computed above
+	// the switch precisely so a printer refused here is still reported as
+	// holding the colours, so nothing is lost by refusing earlier.
+	if cap := in.WaitingCap; cap > 0 && opt.QueuedAhead >= cap {
+		opt.Refusal = "this printer already has a bed queued"
+		return opt
 	}
 
 	// Checked here rather than at send time, where it was a 409 raised AFTER
@@ -343,7 +351,7 @@ func (s *Server) weighMachine(in weighInputs) machineOption {
 // the plate on the bed right now (from the printer's own remaining time),
 // the plates queued behind it in BambuBuddy, and the beds Tensor has sent that
 // have not reached that queue yet.
-func freeAtFor(in weighInputs, machine gen.Machine) (time.Time, int) {
+func freeAtFor(in weighInputs, machine gen.Machine) (free time.Time, items, queuedAhead int) {
 	state := production.FleetMachineState{
 		MachineID:           machine.ID,
 		RemainingMinutes:    int32PtrToIntPtr(machine.RemainingMinutes),
@@ -351,21 +359,25 @@ func freeAtFor(in weighInputs, machine gen.Machine) (time.Time, int) {
 	}
 
 	var queued []production.QueuedBatch
-	var items int
 	if printerID, ok := in.PrinterIDs[machine.MachineID]; ok {
 		if l, known := in.Load[printerID]; known {
 			items = l.Items
+			queuedAhead = l.Pending
 			queued = append(queued, production.QueuedBatch{TotalPrintTimeMinutes: l.Minutes})
 		}
 	}
 	// A bed sliced but not yet queued is real work heading here, charged the
 	// same nominal cost as any plate of unknown length. Without it, five beds
 	// sent in the minutes before the first one is sliced all pick this printer.
+	//
+	// It counts against the cap as well as the ranking: it is a bed on its way
+	// to this printer's queue, and the cap is about that queue's depth.
 	for i := 0; i < in.InFlight[machine.ID]; i++ {
 		items++
+		queuedAhead++
 		queued = append(queued, production.QueuedBatch{TotalPrintTimeMinutes: unestimatedBatchMinutes})
 	}
-	return production.MachineFreeAt(in.Now, state, queued), items
+	return production.MachineFreeAt(in.Now, state, queued), items, queuedAhead
 }
 
 // chooseMachine returns the index of the printer that wins, or -1.

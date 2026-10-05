@@ -354,46 +354,71 @@ func healthyRow(serial string) gen.ListFleetMachinesWithFamilyRow {
 // redBed is a one-slot plate the printer above can take.
 var redBed = []meshio.Slot{{Colour: "#FF0000", Material: "PLA"}}
 
-// One bed per printer at a time.
+// One QUEUED bed per printer at a time.
 //
-// The shop's instruction, in their words: "for every machine just queue max
-// only 1 batch, not more than that". Stacking a queue per printer commits a bed
-// hours before it runs, which is exactly when the reasons for choosing that
-// machine stop being true: the spools get swapped, a job goes on hold, a faster
-// printer frees up.
-func TestAPrinterWithABedAlreadyWaitingIsNotOfferedAnother(t *testing.T) {
+// The shop's instruction, in their words: "every machine have only one queue
+// batch, means only one queue batch on bambubuddy for every machine". Stacking
+// a queue deeper than one commits a bed hours before it runs, which is exactly
+// when the reasons for choosing that machine stop being true: the spools get
+// swapped, a job goes on hold, a faster printer frees up.
+func TestAPrinterWithABedAlreadyQueuedIsNotOfferedAnother(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("H2C-1")
 
 	opt := s.weighMachine(weighInputs{
 		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable: func(string) string { return "" },
-		// One plate pending on this printer in BambuBuddy.
+		// One plate PENDING on this printer in BambuBuddy.
 		PrinterIDs: map[string]int{"H2C-1": 11},
-		Load:       map[int]queueLoad{11: {Items: 1, Minutes: 120}},
+		Load:       map[int]queueLoad{11: {Items: 1, Pending: 1, Minutes: 120}},
 	})
 
 	if opt.Eligible {
-		t.Error("a printer with a bed already waiting was offered another")
+		t.Error("a printer with a bed already queued was offered another")
 	}
-	if !strings.Contains(opt.Refusal, "already has a bed") {
-		t.Errorf("refusal = %q, want it to say the printer is already holding one", opt.Refusal)
+	if !strings.Contains(opt.Refusal, "already has a bed queued") {
+		t.Errorf("refusal = %q, want it to say the printer already has one queued", opt.Refusal)
 	}
 }
 
-// A printer laying plastic has its batch, so it is not offered another.
+// A bed Tensor has sent but BambuBuddy has not listed yet still fills the queue.
 //
-// This inverted at the shop's instruction. The rule used to be one bed WAITING,
-// with the printing plate uncounted, so the next bed went the moment the last
-// one started. "Any P2S is empty" is the condition now, and empty means empty:
-// a bed waits as a Draft - where it can still absorb work - until a machine is
-// genuinely free.
+// Without this, every pass in the minutes between sending a bed and seeing it
+// appear would offer the same printer another one, and a machine would collect
+// five beds in the time it takes the first to slice.
+func TestABedInFlightCountsAgainstTheQueueCap(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("H2C-9")
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
+		Sliceable:  func(string) string { return "" },
+		PrinterIDs: map[string]int{"H2C-9": 19},
+		Load:       map[int]queueLoad{},
+		// Nothing in BambuBuddy's queue yet; one bed on its way there.
+		InFlight: map[uuid.UUID]int{row.ID: 1},
+	})
+
+	if opt.Eligible {
+		t.Error("a printer with a bed already on its way was offered another; the cap " +
+			"has to count what Tensor has sent as well as what BambuBuddy can see")
+	}
+}
+
+// A printer laying plastic with an EMPTY queue still takes the next bed.
 //
-// Asserted on the printer's own live state with an EMPTY queue, which is the
-// case the queue count alone cannot catch: a plate started in BambuBuddy's own
-// UI, or one whose queue item has already been retired, leaves a machine
-// running with nothing queued against it.
-func TestAPrinterThatIsPrintingIsNotOfferedTheNextBed(t *testing.T) {
+// This inverted at the shop's instruction, twice, so the current rule is worth
+// stating plainly: the cap is on the QUEUE, not on the machine. A printer that
+// is printing may be handed its next bed, which starts as the current plate
+// comes off. That is the whole reason a queue exists, and the only way a
+// machine does not idle between plates.
+//
+// The previous reading counted the printing plate as the machine's one bed. It
+// failed on the floor in the most complete way available: every printer
+// mid-print, BambuBuddy's queue empty, and therefore NOT ONE bed queueable
+// anywhere - thirteen machines with nothing waiting on any of them, and every
+// bed in Tensor held back from a queue nobody was permitted to fill.
+func TestAPrinterThatIsPrintingStillTakesTheNextBed(t *testing.T) {
 	s := &Server{}
 	row := healthyRow("H2C-2")
 	row.Status = production.FleetMachineRunning
@@ -405,15 +430,34 @@ func TestAPrinterThatIsPrintingIsNotOfferedTheNextBed(t *testing.T) {
 		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
 		Sliceable:  func(string) string { return "" },
 		PrinterIDs: map[string]int{"H2C-2": 12},
-		Load:       map[int]queueLoad{},
+		// Printing, and nothing queued behind it.
+		Load: map[int]queueLoad{12: {Items: 1, Pending: 0}},
+	})
+
+	if !opt.Eligible {
+		t.Errorf("a printing machine with an empty queue was refused (%q); the cap is "+
+			"on queued beds, and this printer has none", opt.Refusal)
+	}
+}
+
+// But it takes exactly ONE. A printer that is printing AND already has its next
+// bed queued is full, and this is the pairing that keeps the queue one deep
+// rather than letting a busy machine collect work.
+func TestAPrintingMachineWithOneQueuedIsFull(t *testing.T) {
+	s := &Server{}
+	row := healthyRow("H2C-3")
+	row.Status = production.FleetMachineRunning
+
+	opt := s.weighMachine(weighInputs{
+		Row: row, Slots: redBed, Now: time.Now(), WaitingCap: maxBedsPerMachine,
+		Sliceable:  func(string) string { return "" },
+		PrinterIDs: map[string]int{"H2C-3": 13},
+		// One printing, one already waiting behind it.
+		Load: map[int]queueLoad{13: {Items: 2, Pending: 1, Minutes: 90}},
 	})
 
 	if opt.Eligible {
-		t.Error("a printing machine was offered the next bed; one batch per machine " +
-			"means the printer must be empty")
-	}
-	if !strings.Contains(opt.Refusal, "is printing") {
-		t.Errorf("refusal = %q, want it to say the printer is printing", opt.Refusal)
+		t.Error("a printing machine that already has its next bed queued was offered a third")
 	}
 }
 
