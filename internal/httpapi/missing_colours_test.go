@@ -10,6 +10,7 @@ package httpapi
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +96,68 @@ func TestLoadedHexesAreNormalisedBeforeComparing(t *testing.T) {
 		if got := missingColours(needed, []string{raw}, goldIdentity(), bedColours{}); len(got) != 0 {
 			t.Errorf("missing = %v for a tray reporting %q, want none", got, raw)
 		}
+	}
+}
+
+// The refusal has to name the spool, because naming it IS the fix.
+//
+// "No spool has been confirmed as one of this bed's colours. Map it under
+// Inventory" told an operator to go and name a colour without saying which one,
+// on a page listing every colour in the building. The hex is already sitting in
+// each machine's refusal and the order's own word for it is on the bed, so the
+// note can say both.
+func TestTheRefusalNamesTheSpoolNobodyHasConfirmed(t *testing.T) {
+	gold := bedColours{Names: []string{"GOLD"}}
+	refused := []machineOption{
+		{Refusal: "no spool has been confirmed as #D3C5A3"},
+		// A second printer refusing for the same reason must not say it twice.
+		{Refusal: "no spool has been confirmed as #D3C5A3"},
+	}
+
+	note := noPrinterNote(refused, gold)
+	for _, want := range []string{"#D3C5A3", "GOLD", "Inventory"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note = %q, want it to name %q", note, want)
+		}
+	}
+	if strings.Count(note, "#D3C5A3") != 1 {
+		t.Errorf("note = %q repeats the hex; every printer refuses for the same spool", note)
+	}
+	// The instruction to press a button that no longer exists must stay gone.
+	if strings.Contains(strings.ToLower(note), "queue this bed") {
+		t.Errorf("note = %q names a button that was deleted", note)
+	}
+}
+
+// Two colours on a bed means no name can be attached to a hex safely.
+//
+// The bed knows it needs GOLD and RED; the refusal knows one hex is missing.
+// Pairing them is a coin flip, and guessing wrong sends somebody to rename the
+// spool that was already correct. The hex alone is still actionable.
+func TestAMultiColourBedNamesTheHexWithoutGuessingTheColour(t *testing.T) {
+	twoColours := bedColours{Names: []string{"GOLD", "RED"}}
+	note := noPrinterNote([]machineOption{
+		{Refusal: "no spool has been confirmed as #D3C5A3"},
+	}, twoColours)
+
+	if !strings.Contains(note, "#D3C5A3") {
+		t.Errorf("note = %q, want the hex", note)
+	}
+	for _, guess := range []string{"GOLD", "RED"} {
+		if strings.Contains(note, guess) {
+			t.Errorf("note = %q guesses %q; with two colours on the bed there is no way "+
+				"to tell which one this hex is, and the wrong guess renames a good spool",
+				note, guess)
+		}
+	}
+}
+
+// Falls back rather than inventing. A refusal carrying no hex still produces
+// the old sentence - vague, but never wrong.
+func TestTheRefusalFallsBackWhenNoHexIsAvailable(t *testing.T) {
+	note := noPrinterNote([]machineOption{{Refusal: "no spool has been confirmed as banana"}},
+		bedColours{Names: []string{"GOLD"}})
+	if !strings.Contains(note, "one of this bed's colours") {
+		t.Errorf("note = %q, want the generic fallback for an unreadable hex", note)
 	}
 }

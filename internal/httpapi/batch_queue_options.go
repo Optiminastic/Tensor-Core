@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -270,7 +271,7 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	case len(out.Slots) == 0:
 		out.Note = "This bed's plate declares no filament. Rebuild the bed before sending it."
 	case eligible == 0:
-		out.Note = noPrinterNote(options)
+		out.Note = noPrinterNote(options, bed)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -293,7 +294,7 @@ func plateSlotsOf(slots []queueSlot) []meshio.Slot {
 // "No printer can take this bed" is true and useless. The causes need different
 // people to do different things - map a colour, load a spool, or simply wait -
 // so the note names whichever one accounts for the fleet.
-func noPrinterNote(options []machineOption) string {
+func noPrinterNote(options []machineOption, bed bedColours) string {
 	var unmapped, loadable, wrongClassWithColours int
 	for _, o := range options {
 		switch {
@@ -328,7 +329,14 @@ func noPrinterNote(options []machineOption) string {
 		// bed is already retrying on its own, so the sentence described the
 		// operator as the thing standing between the plate and the printer
 		// when the only missing step is the swatch.
-		return "No spool has been confirmed as one of this bed's colours. " +
+		//
+		// And it said "one of this bed's colours", which is the one thing a
+		// person reading it needs and the one thing it would not say. The fix
+		// is to go to Inventory and name a spool - but WHICH spool was left as
+		// an exercise, on a page listing every colour in the building. The hex
+		// is already in each refusal and the order's own word for it is in the
+		// bed, so both are named here.
+		return "No spool has been confirmed as " + describeMissing(options, bed) + ". " +
 			"Map it under Inventory and this bed goes on its own."
 	case loadable > 0:
 		return "No printer has this bed's colours loaded. Load a spool, or wait for one to free up."
@@ -513,6 +521,49 @@ func missingColours(
 		}
 	}
 	return missing
+}
+
+// describeMissing names the colour nobody has confirmed, as precisely as the
+// evidence allows.
+//
+// Three grades, and it drops to the next only when the one above is not there:
+//
+//   - "#D3C5A3 (GOLD)" - the hex a printer would have to report, and the word
+//     the order used. Everything somebody needs to find the spool and name it.
+//   - "#D3C5A3" - the hex alone, when the bed's colours cannot be read.
+//   - "one of this bed's colours" - the old sentence, when even the refusals
+//     carry no hex. Vague, but never wrong.
+//
+// The hexes come from the refusals themselves, which already end "confirmed as
+// #RRGGBB", so there is no second source to disagree with the first.
+func describeMissing(options []machineOption, bed bedColours) string {
+	seen := map[string]bool{}
+	var hexes []string
+	for _, o := range options {
+		_, after, found := strings.Cut(o.Refusal, "confirmed as ")
+		if !found {
+			continue
+		}
+		hex, ok := normaliseHex(strings.TrimSpace(after))
+		if !ok || seen[hex] {
+			continue
+		}
+		seen[hex] = true
+		hexes = append(hexes, hex)
+	}
+	if len(hexes) == 0 {
+		return "one of this bed's colours"
+	}
+	sort.Strings(hexes) // stable wording, so the note does not churn between passes
+	joined := strings.Join(hexes, " or ")
+
+	// Named only when the bed asks for ONE colour. With two there is no way to
+	// tell which name belongs to which hex, and pairing them the wrong way
+	// round would send somebody to rename the spool that was already right.
+	if len(bed.Names) == 1 {
+		return joined + " (" + bed.Names[0] + ")"
+	}
+	return joined
 }
 
 // nearestColourDistance is how far the closest loaded spool is from want, as a

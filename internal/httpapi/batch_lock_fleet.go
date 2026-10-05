@@ -150,5 +150,5 @@ func (s *Server) bedHasFreePrinter(
 	if best := chooseMachine(options); best >= 0 {
 		return options[best].Machine.ID, true, ""
 	}
-	return uuid.Nil, false, noPrinterNote(options)
+	return uuid.Nil, false, noPrinterNote(options, bed)
 }
