@@ -311,6 +311,33 @@ func noPrinterNote(options []machineOption, colours []queueColour) string {
 			loadable++
 		}
 	}
+	// Printers that COULD print this bed and were refused for something other
+	// than the bed: busy, off, offline, in maintenance, mid-print.
+	//
+	// HoldsColours is set from the binding BEFORE weighMachine's availability
+	// switch runs, exactly so this stays knowable - its comment there says so.
+	// It was then read in one branch below and nowhere else, so a printer
+	// holding white and blue that was simply PRINTING fell into no bucket at
+	// all, and the note dropped through to a colour complaint from some other
+	// machine that never held the colours and was never a candidate.
+	//
+	// That is how a blue bed, on a floor with blue in four printers and white
+	// in eleven, came to read "No spool has been confirmed as #FFFFFF. Map it
+	// under Inventory." Nothing was unmapped. Every printer that could take it
+	// was busy, and the one printer that could not was the only one whose
+	// refusal the note knew how to describe.
+	var heldButBusy int
+	var busyReason string
+	for _, o := range options {
+		if o.Eligible || !o.HoldsColours || strings.Contains(o.Refusal, "laid out for") {
+			continue
+		}
+		heldButBusy++
+		if busyReason == "" {
+			busyReason = o.Refusal
+		}
+	}
+
 	switch {
 	// Said FIRST, ahead of everything, when NO printer reported a single tray.
 	//
@@ -341,6 +368,14 @@ func noPrinterNote(options []machineOption, colours []queueColour) string {
 		// bed too SMALL - there is no bigger machine waiting to be offered it.
 		return "A printer holds this bed's colours but its bed is too small for this plate. " +
 			"This bed waits for a machine of its own class or larger."
+	// Before any colour reason, because this bed has no colour problem: a
+	// printer that can print it exists and is occupied. It goes on its own as
+	// soon as one frees up, and the only honest instruction is to say so.
+	case heldButBusy > 0:
+		return fmt.Sprintf(
+			"%d %s this bed's colours but none is free - %s. "+
+				"It goes as soon as one is, with nothing to map or load.",
+			heldButBusy, plural2(heldButBusy, "printer holds", "printers hold"), busyReason)
 	case unmapped > 0:
 		// It used to end "then queue this bed", which was an instruction to
 		// press a button that no longer exists. Worse than merely stale: the

@@ -245,3 +245,82 @@ func TestOneReadableTrayIsEnoughToTrustTheFleet(t *testing.T) {
 			"unmapped colour is a real unmapped colour", note)
 	}
 }
+
+// A bed whose printers are merely BUSY must not be reported as a colour fault.
+//
+// Straight off the floor, and the one that cost the most time. A blue bed sat
+// locked on a fleet with blue in four printers and white in eleven, reading "No
+// spool has been confirmed as #FFFFFF. Map it under Inventory." Nothing was
+// unmapped. Every printer that could take the bed was printing something, and
+// the single printer that could NOT take it - no white loaded - was the only
+// one whose refusal the note knew how to describe. So the note described that
+// one, and sent an operator to the colour map three times over.
+//
+// weighMachine computes HoldsColours BEFORE its availability switch precisely
+// so this stays knowable; its comment there says so. The note then read it in
+// one branch and nowhere else.
+func TestABedWaitingOnBusyPrintersIsNotCalledAColourProblem(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		// Holds white and blue. Simply occupied.
+		{Machine: machineReporting("#FFFFFF", "#2850E0"), HoldsColours: true,
+			Refusal: "this printer is printing"},
+		{Machine: machineReporting("#FFFFFF", "#2850E0"), HoldsColours: true,
+			Refusal: "this printer already has a bed"},
+		// Holds neither, and was never a candidate. Its refusal used to win.
+		{Machine: machineReporting("#F72323"), HoldsColours: false,
+			Refusal: "no spool has been confirmed as #FFFFFF"},
+	}, []queueColour{{Name: "BLUE", Hex: "#2850E0"}})
+
+	if strings.Contains(note, "Inventory") {
+		t.Errorf("note = %q sends somebody to the colour map; two printers hold this "+
+			"bed's colours and are busy, and nothing about the map can change that", note)
+	}
+	if !strings.Contains(note, "2 printers hold") {
+		t.Errorf("note = %q, want it to say how many printers could take the bed", note)
+	}
+	// The machine's own words, so the next question has an answer.
+	if !strings.Contains(note, "this printer is printing") {
+		t.Errorf("note = %q, want it to quote why the first one is unavailable", note)
+	}
+}
+
+// One busy printer still reads as one, not as "1 printers hold".
+func TestASingleBusyPrinterReadsAsOne(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#FFFFFF"), HoldsColours: true,
+			Refusal: "this printer is in maintenance"},
+	}, []queueColour{{Name: "WHITE", Hex: "#FFFFFF"}})
+
+	if !strings.Contains(note, "1 printer holds") {
+		t.Errorf("note = %q, want singular phrasing", note)
+	}
+}
+
+// A printer holding the colours whose BED is too small is a different thing,
+// and keeps its own more specific message - waiting for a free printer would be
+// false there, because this bed will never fit that one.
+func TestTheWrongClassStillOutranksBusyness(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#FFFFFF"), HoldsColours: true,
+			Refusal: "this bed is laid out for a A2L"},
+	}, []queueColour{{Name: "WHITE", Hex: "#FFFFFF"}})
+
+	if !strings.Contains(note, "too small") {
+		t.Errorf("note = %q; a printer that can never take this plate is not one to "+
+			"wait for", note)
+	}
+}
+
+// And a genuine colour gap is still reported as one when no printer that holds
+// the colours exists at all.
+func TestARealColourGapSurvivesTheBusynessBranch(t *testing.T) {
+	note := noPrinterNote([]machineOption{
+		{Machine: machineReporting("#F72323"), HoldsColours: false,
+			Refusal: "no spool has been confirmed as #D3C5A3"},
+	}, []queueColour{{Name: "GOLD", Hex: "#D3C5A3"}})
+
+	if !strings.Contains(note, "Inventory") {
+		t.Errorf("note = %q; no printer holds this colour and none is merely busy, so "+
+			"the colour map really is the fix", note)
+	}
+}
