@@ -230,8 +230,9 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 	// to the operator's eye. The dialog still opens, still shows every machine
 	// and still lets any of them be chosen - what changes is that the obvious
 	// one is already selected, with its spools already bound.
+	bed := bedColoursOf(out.Colours)
 	plan, options, err := s.planQueueForBatch(ctx, plateSlotsOf(out.Slots),
-		bedColoursOf(out.Colours), deref(batch.MachineFamily))
+		bed, deref(batch.MachineFamily))
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the fleet.")
 		return
@@ -245,7 +246,7 @@ func (s *Server) batchQueueOptions(c *gin.Context) {
 		machine := queueMachine{
 			ID: m.ID.String(), Name: m.Name, Model: deref(m.Model), Status: m.Status,
 			Loaded: loaded, Trays: trays,
-			Missing:  missingColours(out.Colours, loaded),
+			Missing:  missingColours(out.Colours, loaded, identities, bed),
 			Eligible: o.Eligible, Reason: o.Refusal,
 			// Nearest colour, as a starting point for a machine the operator
 			// deliberately overrides to. It is a guess and it is offered as
@@ -464,17 +465,50 @@ func (s *Server) queueColoursFor(ctx context.Context, jobs []gen.ProductionJob) 
 // this only annotates the dropdown. A colour with no resolvable hex is skipped
 // rather than reported missing - saying a printer lacks a colour Tensor cannot
 // describe is not information.
-func missingColours(needed []queueColour, loaded []string) []string {
-	have := map[string]bool{}
+// It asks the SAME question the binding asks, through acceptedHexes, rather
+// than comparing one hex against the trays.
+//
+// It used to test the bed's resolved hex for exact membership in the loaded
+// list. That is the right strictness for choosing a tray - a near-enough colour
+// is a scrapped plank - but the wrong question for "what is this machine
+// missing", because a colour legitimately has several hexes. Thirteen printers
+// do not agree on blue, and the shop's two gold spools report #D3C5A3 and
+// #D3B7A7; the colour map exists precisely to say that both of those ARE gold.
+//
+// So a printer holding the alternative gold was listed as missing GOLD while
+// the dispatcher would have bound it without complaint - the screen and the
+// floor disagreeing about the same printer, with the screen the more
+// pessimistic of the two. Worse for a plate built before its colour was mapped:
+// those carry a built-in hex no printer has ever reported, so EVERY machine
+// read as missing the colour.
+//
+// acceptedHexes answers all three cases - the plate's own hex, every hex mapped
+// to the same name, and the name the built-in table would have produced - which
+// is exactly what bindPlateToTrays consults. One rule, two readers.
+func missingColours(
+	needed []queueColour, loaded []string, identities []colourIdentity, bed bedColours,
+) []string {
+	have := make(map[string]bool, len(loaded))
 	for _, hex := range loaded {
-		have[hex] = true
+		// loadedColours already normalises, but this is also reached with hexes
+		// from elsewhere and an unnormalised key would silently never match.
+		if h, ok := normaliseHex(hex); ok {
+			have[h] = true
+		}
 	}
 	missing := make([]string, 0, len(needed))
 	for _, colour := range needed {
 		if colour.Hex == "" {
 			continue
 		}
-		if !have[colour.Hex] {
+		held := false
+		for hex := range acceptedHexes(colour.Hex, identities, bed) {
+			if have[hex] {
+				held = true
+				break
+			}
+		}
+		if !held {
 			missing = append(missing, colour.Name)
 		}
 	}
