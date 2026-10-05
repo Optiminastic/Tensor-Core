@@ -322,8 +322,13 @@ func noPrinterNote(options []machineOption) string {
 		return "A printer holds this bed's colours but its bed is too small for this plate. " +
 			"This bed waits for a machine of its own class or larger."
 	case unmapped > 0:
+		// It used to end "then queue this bed", which was an instruction to
+		// press a button that no longer exists. Worse than merely stale: the
+		// bed is already retrying on its own, so the sentence described the
+		// operator as the thing standing between the plate and the printer
+		// when the only missing step is the swatch.
 		return "No spool has been confirmed as one of this bed's colours. " +
-			"Map it under Inventory, then queue this bed."
+			"Map it under Inventory and this bed goes on its own."
 	case loadable > 0:
 		return "No printer has this bed's colours loaded. Load a spool, or wait for one to free up."
 	default:

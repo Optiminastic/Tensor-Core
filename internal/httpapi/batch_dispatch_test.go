@@ -231,6 +231,38 @@ func TestTheNoteBlamesTheClassWhenAPrinterHoldsTheColours(t *testing.T) {
 	}
 }
 
+// No refusal may tell somebody to press the Queue button, because there is no
+// Queue button.
+//
+// These notes are the only thing on screen when a bed will not go, and this one
+// ended "then queue this bed" for a while after the button was deleted. That is
+// worse than stale copy: every one of these beds is already retrying on its own
+// every pass, so naming a press the operator cannot make describes them as the
+// obstacle when the only missing step is the swatch. The fix each note names
+// must be a fix that is actually theirs to make.
+func TestNoRefusalSendsSomebodyToAButtonThatIsGone(t *testing.T) {
+	for _, opts := range [][]machineOption{
+		{{Refusal: "no tray is confirmed as RED", HoldsColours: false}},
+		{{Refusal: "does not hold RED", HoldsColours: false}},
+		{{Refusal: "this bed is laid out for a A2L", HoldsColours: true}},
+		{},
+	} {
+		note := noPrinterNote(opts)
+		for _, gone := range []string{"queue this bed", "press Queue", "then queue"} {
+			if strings.Contains(strings.ToLower(note), strings.ToLower(gone)) {
+				t.Errorf("note = %q names %q; the Queue button was deleted, and the bed "+
+					"is retrying on its own", note, gone)
+			}
+		}
+	}
+
+	// And the one that has a real fix still names it.
+	note := noPrinterNote([]machineOption{{Refusal: "no tray is confirmed as RED"}})
+	if !strings.Contains(note, "Inventory") {
+		t.Errorf("note = %q; an unmapped colour must still send somebody to Inventory", note)
+	}
+}
+
 // But a wrong-class printer that could not have printed the bed anyway
 // explains nothing, and must not take the blame off a real colour problem.
 func TestTheNoteStillBlamesColourWhenTheWrongClassCouldNotHavePrintedItEither(t *testing.T) {
