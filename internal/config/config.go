@@ -296,6 +296,23 @@ type Settings struct {
 	// not race each other to migrate.
 	RunMigrations bool
 
+	// RunSeed decides whether cmd/api projects the permission catalog into the
+	// database at startup, the way RunMigrations applies the schema.
+	//
+	// On by default, for the same reason and with the same failure behind it.
+	// ResolveUserAuthz reads role_permissions and never the Go slice, so a
+	// deploy that ships a changed catalog without running the seed changes
+	// NOTHING: a new permission does not exist, and every guard behind it
+	// rejects. That is invisible - no error, no log, just a page missing from
+	// the nav for everybody including ADMIN, whose "all permissions" is itself
+	// only rows the seed writes.
+	//
+	// It used to be a manual step, and the image still ships /app/seed for it.
+	// But the base is distroless: there is no shell, so Coolify's terminal
+	// cannot open and there is no hand for the by-hand step. A step nobody can
+	// perform is not a step.
+	RunSeed bool
+
 	// RunProductionWorkers decides whether cmd/api consumes the production
 	// queues itself as well as serving HTTP.
 	//
@@ -485,6 +502,7 @@ func Load() Settings {
 		FleetSyncIntervalSeconds:         intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
 		FleetSyncTimeoutMinutes:          intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
 		RunMigrations:                    boolEnvOr("RUN_MIGRATIONS", true),
+		RunSeed:                          boolEnvOr("RUN_SEED", true),
 		RunProductionWorkers:             boolEnvOr("RUN_PRODUCTION_WORKERS", true),
 		OrderSyncIntervalMinutes:         intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
 		OrderSyncTimeoutMinutes:          intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),

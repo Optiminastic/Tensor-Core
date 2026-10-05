@@ -80,6 +80,30 @@ func main() {
 	}
 	defer store.Close()
 
+	// The permission catalog, projected into the tables that actually decide
+	// access. Here rather than in a separate step for the reason the migration
+	// above is here: the base image is distroless, so there is no shell to
+	// chain a second binary and no terminal to run one by hand. /app/seed still
+	// ships, but on this deployment nothing can invoke it.
+	//
+	// Idempotent and transactional - it upserts the catalog and reconciles each
+	// role's grants, inserting what is missing and removing what the catalog no
+	// longer says - so running it on every boot is a no-op once it agrees.
+	//
+	// Fatal on failure, like the migration. A binary serving with a stale
+	// catalog is the exact state this prevents: ADMIN silently missing newly
+	// added permissions, every guard behind them rejecting, and nothing on
+	// screen or in the log to say why. Refusing to start puts that in the
+	// deploy instead of in somebody's afternoon.
+	if cfg.RunSeed {
+		seeded, err := auth.SyncAll(ctx, store)
+		if err != nil {
+			log.Fatalf("seed permission catalog: %v", err)
+		}
+		log.Printf("permission catalog synced: %d permissions, %d roles, %d grants",
+			seeded.Permissions, seeded.Roles, seeded.Grants)
+	}
+
 	verifier := auth.NewVerifier(
 		ctx, cfg.AuthJWKSURL, cfg.AuthIssuer, cfg.AuthAudience,
 		time.Duration(cfg.JWKSCacheSeconds)*time.Second,

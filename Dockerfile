@@ -41,12 +41,19 @@ COPY --from=build /out/unpinfamily /app/unpinfamily
 EXPOSE 8001
 USER nonroot:nonroot
 
-# One binary, and it migrates itself.
+# One binary, and it migrates AND seeds itself.
 #
 # The obvious shape - ENTRYPOINT ["/app/migrate && /app/api"] - cannot work
 # here: the base is distroless, so there is no shell to chain them, and an
-# exec-form ENTRYPOINT runs exactly one program. /app/migrate and /app/seed
-# still ship for running by hand.
+# exec-form ENTRYPOINT runs exactly one program.
+#
+# /app/migrate and /app/seed still ship, but do not count on running them by
+# hand: no shell also means no `docker exec` and no Coolify terminal, which
+# answers "No shell (bash/sh) is available in this container". The seed was a
+# manual post-deploy step on that basis for a long time, and the result was a
+# production ADMIN who could not see two pages because the permissions behind
+# them had never reached the database. So the API seeds at startup too; see
+# RUN_SEED.
 #
 # So the API applies pending migrations itself at startup, before it opens the
 # pool. Without that, every deploy shipped a binary built from current code

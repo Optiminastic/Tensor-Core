@@ -28,3 +28,28 @@ func TestAutoDispatchIsOnUnlessSomebodyTurnsItOff(t *testing.T) {
 		t.Error("BATCH_AUTO_DISPATCH=false did not turn automatic dispatch off")
 	}
 }
+
+// The other default whose absence is invisible.
+//
+// ResolveUserAuthz reads role_permissions and never the Go catalog, so a deploy
+// that ships a new permission without projecting it grants that permission to
+// nobody - including ADMIN, whose "everything" is itself only rows the seed
+// writes. Nothing errors. A page is simply missing from the nav, for everyone,
+// and the natural reading is that the feature did not deploy.
+//
+// It was a manual step until the image went distroless and took the shell with
+// it, at which point the step could not be performed at all. On by default is
+// what makes the deploy self-sufficient; RUN_SEED=false is still there for a
+// deployment where a separate step owns the catalog.
+func TestTheSeedRunsUnlessSomebodyTurnsItOff(t *testing.T) {
+	t.Setenv("RUN_SEED", "")
+	if !Load().RunSeed {
+		t.Fatal("RUN_SEED defaulted to off; a new permission would reach nobody, ADMIN included, " +
+			"and the only symptom is a missing page")
+	}
+
+	t.Setenv("RUN_SEED", "false")
+	if Load().RunSeed {
+		t.Error("RUN_SEED=false did not opt out")
+	}
+}
