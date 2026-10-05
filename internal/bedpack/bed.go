@@ -156,11 +156,33 @@ var (
 	// parts where a nozzle could not follow.
 	BedH2C = Bed{XOriginMM: 25, XMM: 300, YMM: 320, ZMM: 320}
 	// BedA2L holds 6. The same size this package assumed for every machine
-	// before beds were per-class.
-	BedA2L = Bed{XMM: 330, YMM: 320, ZMM: 325}
+	// before beds were per-class, less the 25mm shared origin below.
+	BedA2L = Bed{XOriginMM: 25, XMM: 305, YMM: 320, ZMM: 325}
 	// BedP2S holds 4, and is the one the old assumption was wrong about.
-	BedP2S = Bed{XMM: 256, YMM: 256, ZMM: 256}
+	BedP2S = Bed{XOriginMM: 25, XMM: 231, YMM: 256, ZMM: 256}
 )
+
+// Every bed starts at X=25, including the two that have one nozzle.
+//
+// A one-nozzle machine has no reason of its own to avoid the first 25mm - the
+// A2L really does reach X=0, and the P2S too. They give it up so that ONE
+// PLATE IS PRINTABLE ON ANY MACHINE.
+//
+// The alternative is to pack each plate for its own class and re-lay it when
+// it goes somewhere else, which is what the code claimed to do and never did:
+// a bed of three units is classed P2S, laid out from X=10, and then handed to
+// an H2C by the two-tier fallback because no P2S was free. On that machine the
+// second nozzle cannot reach before X=25, so the lettering of a two-colour
+// plank sat 2mm inside a strip no nozzle could follow, and every such plate was
+// refused with "Found G-code in unprintable area of multi-extruder printers".
+//
+// Sharing the origin costs nothing that matters. These plates are columns of
+// identical planks stacked in Y, so the limit on how many fit is the bed's
+// DEPTH; 25mm off the width changes the count on none of the three. It narrows
+// only the mixed-footprint layout, which this shop's beds do not use.
+//
+// The right edges are untouched: A2L still ends at 330 and P2S at 256, so the
+// widths above are 25mm smaller than the machines, not the areas.
 
 // BedForFamily is the bed a machine family prints on.
 //

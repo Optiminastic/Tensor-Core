@@ -281,10 +281,24 @@ func PackColumn(units []UnitFootprint) (placements []Placement, rejected []UnitF
 func PackColumnOn(bed Bed, units []UnitFootprint) (placements []Placement, rejected []UnitFootprint) {
 	bed = bed.Normalised()
 	y := bed.EdgeMarginMM
+	// Where the column starts, and where it must stop.
+	//
+	// Both are measured from XOriginMM, which this function used to ignore
+	// entirely - it placed every unit at EdgeMarginMM and compared against
+	// XMM - EdgeMarginMM, as though the usable area always began at zero. On
+	// the one bed where it does not, that is the whole bug: an H2C's second
+	// nozzle cannot reach before X=25, every plank was laid from X=10, and a
+	// two-colour plate put its lettering where that nozzle cannot go.
+	//
+	// XMM is a WIDTH, not a right edge, which is what made the old arithmetic
+	// look correct: on a bed whose origin is zero the two are the same number.
+	// PackOn had this right (see the envelope it builds); only this layout did
+	// not, and this is the layout a bed of identical planks actually takes.
+	left := bed.XOriginMM + bed.EdgeMarginMM
 	// A column is one plank wide, so the tower usually fits beside it - and
 	// beside is free, where behind costs the wide gap between planks. Only a
 	// bed too narrow for both pays in depth.
-	limitX := bed.XMM - bed.EdgeMarginMM
+	limitX := bed.XOriginMM + bed.XMM - bed.EdgeMarginMM
 	limitY := bed.YMM - bed.EdgeMarginMM
 	if bed.WipeTowerMM > 0 && !fitsBesideTower(bed, units) {
 		limitY = bed.EdgeMarginMM + bed.ModelYMM()
@@ -294,12 +308,12 @@ func PackColumnOn(bed Bed, units []UnitFootprint) (placements []Placement, rejec
 	gap := columnGapFor(bed, limitY-bed.EdgeMarginMM, units)
 
 	for _, u := range units {
-		if u.ZMM > bed.ZMM || bed.EdgeMarginMM+u.XMM > limitX || y+u.YMM > limitY {
+		if u.ZMM > bed.ZMM || left+u.XMM > limitX || y+u.YMM > limitY {
 			rejected = append(rejected, u)
 			continue
 		}
 		placements = append(placements, Placement{
-			RefID: u.RefID, XOffsetMM: bed.EdgeMarginMM, YOffsetMM: y, Rotated: false,
+			RefID: u.RefID, XOffsetMM: left, YOffsetMM: y, Rotated: false,
 		})
 		y += u.YMM + gap
 	}
@@ -330,6 +344,10 @@ func columnGapFor(bed Bed, depthAvailable float64, units []UnitFootprint) float6
 
 // fitsBesideTower reports whether a single column of these units leaves the
 // tower room beside it, rather than behind it.
+//
+// Width-relative and deliberately origin-free: it asks how much room there is,
+// not where that room begins. Adding XOriginMM here would subtract the offset
+// twice, since the caller's limitX already starts from it.
 func fitsBesideTower(bed Bed, units []UnitFootprint) bool {
 	width := bed.XMM - 2*bed.EdgeMarginMM - bed.WipeTowerMM
 	for _, u := range units {

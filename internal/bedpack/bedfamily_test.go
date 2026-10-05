@@ -1,6 +1,9 @@
 package bedpack
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func planks(n int) []UnitFootprint {
 	out := make([]UnitFootprint, 0, n)
@@ -11,20 +14,33 @@ func planks(n int) []UnitFootprint {
 }
 
 // extent is how much of the bed a packing actually occupies.
+// extent is how big the packed plate IS, which is what a bed's XMM/YMM are
+// compared against.
+//
+// Max minus min, not max alone. It measured the absolute right edge until the
+// beds gained a shared 25mm origin, at which point "the plate ends at X=235"
+// started being compared against "the bed is 231 wide" - two different
+// quantities that agreed only while every bed began at zero. meshio.Merge3MF
+// reports the same thing this does (`XMM: mx.X - mn.X`), so the test now
+// measures a plate the way production does.
 func extent(placed []Placement) (x, y float64) {
-	for _, p := range placed {
+	var minX, minY, maxX, maxY float64
+	for i, p := range placed {
 		w, h := 200.0, 50.0
 		if p.Rotated {
 			w, h = h, w
 		}
-		if p.XOffsetMM+w > x {
-			x = p.XOffsetMM + w
+		if i == 0 {
+			minX, minY = p.XOffsetMM, p.YOffsetMM
+			maxX, maxY = p.XOffsetMM+w, p.YOffsetMM+h
+			continue
 		}
-		if p.YOffsetMM+h > y {
-			y = p.YOffsetMM + h
-		}
+		minX = math.Min(minX, p.XOffsetMM)
+		minY = math.Min(minY, p.YOffsetMM)
+		maxX = math.Max(maxX, p.XOffsetMM+w)
+		maxY = math.Max(maxY, p.YOffsetMM+h)
 	}
-	return x, y
+	return maxX - minX, maxY - minY
 }
 
 // The bed a class prints on must hold the bed the shop routes to it.
