@@ -22,7 +22,6 @@ package httpapi
 // the resulting sliced file itself, printer_id is set at creation.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -35,6 +34,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
+	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -169,25 +169,18 @@ func (s *Server) sendBatchToMachine(
 	// The nozzle map for THIS machine, computed once and used twice: written
 	// into the plate below, and sent as an override for the single-nozzle path
 	// that still goes through the presets.
-	nozzleMap := nozzleMapOverrides(machine, assignments, s.physicalExtruderMap(ctx, pipeline))
+	// The bed this plate is laid out on, and the units on it: the prime tower
+	// has to go in the band bedpack kept clear, and that band is a property of
+	// the bed and the footprints, not of the machine.
+	towerBed := bedpack.BedForFamily(deref(machine.Model))
+	nozzleMap := nozzleMapOverrides(machine, assignments,
+		s.physicalExtruderMap(ctx, pipeline), towerBed, s.bedUnitsFor(ctx, bedJobs))
 
-	// A two-colour plate on a two-nozzle machine carries its own profile.
-	//
-	// It has to. On the preset path BambuBuddy forces enable_prime_tower to 0 -
-	// over its own preset and over an explicit override - and a tool change
-	// with nowhere to purge either drops the second filament silently or puts
-	// G-code off the bed. Measured on this plate: 0.00g of blue one way,
-	// 26.59g white plus 27.05g blue the other. See plate_profile.go.
-	plateColours := trayColoursOf(assignments)
-	uploaded, embedded, err := s.uploadPlate(ctx, batch, plate, plateColours, nozzleMap)
+	uploaded, err := s.uploadPlate(ctx, batch, plate)
 	if err != nil {
 		return out, err
 	}
 	out.Filename = uploaded.Filename
-	if embedded {
-		log.Info("plate carries its own profile for a two-nozzle slice",
-			"batch", batch.BatchNumber, "machine", machine.Name, "colours", plateColours)
-	}
 
 	// One filament preset PER SLOT. A single preset is what collapsed a
 	// two-colour bed to one filament, and repeating the pipeline's own preset is
@@ -206,13 +199,16 @@ func (s *Server) sendBatchToMachine(
 		// bedpack already placed every part and meshio merged them at those
 		// offsets; letting the slicer rearrange the plate would discard it.
 		AutoOrient: false, AutoArrange: false,
-		// Only where the plate carries a profile of its own. Everywhere else
-		// the presets are still the configuration, which is the arrangement
-		// every single-nozzle bed on this floor already prints under.
-		UseEmbeddedSettings: embedded,
-		// Still sent on the preset path. Discarded on the embedded one, where
-		// the same values are already in the plate.
-		ProcessOverrides: nozzleMap,
+		// BambuBuddy's presets are the configuration, for every machine.
+		//
+		// A two-colour H2C bed used to be sliced from a profile written into
+		// the plate instead, on the belief that the preset path could not turn
+		// the prime tower on. It can - every override here is read back
+		// applied - and the embedded path additionally crashes BambuBuddy's
+		// slicer, which has no display for it (SIGSEGV in glfwInit). The
+		// presets plus a tower POSITION are what produce two nozzles.
+		UseEmbeddedSettings: false,
+		ProcessOverrides:    nozzleMap,
 	})
 	if err != nil {
 		var reason bambubuddy.ReasonError
@@ -428,51 +424,36 @@ func (s *Server) plateSlots(ctx context.Context, plate gen.FileAsset) ([]meshio.
 }
 
 // uploadPlate puts the unsliced plate in BambuBuddy's library.
+//
+// Streamed, always. A plate used to be buffered and rewritten here to carry a
+// 564-key slicer profile of its own, because the preset path was believed to
+// force the prime tower off. It does not - see primeTowerOverrides - and the
+// profile was removed along with that belief. BambuBuddy's own presets are the
+// configuration again, which is what the shop maintains and what every
+// single-nozzle bed already printed under.
 func (s *Server) uploadPlate(
 	ctx context.Context, batch gen.Batch, plate gen.FileAsset,
-	colours []string, nozzleMap map[string]any,
-) (bambubuddy.UploadedFile, bool, error) {
+) (bambubuddy.UploadedFile, error) {
 	obj, err := s.storage.Get(ctx, plate.StorageKey)
 	if err != nil {
 		const reason = "This batch's plate is missing from storage. Re-approve the batch to rebuild it."
 		s.recordPrintError(ctx, batch.ID, reason)
-		return bambubuddy.UploadedFile{}, false, statusErr(http.StatusConflict, reason)
+		return bambubuddy.UploadedFile{}, statusErr(http.StatusConflict, reason)
 	}
 	defer func() { _ = obj.Body.Close() }()
 
-	// Streamed by default, and buffered only where the plate has to be
-	// rewritten. UploadFile streams for a reason - a print file is large and
-	// holding one per concurrent upload is how a service falls over - so the
-	// two-nozzle path pays that cost and nothing else does.
-	var body io.Reader = obj.Body
-	embedded := false
-	if len(nozzleMap) > 0 && len(colours) >= 2 {
-		raw, err := io.ReadAll(obj.Body)
-		if err != nil {
-			const reason = "Could not read this batch's plate to give it a slicer profile."
-			s.recordPrintError(ctx, batch.ID, reason)
-			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusInternalServerError, reason)
-		}
-		rewritten, ok, err := embedPlateProfile(raw, colours, nozzleMap)
-		if err != nil {
-			s.recordPrintError(ctx, batch.ID, err.Error())
-			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusInternalServerError, err.Error())
-		}
-		body, embedded = bytes.NewReader(rewritten), ok
-	}
-
-	uploaded, err := s.bambu.UploadFile(ctx, plate.Filename, body)
+	uploaded, err := s.bambu.UploadFile(ctx, plate.Filename, obj.Body)
 	if err != nil {
 		var reason bambubuddy.ReasonError
 		if errors.As(err, &reason) {
 			s.recordPrintError(ctx, batch.ID, reason.Reason)
-			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusUnprocessableEntity, reason.Reason)
+			return bambubuddy.UploadedFile{}, statusErr(http.StatusUnprocessableEntity, reason.Reason)
 		}
 		s.recordPrintError(ctx, batch.ID, "Could not send the plate to BambuBuddy.")
-		return bambubuddy.UploadedFile{}, false, statusErr(http.StatusBadGateway,
+		return bambubuddy.UploadedFile{}, statusErr(http.StatusBadGateway,
 			"Could not send the plate to BambuBuddy.")
 	}
-	return uploaded, embedded, nil
+	return uploaded, nil
 }
 
 // pipelineForModel picks the slicer configuration for one printer model.
@@ -635,6 +616,7 @@ func (s *Server) colourIdentities(ctx context.Context) ([]colourIdentity, error)
 // not exist.
 func nozzleMapOverrides(
 	machine gen.Machine, assignments []slotAssignment, physicalMap []int,
+	bed bedpack.Bed, units []bedpack.UnitFootprint,
 ) map[string]any {
 	if machine.FixedNozzleIndex == nil || len(assignments) == 0 {
 		return nil
@@ -687,7 +669,7 @@ func nozzleMapOverrides(
 	if topology, ok := amsTopologyFor(fixed, physicalMap); ok {
 		out["extruder_ams_count"] = topology
 	}
-	for k, v := range primeTowerOverrides(assignments) {
+	for k, v := range primeTowerOverrides(assignments, bed, units) {
 		out[k] = v
 	}
 	return out
@@ -749,15 +731,24 @@ func (s *Server) physicalExtruderMap(ctx context.Context, pipeline bambubuddy.Pi
 // Studio's own slice of this plate carries "FEATURE: Prime tower"; BambuBuddy's
 // carries none.
 //
-// BAMBUBUDDY CURRENTLY IGNORES THIS, and the override is sent anyway so the
-// intent is recorded and starts working the day that changes. Measured against
-// the live service: slicing one file with
-// process_overrides {"enable_prime_tower":"1","sparse_infill_density":"42%"}
-// came back with sparse_infill_density "42%" applied and enable_prime_tower
-// "0" - then listed enable_prime_tower in different_settings_to_system as a
-// "designer change", though neither the source 3MF nor the process preset says
-// 0. Both say 1. So it is BambuBuddy forcing it off, over its own preset and
-// over an explicit override; nothing Tensor sends can turn it on today.
+// TURNING IT ON WAS NEVER ENOUGH - IT ALSO HAS TO BE PLACED. Read back from a
+// completed slice, every override here is honoured: enable_prime_tower comes
+// back "1", as do filament_map, filament_map_mode and extruder_ams_count. An
+// earlier note in this file claimed BambuBuddy forced the tower off. It does
+// not, and that claim sent the whole investigation after the wrong thing.
+//
+// What BambuBuddy does supply, when Tensor says nothing, is its own default
+// POSITION: wipe_tower_x 15. An H2C's second extruder cannot reach before
+// X=25, so a 60mm tower there hangs over the edge of that nozzle's printable
+// area, and the plate is refused with "Found G-code in unprintable area of
+// multi-extruder printers". Same plate, same presets, only the tower moved:
+//
+//	wipe_tower_x 15   ->  refused
+//	wipe_tower_x 165  ->  sliced, filament_maps "2 1", 54.91g + 46.57g
+//
+// Bed.TowerOrigin puts it in the band bedpack already keeps clear, so the
+// position follows the layout instead of a slicer default that knows nothing
+// about which nozzle has to reach it.
 //
 // Only for a plate that actually changes colour. A single-colour bed never
 // purges, so a tower there is plastic and minutes for nothing.
@@ -765,7 +756,9 @@ func (s *Server) physicalExtruderMap(ctx context.Context, pipeline bambubuddy.Pi
 // The space is already reserved: bedpack holds back WipeTowerMM on every plate
 // it packs, and the process preset's own prime_tower_width is 60 - the same
 // number - so this costs no plate area that is not already set aside.
-func primeTowerOverrides(assignments []slotAssignment) map[string]any {
+func primeTowerOverrides(
+	assignments []slotAssignment, bed bedpack.Bed, units []bedpack.UnitFootprint,
+) map[string]any {
 	seen := map[string]bool{}
 	for _, a := range assignments {
 		seen[a.TrayHex] = true
@@ -773,7 +766,24 @@ func primeTowerOverrides(assignments []slotAssignment) map[string]any {
 	if len(seen) < 2 {
 		return nil
 	}
-	return map[string]any{"enable_prime_tower": "1"}
+	out := map[string]any{"enable_prime_tower": "1"}
+	x, y, ok := bed.TowerOrigin(units)
+	if !ok {
+		// No band was reserved, so there is nowhere this plate is known to be
+		// free. Better to let BambuBuddy choose than to name a spot that may
+		// hold a part.
+		return out
+	}
+	// Arrays: wipe_tower_x and wipe_tower_y are per-plate in a Bambu profile.
+	out["wipe_tower_x"] = []string{formatMM(x)}
+	out["wipe_tower_y"] = []string{formatMM(y)}
+	return out
+}
+
+// formatMM writes a millimetre position the way a Bambu profile does - plain
+// decimal, no exponent, no trailing zeros.
+func formatMM(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 // pipelineForBed picks the slicer configuration for THIS bed on this model.
@@ -961,4 +971,37 @@ func (s *Server) replateForMachine(
 		return batch, statusErr(http.StatusInternalServerError, "Could not reload the batch.")
 	}
 	return refreshed, nil
+}
+
+// bedUnitsFor is the footprints on a bed, for deciding where its prime tower
+// goes.
+//
+// Best effort on purpose. The plate has already been built and stored by the
+// time anything here runs, which means every job on it had a measurable file -
+// so a miss means the file record changed under us, not that the bed is
+// unprintable. Returning what is known lets TowerOrigin answer from the same
+// footprints the packer saw; returning nothing only costs the tower its
+// position, which is the behaviour before this existed.
+func (s *Server) bedUnitsFor(
+	ctx context.Context, jobs []gen.ProductionJob,
+) []bedpack.UnitFootprint {
+	out := make([]bedpack.UnitFootprint, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PrintFileID == nil {
+			continue
+		}
+		file, err := s.store.Q.GetFileAsset(ctx, *j.PrintFileID)
+		if err != nil {
+			continue
+		}
+		bx, by, bz := db.NumFloatPtr(file.BboxXMm), db.NumFloatPtr(file.BboxYMm), db.NumFloatPtr(file.BboxZMm)
+		if bx == nil || by == nil || bz == nil {
+			continue
+		}
+		box := bedpack.UnitFootprint{RefID: j.ID.String(), XMM: *bx, YMM: *by, ZMM: *bz}
+		for range jobQuantity(j.Quantity) {
+			out = append(out, box)
+		}
+	}
+	return out
 }

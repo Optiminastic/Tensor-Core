@@ -196,3 +196,45 @@ func BedForFamily(family string) Bed {
 	}
 	return BedP2S.Normalised()
 }
+
+// TowerOrigin reports where the prime tower belongs on this bed: the corner of
+// the band every layout here already keeps clear for it.
+//
+// THE BUG THIS FIXES. Tensor asked for the tower and never said where, so
+// BambuBuddy used its own default - wipe_tower_x 15 - and an H2C's second
+// extruder cannot reach before X=25. The tower is 60mm wide, so it straddled
+// that line, and every purge move the second nozzle made was off its own
+// printable area. BambuBuddy then refused the whole plate:
+//
+//	Found G-code in unprintable area of multi-extruder printers after slicing.
+//
+// Measured on batch 115483's plate, same file, same presets, only this moved:
+//
+//	wipe_tower_x 15   ->  refused
+//	wipe_tower_x 165  ->  sliced, filament_maps "2 1", 54.91g + 46.57g
+//
+// So the parts were never the problem - they sit at X 35..235 - and neither was
+// the model. It was the one place on the plate nobody had placed.
+//
+// WHICH BAND. The reservation comes off the width when the plate fits beside
+// the tower and off the depth when it does not. PackColumnOn asks
+// FitsBesideTower outright; PackOn tries the narrow envelope first, and that
+// envelope's width is the very quantity FitsBesideTower measures. So asking it
+// here follows the layout rather than guessing at it - and a tower dropped in
+// the band that was NOT kept clear lands on top of a part.
+//
+// ok is false for a single-filament plate, which reserves no band and never
+// purges. Nothing should be sent for those: they slice correctly today.
+func (b Bed) TowerOrigin(units []UnitFootprint) (xMM, yMM float64, ok bool) {
+	b = b.Normalised()
+	if b.WipeTowerMM <= 0 {
+		return 0, 0, false
+	}
+	if FitsBesideTower(b, units) {
+		// Beside, flush with the right edge of the usable area - which is
+		// where limitX -= WipeTowerMM stopped the parts.
+		return b.XOriginMM + b.XMM - b.EdgeMarginMM - b.WipeTowerMM, b.EdgeMarginMM, true
+	}
+	// Behind, past the depth the parts were held to.
+	return b.XOriginMM + b.EdgeMarginMM, b.EdgeMarginMM + b.ModelYMM(), true
+}

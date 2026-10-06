@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/Optiminastic/tensor-core/internal/bedpack"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/meshio"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -764,7 +765,7 @@ func TestTheNozzleMapPinsTheFixedSpoolToItsOwnNozzle(t *testing.T) {
 
 	// The H2C's own map, as every file Bambu Studio produced for these
 	// printers carries it: logical 1 is physical 1, logical 2 is physical 0.
-	got := nozzleMapOverrides(machine, assignments, []int{1, 0})
+	got := nozzleMapFor(machine, assignments, []int{1, 0})
 	if got == nil {
 		t.Fatal("no overrides sent, so the slicer would map the nozzles itself")
 	}
@@ -795,8 +796,8 @@ func TestTheNozzleMapFollowsThePresetsExtruderOrder(t *testing.T) {
 		{SlotIndex: 1, AmsIndex: 6, TrayHex: "#D3C5A3"},
 	}
 
-	swapped, _ := nozzleMapOverrides(machine, assignments, []int{1, 0})["filament_map"].([]string)
-	identity, _ := nozzleMapOverrides(machine, assignments, []int{0, 1})["filament_map"].([]string)
+	swapped, _ := nozzleMapFor(machine, assignments, []int{1, 0})["filament_map"].([]string)
+	identity, _ := nozzleMapFor(machine, assignments, []int{0, 1})["filament_map"].([]string)
 	if swapped[0] == identity[0] {
 		t.Fatalf("both maps gave %q for the fixed nozzle; physical_extruder_map is being ignored",
 			swapped[0])
@@ -811,7 +812,7 @@ func TestTheNozzleMapFollowsThePresetsExtruderOrder(t *testing.T) {
 // the wrong nozzle prints every colour from the wrong spool.
 func TestNoNozzleMapWhenThePresetDoesNotPlaceThatNozzle(t *testing.T) {
 	idx := int32(3)
-	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+	got := nozzleMapFor(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
 	}, []int{1, 0})
 	if got != nil {
@@ -824,7 +825,7 @@ func TestNoNozzleMapWhenThePresetDoesNotPlaceThatNozzle(t *testing.T) {
 // prime tower at all where Bambu Studio's does.
 func TestThePrimeTowerIsOnForATwoColourPlate(t *testing.T) {
 	idx := int32(1)
-	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+	got := nozzleMapFor(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
 	}, []int{1, 0})
 	if got["enable_prime_tower"] != "1" {
@@ -836,7 +837,7 @@ func TestThePrimeTowerIsOnForATwoColourPlate(t *testing.T) {
 // One colour never purges, so a tower would be plastic and minutes for nothing.
 func TestNoPrimeTowerForASingleColourPlate(t *testing.T) {
 	idx := int32(1)
-	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+	got := nozzleMapFor(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#FFFFFF"},
 	}, []int{1, 0})
 	if _, ok := got["enable_prime_tower"]; ok {
@@ -847,7 +848,7 @@ func TestNoPrimeTowerForASingleColourPlate(t *testing.T) {
 // A printer with one extruder has nothing to map, and describing a second
 // nozzle to it would describe a machine that does not exist.
 func TestNoNozzleMapForASingleNozzleMachine(t *testing.T) {
-	got := nozzleMapOverrides(gen.Machine{}, []slotAssignment{{AmsIndex: 6}}, nil)
+	got := nozzleMapFor(gen.Machine{}, []slotAssignment{{AmsIndex: 6}}, nil)
 	if got != nil {
 		t.Errorf("overrides = %v, want none for a one-nozzle printer", got)
 	}
@@ -857,7 +858,7 @@ func TestNoNozzleMapForASingleNozzleMachine(t *testing.T) {
 // slicer is left to arrange them rather than told to stack them on one nozzle.
 func TestNoNozzleMapWhenNothingUsesTheFixedSpool(t *testing.T) {
 	idx := int32(1)
-	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+	got := nozzleMapFor(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: 6}, {AmsIndex: 7},
 	}, []int{1, 0})
 	if got != nil {
@@ -870,7 +871,7 @@ func TestNoNozzleMapWhenNothingUsesTheFixedSpool(t *testing.T) {
 // what Bambu Studio writes for the same machine, indexed by LOGICAL extruder.
 func TestTheAMSTopologyMatchesBambuStudiosForAnH2C(t *testing.T) {
 	idx := int32(1)
-	got := nozzleMapOverrides(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
+	got := nozzleMapFor(gen.Machine{FixedNozzleIndex: &idx}, []slotAssignment{
 		{AmsIndex: amsExternalSpool, TrayHex: "#FFFFFF"}, {AmsIndex: 6, TrayHex: "#D3C5A3"},
 	}, []int{1, 0})
 
@@ -888,4 +889,17 @@ func TestNoAMSTopologyForASingleNozzleMachine(t *testing.T) {
 	if got, ok := amsTopologyFor(1, []int{0}); ok {
 		t.Errorf("topology = %v, want none for a one-extruder preset", got)
 	}
+}
+
+// nozzleMapFor is nozzleMapOverrides with the bed arguments defaulted.
+//
+// These tests are about which NOZZLE each slot prints from, not about where the
+// prime tower sits, so they pass the H2C bed and no footprints: a plate with no
+// units still leaves the tower band free, which is the uninteresting answer for
+// a test that does not assert on it.
+func nozzleMapFor(
+	machine gen.Machine, assignments []slotAssignment, physicalMap []int,
+) map[string]any {
+	return nozzleMapOverrides(machine, assignments, physicalMap,
+		bedpack.BedForFamily("H2C"), nil)
 }

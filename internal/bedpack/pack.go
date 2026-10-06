@@ -300,7 +300,7 @@ func PackColumnOn(bed Bed, units []UnitFootprint) (placements []Placement, rejec
 	// bed too narrow for both pays in depth.
 	limitX := bed.XOriginMM + bed.XMM - bed.EdgeMarginMM
 	limitY := bed.YMM - bed.EdgeMarginMM
-	if bed.WipeTowerMM > 0 && !fitsBesideTower(bed, units) {
+	if bed.WipeTowerMM > 0 && !FitsBesideTower(bed, units) {
 		limitY = bed.EdgeMarginMM + bed.ModelYMM()
 	} else if bed.WipeTowerMM > 0 {
 		limitX -= bed.WipeTowerMM
@@ -342,13 +342,13 @@ func columnGapFor(bed Bed, depthAvailable float64, units []UnitFootprint) float6
 	return bed.GapMM
 }
 
-// fitsBesideTower reports whether a single column of these units leaves the
+// FitsBesideTower reports whether a single column of these units leaves the
 // tower room beside it, rather than behind it.
 //
 // Width-relative and deliberately origin-free: it asks how much room there is,
 // not where that room begins. Adding XOriginMM here would subtract the offset
 // twice, since the caller's limitX already starts from it.
-func fitsBesideTower(bed Bed, units []UnitFootprint) bool {
+func FitsBesideTower(bed Bed, units []UnitFootprint) bool {
 	width := bed.XMM - 2*bed.EdgeMarginMM - bed.WipeTowerMM
 	for _, u := range units {
 		if u.XMM > width {
