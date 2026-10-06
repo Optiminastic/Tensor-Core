@@ -22,6 +22,7 @@ package httpapi
 // the resulting sliced file itself, printer_id is set at creation.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -165,11 +166,28 @@ func (s *Server) sendBatchToMachine(
 		return out, statusErr(http.StatusConflict, err.Error())
 	}
 
-	uploaded, err := s.uploadPlate(ctx, batch, plate)
+	// The nozzle map for THIS machine, computed once and used twice: written
+	// into the plate below, and sent as an override for the single-nozzle path
+	// that still goes through the presets.
+	nozzleMap := nozzleMapOverrides(machine, assignments, s.physicalExtruderMap(ctx, pipeline))
+
+	// A two-colour plate on a two-nozzle machine carries its own profile.
+	//
+	// It has to. On the preset path BambuBuddy forces enable_prime_tower to 0 -
+	// over its own preset and over an explicit override - and a tool change
+	// with nowhere to purge either drops the second filament silently or puts
+	// G-code off the bed. Measured on this plate: 0.00g of blue one way,
+	// 26.59g white plus 27.05g blue the other. See plate_profile.go.
+	plateColours := trayColoursOf(assignments)
+	uploaded, embedded, err := s.uploadPlate(ctx, batch, plate, plateColours, nozzleMap)
 	if err != nil {
 		return out, err
 	}
 	out.Filename = uploaded.Filename
+	if embedded {
+		log.Info("plate carries its own profile for a two-nozzle slice",
+			"batch", batch.BatchNumber, "machine", machine.Name, "colours", plateColours)
+	}
 
 	// One filament preset PER SLOT. A single preset is what collapsed a
 	// two-colour bed to one filament, and repeating the pipeline's own preset is
@@ -187,8 +205,14 @@ func (s *Server) sendBatchToMachine(
 		ExportThreeMF:   true,
 		// bedpack already placed every part and meshio merged them at those
 		// offsets; letting the slicer rearrange the plate would discard it.
-		AutoOrient: false, AutoArrange: false, UseEmbeddedSettings: false,
-		ProcessOverrides: nozzleMapOverrides(machine, assignments, s.physicalExtruderMap(ctx, pipeline)),
+		AutoOrient: false, AutoArrange: false,
+		// Only where the plate carries a profile of its own. Everywhere else
+		// the presets are still the configuration, which is the arrangement
+		// every single-nozzle bed on this floor already prints under.
+		UseEmbeddedSettings: embedded,
+		// Still sent on the preset path. Discarded on the embedded one, where
+		// the same values are already in the plate.
+		ProcessOverrides: nozzleMap,
 	})
 	if err != nil {
 		var reason bambubuddy.ReasonError
@@ -406,27 +430,49 @@ func (s *Server) plateSlots(ctx context.Context, plate gen.FileAsset) ([]meshio.
 // uploadPlate puts the unsliced plate in BambuBuddy's library.
 func (s *Server) uploadPlate(
 	ctx context.Context, batch gen.Batch, plate gen.FileAsset,
-) (bambubuddy.UploadedFile, error) {
+	colours []string, nozzleMap map[string]any,
+) (bambubuddy.UploadedFile, bool, error) {
 	obj, err := s.storage.Get(ctx, plate.StorageKey)
 	if err != nil {
 		const reason = "This batch's plate is missing from storage. Re-approve the batch to rebuild it."
 		s.recordPrintError(ctx, batch.ID, reason)
-		return bambubuddy.UploadedFile{}, statusErr(http.StatusConflict, reason)
+		return bambubuddy.UploadedFile{}, false, statusErr(http.StatusConflict, reason)
 	}
 	defer func() { _ = obj.Body.Close() }()
 
-	uploaded, err := s.bambu.UploadFile(ctx, plate.Filename, obj.Body)
+	// Streamed by default, and buffered only where the plate has to be
+	// rewritten. UploadFile streams for a reason - a print file is large and
+	// holding one per concurrent upload is how a service falls over - so the
+	// two-nozzle path pays that cost and nothing else does.
+	var body io.Reader = obj.Body
+	embedded := false
+	if len(nozzleMap) > 0 && len(colours) >= 2 {
+		raw, err := io.ReadAll(obj.Body)
+		if err != nil {
+			const reason = "Could not read this batch's plate to give it a slicer profile."
+			s.recordPrintError(ctx, batch.ID, reason)
+			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusInternalServerError, reason)
+		}
+		rewritten, ok, err := embedPlateProfile(raw, colours, nozzleMap)
+		if err != nil {
+			s.recordPrintError(ctx, batch.ID, err.Error())
+			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusInternalServerError, err.Error())
+		}
+		body, embedded = bytes.NewReader(rewritten), ok
+	}
+
+	uploaded, err := s.bambu.UploadFile(ctx, plate.Filename, body)
 	if err != nil {
 		var reason bambubuddy.ReasonError
 		if errors.As(err, &reason) {
 			s.recordPrintError(ctx, batch.ID, reason.Reason)
-			return bambubuddy.UploadedFile{}, statusErr(http.StatusUnprocessableEntity, reason.Reason)
+			return bambubuddy.UploadedFile{}, false, statusErr(http.StatusUnprocessableEntity, reason.Reason)
 		}
 		s.recordPrintError(ctx, batch.ID, "Could not send the plate to BambuBuddy.")
-		return bambubuddy.UploadedFile{}, statusErr(http.StatusBadGateway,
+		return bambubuddy.UploadedFile{}, false, statusErr(http.StatusBadGateway,
 			"Could not send the plate to BambuBuddy.")
 	}
-	return uploaded, nil
+	return uploaded, embedded, nil
 }
 
 // pipelineForModel picks the slicer configuration for one printer model.
