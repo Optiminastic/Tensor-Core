@@ -659,8 +659,15 @@ func nozzleMapOverrides(
 	// Nothing on this plate comes off the fixed spool, so there is nothing to
 	// pin: let the slicer arrange the AMS colours as it likes rather than
 	// forcing them all onto one nozzle and telling it that was deliberate.
+	//
+	// The TOWER still has to be placed, though. The slicer may well put these
+	// colours on both nozzles - that is the arrangement being left to it - and
+	// then it purges into a tower that BambuBuddy would otherwise default to
+	// X=15, which the second nozzle cannot reach. Returning nil here sent
+	// every all-AMS two-colour bed back into the failure this whole change is
+	// about.
 	if !external {
-		return nil
+		return primeTowerOverrides(assignments, bed, units)
 	}
 	out := map[string]any{
 		"filament_map_mode": "Manual",

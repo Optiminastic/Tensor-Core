@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Optiminastic/tensor-core/internal/bedpack"
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 )
 
 // A two-colour plate must be told WHERE its prime tower goes, not just that it
@@ -48,5 +49,38 @@ func TestATwoColourPlateIsToldWhereItsPrimeTowerGoes(t *testing.T) {
 				t.Error("no wipe_tower_y; a position needs both axes")
 			}
 		})
+	}
+}
+
+// A two-colour bed whose colours BOTH come from the AMS still needs its tower
+// placed, even though there is no external spool to pin a nozzle to.
+//
+// nozzleMapOverrides used to return nil outright for these, which left the
+// tower at BambuBuddy's X=15 default - unreachable by an H2C's second nozzle,
+// and the slicer is free to use that nozzle precisely because the arrangement
+// was left to it.
+func TestAnAllAmsTwoColourBedStillGetsItsTowerPlaced(t *testing.T) {
+	idx := int32(1)
+	got := nozzleMapOverrides(
+		gen.Machine{FixedNozzleIndex: &idx},
+		[]slotAssignment{{AmsIndex: 6, TrayHex: "#FFFFFF"}, {AmsIndex: 7, TrayHex: "#C12E1F"}},
+		[]int{1, 0},
+		bedpack.BedForFamily("H2C"),
+		[]bedpack.UnitFootprint{{RefID: "plank", XMM: 200, YMM: 50, ZMM: 40}},
+	)
+	if got["enable_prime_tower"] != "1" {
+		t.Fatalf("overrides = %v, want the prime tower on", got)
+	}
+	xs, ok := got["wipe_tower_x"].([]string)
+	if !ok || len(xs) != 1 {
+		t.Fatalf("wipe_tower_x = %#v, want a position", got["wipe_tower_x"])
+	}
+	x, err := strconv.ParseFloat(xs[0], 64)
+	if err != nil || x < 25 {
+		t.Errorf("tower at X=%v, want >= 25 - the H2C's second nozzle starts there", xs[0])
+	}
+	// And still no nozzle pinning: that is what being all-AMS means.
+	if _, pinned := got["filament_map"]; pinned {
+		t.Error("an all-AMS bed was pinned to nozzles; the slicer should arrange it")
 	}
 }
