@@ -12,45 +12,54 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const claimCustomerForCall = `-- name: ClaimCustomerForCall :one
+const claimWinbackContact = `-- name: ClaimWinbackContact :one
 INSERT INTO abandoned_checkout_calls (
-    id, brand_slug, checkout_id, checkout_name, customer_name, phone, status
+    id, brand_slug, checkout_id, checkout_name, customer_name,
+    phone, channel, status
 ) VALUES (
     $1, $2, $3,
-    $4, $5, $6,
-    'claimed'
+    $4, $5,
+    $6, $7, 'claimed'
 )
-ON CONFLICT (phone) DO NOTHING
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
+ON CONFLICT (brand_slug, phone, channel) DO NOTHING
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
 `
 
-type ClaimCustomerForCallParams struct {
+type ClaimWinbackContactParams struct {
 	ID           uuid.UUID
 	BrandSlug    string
 	CheckoutID   string
 	CheckoutName string
 	CustomerName string
 	Phone        string
+	Channel      string
 }
 
-// Takes the right to ring this PERSON, or reports that it is already taken.
+// Takes the right to reach this PERSON on this CHANNEL, or reports that it is
+// already taken.
 //
-// Inserted BEFORE the call is placed, not after. A row written afterwards
-// leaves a window in which the process can die with the customer's phone
-// ringing and nothing recorded - and the next sweep rings them again. Claiming
-// first means a crash costs a missed call, which is recoverable, instead of a
-// repeated one, which is not.
+// Inserted BEFORE anything is sent, not after. A row written afterwards leaves
+// a window in which the process can die with the customer's phone ringing and
+// nothing recorded - and the next sweep rings them again. Claiming first means
+// a crash costs a missed contact, which is recoverable, instead of a repeated
+// one, which is not.
 //
-// Keyed on the phone, so a customer who abandons three carts is called once.
+// PER CHANNEL, because a customer who was rung is still due a message. A
+// single row for both would mean whichever channel claimed first silently
+// cancelled the other, which is indistinguishable from losing a race to
+// another replica. Per brand too - see migration 0098 for why that was wrong
+// before.
+//
 // DO NOTHING on conflict, so a second replica gets no row back and stands down.
-func (q *Queries) ClaimCustomerForCall(ctx context.Context, arg ClaimCustomerForCallParams) (AbandonedCheckoutCall, error) {
-	row := q.db.QueryRow(ctx, claimCustomerForCall,
+func (q *Queries) ClaimWinbackContact(ctx context.Context, arg ClaimWinbackContactParams) (AbandonedCheckoutCall, error) {
+	row := q.db.QueryRow(ctx, claimWinbackContact,
 		arg.ID,
 		arg.BrandSlug,
 		arg.CheckoutID,
 		arg.CheckoutName,
 		arg.CustomerName,
 		arg.Phone,
+		arg.Channel,
 	)
 	var i AbandonedCheckoutCall
 	err := row.Scan(
@@ -60,6 +69,7 @@ func (q *Queries) ClaimCustomerForCall(ctx context.Context, arg ClaimCustomerFor
 		&i.CheckoutName,
 		&i.CustomerName,
 		&i.Phone,
+		&i.Channel,
 		&i.AttemptID,
 		&i.InteractionID,
 		&i.Status,
@@ -71,61 +81,27 @@ func (q *Queries) ClaimCustomerForCall(ctx context.Context, arg ClaimCustomerFor
 	return i, err
 }
 
-const listCalledPhones = `-- name: ListCalledPhones :many
-SELECT phone, status, attempt_id, last_attempt_at
-FROM abandoned_checkout_calls
-WHERE brand_slug = $1
-`
-
-type ListCalledPhonesRow struct {
-	Phone         string
-	Status        string
-	AttemptID     *string
-	LastAttemptAt pgtype.Timestamptz
-}
-
-// Every number this brand has already been through, so a sweep can skip them
-// without a round trip per row.
-func (q *Queries) ListCalledPhones(ctx context.Context, brandSlug string) ([]ListCalledPhonesRow, error) {
-	rows, err := q.db.Query(ctx, listCalledPhones, brandSlug)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListCalledPhonesRow{}
-	for rows.Next() {
-		var i ListCalledPhonesRow
-		if err := rows.Scan(
-			&i.Phone,
-			&i.Status,
-			&i.AttemptID,
-			&i.LastAttemptAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listCheckoutCalls = `-- name: ListCheckoutCalls :many
-SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at FROM abandoned_checkout_calls
+SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at FROM abandoned_checkout_calls
 WHERE brand_slug = $1
+  AND ($2::varchar IS NULL OR channel = $2)
 ORDER BY created_at DESC
-LIMIT $2
+LIMIT $3
 `
 
 type ListCheckoutCallsParams struct {
 	BrandSlug string
+	Channel   *string
 	RowLimit  int32
 }
 
-// What the agent has done, newest first - the Call Logs page's own read.
+// What the agent has done, newest first - the Outreach page's own read.
+//
+// Optionally filtered by channel. Meta's message id and Sarvam's attempt id
+// both live in attempt_id, so a page that does not filter will ask Sarvam for
+// the transcript of a WhatsApp message.
 func (q *Queries) ListCheckoutCalls(ctx context.Context, arg ListCheckoutCallsParams) ([]AbandonedCheckoutCall, error) {
-	rows, err := q.db.Query(ctx, listCheckoutCalls, arg.BrandSlug, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listCheckoutCalls, arg.BrandSlug, arg.Channel, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +116,7 @@ func (q *Queries) ListCheckoutCalls(ctx context.Context, arg ListCheckoutCallsPa
 			&i.CheckoutName,
 			&i.CustomerName,
 			&i.Phone,
+			&i.Channel,
 			&i.AttemptID,
 			&i.InteractionID,
 			&i.Status,
@@ -158,26 +135,71 @@ func (q *Queries) ListCheckoutCalls(ctx context.Context, arg ListCheckoutCallsPa
 	return items, nil
 }
 
-const releaseCheckoutCall = `-- name: ReleaseCheckoutCall :exec
+const listWinbackContacts = `-- name: ListWinbackContacts :many
+SELECT phone, channel, status, attempt_id, last_attempt_at
+FROM abandoned_checkout_calls
+WHERE brand_slug = $1
+`
+
+type ListWinbackContactsRow struct {
+	Phone         string
+	Channel       string
+	Status        string
+	AttemptID     *string
+	LastAttemptAt pgtype.Timestamptz
+}
+
+// Every number this brand has been through, on every channel, in one read.
+//
+// One query for both passes rather than one per channel: it is the same
+// question asked twice, and the sweep already costs a Shopify page.
+func (q *Queries) ListWinbackContacts(ctx context.Context, brandSlug string) ([]ListWinbackContactsRow, error) {
+	rows, err := q.db.Query(ctx, listWinbackContacts, brandSlug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWinbackContactsRow{}
+	for rows.Next() {
+		var i ListWinbackContactsRow
+		if err := rows.Scan(
+			&i.Phone,
+			&i.Channel,
+			&i.Status,
+			&i.AttemptID,
+			&i.LastAttemptAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const releaseWinbackContact = `-- name: ReleaseWinbackContact :exec
 DELETE FROM abandoned_checkout_calls
 WHERE id = $1 AND attempt_id IS NULL
 `
 
-// Gives the number back, for a claim whose call never reached the network.
+// Gives the number back, for a claim whose message or call never left.
 //
-// The cost of claiming first: a refusal before dialling - no credit, a bad
-// number, Sarvam down - would otherwise mark a customer called forever on a
-// call that never happened. Only ever used when Sarvam returned no attempt id,
-// which is the proof that nothing rang.
-func (q *Queries) ReleaseCheckoutCall(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, releaseCheckoutCall, id)
+// ONLY FOR A TRANSIENT REFUSAL - no credit, rate limiting, the provider down.
+// A PERMANENT one is settled as 'failed' and KEPT: the row is the only thing
+// that can tell an operator why a shop's carts went uncontacted, and silence
+// there is indistinguishable from "nobody abandoned anything". Guarded on a
+// null attempt_id, which is the proof that nothing was sent.
+func (q *Queries) ReleaseWinbackContact(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, releaseWinbackContact, id)
 	return err
 }
 
 const setCallInteractionID = `-- name: SetCallInteractionID :exec
 UPDATE abandoned_checkout_calls
 SET interaction_id = $1
-WHERE attempt_id = $2
+WHERE attempt_id = $2 AND channel = 'voice'
 `
 
 type SetCallInteractionIDParams struct {
@@ -187,31 +209,38 @@ type SetCallInteractionIDParams struct {
 
 // Caches the interaction id once the analytics API has told us, so the
 // transcript can be fetched later without listing attempts again.
+//
+// Voice only. A WhatsApp row's attempt_id is a wamid and Sarvam knows nothing
+// about it; the formats never collide, but saying so here is cheaper than
+// relying on that.
 func (q *Queries) SetCallInteractionID(ctx context.Context, arg SetCallInteractionIDParams) error {
 	_, err := q.db.Exec(ctx, setCallInteractionID, arg.InteractionID, arg.AttemptID)
 	return err
 }
 
-const settleCheckoutCall = `-- name: SettleCheckoutCall :one
+const settleWinbackContact = `-- name: SettleWinbackContact :one
 UPDATE abandoned_checkout_calls
 SET status          = $1,
     attempt_id      = coalesce($2, attempt_id),
     detail          = $3,
+    attempts        = attempts + 1,
     last_attempt_at = now()
 WHERE id = $4
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
 `
 
-type SettleCheckoutCallParams struct {
+type SettleWinbackContactParams struct {
 	Status    string
 	AttemptID *string
 	Detail    *string
 	ID        uuid.UUID
 }
 
-// Records how the claimed call actually went.
-func (q *Queries) SettleCheckoutCall(ctx context.Context, arg SettleCheckoutCallParams) (AbandonedCheckoutCall, error) {
-	row := q.db.QueryRow(ctx, settleCheckoutCall,
+// Records how the claimed contact actually went.
+//
+// attempts is incremented rather than set, so a row that was retried says so.
+func (q *Queries) SettleWinbackContact(ctx context.Context, arg SettleWinbackContactParams) (AbandonedCheckoutCall, error) {
+	row := q.db.QueryRow(ctx, settleWinbackContact,
 		arg.Status,
 		arg.AttemptID,
 		arg.Detail,
@@ -225,6 +254,7 @@ func (q *Queries) SettleCheckoutCall(ctx context.Context, arg SettleCheckoutCall
 		&i.CheckoutName,
 		&i.CustomerName,
 		&i.Phone,
+		&i.Channel,
 		&i.AttemptID,
 		&i.InteractionID,
 		&i.Status,

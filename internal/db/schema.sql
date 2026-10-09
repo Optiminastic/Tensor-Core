@@ -1083,13 +1083,17 @@ CREATE TABLE IF NOT EXISTS abandoned_checkout_calls (
     -- E.164. Kept so an operator can see WHO was rung without going back to
     -- Shopify for a checkout it may since have dropped.
     phone           varchar(24)  NOT NULL,
+    -- 'voice' | 'whatsapp'. Both fire at the same T+10 trigger and both
+    -- claim per person, so the channel is part of the key - without it the
+    -- first to claim silently cancels the second.
+    channel         varchar(16)  NOT NULL DEFAULT 'voice',
     -- Sarvam's correlation key, null when the call never got placed.
     attempt_id      varchar(128),
     -- Sarvam's interaction id, which is what its transcript and recording are
     -- addressed by. Learned AFTER the call from the analytics API, never at
     -- dial time, so it is null until the log page has resolved it once.
     interaction_id  varchar(160),
-    -- 'placed' | 'failed' | 'skipped'
+    -- 'claimed' | 'placed' (voice) | 'sent' (whatsapp) | 'failed'
     status          varchar(16)  NOT NULL,
     -- Sarvam's own sentence on a refusal. Its errors name the thing to fix.
     detail          varchar(500),
@@ -1098,8 +1102,13 @@ CREATE TABLE IF NOT EXISTS abandoned_checkout_calls (
     created_at      timestamptz  NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_abandoned_checkout_call_phone
-    ON abandoned_checkout_calls (phone);
+-- One contact per person per channel, per brand. See migration 0098 for why
+-- the brand and the channel are both in the key.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_winback_contact_brand_phone_channel
+    ON abandoned_checkout_calls (brand_slug, phone, channel);
+
+CREATE INDEX IF NOT EXISTS ix_abandoned_checkout_calls_channel
+    ON abandoned_checkout_calls (brand_slug, channel);
 
 -- Not unique: the same person's later checkouts are recorded as skipped
 -- against their own id, so the log can say WHY a cart was never rung.

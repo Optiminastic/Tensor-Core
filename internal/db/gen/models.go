@@ -16,6 +16,7 @@ type AbandonedCheckoutCall struct {
 	CheckoutName  string
 	CustomerName  string
 	Phone         string
+	Channel       string
 	AttemptID     *string
 	InteractionID *string
 	Status        string

@@ -236,6 +236,35 @@ type Settings struct {
 	BambuBuddyURL    string
 	BambuBuddyAPIKey string
 
+	// WinbackWhatsAppEnabled is the messaging half's consent, and it is a
+	// SEPARATE switch from WinbackCallsEnabled on purpose. The two channels
+	// cost different things and intrude differently - a call interrupts
+	// somebody, a message waits for them - so a shop that wants one must not
+	// get the other because they shared a flag. Defaults to false, like
+	// calling: with it off the sweep still runs every rule and logs who it
+	// WOULD have messaged.
+	WinbackWhatsAppEnabled bool
+	// WinbackWhatsAppMaxPerRun bounds one sweep's messages, separately from
+	// its calls. A shared counter would let a full voice pass silently starve
+	// the messages, with the only evidence a "reached the cap" line
+	// attributed to the wrong channel.
+	//
+	// Higher than the call cap because a message is cheaper and quieter. The
+	// cost of that choice is that a rules bug sends more of them.
+	WinbackWhatsAppMaxPerRun int
+	// WinbackDiscountCode is the ONE SHARED code the message carries, created
+	// by hand in Shopify's admin and set to apply once per customer. Tensor
+	// creates no discounts and holds no scope to.
+	//
+	// The environment FALLBACK only - the live value is normally the brand's
+	// own integration setting, because this is a marketing lever rather than
+	// a credential and should not need a deploy to change.
+	WinbackDiscountCode string
+	// WinbackLinkHost is the host baked into the approved WhatsApp template's
+	// URL button. Shopify's recovery link must be on it, or the button would
+	// point at a different site; see internal/httpapi/winback_link.go.
+	WinbackLinkHost string
+
 	// OpenSCADBin is the OpenSCAD executable used to render personalised
 	// models. A bare name is looked up on PATH; an absolute path is used as
 	// given, which is the normal case on Windows where the installer never
@@ -615,6 +644,10 @@ func Load() Settings {
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
 		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
+		WinbackWhatsAppEnabled:           boolEnvOr("WINBACK_WHATSAPP_ENABLED", false),
+		WinbackWhatsAppMaxPerRun:         intEnvOr("WINBACK_WHATSAPP_MAX_PER_RUN", 10),
+		WinbackDiscountCode:              envOr("WINBACK_DISCOUNT_CODE", ""),
+		WinbackLinkHost:                  envOr("WINBACK_LINK_HOST", ""),
 		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
 		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
 		BambuStatusTTL:                   secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),

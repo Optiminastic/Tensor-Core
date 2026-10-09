@@ -25,6 +25,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/delhivery"
 	"github.com/Optiminastic/tensor-core/internal/integrations/sarvam"
+	"github.com/Optiminastic/tensor-core/internal/integrations/whatsapp"
 )
 
 // Provider names, as the URL and the database carry them.
@@ -166,6 +167,17 @@ var integrationSpecs = []integrationSpec{
 				Help: "Part of the template's identity, not a formatting hint. “en” and " +
 					"“en_US” are different templates, and the wrong one answers " +
 					"“Template name does not exist in the translation”."},
+			{Key: "discount_code", Label: "Win-back discount code", Required: false,
+				Help: "An existing code in Shopify’s Discounts, set to apply once per " +
+					"customer. Tensor never creates discounts — and a code that does " +
+					"not exist still produces a working link that applies nothing, so " +
+					"Shopify will not tell you it is wrong."},
+			{Key: "link_host", Label: "Link host", Required: false,
+				Default: "the3dprintingstore.in",
+				Help: "The domain baked into the approved template’s button. It must be " +
+					"the shop’s primary domain, which is where Shopify’s recovery " +
+					"links live; on a mismatch Tensor refuses to send rather than point " +
+					"the button at the wrong shop."},
 			{Key: "api_version", Label: "Graph API version", Required: false,
 				Default: "v25.0",
 				Help: "Pinned on purpose. Meta retires versions on a schedule, and a floating " +
@@ -382,6 +394,8 @@ func (s *Server) environmentSettings(provider string) (map[string]string, []stri
 		put("api_version", s.cfg.WhatsAppAPIVersion)
 		put("template_name", s.cfg.WhatsAppTemplateName)
 		put("template_language", s.cfg.WhatsAppTemplateLanguage)
+		put("discount_code", s.cfg.WinbackDiscountCode)
+		put("link_host", s.cfg.WinbackLinkHost)
 
 		var secrets []string
 		if token := strings.TrimSpace(s.cfg.WhatsAppAccessToken); token != "" {
@@ -516,6 +530,93 @@ func (s *Server) productVariableFor(ctx context.Context, brandSlug string) strin
 		}
 	}
 	return s.productVariable()
+}
+
+// whatsappFor builds the messaging client for one brand.
+//
+// Same precedence as sarvamFor and delhiveryFor: the brand's own stored
+// settings first, the process's environment as the fallback. Returns nil when
+// neither is complete, which Configured() reports.
+func (s *Server) whatsappFor(ctx context.Context, brandSlug string) *whatsapp.Client {
+	cfg := whatsapp.Config{
+		AccessToken:      s.cfg.WhatsAppAccessToken,
+		PhoneNumberID:    s.cfg.WhatsAppPhoneNumberID,
+		WABAID:           s.cfg.WhatsAppWABAID,
+		APIVersion:       s.cfg.WhatsAppAPIVersion,
+		TemplateName:     s.cfg.WhatsAppTemplateName,
+		TemplateLanguage: s.cfg.WhatsAppTemplateLanguage,
+	}
+	for key, value := range s.integrationSettings(ctx, brandSlug, providerWhatsApp) {
+		switch key {
+		case "access_token":
+			cfg.AccessToken = value
+		case "phone_number_id":
+			cfg.PhoneNumberID = value
+		case "waba_id":
+			cfg.WABAID = value
+		case "api_version":
+			cfg.APIVersion = value
+		case "template_name":
+			cfg.TemplateName = value
+		case "template_language":
+			cfg.TemplateLanguage = value
+		}
+	}
+	// app_secret is deliberately not read: it verifies inbound webhooks and
+	// has no part in sending.
+	return whatsapp.New(cfg)
+}
+
+// winbackLinkFor is the discount code and the template's link host, per brand.
+//
+// Both live beside the credentials rather than in the environment, for the
+// same reason productVariableFor does: they are values somebody changes
+// without a deploy. The discount code especially - it is a marketing lever,
+// it changes with the season, and Shopify does not error on an unknown one,
+// so the only fast way to catch a typo is an admin editing it where they see
+// the mistake.
+func (s *Server) winbackLinkFor(ctx context.Context, brandSlug string) (code, host string) {
+	code, host = s.cfg.WinbackDiscountCode, s.cfg.WinbackLinkHost
+	for key, value := range s.integrationSettings(ctx, brandSlug, providerWhatsApp) {
+		switch key {
+		case "discount_code":
+			code = value
+		case "link_host":
+			host = value
+		}
+	}
+	return strings.TrimSpace(code), strings.TrimSpace(host)
+}
+
+// integrationSettings is one brand's stored settings for a provider, unsealed.
+//
+// Extracted because three resolvers now walk the same rows in the same way,
+// and the secret handling is the part that must not drift between them: a
+// sealed value that will not open leaves the field UNSET rather than falling
+// back to the environment, so a brand never acts with another brand's
+// credentials.
+func (s *Server) integrationSettings(
+	ctx context.Context, brandSlug, provider string,
+) map[string]string {
+	rows, err := s.store.Q.ListIntegrationSettings(ctx, gen.ListIntegrationSettingsParams{
+		BrandSlug: brandSlug, Provider: provider,
+	})
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		value := row.SettingValue
+		if row.IsSecret {
+			opened, openErr := s.secrets.Open(value)
+			if openErr != nil {
+				continue
+			}
+			value = opened
+		}
+		out[row.SettingKey] = value
+	}
+	return out
 }
 
 // delhiveryFor builds the courier client for one brand.

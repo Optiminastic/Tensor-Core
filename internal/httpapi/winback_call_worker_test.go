@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Optiminastic/tensor-core/internal/config"
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 )
 
@@ -183,5 +184,102 @@ func TestTheAllowListStillReachesAnOlderCheckout(t *testing.T) {
 	if len(got) != 1 || got[0].checkout.Name != "#66850294530261" {
 		t.Fatalf("eligible = %v, want the allow-listed checkout despite the watch mark",
 			candidateNames(got))
+	}
+}
+
+// --- two channels -----------------------------------------------------------
+
+// The bug this replaces: sweepBrand returned at the top when Sarvam was
+// unconfigured, so a brand with WhatsApp and no Sarvam was skipped entirely -
+// and the line it logged was the same one a brand with nothing connected logs.
+func TestAChannelThatIsNotConnectedDoesNotSilenceTheOther(t *testing.T) {
+	cfg := config.Settings{
+		WinbackCallsEnabled: true, WinbackCallMaxPerRun: 5,
+		WinbackWhatsAppEnabled: true, WinbackWhatsAppMaxPerRun: 10,
+	}
+	only := winbackChannels(cfg, false, true)
+	if len(only) != 1 || only[0].Name != channelWhatsApp {
+		t.Fatalf("got %+v, want WhatsApp alone", only)
+	}
+	if got := winbackChannels(cfg, true, false); len(got) != 1 || got[0].Name != channelVoice {
+		t.Fatalf("got %+v, want voice alone", got)
+	}
+	if got := winbackChannels(cfg, false, false); len(got) != 0 {
+		t.Errorf("got %+v, want nothing when neither is connected", got)
+	}
+	if got := winbackChannels(cfg, true, true); len(got) != 2 {
+		t.Errorf("got %+v, want both", got)
+	}
+}
+
+// Two switches exist so one channel can be trialled without the other.
+func TestEachChannelHasItsOwnConsent(t *testing.T) {
+	cfg := config.Settings{
+		WinbackCallsEnabled: false, WinbackCallMaxPerRun: 5,
+		WinbackWhatsAppEnabled: true, WinbackWhatsAppMaxPerRun: 10,
+	}
+	for _, ch := range winbackChannels(cfg, true, true) {
+		switch ch.Name {
+		case channelVoice:
+			if ch.Enabled {
+				t.Error("calling is off and must stay off")
+			}
+			if ch.MaxPerRun != 5 {
+				t.Errorf("voice cap %d, want its own", ch.MaxPerRun)
+			}
+		case channelWhatsApp:
+			if !ch.Enabled {
+				t.Error("messaging is on and must not be gated by the call switch")
+			}
+			// A SEPARATE cap. Sharing one lets a full voice pass consume the
+			// budget and send no messages at all.
+			if ch.MaxPerRun != 10 {
+				t.Errorf("whatsapp cap %d, want its own", ch.MaxPerRun)
+			}
+		}
+	}
+}
+
+// A customer who was rung is still due a message.
+func TestVoiceAndWhatsAppAreJudgedSeparately(t *testing.T) {
+	contacts := []gen.ListWinbackContactsRow{
+		{Phone: "+919799931864", Channel: channelVoice},
+		{Phone: "+919000000002", Channel: channelWhatsApp},
+	}
+	voice := doneFor(contacts, channelVoice)
+	if !voice["+919799931864"] || voice["+919000000002"] {
+		t.Errorf("voice history = %v", voice)
+	}
+	wa := doneFor(contacts, channelWhatsApp)
+	if wa["+919799931864"] || !wa["+919000000002"] {
+		t.Errorf("whatsapp history = %v", wa)
+	}
+
+	// And the rule that reads it still works: the rung number is eligible for
+	// a message, and not for a second call.
+	w := sweeper()
+	cart := checkout("#1", 30*time.Minute, "9799931864")
+	if got := w.eligible([]shopify.AbandonedCheckout{cart}, voice, time.Time{}); len(got) != 0 {
+		t.Error("already called: must not be called again")
+	}
+	if got := w.eligible([]shopify.AbandonedCheckout{cart}, wa, time.Time{}); len(got) != 1 {
+		t.Error("already called is not already messaged: must still be due a message")
+	}
+}
+
+func TestOnlyThisChannelsHistoryCounts(t *testing.T) {
+	contacts := []gen.ListWinbackContactsRow{
+		{Phone: "+91A", Channel: channelVoice},
+		{Phone: "+91B", Channel: channelVoice},
+		{Phone: "+91C", Channel: channelWhatsApp},
+	}
+	if n := len(doneFor(contacts, channelVoice)); n != 2 {
+		t.Errorf("voice history has %d, want 2", n)
+	}
+	if n := len(doneFor(contacts, channelWhatsApp)); n != 1 {
+		t.Errorf("whatsapp history has %d, want 1", n)
+	}
+	if n := len(doneFor(nil, channelVoice)); n != 0 {
+		t.Errorf("empty history has %d", n)
 	}
 }
