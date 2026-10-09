@@ -210,14 +210,19 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 	return nil
 }
 
-// renderColouredPlank builds the finished model: a white base with the
-// lettering in the colour the customer chose.
+// renderColouredPlank builds the finished model: one render per coloured
+// piece, assembled into a single 3MF.
 //
-// Two renders, not one. Neither STL nor OpenSCAD's own 3MF export carries
-// colour - the templates say so themselves - so the base and the lettering are
-// rendered as separate parts and assembled into a 3MF where each is its own
-// object with its own material. That is the only way the colour reaches the
-// slicer.
+// One render per PIECE, not one per model. Neither STL nor OpenSCAD's own 3MF
+// export carries colour - the templates say so themselves, and `color()` is a
+// preview that CGAL discards - so each piece is rendered on its own and the
+// results are assembled into a 3MF where each is its own object with its own
+// material. That is the only way the colour reaches the slicer.
+//
+// WHICH pieces comes from the product when it declares them and from the plank
+// otherwise: a white base plus the customer's colour on the lettering, which is
+// what every product printed before this was configurable. See
+// design_colour_parts.go.
 //
 // A colour that cannot be resolved fails the job rather than building it
 // anyway. It used to fall back to a single uncoloured STL, which was worse than
@@ -242,14 +247,85 @@ func (s *Server) renderColouredPlank(
 	// spreadsheet row, one per plank. Without this fallback every bulk plank
 	// failed with `no swatch for ""` while holding the colour it needed in the
 	// column beside the empty one being read.
+	parts := s.colourPartsForJob(ctx, job)
+
 	colour := colourFromVariant(job.VariantTitle)
 	if colour == "" {
 		colour = strings.TrimSpace(deref(job.Colour))
 	}
+
+	// Resolved only when a piece actually asks for it. A model whose pieces
+	// all carry fixed colours has no opinion about the variant, and holding
+	// such a job because "RED SPARKLE" is not on the filament shelf would fail
+	// it over a colour nothing was going to use.
+	var hex string
+	if needsCustomerColour(parts) {
+		var err error
+		hex, err = s.resolveColourHexForParts(ctx, colour)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	meshes := make([]meshio.Part, 0, len(parts))
+	material := deref(job.Material)
+	for _, part := range parts {
+		stl, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(part.Name))
+		if err != nil {
+			return nil, fmt.Errorf("render the %s: %w", part.Name, err)
+		}
+		mesh, err := meshFromSTL(stl)
+		if err != nil {
+			return nil, fmt.Errorf("read the %s: %w", part.Name, err)
+		}
+		// An empty piece is the silent failure this whole mechanism is exposed
+		// to: a template that declares PART and never branches on it answers
+		// every request with the same solid, and one that branches on names
+		// that do not match the configured pieces answers some with nothing.
+		// Both slice, both print, and both are wrong - so a piece that came
+		// back with no geometry holds the job and names itself.
+		if len(mesh.Triangles) == 0 {
+			return nil, fmt.Errorf(
+				"the template rendered nothing for part %q - check that %s branches on "+
+					"PART and spells this piece the same way",
+				part.Name, plan.Template)
+		}
+		partColour, partName := part.Hex, part.Name
+		if part.FollowsCustomer() {
+			partColour = hex
+			partName = colour + " " + part.Name
+		}
+		meshes = append(meshes, meshio.Part{
+			// Named for what it is, because this is what an operator sees in
+			// the slicer's object list.
+			Name: partName, Colour: partColour, Material: material,
+			Triangles: mesh.Triangles,
+		})
+	}
+
+	model, err := meshio.Write3MF(meshes)
+	if err != nil {
+		return nil, fmt.Errorf("assemble the coloured model: %w", err)
+	}
+	log.Info("built a coloured model",
+		"job", job.JobNumber, "parts", len(meshes), "colour", colour, "hex", hex)
+	return model, nil
+}
+
+// resolveColourHexForParts is resolveColourHex with the refusal that matters.
+//
+// A colour that cannot be resolved fails the job rather than building it
+// anyway. It used to fall back to a single uncoloured STL, which was worse than
+// it sounds: that render is PartAll - one mesh - so the plank came out with no
+// white base at all, and the job still reported success, cleared its issue and
+// went to a bed. One such job then took every plank beside it down to a
+// colourless plate. A job held with a named colour is a five-second fix; a bed
+// of planks in the wrong colour is scrap.
+func (s *Server) resolveColourHexForParts(ctx context.Context, colour string) (string, error) {
 	hex, err := s.resolveColourHex(ctx, colour)
 	if err != nil {
 		if !errors.Is(err, errUnknownColour) {
-			return nil, err
+			return "", err
 		}
 		// An unresolvable colour fails the job rather than building it plain.
 		//
@@ -264,45 +340,11 @@ func (s *Server) renderColouredPlank(
 		// fallbackColours, or sync the filament shelf - and it is visible on
 		// the issues board rather than silent. A plank in a colour nobody
 		// chose is scrap, and a whole bed of them is four times the scrap.
-		return nil, fmt.Errorf(
-			"no swatch for %q, so this plank cannot be built in colour; "+
+		return "", fmt.Errorf(
+			"no swatch for %q, so this model cannot be built in colour; "+
 				"add the colour to the filament shelf or the built-in table", colour)
 	}
-
-	base, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(personalise.PartBase))
-	if err != nil {
-		return nil, fmt.Errorf("render the base: %w", err)
-	}
-	text, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(personalise.PartText))
-	if err != nil {
-		return nil, fmt.Errorf("render the lettering: %w", err)
-	}
-
-	baseMesh, err := meshFromSTL(base)
-	if err != nil {
-		return nil, fmt.Errorf("read the base: %w", err)
-	}
-	textMesh, err := meshFromSTL(text)
-	if err != nil {
-		return nil, fmt.Errorf("read the lettering: %w", err)
-	}
-
-	// The job's own material, not a default. It reaches BambuBuddy as
-	// filament_type in the plate's slot declaration, and a bed of PETG that
-	// declares PLA asks the AMS for the wrong spool.
-	material := deref(job.Material)
-	model, err := meshio.Write3MF([]meshio.Part{
-		// Named for what they are, because these are what an operator sees in
-		// the slicer's object list.
-		{Name: "Plate", Colour: BasePlateColour, Material: material, Triangles: baseMesh.Triangles},
-		{Name: colour + " lettering", Colour: hex, Material: material, Triangles: textMesh.Triangles},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("assemble the coloured model: %w", err)
-	}
-	log.Info("built a two-colour plank",
-		"job", job.JobNumber, "lettering", colour, "hex", hex)
-	return model, nil
+	return hex, nil
 }
 
 // meshFromSTL parses rendered STL bytes into a mesh.

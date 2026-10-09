@@ -473,3 +473,46 @@ ORDER BY p.code, f.position, lower(f.scad_variable);
 SELECT v.id AS variant_id, v.sku, p.id AS product_id, p.code AS product_code, p.name AS product_name
 FROM product_variants v JOIN products p ON p.id = v.product_id
 WHERE v.id = $1;
+
+-- name: ListDesignColourParts :many
+-- The coloured pieces one design file prints as, in the order they were read
+-- from the reference 3MF.
+--
+-- Empty is the normal answer for every product configured before this existed,
+-- and the renderer treats it as "use the two-pass plank behaviour" rather than
+-- as a misconfiguration.
+SELECT * FROM design_colour_parts
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('role')::text)
+ORDER BY position, lower(part_name);
+
+-- name: ListAllDesignColourParts :many
+-- Every coloured piece of one product, across all its roles, for the editor.
+SELECT * FROM design_colour_parts
+WHERE product_id = sqlc.arg('product_id')
+ORDER BY lower(role), position, lower(part_name);
+
+-- name: ClearDesignColourParts :exec
+-- Removes one role's pieces, so a re-uploaded reference 3MF replaces rather
+-- than merges. A part that disappeared from the file has disappeared from the
+-- product, and leaving it behind would render a piece the design no longer has.
+DELETE FROM design_colour_parts
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('role')::text);
+
+-- name: InsertDesignColourPart :one
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position)
+VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('role'),
+        sqlc.arg('part_name'), sqlc.narg('colour_hex'), sqlc.arg('position'))
+RETURNING *;
+
+-- name: SetDesignColourPartColour :one
+-- Changes one piece between a fixed colour and the customer's choice.
+--
+-- NULL is the customer's choice, which is why this takes a nullable colour
+-- rather than a colour and a flag: the two can contradict each other and
+-- nothing here needs them to.
+UPDATE design_colour_parts
+SET colour_hex = sqlc.narg('colour_hex')
+WHERE id = sqlc.arg('id')
+RETURNING *;

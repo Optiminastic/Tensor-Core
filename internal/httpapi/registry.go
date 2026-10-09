@@ -137,6 +137,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// Which order field feeds which OpenSCAD variable, and what the customers
 	// have actually been sending - see registry_field_maps.go.
 	s.registerRegistryFieldMaps(g, read, manage)
+	// Which coloured pieces each design file prints as, read from a reference
+	// 3MF - see registry_colour_parts.go.
+	s.registerRegistryColourParts(g, read, manage)
 	// Which slicer pipeline each SKU prints with, per machine class - see
 	// registry_pipelines.go.
 	s.registerRegistryPipelines(g, read, manage)

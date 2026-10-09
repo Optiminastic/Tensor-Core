@@ -30,6 +30,25 @@ func (q *Queries) AddVariantOptionValue(ctx context.Context, arg AddVariantOptio
 	return err
 }
 
+const clearDesignColourParts = `-- name: ClearDesignColourParts :exec
+DELETE FROM design_colour_parts
+WHERE product_id = $1
+  AND lower(role) = lower($2::text)
+`
+
+type ClearDesignColourPartsParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+// Removes one role's pieces, so a re-uploaded reference 3MF replaces rather
+// than merges. A part that disappeared from the file has disappeared from the
+// product, and leaving it behind would render a piece the design no longer has.
+func (q *Queries) ClearDesignColourParts(ctx context.Context, arg ClearDesignColourPartsParams) error {
+	_, err := q.db.Exec(ctx, clearDesignColourParts, arg.ProductID, arg.Role)
+	return err
+}
+
 const clearProductFieldMaps = `-- name: ClearProductFieldMaps :exec
 DELETE FROM product_field_maps
 WHERE product_id = $1
@@ -297,6 +316,44 @@ func (q *Queries) GetVariantProduct(ctx context.Context, id uuid.UUID) (GetVaria
 	return i, err
 }
 
+const insertDesignColourPart = `-- name: InsertDesignColourPart :one
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position)
+VALUES ($1, $2, $3,
+        $4, $5, $6)
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at
+`
+
+type InsertDesignColourPartParams struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	Role      string
+	PartName  string
+	ColourHex *string
+	Position  int32
+}
+
+func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignColourPartParams) (DesignColourPart, error) {
+	row := q.db.QueryRow(ctx, insertDesignColourPart,
+		arg.ID,
+		arg.ProductID,
+		arg.Role,
+		arg.PartName,
+		arg.ColourHex,
+		arg.Position,
+	)
+	var i DesignColourPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PartName,
+		&i.ColourHex,
+		&i.Position,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertOptionValue = `-- name: InsertOptionValue :one
 INSERT INTO product_option_values (id, option_id, code, label, position)
 VALUES ($1, $2, $3,
@@ -536,6 +593,41 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 	return i, err
 }
 
+const listAllDesignColourParts = `-- name: ListAllDesignColourParts :many
+SELECT id, product_id, role, part_name, colour_hex, position, created_at FROM design_colour_parts
+WHERE product_id = $1
+ORDER BY lower(role), position, lower(part_name)
+`
+
+// Every coloured piece of one product, across all its roles, for the editor.
+func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.UUID) ([]DesignColourPart, error) {
+	rows, err := q.db.Query(ctx, listAllDesignColourParts, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DesignColourPart{}
+	for rows.Next() {
+		var i DesignColourPart
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Role,
+			&i.PartName,
+			&i.ColourHex,
+			&i.Position,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAllPipelineMappings = `-- name: ListAllPipelineMappings :many
 SELECT lower(sku)::text AS sku, machine_family, pipeline_id
 FROM sku_slicer_pipelines
@@ -657,6 +749,52 @@ func (q *Queries) ListBomForProduct(ctx context.Context, productID uuid.UUID) ([
 			&i.ItemCode,
 			&i.Unit,
 			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDesignColourParts = `-- name: ListDesignColourParts :many
+SELECT id, product_id, role, part_name, colour_hex, position, created_at FROM design_colour_parts
+WHERE product_id = $1
+  AND lower(role) = lower($2::text)
+ORDER BY position, lower(part_name)
+`
+
+type ListDesignColourPartsParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+// The coloured pieces one design file prints as, in the order they were read
+// from the reference 3MF.
+//
+// Empty is the normal answer for every product configured before this existed,
+// and the renderer treats it as "use the two-pass plank behaviour" rather than
+// as a misconfiguration.
+func (q *Queries) ListDesignColourParts(ctx context.Context, arg ListDesignColourPartsParams) ([]DesignColourPart, error) {
+	rows, err := q.db.Query(ctx, listDesignColourParts, arg.ProductID, arg.Role)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DesignColourPart{}
+	for rows.Next() {
+		var i DesignColourPart
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Role,
+			&i.PartName,
+			&i.ColourHex,
+			&i.Position,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1305,6 +1443,38 @@ func (q *Queries) RetireVariantsNotInSKUs(ctx context.Context, arg RetireVariant
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setDesignColourPartColour = `-- name: SetDesignColourPartColour :one
+UPDATE design_colour_parts
+SET colour_hex = $1
+WHERE id = $2
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at
+`
+
+type SetDesignColourPartColourParams struct {
+	ColourHex *string
+	ID        uuid.UUID
+}
+
+// Changes one piece between a fixed colour and the customer's choice.
+//
+// NULL is the customer's choice, which is why this takes a nullable colour
+// rather than a colour and a flag: the two can contradict each other and
+// nothing here needs them to.
+func (q *Queries) SetDesignColourPartColour(ctx context.Context, arg SetDesignColourPartColourParams) (DesignColourPart, error) {
+	row := q.db.QueryRow(ctx, setDesignColourPartColour, arg.ColourHex, arg.ID)
+	var i DesignColourPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PartName,
+		&i.ColourHex,
+		&i.Position,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const supersedeVariantDesign = `-- name: SupersedeVariantDesign :exec

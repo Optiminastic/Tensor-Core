@@ -167,6 +167,16 @@ type Design struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type DesignColourPart struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	Role      string
+	PartName  string
+	ColourHex *string
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
 type DesignPricing struct {
 	DesignID           uuid.UUID
 	DesignCp           pgtype.Numeric
@@ -234,6 +244,16 @@ type FileAsset struct {
 	BboxZMm      pgtype.Numeric
 	RenderParams []byte
 	CreatedAt    pgtype.Timestamptz
+}
+
+type IntegrationSetting struct {
+	BrandSlug    string
+	Provider     string
+	SettingKey   string
+	SettingValue string
+	IsSecret     bool
+	UpdatedBy    *string
+	UpdatedAt    pgtype.Timestamptz
 }
 
 type InventoryItem struct {
