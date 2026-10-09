@@ -85,7 +85,13 @@ services:
     image: tensor-winback-worker
     env_file: [env/local.env]
     environment:
+      # BOTH channels off. Each is consent, not configuration, and they
+      # are separate because a call interrupts somebody and a message
+      # waits for them - a shop that wants one must not get the other
+      # because they shared a flag. The sweep still runs every rule and
+      # logs who it WOULD have reached.
       WINBACK_CALLS_ENABLED: "false"
+      WINBACK_WHATSAPP_ENABLED: "false"
     restart: unless-stopped
     deploy:
       resources:

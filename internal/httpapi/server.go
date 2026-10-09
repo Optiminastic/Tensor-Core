@@ -238,6 +238,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerAbandonedCheckouts(r)
 	s.registerVoiceCalls(r)
 	s.registerCallLogs(r)
+	s.registerMessageLogs(r)
 	s.registerShipments(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)

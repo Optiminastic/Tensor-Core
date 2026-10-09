@@ -126,20 +126,6 @@ var integrationSpecs = []integrationSpec{
 		Available: true,
 	},
 	{
-		Provider: providerDelhivery,
-		Label:    "Delhivery",
-		Summary:  "Reads carrier tracking, so a parcel that could not be delivered shows up in Tensor.",
-		Fields: []settingField{
-			{Key: "api_key", Label: "API key", Secret: true, Required: true,
-				Help: "From Delhivery's panel under API Setup. A production key; the staging host has its own, and a mismatch returns no shipments rather than an error."},
-			{Key: "base_url", Label: "Carrier host", Required: false,
-				Default: delhivery.DefaultBaseURL,
-				Help: "The production tracking host. Change it only to point at Delhivery's " +
-					"staging host, which has its own keys and returns nothing to a production one."},
-		},
-		Available: true,
-	},
-	{
 		Provider: providerWhatsApp,
 		Label:    "WhatsApp Business",
 		Summary:  "Sends the win-back message and order updates through Meta's Cloud API.",
@@ -158,20 +144,21 @@ var integrationSpecs = []integrationSpec{
 				Help: "Only needed to verify inbound webhooks. Sending works without it; " +
 					"nothing Meta posts back can be trusted until it is set."},
 			{Key: "template_name", Label: "Win-back template", Required: true,
-				Default: "cart_recovery_checkout",
-				Help: "An APPROVED template on that business account. " +
-					"cart_recovery_checkout carries the “Complete checkout” button; " +
-					"cart_recovery_discount is the same text without it."},
+				Default: "cart_recovery_personalised",
+				Help: "An APPROVED template on that business account. It must take five " +
+					"body values — name, products, item count, cart value, discount " +
+					"code — and carry a URL button, which is what returns the customer " +
+					"to their own basket."},
 			{Key: "template_language", Label: "Template language", Required: true,
 				Default: "en",
 				Help: "Part of the template's identity, not a formatting hint. “en” and " +
 					"“en_US” are different templates, and the wrong one answers " +
 					"“Template name does not exist in the translation”."},
-			{Key: "discount_code", Label: "Win-back discount code", Required: false,
-				Help: "An existing code in Shopify’s Discounts, set to apply once per " +
-					"customer. Tensor never creates discounts — and a code that does " +
-					"not exist still produces a working link that applies nothing, so " +
-					"Shopify will not tell you it is wrong."},
+			// No discount_code field, deliberately. Tensor mints a code PER
+			// CUSTOMER at send time - SEETHA10 for Seetha Chinna - valid for
+			// one hour and usable once. A shared code configured here would
+			// be a public coupon the moment one customer forwarded the
+			// message, and it could not carry the customer's own name.
 			{Key: "link_host", Label: "Link host", Required: false,
 				Default: "the3dprintingstore.in",
 				Help: "The domain baked into the approved template’s button. It must be " +
@@ -394,7 +381,6 @@ func (s *Server) environmentSettings(provider string) (map[string]string, []stri
 		put("api_version", s.cfg.WhatsAppAPIVersion)
 		put("template_name", s.cfg.WhatsAppTemplateName)
 		put("template_language", s.cfg.WhatsAppTemplateLanguage)
-		put("discount_code", s.cfg.WinbackDiscountCode)
 		put("link_host", s.cfg.WinbackLinkHost)
 
 		var secrets []string
@@ -567,7 +553,7 @@ func (s *Server) whatsappFor(ctx context.Context, brandSlug string) *whatsapp.Cl
 	return whatsapp.New(cfg)
 }
 
-// winbackLinkFor is the discount code and the template's link host, per brand.
+// winbackLinkFor is the host baked into the approved template's URL button.
 //
 // Both live beside the credentials rather than in the environment, for the
 // same reason productVariableFor does: they are values somebody changes
@@ -575,17 +561,14 @@ func (s *Server) whatsappFor(ctx context.Context, brandSlug string) *whatsapp.Cl
 // it changes with the season, and Shopify does not error on an unknown one,
 // so the only fast way to catch a typo is an admin editing it where they see
 // the mistake.
-func (s *Server) winbackLinkFor(ctx context.Context, brandSlug string) (code, host string) {
-	code, host = s.cfg.WinbackDiscountCode, s.cfg.WinbackLinkHost
+func (s *Server) winbackLinkFor(ctx context.Context, brandSlug string) string {
+	host := s.cfg.WinbackLinkHost
 	for key, value := range s.integrationSettings(ctx, brandSlug, providerWhatsApp) {
-		switch key {
-		case "discount_code":
-			code = value
-		case "link_host":
+		if key == "link_host" {
 			host = value
 		}
 	}
-	return strings.TrimSpace(code), strings.TrimSpace(host)
+	return strings.TrimSpace(host)
 }
 
 // integrationSettings is one brand's stored settings for a provider, unsealed.

@@ -252,14 +252,17 @@ type Settings struct {
 	// Higher than the call cap because a message is cheaper and quieter. The
 	// cost of that choice is that a rules bug sends more of them.
 	WinbackWhatsAppMaxPerRun int
-	// WinbackDiscountCode is the ONE SHARED code the message carries, created
-	// by hand in Shopify's admin and set to apply once per customer. Tensor
-	// creates no discounts and holds no scope to.
+	// WinbackShopPath is the SECOND URL button's value - the "Shop more
+	// gifts" one, which is the same for every customer.
 	//
-	// The environment FALLBACK only - the live value is normally the brand's
-	// own integration setting, because this is a marketing lever rather than
-	// a credential and should not need a deploy to change.
-	WinbackDiscountCode string
+	// A PATH, not a URL, because the approved template bakes in the host and
+	// only the tail is variable. It also cannot be empty: the button is
+	// dynamic, Meta refuses an empty parameter, and a missing one refuses the
+	// WHOLE message - so the bare homepage has to be spelled as "#", which
+	// resolves to the same page. Set it to "" only for a template whose
+	// second button is static or absent.
+	WinbackShopPath string
+
 	// WinbackLinkHost is the host baked into the approved WhatsApp template's
 	// URL button. Shopify's recovery link must be on it, or the button would
 	// point at a different site; see internal/httpapi/winback_link.go.
@@ -646,7 +649,7 @@ func Load() Settings {
 		BambuBuddyAPIKey:                 envOr("BAMBUBUDDY_API_KEY", ""),
 		WinbackWhatsAppEnabled:           boolEnvOr("WINBACK_WHATSAPP_ENABLED", false),
 		WinbackWhatsAppMaxPerRun:         intEnvOr("WINBACK_WHATSAPP_MAX_PER_RUN", 10),
-		WinbackDiscountCode:              envOr("WINBACK_DISCOUNT_CODE", ""),
+		WinbackShopPath:                  envOr("WINBACK_SHOP_PATH", "#"),
 		WinbackLinkHost:                  envOr("WINBACK_LINK_HOST", ""),
 		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
 		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
@@ -695,7 +698,7 @@ func Load() Settings {
 		WhatsAppAppID:              envOr("WHATSAPP_APP_ID", ""),
 		WhatsAppAppSecret:          os.Getenv("WHATSAPP_APP_SECRET"),
 		WhatsAppAPIVersion:         envOr("WHATSAPP_API_VERSION", "v25.0"),
-		WhatsAppTemplateName:       envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_checkout"),
+		WhatsAppTemplateName:       envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_personalised"),
 		WhatsAppTemplateLanguage:   envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
 
 		DelhiveryAPIKey:  os.Getenv("DELHIVERY_API_KEY"),

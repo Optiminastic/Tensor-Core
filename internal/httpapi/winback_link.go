@@ -25,12 +25,14 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 )
 
-// maxProductPhrase bounds the product name said in the message.
+// maxProductPhrase bounds the product names said in the message.
 //
-// A template parameter has a length limit and a basket of six personalised
-// planks produces a very long phrase. Truncated here rather than discovered
-// as a refusal from Meta.
-const maxProductPhrase = 60
+// The message names EVERY product in the basket, so this has to be generous
+// - clipping at sixty characters turned a three-item cart into one item and
+// an ellipsis. It is still bounded, because a template parameter has a hard
+// limit at Meta and a basket of ten personalised planks would reach it; a
+// truncated list is better than a refused send.
+const maxProductPhrase = 220
 
 // winbackLink is the WhatsApp URL button's one variable, or the reason there
 // is not one.

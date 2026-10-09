@@ -161,23 +161,25 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	// started with.
 	voice := w.server.sarvamFor(ctx, slug)
 	messenger := w.server.whatsappFor(ctx, slug)
-	discount, linkHost := w.server.winbackLinkFor(ctx, slug)
+	linkHost := w.server.winbackLinkFor(ctx, slug)
 
 	// A message needs somewhere to send somebody. Without a link host there is
 	// no button, and a win-back message whose whole job is to reopen the
 	// basket is not worth sending without one.
-	canMessage := messenger.Configured() && linkHost != ""
-
-	channels := winbackChannels(cfg, voice.Configured(), canMessage)
-	if len(channels) == 0 {
-		w.logger.Info("win-back sweep skipped: no channel is connected", "brand", slug)
-		return nil
-	}
-
 	conn, err := w.server.store.Q.GetConnectionWithToken(ctx,
 		gen.GetConnectionWithTokenParams{BrandSlug: slug, Provider: shopifyProvider})
 	shop, token, connected := shopifyCredentials(conn, err)
 	if !connected {
+		return nil
+	}
+
+	// Messaging needs a link host AND a Shopify token, because the code is
+	// minted in the merchant's own Shopify immediately before the send.
+	canMessage := messenger.Configured() && linkHost != "" && token != ""
+
+	channels := winbackChannels(cfg, voice.Configured(), canMessage)
+	if len(channels) == 0 {
+		w.logger.Info("win-back sweep skipped: no channel is connected", "brand", slug)
 		return nil
 	}
 
@@ -221,7 +223,7 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	// the messages, and Meta refusing a template must not stop the calls.
 	for _, ch := range channels {
 		if err := w.runChannel(ctx, slug, ch, checkouts, contacts, watchFrom,
-			voice, messenger, discount, linkHost); err != nil {
+			voice, messenger, shop, token, linkHost); err != nil {
 			w.logger.Error("win-back channel failed",
 				"brand", slug, "channel", ch.Name, "error", err)
 		}
@@ -234,7 +236,7 @@ func (w *WinbackCallWorker) runChannel(
 	ctx context.Context, slug string, ch winbackChannel,
 	checkouts []shopify.AbandonedCheckout, contacts []gen.ListWinbackContactsRow,
 	watchFrom time.Time, voice *sarvam.Client, messenger *whatsapp.Client,
-	discount, linkHost string,
+	shop, token, linkHost string,
 ) error {
 	// "Already done" is PER CHANNEL now: a customer who was rung is still due
 	// a message.
@@ -274,7 +276,7 @@ func (w *WinbackCallWorker) runChannel(
 		case channelVoice:
 			ok = w.call(ctx, slug, c, voice)
 		case channelWhatsApp:
-			ok = w.message(ctx, slug, c, messenger, discount, linkHost)
+			ok = w.message(ctx, slug, c, messenger, shop, token, linkHost)
 		}
 		if ok {
 			sent++
@@ -419,35 +421,72 @@ func (w *WinbackCallWorker) call(
 // person twice.
 func (w *WinbackCallWorker) message(
 	ctx context.Context, slug string, c candidate,
-	client *whatsapp.Client, discount, linkHost string,
+	client *whatsapp.Client, shop, token, linkHost string,
 ) bool {
-	// BUILT BEFORE CLAIMING. A refusal here is deterministic - a missing
-	// recovery URL, a host the template cannot address - so there is no point
-	// taking the claim only to hand it straight back.
-	link := buildWinbackLink(c.checkout.RecoveryURL, discount, linkHost)
-	if link.Param == "" {
-		// Still claimed and recorded, because this will refuse identically on
-		// every future sweep. The row is what stops it being retried forever
-		// and what tells somebody why this cart was never messaged.
+	// THE LINK IS CHECKED BEFORE THE CODE IS MINTED. Both refusals are
+	// deterministic, but one of them creates a discount in the merchant's
+	// Shopify: minting first would leave an unusable code behind every time a
+	// checkout has no recovery URL.
+	//
+	// An empty code here only proves the path is addressable; the real one
+	// replaces it below.
+	if probe := buildWinbackLink(c.checkout.RecoveryURL, "", linkHost); probe.Param == "" {
 		if claim, err := w.claimFor(ctx, slug, c, channelWhatsApp); err == nil {
-			w.settle(ctx, claim.ID, "failed", "", link.Why)
+			w.settle(ctx, claim.ID, "failed", "", probe.Why)
 		}
 		w.logger.Warn("win-back message: no link could be built",
-			"brand", slug, "checkout", c.checkout.Name, "reason", link.Why)
+			"brand", slug, "checkout", c.checkout.Name, "reason", probe.Why)
 		return false
 	}
 
-	claim, err := w.claimFor(ctx, slug, c, channelWhatsApp)
-	if err != nil {
+	// CLAIMED BEFORE THE CODE EXISTS. A discount minted before the claim is
+	// one a losing replica leaves behind in the merchant's Shopify, unused and
+	// unexplained, every single sweep.
+	claim, claimErr := w.claimFor(ctx, slug, c, channelWhatsApp)
+	if claimErr != nil {
 		w.logger.Info("win-back: already claimed on this channel",
 			"brand", slug, "channel", channelWhatsApp, "checkout", c.checkout.Name)
 		return false
 	}
 
+	discount, codeErr := w.mintWinbackCode(ctx, shop, token, c)
+	if codeErr != nil {
+		// The message promises ten per cent off with a named code. Sending it
+		// without one would be a lie in writing, so nothing is sent - and the
+		// claim is RELEASED, because the next sweep may well succeed (a name
+		// collision, a rate limit) and this customer has not been contacted.
+		_ = w.server.store.Q.ReleaseWinbackContact(ctx, claim.ID)
+		w.logger.Error("win-back message: no discount code could be created",
+			"brand", slug, "checkout", c.checkout.Name, "error", codeErr)
+		return false
+	}
+
+	link := buildWinbackLink(c.checkout.RecoveryURL, discount, linkHost)
+	if link.Param == "" {
+		// Unreachable in practice - the probe above already proved the path
+		// is addressable - but a silent empty button is worth refusing twice.
+		w.settle(ctx, claim.ID, "failed", "", link.Why)
+		w.logger.Warn("win-back message: no link could be built",
+			"brand", slug, "checkout", c.checkout.Name, "reason", link.Why)
+		return false
+	}
+
+	// ONE PARAMETER PER URL BUTTON the template declares, in its order.
+	//
+	// cart_recovery_personalised has two: "Complete checkout", which carries
+	// the customer back to their own basket, and "Shop more gifts", which is
+	// the same for everybody. Both are dynamic in the template, so both need
+	// a value - a missing one refuses the whole send, including the half that
+	// matters.
+	buttons := []string{link.Param}
+	if shop := strings.TrimSpace(w.server.cfg.WinbackShopPath); shop != "" {
+		buttons = append(buttons, shop)
+	}
+
 	result, sendErr := client.SendTemplate(ctx, whatsapp.TemplateMessage{
-		To:          c.phone,
-		BodyParams:  winbackBodyParams(c.checkout, discount),
-		ButtonParam: link.Param,
+		To:           c.phone,
+		BodyParams:   winbackBodyParams(c.checkout, discount),
+		ButtonParams: buttons,
 	})
 	if sendErr != nil {
 		// TRANSIENT GOES BACK, PERMANENT STAYS. A rate limit or an outage must
@@ -479,6 +518,56 @@ func (w *WinbackCallWorker) message(
 	w.logger.Info("win-back message sent",
 		"brand", slug, "checkout", c.checkout.Name, "message", result.MessageID)
 	return true
+}
+
+// winbackCodeValidFor is how long a win-back code lasts.
+//
+// One hour, and the message says so. The urgency is the point of the offer -
+// a code with no end is a permanent discount on the shop's own margin - and
+// the clock starts HERE, when the code is created immediately before the
+// message that carries it, not when a config value was last edited.
+const winbackCodeValidFor = time.Hour
+
+// winbackCodeAttempts is how many names to try before giving up.
+//
+// A collision is not rare: Shopify holds a code name forever, including after
+// the discount has expired, so the second Seetha to abandon a cart collides
+// with the first. The clean name is tried once and then randomness is added,
+// so three is plenty - a fourth collision would mean something other than
+// bad luck.
+const winbackCodeAttempts = 3
+
+// mintWinbackCode creates this customer's own single-use code, valid for an
+// hour, and returns it.
+func (w *WinbackCallWorker) mintWinbackCode(
+	ctx context.Context, shop, token string, c candidate,
+) (string, error) {
+	now := time.Now()
+	var lastErr error
+	for _, code := range winbackCodeCandidates(c.checkout.CustomerName, winbackCodeAttempts) {
+		_, err := w.server.shopify.CreateDiscountCode(ctx, shop, token, shopify.DiscountCode{
+			Code: code,
+			// Named so the merchant's Discounts list stays readable: a
+			// thousand rows of random letters is not a list anybody can use.
+			Title:      "Win-back " + c.checkout.Name,
+			Percentage: winbackDiscountFraction,
+			StartsAt:   now,
+			EndsAt:     now.Add(winbackCodeValidFor),
+		})
+		if err == nil {
+			return code, nil
+		}
+		if errors.Is(err, shopify.ErrDiscountCodeTaken) {
+			// Someone already has this name. Try a suffixed one; this is the
+			// expected path for a common first name, not an error.
+			lastErr = err
+			continue
+		}
+		// Anything else - no scope, rate limited, Shopify down - will not be
+		// fixed by a different name.
+		return "", err
+	}
+	return "", fmt.Errorf("every candidate code was taken: %w", lastErr)
 }
 
 // claimFor takes the right to contact this person on this channel.

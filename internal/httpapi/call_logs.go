@@ -125,8 +125,14 @@ func (s *Server) listCallLogs(c *gin.Context) {
 	}
 
 	// Our side of the join, read once rather than per row.
+	// VOICE ONLY. The join below falls back to matching on the phone
+	// number, and a WhatsApp row for the same customer carries the same
+	// number - so without this filter a message could supply the checkout
+	// details for a call, and the two channels would blur together on a
+	// page that exists to tell them apart.
+	voiceOnly := channelVoice
 	records, err := s.store.Q.ListCheckoutCalls(ctx, gen.ListCheckoutCallsParams{
-		BrandSlug: slug, RowLimit: 500,
+		BrandSlug: slug, Channel: &voiceOnly, RowLimit: 500,
 	})
 	if err != nil {
 		// A call log is still worth reading without the mapping: Sarvam's half

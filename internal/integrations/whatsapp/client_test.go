@@ -60,9 +60,9 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 
 	result, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
 		// With a '+', to prove it is stripped.
-		To:          "+919799931864",
-		BodyParams:  []string{"Tushar", "Dual Name Plank", "1", "948", "BACK10"},
-		ButtonParam: "discount/BACK10?redirect=%2Fcheckouts%2Fac%2FTOKEN%2Frecover%3Fkey%3DKEY",
+		To:           "+919799931864",
+		BodyParams:   []string{"Tushar", "Dual Name Plank", "1", "948", "BACK10"},
+		ButtonParams: []string{"discount/BACK10?redirect=%2Fcheckouts%2Fac%2FTOKEN%2Frecover%3Fkey%3DKEY", "#"},
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
@@ -90,8 +90,8 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 	}
 
 	comps, _ := tpl["components"].([]any)
-	if len(comps) != 2 {
-		t.Fatalf("got %d components, want body + button", len(comps))
+	if len(comps) != 3 {
+		t.Fatalf("got %d components, want body + two buttons", len(comps))
 	}
 	body, _ := comps[0].(map[string]any)
 	params, _ := body["parameters"].([]any)
@@ -105,12 +105,19 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 		}
 	}
 
-	btn, _ := comps[1].(map[string]any)
-	if btn["type"] != "button" || btn["sub_type"] != "url" {
-		t.Errorf("button component %v, want type=button sub_type=url", btn)
-	}
-	if btn["index"] != "0" {
-		t.Errorf("button index %#v, want the STRING \"0\" - a number is refused", btn["index"])
+	// ONE COMPONENT PER BUTTON, indexed in the template's own order. A
+	// template that gains a second button refuses every send until this is
+	// right, which is how a working win-back goes silent after somebody edits
+	// it in Meta's console.
+	for i, wantIndex := range []string{"0", "1"} {
+		btn, _ := comps[i+1].(map[string]any)
+		if btn["type"] != "button" || btn["sub_type"] != "url" {
+			t.Errorf("button %d component %v, want type=button sub_type=url", i, btn)
+		}
+		if btn["index"] != wantIndex {
+			t.Errorf("button index %#v, want the STRING %q - a number is refused",
+				btn["index"], wantIndex)
+		}
 	}
 
 	if result.MessageID != "wamid.TEST" || result.WAID != "919799931864" {
@@ -333,4 +340,31 @@ func asMetaError(err error, target **Error) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// A template with two dynamic URL buttons refuses the whole send when only
+// one parameter is given. Catching an empty one here, before the network,
+// turns "(#131008) Button at index 1 requires a parameter" into a sentence
+// that names the position.
+func TestAnEmptyButtonParameterIsRefusedBeforeTheNetwork(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		_, _ = w.Write([]byte(acceptedBody))
+	}))
+	defer server.Close()
+
+	_, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
+		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		ButtonParams: []string{"discount/X?redirect=%2Fy", "  "},
+	})
+	if err == nil {
+		t.Fatal("an empty button parameter must be refused")
+	}
+	if !strings.Contains(err.Error(), "button parameter 1") {
+		t.Errorf("the error should name the position: %v", err)
+	}
+	if requests != 0 {
+		t.Errorf("%d requests reached Meta; it should have failed locally", requests)
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -120,10 +121,18 @@ type TemplateMessage struct {
 	// BodyParams in the template's own order. An EMPTY one is refused by Meta
 	// outright, so they are checked here, before the network.
 	BodyParams []string
-	// ButtonParam is the URL button's {{1}}: everything after the host that
-	// the approved template bakes in. Empty omits the button component, for a
-	// template that has none.
-	ButtonParam string
+	// ButtonParams is one value per URL button, in the template's own order.
+	//
+	// ONE PER BUTTON, NOT ONE IN TOTAL. Every dynamic URL button needs its
+	// own parameter and Meta refuses the whole send if any is missing, with
+	// "Button at index 1 of type Url requires a parameter". A template that
+	// gains a second button therefore breaks every send until this list grows
+	// to match - which is exactly how a working win-back goes silent after
+	// somebody edits it in Meta's console.
+	//
+	// Each value is everything after the host the approved template bakes in.
+	// Empty omits the button components entirely, for a template with none.
+	ButtonParams []string
 }
 
 // SendResult is Meta's acknowledgement, and nothing more than that.
@@ -190,10 +199,16 @@ func (c *Client) SendTemplate(ctx context.Context, msg TemplateMessage) (SendRes
 		Type:       "body",
 		Parameters: textParams(msg.BodyParams),
 	}}
-	if strings.TrimSpace(msg.ButtonParam) != "" {
+	for i, p := range msg.ButtonParams {
+		if strings.TrimSpace(p) == "" {
+			return SendResult{}, fmt.Errorf(
+				"button parameter %d is empty, which Meta refuses", i)
+		}
 		components = append(components, templateComponent{
-			Type: "button", SubType: "url", Index: "0",
-			Parameters: textParams([]string{msg.ButtonParam}),
+			// Index is the STRING form of the position. A number there is
+			// refused with an unhelpful generic error.
+			Type: "button", SubType: "url", Index: strconv.Itoa(i),
+			Parameters: textParams([]string{p}),
 		})
 	}
 

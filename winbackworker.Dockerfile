@@ -1,5 +1,5 @@
-# Win-back call scheduler: the one process in Tensor that telephones a member
-# of the public.
+# Win-back scheduler: the one process in Tensor that contacts a member of the
+# public directly, by telephone and by WhatsApp.
 #
 # Its own image, and its own container, for blast radius rather than for
 # packaging. Stop this and the calling stops dead while orders keep importing,
@@ -8,11 +8,13 @@
 # taking the API down.
 #
 # Nothing heavy in here: no OpenSCAD, no object storage, no ports. It reads
-# Shopify over HTTPS, talks to Sarvam, and consumes one River queue from
-# Postgres. Distroless/static is enough.
+# Shopify over HTTPS, talks to Sarvam and Meta, mints a one-hour discount
+# code in the shop, and consumes one River queue from Postgres.
+# Distroless/static is enough.
 #
-# SAFE BY DEFAULT: with WINBACK_CALLS_ENABLED unset it runs every rule, logs
-# exactly who it would have rung, and places no calls.
+# SAFE BY DEFAULT: with WINBACK_CALLS_ENABLED and WINBACK_WHATSAPP_ENABLED
+# unset it runs every rule, logs exactly who it would have reached on each
+# channel, and contacts nobody.
 #
 #   docker build -f winbackworker.Dockerfile -t tensor-winback-worker .
 

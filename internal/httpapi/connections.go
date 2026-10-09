@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +13,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 )
 
@@ -134,6 +137,25 @@ func (s *Server) upsertConnection(c *gin.Context) {
 		return
 	}
 
+	// A SHOPIFY CREDENTIAL IS PROVED BEFORE IT IS BELIEVED.
+	//
+	// This used to store whatever the form sent and call it connected, so a
+	// mistyped field produced a green "Connected" badge over a credential that
+	// could not talk to Shopify at all. It happened: an admin's own email
+	// address in the shop field and an eleven-character token, saved happily,
+	// while every read - abandoned checkouts, shipments, the win-back sweep -
+	// failed somewhere far away with a 401 that pointed at none of it.
+	//
+	// Only Shopify, and only on 'connected'. Clearing a connection must always
+	// be possible, including when the credential is already broken, and the
+	// other providers have no equivalent cheap check.
+	if req.Status == connectionConnected && provider == shopifyProvider {
+		if detailMsg := s.verifyShopifyCredential(c.Request.Context(), req); detailMsg != "" {
+			detail(c, http.StatusUnprocessableEntity, detailMsg)
+			return
+		}
+	}
+
 	user, _ := auth.UserFrom(c) // connected_by comes from the token, never the body.
 	connectedBy := user.ID
 
@@ -149,6 +171,47 @@ func (s *Server) upsertConnection(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, connectionDTO(r.ID, r.BrandSlug, r.Provider, r.Status, r.ExternalAccountID,
 		r.ExpiresAt, r.ConnectedBy, r.CreatedAt, r.UpdatedAt))
+}
+
+// connectionConnected is the status that asserts the credential works.
+const connectionConnected = "connected"
+
+// verifyShopifyCredential returns a sentence naming what is wrong, or "".
+//
+// One cheap call to Shopify's own access_scopes endpoint. It is the same
+// question the integration will ask on every page load - "does this token
+// work on this shop?" - asked once, now, while somebody is looking at the
+// form and can fix it.
+func (s *Server) verifyShopifyCredential(
+	ctx context.Context, req connectionUpsertRequest,
+) string {
+	shop := ""
+	if req.ExternalAccountID != nil {
+		shop = strings.TrimSpace(*req.ExternalAccountID)
+	}
+	token := ""
+	if req.AccessToken != nil {
+		token = strings.TrimSpace(*req.AccessToken)
+	}
+
+	if !shopify.ValidShopDomain(shop) {
+		return "That is not a Shopify store domain. It looks like " +
+			"your-store.myshopify.com - not an email address or a storefront URL."
+	}
+	if token == "" {
+		return "A Shopify access token is required to mark this connected."
+	}
+
+	scopes, err := s.shopify.AccessScopes(ctx, shop, token)
+	if err != nil {
+		// Shopify's own sentence. A bad token answers "Invalid API key or
+		// access token", which is exactly what the person needs to read.
+		return "Shopify rejected that token for " + shop + ": " + err.Error()
+	}
+	if len(scopes) == 0 {
+		return "Shopify accepted that token but granted it nothing."
+	}
+	return ""
 }
 
 func (s *Server) deleteConnection(c *gin.Context) {

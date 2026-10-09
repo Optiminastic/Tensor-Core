@@ -121,3 +121,26 @@ func TestIntegrationSpecsAreCoherent(t *testing.T) {
 		}
 	}
 }
+
+// Two specs for the same provider render as two rows that save over each
+// other. It happened: restoring Sarvam into this slice duplicated Delhivery,
+// and the Settings page showed it twice with nothing to say which was which.
+func TestEachProviderAppearsOnce(t *testing.T) {
+	seen := map[string]bool{}
+	for _, spec := range integrationSpecs {
+		if seen[spec.Provider] {
+			t.Errorf("%q is declared twice", spec.Provider)
+		}
+		seen[spec.Provider] = true
+		if spec.Provider == "" || spec.Label == "" || spec.Summary == "" {
+			t.Errorf("%+v needs a provider, a label and a summary", spec)
+		}
+	}
+	// And every provider the resolvers know about must actually be listed,
+	// or its credentials can never be entered.
+	for _, want := range []string{providerSarvam, providerDelhivery, providerWhatsApp} {
+		if !seen[want] {
+			t.Errorf("%q has a resolver but no row in Settings", want)
+		}
+	}
+}
