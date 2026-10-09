@@ -16,6 +16,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -23,10 +24,12 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/delhivery"
+	"github.com/Optiminastic/tensor-core/internal/integrations/sarvam"
 )
 
 // Provider names, as the URL and the database carry them.
 const (
+	providerSarvam    = "sarvam"
 	providerWhatsApp  = "whatsapp"
 	providerDelhivery = "delhivery"
 )
@@ -82,6 +85,46 @@ type integrationSpec struct {
 // integrationSpecs is the catalogue. One entry per provider.
 var integrationSpecs = []integrationSpec{
 	{
+		Provider: providerSarvam,
+		Label:    "Sarvam Voice Agent",
+		Summary:  "Places the win-back calls to customers who abandoned a checkout.",
+		Fields: []settingField{
+			{Key: "api_key", Label: "API key", Secret: true, Required: true,
+				Help: "A Voice Agents key (sk_samvaad_…), not a Sarvam model-API key — the wrong one answers 401."},
+			{Key: "org_id", Label: "Organisation ID", Required: true,
+				Help: "From the agent's own API snippet in Sarvam's console."},
+			{Key: "workspace_id", Label: "Workspace ID", Required: true,
+				Help: "From the same snippet. An agent in another workspace answers “App not found”."},
+			{Key: "agent_id", Label: "Agent ID", Required: true,
+				Help: "The app_id from the snippet — not the id in the console URL, which is a different value."},
+			{Key: "agent_version", Label: "Agent version", Required: true,
+				Help: "An integer, and it must be a COMMITTED version. A draft does not run."},
+			{Key: "connection_id", Label: "Telephony connection", Required: true,
+				Help: "The Plivo or Vobiz connection onboarded in Sarvam."},
+			{Key: "agent_phone_number", Label: "Calls from", Required: true,
+				Help: "In full international form. The number must be imported onto that connection."},
+			{Key: "product_variable", Label: "Cart-item variable", Required: false,
+				Default: "cart_item_name",
+				Help: "The agent's variable for what was in the basket. Sarvam matches the name " +
+					"exactly and silently ignores one it does not know; this has been renamed twice."},
+		},
+		Available: true,
+	},
+	{
+		Provider: providerDelhivery,
+		Label:    "Delhivery",
+		Summary:  "Reads carrier tracking, so a parcel that could not be delivered shows up in Tensor.",
+		Fields: []settingField{
+			{Key: "api_key", Label: "API key", Secret: true, Required: true,
+				Help: "From Delhivery's panel under API Setup. A production key; the staging host has its own, and a mismatch returns no shipments rather than an error."},
+			{Key: "base_url", Label: "Carrier host", Required: false,
+				Default: delhivery.DefaultBaseURL,
+				Help: "The production tracking host. Change it only to point at Delhivery's " +
+					"staging host, which has its own keys and returns nothing to a production one."},
+		},
+		Available: true,
+	},
+	{
 		Provider: providerDelhivery,
 		Label:    "Delhivery",
 		Summary:  "Reads carrier tracking, so a parcel that could not be delivered shows up in Tensor.",
@@ -98,13 +141,37 @@ var integrationSpecs = []integrationSpec{
 	{
 		Provider: providerWhatsApp,
 		Label:    "WhatsApp Business",
-		Summary:  "Order updates, personalisation confirmations and the win-back discount code.",
-		// Deliberately unavailable. The backend does not exist, and a form
-		// that stores a permanent access token nothing reads is a credential
-		// at risk for no benefit. It is listed so the page says what is
-		// planned rather than pretending the plan is a secret.
-		Fields:    nil,
-		Available: false,
+		Summary:  "Sends the win-back message and order updates through Meta's Cloud API.",
+		Fields: []settingField{
+			{Key: "access_token", Label: "Access token", Secret: true, Required: true,
+				Help: "A SYSTEM USER token, not a user token. A user token works identically " +
+					"for an hour and then stops - the sends start failing and nothing says so."},
+			{Key: "phone_number_id", Label: "Phone number ID", Required: true,
+				Help: "The number's id from WhatsApp Manager, not the business account's. " +
+					"Sending posts to this id; the WABA id there answers 404."},
+			{Key: "waba_id", Label: "Business account ID", Required: true,
+				Help: "Owns the templates and the delivery analytics."},
+			{Key: "app_id", Label: "App ID", Required: true,
+				Help: "The Meta app the token belongs to."},
+			{Key: "app_secret", Label: "App secret", Secret: true, Required: false,
+				Help: "Only needed to verify inbound webhooks. Sending works without it; " +
+					"nothing Meta posts back can be trusted until it is set."},
+			{Key: "template_name", Label: "Win-back template", Required: true,
+				Default: "cart_recovery_checkout",
+				Help: "An APPROVED template on that business account. " +
+					"cart_recovery_checkout carries the “Complete checkout” button; " +
+					"cart_recovery_discount is the same text without it."},
+			{Key: "template_language", Label: "Template language", Required: true,
+				Default: "en",
+				Help: "Part of the template's identity, not a formatting hint. “en” and " +
+					"“en_US” are different templates, and the wrong one answers " +
+					"“Template name does not exist in the translation”."},
+			{Key: "api_version", Label: "Graph API version", Required: false,
+				Default: "v25.0",
+				Help: "Pinned on purpose. Meta retires versions on a schedule, and a floating " +
+					"one breaks on a date nobody wrote down."},
+		},
+		Available: true,
 	},
 }
 
@@ -250,6 +317,14 @@ func (s *Server) saveIntegration(c *gin.Context) {
 			continue
 		}
 
+		if field.Key == "agent_version" {
+			if _, err := strconv.Atoi(value); err != nil {
+				detail(c, http.StatusUnprocessableEntity,
+					"Agent version is a whole number. Sarvam’s console shows it as “v6”; "+
+						"the API wants 6.")
+				return
+			}
+		}
 		stored := value
 		if field.Secret {
 			sealed, err := s.secrets.Seal(value)
@@ -294,6 +369,38 @@ func (s *Server) disconnectIntegration(c *gin.Context) {
 // the environment is treated exactly like one in the database - see the note
 // on settingField.Secret for why this endpoint returns them at all.
 func (s *Server) environmentSettings(provider string) (map[string]string, []string) {
+	if provider == providerWhatsApp {
+		values := map[string]string{}
+		put := func(key, value string) {
+			if strings.TrimSpace(value) != "" {
+				values[key] = value
+			}
+		}
+		put("phone_number_id", s.cfg.WhatsAppPhoneNumberID)
+		put("waba_id", s.cfg.WhatsAppWABAID)
+		put("app_id", s.cfg.WhatsAppAppID)
+		put("api_version", s.cfg.WhatsAppAPIVersion)
+		put("template_name", s.cfg.WhatsAppTemplateName)
+		put("template_language", s.cfg.WhatsAppTemplateLanguage)
+
+		var secrets []string
+		if token := strings.TrimSpace(s.cfg.WhatsAppAccessToken); token != "" {
+			secrets = append(secrets, "access_token")
+			values["access_token"] = token
+		}
+		if secret := strings.TrimSpace(s.cfg.WhatsAppAppSecret); secret != "" {
+			secrets = append(secrets, "app_secret")
+			values["app_secret"] = secret
+		}
+		// The version and the template have defaults, so they are always
+		// present. Connected is judged on the values that identify an ACCOUNT -
+		// without those, a row showing "v25.0" and nothing else would read as
+		// configured when it can send nothing.
+		if s.cfg.WhatsAppPhoneNumberID == "" && len(secrets) == 0 {
+			return nil, nil
+		}
+		return values, secrets
+	}
 	if provider == providerDelhivery {
 		values := map[string]string{}
 		if strings.TrimSpace(s.cfg.DelhiveryBaseURL) != "" {
@@ -309,7 +416,106 @@ func (s *Server) environmentSettings(provider string) (map[string]string, []stri
 		}
 		return values, secrets
 	}
-	return nil, nil
+	values := map[string]string{}
+	put := func(key, value string) {
+		if strings.TrimSpace(value) != "" {
+			values[key] = value
+		}
+	}
+	put("org_id", s.cfg.SarvamOrgID)
+	put("workspace_id", s.cfg.SarvamWorkspaceID)
+	put("agent_id", s.cfg.SarvamAgentID)
+	put("connection_id", s.cfg.SarvamConnectionID)
+	put("agent_phone_number", s.cfg.SarvamAgentPhoneNumber)
+	put("product_variable", s.cfg.SarvamProductVariable)
+	if s.cfg.SarvamAgentVersion > 0 {
+		values["agent_version"] = strconv.Itoa(s.cfg.SarvamAgentVersion)
+	}
+
+	var secrets []string
+	if key := strings.TrimSpace(s.cfg.SarvamAPIKey); key != "" {
+		secrets = append(secrets, "api_key")
+		values["api_key"] = key
+	}
+	if len(values) == 0 && len(secrets) == 0 {
+		return nil, nil
+	}
+	return values, secrets
+}
+
+// sarvamFor builds the client for one brand.
+//
+// The brand's own settings first, the process's environment as the fallback.
+// That ordering is what lets the shop move a value into the UI without a
+// deploy, and lets a deployment that has configured nothing keep working
+// exactly as it did.
+//
+// Returns nil when neither is complete, which Configured() reports and every
+// caller already handles.
+func (s *Server) sarvamFor(ctx context.Context, brandSlug string) *sarvam.Client {
+	cfg := sarvam.Config{
+		BaseURL:          s.cfg.SarvamBaseURL,
+		APIKey:           s.cfg.SarvamAPIKey,
+		OrgID:            s.cfg.SarvamOrgID,
+		WorkspaceID:      s.cfg.SarvamWorkspaceID,
+		AgentID:          s.cfg.SarvamAgentID,
+		AgentVersion:     s.cfg.SarvamAgentVersion,
+		ConnectionID:     s.cfg.SarvamConnectionID,
+		AgentPhoneNumber: s.cfg.SarvamAgentPhoneNumber,
+	}
+
+	rows, err := s.store.Q.ListIntegrationSettings(ctx, gen.ListIntegrationSettingsParams{
+		BrandSlug: brandSlug, Provider: providerSarvam,
+	})
+	if err == nil {
+		for _, row := range rows {
+			value := row.SettingValue
+			if row.IsSecret {
+				opened, err := s.secrets.Open(value)
+				if err != nil {
+					// A sealed value that will not open is not a reason to
+					// fall back to the environment and call somebody with the
+					// wrong agent. Leave it unset so Configured() says no.
+					continue
+				}
+				value = opened
+			}
+			switch row.SettingKey {
+			case "api_key":
+				cfg.APIKey = value
+			case "org_id":
+				cfg.OrgID = value
+			case "workspace_id":
+				cfg.WorkspaceID = value
+			case "agent_id":
+				cfg.AgentID = value
+			case "agent_version":
+				if v, err := strconv.Atoi(value); err == nil {
+					cfg.AgentVersion = v
+				}
+			case "connection_id":
+				cfg.ConnectionID = value
+			case "agent_phone_number":
+				cfg.AgentPhoneNumber = value
+			}
+		}
+	}
+	return sarvam.New(cfg)
+}
+
+// productVariableFor is the agent's name for the cart's contents, per brand.
+func (s *Server) productVariableFor(ctx context.Context, brandSlug string) string {
+	rows, err := s.store.Q.ListIntegrationSettings(ctx, gen.ListIntegrationSettingsParams{
+		BrandSlug: brandSlug, Provider: providerSarvam,
+	})
+	if err == nil {
+		for _, row := range rows {
+			if row.SettingKey == "product_variable" && strings.TrimSpace(row.SettingValue) != "" {
+				return row.SettingValue
+			}
+		}
+	}
+	return s.productVariable()
 }
 
 // delhiveryFor builds the courier client for one brand.

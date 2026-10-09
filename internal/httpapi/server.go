@@ -13,6 +13,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
+	"github.com/Optiminastic/tensor-core/internal/integrations/sarvam"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/personalise"
@@ -83,6 +84,9 @@ type Server struct {
 	// whether it has anywhere to call, so an install with no printers simply
 	// never syncs rather than erroring every cycle.
 	bambu *bambubuddy.Client
+	// sarvam places outbound voice calls. Nil when unconfigured, which is every
+	// deployment that has not been given a Voice Agents key.
+	sarvam *sarvam.Client
 	// shipmentCache holds one brand's whole delivery picture for a couple of
 	// minutes. Not an optimisation: without it the Deliveries page re-tracked
 	// 703 parcels on every load and every filter chip, and Delhivery answered
@@ -130,7 +134,17 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		bambuCache: newBambuCache(
 			cfg.BambuPrinterIndexTTL, cfg.BambuStatusTTL, cfg.BambuErrorTTL,
 		),
-		colourNames:   newColourCatalogue(time.Hour),
+		colourNames: newColourCatalogue(time.Hour),
+		sarvam: sarvam.New(sarvam.Config{
+			BaseURL:          cfg.SarvamBaseURL,
+			APIKey:           cfg.SarvamAPIKey,
+			OrgID:            cfg.SarvamOrgID,
+			WorkspaceID:      cfg.SarvamWorkspaceID,
+			AgentID:          cfg.SarvamAgentID,
+			AgentVersion:     cfg.SarvamAgentVersion,
+			ConnectionID:     cfg.SarvamConnectionID,
+			AgentPhoneNumber: cfg.SarvamAgentPhoneNumber,
+		}),
 		shipmentCache: newShipmentCache(shipmentCacheTTL, shipmentErrorTTL),
 	}
 }
@@ -221,6 +235,9 @@ func (s *Server) Router() *gin.Engine {
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)
+	s.registerAbandonedCheckouts(r)
+	s.registerVoiceCalls(r)
+	s.registerCallLogs(r)
 	s.registerShipments(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)

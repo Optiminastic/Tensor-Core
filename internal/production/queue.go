@@ -475,3 +475,61 @@ func (e *DispatchEnqueuer) Enqueue(ctx context.Context) error {
 	})
 	return err
 }
+
+// WinbackCallQueueName is the queue the abandoned-checkout call scheduler runs
+// on.
+//
+// Its own queue, not shared with the order pull, so the calling can be stopped
+// dead - drop the worker, or run it nowhere - without taking order imports down
+// with it. A thing that telephones customers should have an off switch that
+// does not cost you anything else.
+const WinbackCallQueueName = "winback_calls"
+
+// WinbackCallsArgs sweeps a brand's abandoned checkouts and rings the ones that
+// have gone quiet long enough.
+//
+// Carries the brand slug only. The Shopify token and the Sarvam key are
+// resolved when the job runs: a River job is a database row that outlives the
+// request, and neither credential has any business sitting in one.
+//
+// An empty slug means every connected store, matching SyncOrdersArgs.
+type WinbackCallsArgs struct {
+	BrandSlug string `json:"brand_slug"`
+}
+
+func (WinbackCallsArgs) Kind() string { return "winback_calls" }
+
+// InsertOpts deduplicates by brand over a minute.
+//
+// Two ticks landing together would read the same Shopify page and race to call
+// the same person. The unique index on abandoned_checkout_calls is the real
+// defence, but not racing in the first place is cheaper than relying on it.
+func (a WinbackCallsArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue: WinbackCallQueueName,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
+			ByPeriod: time.Minute,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending, rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable, rivertype.JobStateRunning,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
+
+// PeriodicWinbackCallConstructor builds the recurring sweep.
+//
+// RunOnStart is false, deliberately. A worker restart is not a reason to ring
+// anybody, and during a deploy loop it would be a reason to ring them
+// repeatedly. The first sweep happens one interval in, by which time the
+// process has proved it can stay up.
+func PeriodicWinbackCallConstructor(period time.Duration) func() (river.JobArgs, *river.InsertOpts) {
+	return func() (river.JobArgs, *river.InsertOpts) {
+		return WinbackCallsArgs{}, &river.InsertOpts{
+			Queue:      WinbackCallQueueName,
+			UniqueOpts: river.UniqueOpts{ByPeriod: period},
+		}
+	}
+}

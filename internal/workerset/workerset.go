@@ -109,6 +109,12 @@ func Start(
 		server, logger, time.Duration(cfg.OrderSyncTimeoutMinutes)*time.Minute,
 	))
 
+	// The win-back call sweep. Registered unconditionally, because disabled
+	// means "place no calls" rather than "do not look": the sweep still runs
+	// every rule and logs who it would have rung, which is how the rules get
+	// checked before a phone does.
+	river.AddWorker(workers, httpapi.NewWinbackCallWorker(server, logger))
+
 	fleetSync := time.Duration(cfg.FleetSyncIntervalSeconds) * time.Second
 	if fleetSync > 0 {
 		river.AddWorker(workers, httpapi.NewFleetSyncWorker(
@@ -125,6 +131,11 @@ func Start(
 			// host that may be asleep, and must never hold the single
 			// batch-plan slot while it does.
 			production.FleetSyncQueueName: {MaxWorkers: 1},
+			// ONE AT A TIME, deliberately. This queue telephones customers,
+			// and the cost of getting concurrency wrong here is not a slow
+			// page - it is several people's phones ringing at once from a
+			// burst nobody intended.
+			production.WinbackCallQueueName: {MaxWorkers: 1},
 			// OpenSCAD is CPU-bound for 20-45 seconds per plank. Bounded rather
 			// than unlimited: renders are pure CPU and the box also runs the
 			// API, the database and Docker.
@@ -223,6 +234,22 @@ func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*riv
 			&river.PeriodicJobOpts{RunOnStart: true},
 		))
 	}
+	// The win-back sweep. Registered even when calling is disabled, because
+	// disabled means "place no calls", not "do not look" - the sweep still
+	// runs every rule and logs who it would have rung.
+	//
+	// BEFORE the fleet-sync early return below, not after. On the branch this
+	// was restored from it sat after it, so FLEET_SYNC_INTERVAL_SECONDS=0 -
+	// an unrelated setting about printers - silently stopped every win-back
+	// sweep, with nothing in the logs to say why.
+	if every := time.Duration(cfg.WinbackCallIntervalMinutes) * time.Minute; every > 0 {
+		jobs = append(jobs, river.NewPeriodicJob(
+			river.PeriodicInterval(every),
+			production.PeriodicWinbackCallConstructor(every),
+			&river.PeriodicJobOpts{RunOnStart: false},
+		))
+	}
+
 	if fleetSync <= 0 {
 		return jobs // FLEET_SYNC_INTERVAL_SECONDS=0 opts out entirely
 	}

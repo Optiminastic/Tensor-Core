@@ -9,6 +9,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AbandonedCheckoutCall struct {
+	ID            uuid.UUID
+	BrandSlug     string
+	CheckoutID    string
+	CheckoutName  string
+	CustomerName  string
+	Phone         string
+	AttemptID     *string
+	InteractionID *string
+	Status        string
+	Detail        *string
+	Attempts      int32
+	LastAttemptAt pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+}
+
 type Batch struct {
 	ID                          uuid.UUID
 	BatchNumber                 string
@@ -733,4 +749,10 @@ type VariantDesign struct {
 	Version     int32
 	Status      string
 	CreatedAt   pgtype.Timestamptz
+}
+
+type WinbackWatermark struct {
+	BrandSlug string
+	WatchFrom pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
 }

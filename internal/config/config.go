@@ -400,6 +400,113 @@ type Settings struct {
 	OrientationOverhangDeg  float64
 	OrientationMaxTriangles int
 
+	// Sarvam places the outbound voice calls that ask a customer about the cart
+	// they left behind.
+	//
+	// SarvamAPIKey is a VOICE AGENTS key (sk_samvaad_...), not one of Sarvam's
+	// model-API keys. The two look alike and only one works here; the wrong one
+	// answers 401 "Invalid API key format", which names neither the product nor
+	// the fix. It is a spending credential: environment only, never the repo,
+	// never logged.
+	//
+	// The four ids below are configured in Sarvam's console and cannot be
+	// guessed - which agent, which revision of it, which telephony connection,
+	// and which number it dials FROM. The number must be imported onto that
+	// connection or every call answers 404.
+	//
+	// Unset means no calls: the client is nil and the route answers 503 rather
+	// than the service refusing to start.
+	SarvamAPIKey           string
+	SarvamOrgID            string
+	SarvamWorkspaceID      string
+	SarvamAgentID          string
+	SarvamAgentVersion     int
+	SarvamConnectionID     string
+	SarvamAgentPhoneNumber string
+	// SarvamBaseURL overrides Sarvam's API, for tests and nothing else.
+	SarvamBaseURL string
+	// SarvamProductVariable is the agent's variable for what was in the cart.
+	//
+	// Configurable because this one keeps moving. It shipped as "Product_name"
+	// - a capital P among three lowercase siblings - and renaming it in
+	// Sarvam's console broke every call with "Agent variables
+	// '{'Product_name'}' not found", because Sarvam matches names exactly and
+	// refuses the whole call over one it does not recognise.
+	//
+	// It then moved again, to "cart_item_name", which is the current default.
+	// A name that lives on somebody else's console should not need a deploy to
+	// follow. The other three have never moved and stay in the code.
+	SarvamProductVariable string
+
+	// The win-back scheduler: the worker that rings a customer a few minutes
+	// after they walk away from a checkout. See
+	// internal/httpapi/winback_call_worker.go.
+	//
+	// WinbackCallsEnabled is the master switch and it DEFAULTS TO FALSE.
+	// Everything else here is configuration; this is consent. A deployment
+	// that merely has Sarvam credentials should not start phoning customers
+	// because somebody restarted a worker - switching it on has to be an act,
+	// not a side effect. With it off the scheduler still runs and still logs
+	// every checkout it would have rung, which is how you check the rules
+	// before anybody's phone does.
+	WinbackCallsEnabled bool
+	// WinbackCallDelayMinutes is how long a checkout must have been abandoned
+	// before it is called. Too soon and you ring somebody who is still typing
+	// their card number.
+	WinbackCallDelayMinutes int
+	// WinbackCallMaxAgeHours stops the scheduler working through history. A
+	// basket left three weeks ago is not a win-back, it is a cold call.
+	WinbackCallMaxAgeHours int
+	// WinbackCallIntervalMinutes is how often the scheduler looks.
+	WinbackCallIntervalMinutes int
+	// WinbackCallMaxPerRun bounds one pass. A burst of calls from one tick is
+	// how a telephony account gets flagged, and a bug that selects everybody
+	// should cost a handful of calls rather than a day's worth.
+	WinbackCallMaxPerRun int
+	// WinbackCallOnly restricts calling to these checkout names (Shopify's
+	// "#66850294530261" form), comma-separated.
+	//
+	// The testing gate. While it is non-empty NOTHING else is ever called, no
+	// matter what the rules above would allow - so the scheduler can be run
+	// against the live store with one real checkout and no risk to the rest.
+	// Empty means the rules alone decide, which is the production setting.
+	WinbackCallOnly []string
+
+	// WhatsApp Business (Meta Cloud API) sends the win-back message and the
+	// order updates. Tensor only ever SENDS templates from it.
+	//
+	// WhatsAppAccessToken must be a SYSTEM USER token. A user token works
+	// identically for an hour and then stops, which is the worst possible
+	// failure for a thing that messages customers: nothing breaks loudly, the
+	// sends simply start returning 401 and the shop finds out from silence.
+	// Verified against the live account - the first token supplied was type
+	// USER with an hour left on it.
+	WhatsAppAccessToken string
+	// WhatsAppPhoneNumberID is the NUMBER's id, not the business account's.
+	// Sending posts to /{phone_number_id}/messages; using the WABA id there
+	// answers 404.
+	WhatsAppPhoneNumberID string
+	// WhatsAppWABAID owns the templates and the delivery analytics.
+	WhatsAppWABAID string
+	WhatsAppAppID  string
+	// WhatsAppAppSecret verifies X-Hub-Signature-256 on inbound webhooks. Not
+	// needed to send, so it is optional: without it Tensor can message
+	// customers but cannot trust anything Meta posts back.
+	WhatsAppAppSecret string
+	// WhatsAppAPIVersion pins the Graph API version. Meta deprecates these on
+	// a schedule, and a silently floating version is how a working integration
+	// breaks on a date nobody wrote down.
+	WhatsAppAPIVersion string
+	// WhatsAppTemplateName and WhatsAppTemplateLanguage are the approved
+	// template the win-back message uses.
+	//
+	// THE LANGUAGE IS PART OF THE IDENTITY. "en" and "en_US" are different
+	// templates to Meta, and asking for the wrong one answers "(#132001)
+	// Template name does not exist in the translation" - which reads like the
+	// template is missing when it is only the locale that is wrong. Measured.
+	WhatsAppTemplateName     string
+	WhatsAppTemplateLanguage string
+
 	// Delhivery is the courier. Tensor only ever READS from it: the tracking
 	// endpoint, so the Shipment Exceptions page can say which parcels could not
 	// be delivered and why.
@@ -534,6 +641,30 @@ func Load() Settings {
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
 
+		SarvamAPIKey:               envOr("SARVAM_API_KEY", ""),
+		SarvamOrgID:                envOr("SARVAM_ORG_ID", ""),
+		SarvamWorkspaceID:          envOr("SARVAM_WORKSPACE_ID", ""),
+		SarvamAgentID:              envOr("SARVAM_AGENT_ID", ""),
+		SarvamAgentVersion:         intEnvOr("SARVAM_AGENT_VERSION", 1),
+		SarvamConnectionID:         envOr("SARVAM_CONNECTION_ID", ""),
+		SarvamAgentPhoneNumber:     envOr("SARVAM_AGENT_PHONE_NUMBER", ""),
+		SarvamBaseURL:              envOr("SARVAM_BASE_URL", ""),
+		SarvamProductVariable:      envOr("SARVAM_PRODUCT_VARIABLE", "cart_item_name"),
+		WinbackCallsEnabled:        boolEnvOr("WINBACK_CALLS_ENABLED", false),
+		WinbackCallDelayMinutes:    intEnvOr("WINBACK_CALL_DELAY_MINUTES", 10),
+		WinbackCallMaxAgeHours:     intEnvOr("WINBACK_CALL_MAX_AGE_HOURS", 24),
+		WinbackCallIntervalMinutes: intEnvOr("WINBACK_CALL_INTERVAL_MINUTES", 5),
+		WinbackCallMaxPerRun:       intEnvOr("WINBACK_CALL_MAX_PER_RUN", 5),
+		WinbackCallOnly:            csvEnv("WINBACK_CALL_ONLY"),
+		WhatsAppAccessToken:        os.Getenv("WHATSAPP_ACCESS_TOKEN"),
+		WhatsAppPhoneNumberID:      envOr("WHATSAPP_PHONE_NUMBER_ID", ""),
+		WhatsAppWABAID:             envOr("WHATSAPP_WABA_ID", ""),
+		WhatsAppAppID:              envOr("WHATSAPP_APP_ID", ""),
+		WhatsAppAppSecret:          os.Getenv("WHATSAPP_APP_SECRET"),
+		WhatsAppAPIVersion:         envOr("WHATSAPP_API_VERSION", "v25.0"),
+		WhatsAppTemplateName:       envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_checkout"),
+		WhatsAppTemplateLanguage:   envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
+
 		DelhiveryAPIKey:  os.Getenv("DELHIVERY_API_KEY"),
 		DelhiveryBaseURL: envOr("DELHIVERY_BASE_URL", ""),
 
@@ -661,6 +792,25 @@ func corsOrigins(raw string) []string {
 	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// csvEnv reads a comma-separated list, trimming blanks.
+//
+// An unset or empty variable gives nil rather than a one-element slice
+// containing "", which would otherwise read as "allow exactly the empty name"
+// and silently block everything.
+func csvEnv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
 		}
 	}
 	return out

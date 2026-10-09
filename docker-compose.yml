@@ -70,3 +70,23 @@ services:
     deploy:
       resources:
         limits: {cpus: "4", memory: 4G}
+
+  # The abandoned-checkout call scheduler. Separate from the pipeline on
+  # purpose: this is the only process that telephones a member of the public,
+  # so stopping it must stop the calling and nothing else.
+  #
+  # WINBACK_CALLS_ENABLED is false here. The sweep still runs every rule and
+  # logs who it WOULD ring; switching calls on is a deliberate act, never a
+  # side effect of a restart.
+  winbackworker:
+    build:
+      context: .
+      dockerfile: winbackworker.Dockerfile
+    image: tensor-winback-worker
+    env_file: [env/local.env]
+    environment:
+      WINBACK_CALLS_ENABLED: "false"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256M}
