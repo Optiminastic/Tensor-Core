@@ -83,6 +83,11 @@ type Server struct {
 	// whether it has anywhere to call, so an install with no printers simply
 	// never syncs rather than erroring every cycle.
 	bambu *bambubuddy.Client
+	// shipmentCache holds one brand's whole delivery picture for a couple of
+	// minutes. Not an optimisation: without it the Deliveries page re-tracked
+	// 703 parcels on every load and every filter chip, and Delhivery answered
+	// 429. See shipment_cache.go.
+	shipmentCache *shipmentCache
 	// renderer turns an order's personalisation text into a printable model.
 	// Nil when OpenSCAD is not installed, in which case a personalised job
 	// stays held with its reason rather than the service failing to start -
@@ -125,7 +130,8 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		bambuCache: newBambuCache(
 			cfg.BambuPrinterIndexTTL, cfg.BambuStatusTTL, cfg.BambuErrorTTL,
 		),
-		colourNames: newColourCatalogue(time.Hour),
+		colourNames:   newColourCatalogue(time.Hour),
+		shipmentCache: newShipmentCache(shipmentCacheTTL, shipmentErrorTTL),
 	}
 }
 
@@ -215,6 +221,8 @@ func (s *Server) Router() *gin.Engine {
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)
+	s.registerShipments(r)
+	s.registerIntegrations(r)
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)
 	s.registerShopify(r)
