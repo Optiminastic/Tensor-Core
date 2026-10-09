@@ -103,7 +103,9 @@ var integrationSpecs = []integrationSpec{
 			{Key: "connection_id", Label: "Telephony connection", Required: true,
 				Help: "The Plivo or Vobiz connection onboarded in Sarvam."},
 			{Key: "agent_phone_number", Label: "Calls from", Required: true,
-				Help: "In full international form. The number must be imported onto that connection."},
+				Help: "In full international form, and imported onto that connection. " +
+					"This is the number the CALL comes from — not the WhatsApp sender, " +
+					"which is a different line configured under WhatsApp Business."},
 			{Key: "product_variable", Label: "Cart-item variable", Required: false,
 				Default: "cart_item_name",
 				Help: "The agent's variable for what was in the basket. Sarvam matches the name " +
@@ -134,7 +136,9 @@ var integrationSpecs = []integrationSpec{
 				Help: "A SYSTEM USER token, not a user token. A user token works identically " +
 					"for an hour and then stops - the sends start failing and nothing says so."},
 			{Key: "phone_number_id", Label: "Phone number ID", Required: true,
-				Help: "The number's id from WhatsApp Manager, not the business account's. " +
+				Help: "The id of the number MESSAGES are sent from — a different line from " +
+					"the one the voice agent calls on. The number's id from WhatsApp " +
+					"Manager, not the business account's. " +
 					"Sending posts to this id; the WABA id there answers 404."},
 			{Key: "waba_id", Label: "Business account ID", Required: true,
 				Help: "Owns the templates and the delivery analytics."},
