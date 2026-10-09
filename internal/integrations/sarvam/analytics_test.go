@@ -23,7 +23,7 @@ const realAttempt = `{"items":[{
  "connectivity_status":"connected","failure_reason":"NO_FAILURE_REASON",
  "ended_by":"USER_ENDS","duration_in_seconds":21.22993278503418,
  "start_datetime":"2026-10-07T07:49:48","language_name":"English","num_messages":3,
- "user_contact_masked":"+91******1465","user_contact":"+919136361465",
+ "user_contact_masked":"+91******0003","user_contact":"+919000000003",
  "channel_direction":"outbound",
  "audio_url":"https://indus.sarvam.ai/media?x=1",
  "agent_variables":{"cart_value":"1099","customer_name":"Rishi Patel","item_count":"2",
@@ -69,7 +69,7 @@ func TestAnAttemptCarriesTheAgentsOwnSummaryAndOutcome(t *testing.T) {
 		t.Errorf("disposition = %q", a.Disposition())
 	}
 	// The full number is what joins a call back to its checkout.
-	if a.UserContact != "+919136361465" {
+	if a.UserContact != "+919000000003" {
 		t.Errorf("user contact = %q", a.UserContact)
 	}
 	if a.InteractionID == "" {

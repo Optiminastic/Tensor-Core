@@ -48,7 +48,7 @@ func TestTheRequestMatchesTheShapeSarvamAccepts(t *testing.T) {
 
 	client := New(testConfig(server.URL))
 	result, err := client.Call(context.Background(), CallRequest{
-		CustomerNumber: "+919799931864",
+		CustomerNumber: "+919000000001",
 		Variables:      map[string]string{"customer_name": "Priya"},
 	})
 	if err != nil {
@@ -99,7 +99,7 @@ func TestTheRequestMatchesTheShapeSarvamAccepts(t *testing.T) {
 	if !ok {
 		t.Fatalf("no user_config in %v", got)
 	}
-	if user["user_phone_number"] != "+919799931864" {
+	if user["user_phone_number"] != "+919000000001" {
 		t.Errorf("user_phone_number = %v", user["user_phone_number"])
 	}
 	if _, misplaced := user["agent_variables"]; misplaced {
@@ -123,7 +123,7 @@ func TestARefusalKeepsSarvamsOwnExplanation(t *testing.T) {
 	defer server.Close()
 
 	_, err := New(testConfig(server.URL)).
-		Call(context.Background(), CallRequest{CustomerNumber: "+919799931864"})
+		Call(context.Background(), CallRequest{CustomerNumber: "+919000000001"})
 	if err == nil {
 		t.Fatal("a 404 was reported as success")
 	}
@@ -155,7 +155,7 @@ func TestAnUnconfiguredClientIsSafeToHold(t *testing.T) {
 				t.Errorf("AgentPhoneNumber = %q on a nil client", got)
 			}
 			if _, err := client.Call(context.Background(),
-				CallRequest{CustomerNumber: "+919799931864"}); err == nil {
+				CallRequest{CustomerNumber: "+919000000001"}); err == nil {
 				t.Error("a nil client placed a call")
 			}
 		})

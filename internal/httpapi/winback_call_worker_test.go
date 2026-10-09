@@ -51,7 +51,7 @@ func candidateNames(found []candidate) []string {
 func TestACartIsOnlyCalledOnceItHasGoneQuiet(t *testing.T) {
 	w := sweeper()
 	got := w.eligible([]shopify.AbandonedCheckout{
-		checkout("#toosoon", 4*time.Minute, "9799931864"),
+		checkout("#toosoon", 4*time.Minute, "9000000001"),
 		checkout("#ready", 11*time.Minute, "9799931865"),
 	}, nil, longAgo())
 
@@ -64,7 +64,7 @@ func TestACartIsOnlyCalledOnceItHasGoneQuiet(t *testing.T) {
 }
 
 func TestACartThatWasPaidForIsNeverCalled(t *testing.T) {
-	paid := checkout("#recovered", time.Hour, "9799931864")
+	paid := checkout("#recovered", time.Hour, "9000000001")
 	completed := time.Now().Add(-30 * time.Minute)
 	paid.CompletedAt = &completed
 
@@ -79,10 +79,10 @@ func TestACartThatWasPaidForIsNeverCalled(t *testing.T) {
 func TestOneCallPerPersonNotPerBasket(t *testing.T) {
 	// The same number on two different carts. Deduplicating per CHECKOUT would
 	// let both through and ring one person twice.
-	already := map[string]bool{"+919799931864": true}
+	already := map[string]bool{"+919000000001": true}
 	got := sweeper().eligible([]shopify.AbandonedCheckout{
-		checkout("#first", time.Hour, "9799931864"),
-		checkout("#second", 30*time.Minute, "09799931864"),
+		checkout("#first", time.Hour, "9000000001"),
+		checkout("#second", 30*time.Minute, "09000000001"),
 		checkout("#other", 30*time.Minute, "9876543210"),
 	}, already, longAgo())
 
@@ -93,7 +93,7 @@ func TestOneCallPerPersonNotPerBasket(t *testing.T) {
 
 func TestAStaleBasketIsNotACallItIsAColdCall(t *testing.T) {
 	if got := sweeper().eligible([]shopify.AbandonedCheckout{
-		checkout("#ancient", 40*24*time.Hour, "9799931864"),
+		checkout("#ancient", 40*24*time.Hour, "9000000001"),
 	}, nil, longAgo()); len(got) != 0 {
 		t.Fatalf("a six-week-old cart was eligible: %v", candidateNames(got))
 	}
@@ -113,7 +113,7 @@ func TestTheAllowListBeatsEveryOtherRule(t *testing.T) {
 	// which is what makes it safe to run this against the live store.
 	w := sweeper("#66850294530261")
 	got := w.eligible([]shopify.AbandonedCheckout{
-		checkout("#66850294530261", time.Hour, "9799931864"),
+		checkout("#66850294530261", time.Hour, "9000000001"),
 		checkout("#perfectlyeligible", time.Hour, "9876543210"),
 		checkout("#alsoeligible", 2*time.Hour, "9876543211"),
 	}, nil, longAgo())
@@ -124,15 +124,15 @@ func TestTheAllowListBeatsEveryOtherRule(t *testing.T) {
 }
 
 func TestTheNumberIsNormalisedBeforeItIsComparedOrDialled(t *testing.T) {
-	// "09799931864" and "+91 97999 31864" are one person. Compared raw they
-	// are three, and that person is rung three times.
+	// "9000000001", "09000000001" and "+91 90000 00001" are one person.
+	// Compared raw they are three, and that person is rung three times.
 	got := sweeper().eligible([]shopify.AbandonedCheckout{
-		checkout("#a", time.Hour, "+91 97999 31864"),
+		checkout("#a", time.Hour, "+91 90000 00001"),
 	}, nil, longAgo())
 	if len(got) != 1 {
 		t.Fatalf("eligible = %v", candidateNames(got))
 	}
-	if got[0].phone != "+919799931864" {
+	if got[0].phone != "+919000000001" {
 		t.Errorf("phone = %q, want E.164", got[0].phone)
 	}
 }
@@ -162,7 +162,7 @@ func TestABasketAbandonedBeforeWatchingBeganIsLeftAlone(t *testing.T) {
 	// would happen on startup, to everybody at once.
 	watchFrom := time.Now().Add(-time.Hour)
 	got := sweeper().eligible([]shopify.AbandonedCheckout{
-		checkout("#backlog", 6*time.Hour, "9799931864"),
+		checkout("#backlog", 6*time.Hour, "9000000001"),
 		checkout("#sincewatching", 20*time.Minute, "9876543210"),
 	}, nil, watchFrom)
 
@@ -177,7 +177,7 @@ func TestTheAllowListStillReachesAnOlderCheckout(t *testing.T) {
 	// single checkout deliberately and is how the rules get tested against a
 	// real one. Everything else stays gated.
 	got := sweeper("#66850294530261").eligible([]shopify.AbandonedCheckout{
-		checkout("#66850294530261", 20*time.Hour, "9799931864"),
+		checkout("#66850294530261", 20*time.Hour, "9000000001"),
 		checkout("#anotherold", 20*time.Hour, "9876543210"),
 	}, nil, time.Now().Add(-time.Minute))
 
@@ -243,22 +243,22 @@ func TestEachChannelHasItsOwnConsent(t *testing.T) {
 // A customer who was rung is still due a message.
 func TestVoiceAndWhatsAppAreJudgedSeparately(t *testing.T) {
 	contacts := []gen.ListWinbackContactsRow{
-		{Phone: "+919799931864", Channel: channelVoice},
+		{Phone: "+919000000001", Channel: channelVoice},
 		{Phone: "+919000000002", Channel: channelWhatsApp},
 	}
 	voice := doneFor(contacts, channelVoice)
-	if !voice["+919799931864"] || voice["+919000000002"] {
+	if !voice["+919000000001"] || voice["+919000000002"] {
 		t.Errorf("voice history = %v", voice)
 	}
 	wa := doneFor(contacts, channelWhatsApp)
-	if wa["+919799931864"] || !wa["+919000000002"] {
+	if wa["+919000000001"] || !wa["+919000000002"] {
 		t.Errorf("whatsapp history = %v", wa)
 	}
 
 	// And the rule that reads it still works: the rung number is eligible for
 	// a message, and not for a second call.
 	w := sweeper()
-	cart := checkout("#1", 30*time.Minute, "9799931864")
+	cart := checkout("#1", 30*time.Minute, "9000000001")
 	if got := w.eligible([]shopify.AbandonedCheckout{cart}, voice, time.Time{}); len(got) != 0 {
 		t.Error("already called: must not be called again")
 	}

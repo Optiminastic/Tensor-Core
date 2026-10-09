@@ -20,7 +20,7 @@ func testClient(server *httptest.Server) *Client {
 }
 
 const acceptedBody = `{"messaging_product":"whatsapp",
- "contacts":[{"input":"919799931864","wa_id":"919799931864"}],
+ "contacts":[{"input":"919000000001","wa_id":"919000000001"}],
  "messages":[{"id":"wamid.TEST","message_status":"accepted"}]}`
 
 func TestNewIsNilWithoutATokenOrANumber(t *testing.T) {
@@ -60,7 +60,7 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 
 	result, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
 		// With a '+', to prove it is stripped.
-		To:           "+919799931864",
+		To:           "+919000000001",
 		BodyParams:   []string{"Tushar", "Dual Name Plank", "1", "948", "BACK10"},
 		ButtonParams: []string{"discount/BACK10?redirect=%2Fcheckouts%2Fac%2FTOKEN%2Frecover%3Fkey%3DKEY", "#"},
 	})
@@ -77,7 +77,7 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 	if got["messaging_product"] != "whatsapp" {
 		t.Errorf("messaging_product %v", got["messaging_product"])
 	}
-	if got["to"] != "919799931864" {
+	if got["to"] != "919000000001" {
 		t.Errorf("to = %v, want the plus stripped", got["to"])
 	}
 
@@ -120,7 +120,7 @@ func TestTheRequestIsTheShapeMetaValidates(t *testing.T) {
 		}
 	}
 
-	if result.MessageID != "wamid.TEST" || result.WAID != "919799931864" {
+	if result.MessageID != "wamid.TEST" || result.WAID != "919000000001" {
 		t.Errorf("result %+v", result)
 	}
 }
@@ -135,7 +135,7 @@ func TestNoButtonParamMeansNoButtonComponent(t *testing.T) {
 	defer server.Close()
 
 	if _, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestAnEmptyParameterIsRefusedBeforeTheNetwork(t *testing.T) {
 	defer server.Close()
 
 	_, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"Tushar", "", "1", "948", "BACK10"},
+		To: "919000000001", BodyParams: []string{"Tushar", "", "1", "948", "BACK10"},
 	})
 	if err == nil {
 		t.Fatal("an empty parameter must be refused")
@@ -202,7 +202,7 @@ func TestMetaErrorsNameTheFix(t *testing.T) {
 		}))
 
 		_, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-			To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+			To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 		})
 		server.Close()
 
@@ -240,7 +240,7 @@ func TestAnUnparseableRefusalIsStillAnError(t *testing.T) {
 	defer server.Close()
 
 	_, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 	})
 	if err == nil {
 		t.Fatal("a 502 must be an error")
@@ -269,7 +269,7 @@ func TestATransportFailureIsNeverRetried(t *testing.T) {
 	client.http.Timeout = 30 * time.Millisecond
 
 	if _, err := client.SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 	}); err == nil {
 		t.Fatal("expected a timeout")
 	}
@@ -287,7 +287,7 @@ func TestAcceptedWithoutAMessageIDIsAFailure(t *testing.T) {
 	defer server.Close()
 
 	if _, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 	}); err == nil {
 		t.Fatal("no message id means no send")
 	}
@@ -302,7 +302,7 @@ func TestAnAcceptedMessageIsNotADeliveredOne(t *testing.T) {
 	defer server.Close()
 
 	result, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 	})
 	if err != nil {
 		t.Fatalf("send: %v", err)
@@ -355,7 +355,7 @@ func TestAnEmptyButtonParameterIsRefusedBeforeTheNetwork(t *testing.T) {
 	defer server.Close()
 
 	_, err := testClient(server).SendTemplate(context.Background(), TemplateMessage{
-		To: "919799931864", BodyParams: []string{"a", "b", "c", "d", "e"},
+		To: "919000000001", BodyParams: []string{"a", "b", "c", "d", "e"},
 		ButtonParams: []string{"discount/X?redirect=%2Fy", "  "},
 	})
 	if err == nil {
