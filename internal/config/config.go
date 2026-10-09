@@ -400,6 +400,20 @@ type Settings struct {
 	OrientationOverhangDeg  float64
 	OrientationMaxTriangles int
 
+	// Delhivery is the courier. Tensor only ever READS from it: the tracking
+	// endpoint, so the Shipment Exceptions page can say which parcels could not
+	// be delivered and why.
+	//
+	// There is no list-by-status endpoint, so the waybills come from Shopify's
+	// fulfilments and the filtering happens in Tensor. See
+	// internal/integrations/delhivery.
+	DelhiveryAPIKey string
+	// DelhiveryBaseURL overrides the carrier host. Production is
+	// https://track.delhivery.com; the staging host has its own keys and its own
+	// data, so a production key pointed at it returns nothing rather than
+	// failing - which looks exactly like "no shipments".
+	DelhiveryBaseURL string
+
 	// Shopify Admin API version used when publishing an approved design, and the
 	// per-request timeout for the outbound Admin API calls.
 	ShopifyAPIVersion string
@@ -519,6 +533,9 @@ func Load() Settings {
 
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
+
+		DelhiveryAPIKey:  os.Getenv("DELHIVERY_API_KEY"),
+		DelhiveryBaseURL: envOr("DELHIVERY_BASE_URL", ""),
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
 		ShopifyTimeout:    secondsEnvOr("SHOPIFY_TIMEOUT_SECONDS", 15),

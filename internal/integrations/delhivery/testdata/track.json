@@ -1,0 +1,955 @@
+{
+ "ShipmentData": [
+  {
+   "Shipment": {
+    "AWB": "900000000001",
+    "CODAmount": 0,
+    "ChargedWeight": null,
+    "Consignee": {
+     "Address1": [],
+     "Address2": [],
+     "Address3": "",
+     "City": "Testpur",
+     "Country": "India",
+     "Name": "Test Consignee One",
+     "PinCode": 400001,
+     "State": "Maharashtra",
+     "Telephone1": "",
+     "Telephone2": ""
+    },
+    "DeliveryDate": "2026-10-07T13:49:51.002",
+    "DestRecieveDate": "2026-10-07T08:05:19.509",
+    "Destination": "Testpur",
+    "DispatchCount": 1,
+    "Ewaybill": [],
+    "ExpectedDeliveryDate": "2026-10-07T23:59:59",
+    "Extras": "",
+    "FirstAttemptDate": "2026-10-07T09:21:45.079",
+    "InvoiceAmount": 898,
+    "OrderType": "Pre-paid",
+    "Origin": "Origin_Hub (Testland)",
+    "OriginRecieveDate": "2026-10-06T21:08:50",
+    "OutDestinationDate": "2026-10-06T22:40:09.128",
+    "PickUpDate": "2026-10-06T16:45:06",
+    "PickedupDate": "2026-10-06T16:45:06",
+    "PickupLocation": "Test Pickup",
+    "PromisedDeliveryDate": "2026-10-07T23:59:59",
+    "Quantity": "1",
+    "RTOStartedDate": null,
+    "ReferenceNo": "TEST-00001",
+    "ReturnPromisedDeliveryDate": null,
+    "ReturnedDate": null,
+    "ReverseInTransit": false,
+    "Scans": [
+     {
+      "ScanDetail": {
+       "Instructions": "Manifest uploaded",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-06T16:24:04.169",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-UCI",
+       "StatusDateTime": "2026-10-06T16:24:04.169"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment picked up",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T16:45:06",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-PPOM",
+       "StatusDateTime": "2026-10-06T16:45:06"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "weight captured",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T21:08:50",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DWS",
+       "StatusDateTime": "2026-10-06T21:08:50"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Recieved at Origin Center",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T21:08:50",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-PIOM",
+       "StatusDateTime": "2026-10-06T21:08:50"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T22:40:09.268",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-06T22:40:09.268"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-07T04:09:18.903",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-07T04:09:18.903"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-07T04:36:45.923",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-07T04:36:45.923"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Trip Arrived",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-07T05:54:31.178",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-ILL2F",
+       "StatusDateTime": "2026-10-07T05:54:31.178"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-07T06:10:45.079",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-ILL1F",
+       "StatusDateTime": "2026-10-07T06:10:45.079"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Received at Facility",
+       "Scan": "Pending",
+       "ScanDateTime": "2026-10-07T08:05:19.52",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-IBD3F",
+       "StatusDateTime": "2026-10-07T08:05:19.52"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Out for delivery",
+       "Scan": "Dispatched",
+       "ScanDateTime": "2026-10-07T09:21:45.079",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DDD3FD",
+       "StatusDateTime": "2026-10-07T09:21:45.079"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Call placed to consignee",
+       "Scan": "Dispatched",
+       "ScanDateTime": "2026-10-07T13:48:55.002",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "ST-114",
+       "StatusDateTime": "2026-10-07T13:48:55.002",
+       "call_duration": 37,
+       "geo_location": {
+        "lat": 19.2282478,
+        "long": 73.167686
+       }
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Delivered to consignee",
+       "Scan": "Delivered",
+       "ScanDateTime": "2026-10-07T13:49:51.002",
+       "ScanType": "DL",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "EOD-38",
+       "StatusDateTime": "2026-10-07T13:49:51.002",
+       "call_duration": 37,
+       "geo_location": {
+        "lat": 19.2282846,
+        "long": 73.1676924
+       }
+      }
+     }
+    ],
+    "SenderName": "TEST SENDER",
+    "Status": {
+     "Instructions": "Delivered to consignee",
+     "RecievedBy": "",
+     "Status": "Delivered",
+     "StatusCode": "EOD-38",
+     "StatusDateTime": "2026-10-07T13:49:51.002",
+     "StatusLocation": "Dest_Hub (Testland)",
+     "StatusType": "DL"
+    }
+   }
+  },
+  {
+   "Shipment": {
+    "AWB": "900000000002",
+    "CODAmount": 0,
+    "ChargedWeight": null,
+    "Consignee": {
+     "Address1": [],
+     "Address2": [],
+     "Address3": "",
+     "City": "Testnagar",
+     "Country": "India",
+     "Name": "Test Consignee Two",
+     "PinCode": 600001,
+     "State": "Tamil Nadu",
+     "Telephone1": "",
+     "Telephone2": ""
+    },
+    "DeliveryDate": null,
+    "DestRecieveDate": "2026-10-09T08:21:23.546",
+    "Destination": "Testnagar",
+    "DispatchCount": 1,
+    "Ewaybill": [],
+    "ExpectedDeliveryDate": "2026-10-12T23:59:59",
+    "Extras": "",
+    "FirstAttemptDate": "2026-10-09T09:42:04.516",
+    "InvoiceAmount": 629,
+    "OrderType": "Pre-paid",
+    "Origin": "Origin_Hub (Testland)",
+    "OriginRecieveDate": "2026-10-06T20:51:59",
+    "OutDestinationDate": "2026-10-06T21:31:06.454",
+    "PickUpDate": "2026-10-06T16:43:55",
+    "PickedupDate": "2026-10-06T16:43:55",
+    "PickupLocation": "Test Pickup",
+    "PromisedDeliveryDate": "2026-10-12T23:59:59",
+    "Quantity": "1",
+    "RTOStartedDate": null,
+    "ReferenceNo": "TEST-00002",
+    "ReturnPromisedDeliveryDate": null,
+    "ReturnedDate": null,
+    "ReverseInTransit": false,
+    "Scans": [
+     {
+      "ScanDetail": {
+       "Instructions": "Manifest uploaded",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-06T15:27:03.177",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-UCI",
+       "StatusDateTime": "2026-10-06T15:27:03.177"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment picked up",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T16:43:55",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-PPOM",
+       "StatusDateTime": "2026-10-06T16:43:55"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "weight captured",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T20:51:59",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DWS",
+       "StatusDateTime": "2026-10-06T20:51:59"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Recieved at Origin Center",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T20:51:59",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-PIOM",
+       "StatusDateTime": "2026-10-06T20:51:59"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T21:31:06.573",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-06T21:31:06.573"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-06T22:21:09.608",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-06T22:21:09.608"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-07T02:03:48.088",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-07T02:03:48.088"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Trip Arrived",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T05:13:47.858",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL2F",
+       "StatusDateTime": "2026-10-08T05:13:47.858"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T06:03:57.895",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL1F",
+       "StatusDateTime": "2026-10-08T06:03:57.895"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T09:23:37.863",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-08T09:23:37.863"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T12:18:41.892",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-08T12:18:41.892"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Trip Arrived",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T23:06:06.004",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL2F",
+       "StatusDateTime": "2026-10-08T23:06:06.004"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T23:51:42.702",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL1F",
+       "StatusDateTime": "2026-10-08T23:51:42.702"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T00:12:29.764",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-IBD3F",
+       "StatusDateTime": "2026-10-09T00:12:29.764"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T00:16:28.808",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-09T00:16:28.808"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T05:10:33.645",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-09T05:10:33.645"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T06:08:22.357",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-09T06:08:22.357"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Trip Arrived",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T07:05:35.402",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL2F",
+       "StatusDateTime": "2026-10-09T07:05:35.402"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T07:21:02.791",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-ILL1F",
+       "StatusDateTime": "2026-10-09T07:21:02.791"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Received at Facility",
+       "Scan": "Pending",
+       "ScanDateTime": "2026-10-09T08:21:23.555",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-IBD3F",
+       "StatusDateTime": "2026-10-09T08:21:23.555"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Out for delivery",
+       "Scan": "Dispatched",
+       "ScanDateTime": "2026-10-09T09:42:04.516",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DDD3FD",
+       "StatusDateTime": "2026-10-09T09:42:04.516"
+      }
+     }
+    ],
+    "SenderName": "TEST SENDER",
+    "Status": {
+     "Instructions": "Out for delivery",
+     "RecievedBy": "",
+     "Status": "Dispatched",
+     "StatusCode": "X-DDD3FD",
+     "StatusDateTime": "2026-10-09T09:42:04.516",
+     "StatusLocation": "Dest_Hub (Testland)",
+     "StatusType": "UD"
+    }
+   }
+  },
+  {
+   "Shipment": {
+    "AWB": "900000000003",
+    "CODAmount": 0,
+    "ChargedWeight": null,
+    "Consignee": {
+     "Address1": [],
+     "Address2": [],
+     "Address3": "",
+     "City": "Testgarh",
+     "Country": "India",
+     "Name": "Test Consignee Three",
+     "PinCode": 560001,
+     "State": "Karnataka",
+     "Telephone1": "",
+     "Telephone2": ""
+    },
+    "DeliveryDate": null,
+    "DestRecieveDate": null,
+    "Destination": "Testgarh",
+    "DispatchCount": 0,
+    "Ewaybill": [],
+    "ExpectedDeliveryDate": null,
+    "Extras": "",
+    "FirstAttemptDate": null,
+    "InvoiceAmount": 1048,
+    "OrderType": "Pre-paid",
+    "Origin": "Origin_Hub (Testland)",
+    "OriginRecieveDate": "2026-10-08T19:55:09",
+    "OutDestinationDate": "2026-10-08T20:29:07.161",
+    "PickUpDate": "2026-10-08T16:11:44",
+    "PickedupDate": "2026-10-08T16:11:44",
+    "PickupLocation": "Test Pickup",
+    "PromisedDeliveryDate": "2026-10-12T23:59:59",
+    "Quantity": "1",
+    "RTOStartedDate": null,
+    "ReferenceNo": "TEST-00003",
+    "ReturnPromisedDeliveryDate": null,
+    "ReturnedDate": null,
+    "ReverseInTransit": false,
+    "Scans": [
+     {
+      "ScanDetail": {
+       "Instructions": "Manifest uploaded",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-06T19:34:40.147",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-UCI",
+       "StatusDateTime": "2026-10-06T19:34:40.147"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment picked up",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T16:11:44",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-PPOM",
+       "StatusDateTime": "2026-10-08T16:11:44"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Recieved at Origin Center",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T19:55:09",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-PIOM",
+       "StatusDateTime": "2026-10-08T19:55:09"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "weight captured",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T19:55:09",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-DWS",
+       "StatusDateTime": "2026-10-08T19:55:09"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T20:29:07.333",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-08T20:29:07.333"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T00:11:34.833",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-09T00:11:34.833"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T04:38:59.297",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-09T04:38:59.297"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle delayed - Controllable",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T04:51:46.793",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "DLYLH-105",
+       "StatusDateTime": "2026-10-09T04:51:46.793"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle delayed - Controllable",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T06:59:18.339",
+       "ScanType": "UD",
+       "ScannedLocation": "Dest_Hub (Testland)",
+       "StatusCode": "DLYLH-105",
+       "StatusDateTime": "2026-10-09T06:59:18.339"
+      }
+     }
+    ],
+    "SenderName": "TEST SENDER",
+    "Status": {
+     "Instructions": "Vehicle delayed - Controllable",
+     "RecievedBy": "",
+     "Status": "In Transit",
+     "StatusCode": "DLYLH-105",
+     "StatusDateTime": "2026-10-09T06:59:18.339",
+     "StatusLocation": "Dest_Hub (Testland)",
+     "StatusType": "UD"
+    }
+   }
+  },
+  {
+   "Shipment": {
+    "AWB": "900000000004",
+    "CODAmount": 0,
+    "ChargedWeight": null,
+    "Consignee": {
+     "Address1": [],
+     "Address2": [],
+     "Address3": "",
+     "City": "Testpuram",
+     "Country": "India",
+     "Name": "Test Consignee Four",
+     "PinCode": 500001,
+     "State": "Telangana",
+     "Telephone1": "",
+     "Telephone2": ""
+    },
+    "DeliveryDate": null,
+    "DestRecieveDate": null,
+    "Destination": "Testpuram",
+    "DispatchCount": 0,
+    "Ewaybill": [],
+    "ExpectedDeliveryDate": "2026-10-09T23:59:59",
+    "Extras": "",
+    "FirstAttemptDate": null,
+    "InvoiceAmount": 629,
+    "OrderType": "Pre-paid",
+    "Origin": "Origin_Hub (Testland)",
+    "OriginRecieveDate": "2026-10-08T20:04:19",
+    "OutDestinationDate": "2026-10-08T22:45:43.157",
+    "PickUpDate": "2026-10-08T16:11:48",
+    "PickedupDate": "2026-10-08T16:11:48",
+    "PickupLocation": "Test Pickup",
+    "PromisedDeliveryDate": "2026-10-09T23:59:59",
+    "Quantity": "1",
+    "RTOStartedDate": null,
+    "ReferenceNo": "TEST-00004",
+    "ReturnPromisedDeliveryDate": null,
+    "ReturnedDate": null,
+    "ReverseInTransit": false,
+    "Scans": [
+     {
+      "ScanDetail": {
+       "Instructions": "Manifest uploaded",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-06T18:15:31.872",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-UCI",
+       "StatusDateTime": "2026-10-06T18:15:31.872"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment picked up",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T16:11:48",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-PPOM",
+       "StatusDateTime": "2026-10-08T16:11:48"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Recieved at Origin Center",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T20:04:19",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-PIOM",
+       "StatusDateTime": "2026-10-08T20:04:19"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "weight captured",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T20:04:19",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DWS",
+       "StatusDateTime": "2026-10-08T20:04:19"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T22:45:43.312",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-08T22:45:43.312"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T00:03:18.639",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-09T00:03:18.639"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T00:21:24.354",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-09T00:21:24.354"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle delayed - Controllable",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T03:41:09.679",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "DLYLH-105",
+       "StatusDateTime": "2026-10-09T03:41:09.679"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Trip Arrived",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T04:59:51.836",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-ILL2F",
+       "StatusDateTime": "2026-10-09T04:59:51.836"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Received at Facility",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T06:15:06.696",
+       "ScanType": "UD",
+       "ScannedLocation": "Origin_Hub (Testland)",
+       "StatusCode": "X-ILL1F",
+       "StatusDateTime": "2026-10-09T06:15:06.696"
+      }
+     }
+    ],
+    "SenderName": "TEST SENDER",
+    "Status": {
+     "Instructions": "Bag Received at Facility",
+     "RecievedBy": "",
+     "Status": "In Transit",
+     "StatusCode": "X-ILL1F",
+     "StatusDateTime": "2026-10-09T06:15:06.696",
+     "StatusLocation": "Dest_Hub (Testland)",
+     "StatusType": "UD"
+    }
+   }
+  },
+  {
+   "Shipment": {
+    "AWB": "900000000005",
+    "CODAmount": 0,
+    "ChargedWeight": null,
+    "Consignee": {
+     "Address1": [],
+     "Address2": [],
+     "Address3": "",
+     "City": "Testabad",
+     "Country": "India",
+     "Name": "Test Consignee Five",
+     "PinCode": 380001,
+     "State": "Gujarat",
+     "Telephone1": "",
+     "Telephone2": ""
+    },
+    "DeliveryDate": null,
+    "DestRecieveDate": null,
+    "Destination": "Testabad",
+    "DispatchCount": 0,
+    "Ewaybill": [],
+    "ExpectedDeliveryDate": "2026-10-14T23:59:59",
+    "Extras": "",
+    "FirstAttemptDate": null,
+    "InvoiceAmount": 928,
+    "OrderType": "Pre-paid",
+    "Origin": "Origin_Hub (Testland)",
+    "OriginRecieveDate": "2026-10-08T20:58:21",
+    "OutDestinationDate": "2026-10-08T21:00:11.352",
+    "PickUpDate": "2026-10-08T16:11:41",
+    "PickedupDate": "2026-10-08T16:11:41",
+    "PickupLocation": "Test Pickup",
+    "PromisedDeliveryDate": "2026-10-14T23:59:59",
+    "Quantity": "1",
+    "RTOStartedDate": null,
+    "ReferenceNo": "TEST-00005",
+    "ReturnPromisedDeliveryDate": null,
+    "ReturnedDate": null,
+    "ReverseInTransit": false,
+    "Scans": [
+     {
+      "ScanDetail": {
+       "Instructions": "Manifest uploaded",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-07T11:09:37.142",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-UCI",
+       "StatusDateTime": "2026-10-07T11:09:37.142"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Pickup scheduled",
+       "Scan": "Manifested",
+       "ScanDateTime": "2026-10-07T11:09:57",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "FMPUR-101",
+       "StatusDateTime": "2026-10-07T11:09:57"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment picked up",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T16:11:41",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-PPOM",
+       "StatusDateTime": "2026-10-08T16:11:41"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Shipment Recieved at Origin Center",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T20:58:21",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-PIOM",
+       "StatusDateTime": "2026-10-08T20:58:21"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "weight captured",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T20:58:21",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DWS",
+       "StatusDateTime": "2026-10-08T20:58:21"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Added to Bag",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-08T21:00:11.524",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DBL1F",
+       "StatusDateTime": "2026-10-08T21:00:11.524"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Bag Added To Trip",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T01:16:21.027",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-DLL2F",
+       "StatusDateTime": "2026-10-09T01:16:21.027"
+      }
+     },
+     {
+      "ScanDetail": {
+       "Instructions": "Vehicle Departed",
+       "Scan": "In Transit",
+       "ScanDateTime": "2026-10-09T08:24:09.493",
+       "ScanType": "UD",
+       "ScannedLocation": "Transit_Hub (Testland)",
+       "StatusCode": "X-OLL4F",
+       "StatusDateTime": "2026-10-09T08:24:09.493"
+      }
+     }
+    ],
+    "SenderName": "TEST SENDER",
+    "Status": {
+     "Instructions": "Vehicle Departed",
+     "RecievedBy": "",
+     "Status": "In Transit",
+     "StatusCode": "X-OLL4F",
+     "StatusDateTime": "2026-10-09T08:24:09.493",
+     "StatusLocation": "Dest_Hub (Testland)",
+     "StatusType": "UD"
+    }
+   }
+  }
+ ]
+}
