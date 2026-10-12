@@ -1098,6 +1098,14 @@ CREATE TABLE IF NOT EXISTS abandoned_checkout_calls (
     -- Sarvam's own sentence on a refusal. Its errors name the thing to fix.
     detail          varchar(500),
     attempts        integer      NOT NULL DEFAULT 1,
+    -- What was actually said, frozen at send time. The template copy lives at
+    -- Meta and is edited there, so rendering the log from today's copy would
+    -- redraw last week's messages in this week's words. Null on every voice
+    -- row - a call has no text - and on every row written before 0099.
+    message_body    text,
+    -- The recovery link behind the button, whole and tappable. Separate from
+    -- the body because Meta keeps button URLs out of the body text.
+    message_link    text,
     last_attempt_at timestamptz  NOT NULL DEFAULT now(),
     created_at      timestamptz  NOT NULL DEFAULT now()
 );

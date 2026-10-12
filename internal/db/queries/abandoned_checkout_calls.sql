@@ -30,10 +30,16 @@ RETURNING *;
 -- Records how the claimed contact actually went.
 --
 -- attempts is incremented rather than set, so a row that was retried says so.
+--
+-- message_body and message_link COALESCE rather than overwrite, so a voice
+-- settle passing null does not wipe what a message settle wrote, and a retry
+-- that fails keeps the words of the attempt that succeeded.
 UPDATE abandoned_checkout_calls
 SET status          = sqlc.arg('status'),
     attempt_id      = coalesce(sqlc.narg('attempt_id'), attempt_id),
     detail          = sqlc.narg('detail'),
+    message_body    = coalesce(sqlc.narg('message_body'), message_body),
+    message_link    = coalesce(sqlc.narg('message_link'), message_link),
     attempts        = attempts + 1,
     last_attempt_at = now()
 WHERE id = sqlc.arg('id')

@@ -54,6 +54,16 @@ type messageLogResponse struct {
 	// MessageID is Meta's wamid, empty when nothing was sent. It is the key a
 	// delivery webhook would correlate on, the day there is one.
 	MessageID string `json:"message_id"`
+	// Body is the message as the customer saw it - the approved template with
+	// this customer's name, basket and code already in it, frozen at send
+	// time. Empty for a row sent before Tensor recorded this, and for one
+	// whose template copy could not be read at the time.
+	Body string `json:"body"`
+	// Link is the whole recovery address behind the button: the discount, and
+	// the redirect back to this customer's own basket. Separate from the body
+	// because Meta keeps button URLs out of the body text, so the message on
+	// its own refers to a link that is not in it.
+	Link      string `json:"link"`
 	Attempts  int    `json:"attempts"`
 	SentAt    string `json:"sent_at"`
 	CreatedAt string `json:"created_at"`
@@ -107,6 +117,12 @@ func toMessageLog(r gen.AbandonedCheckoutCall) messageLogResponse {
 	}
 	if r.Detail != nil {
 		out.Detail = *r.Detail
+	}
+	if r.MessageBody != nil {
+		out.Body = *r.MessageBody
+	}
+	if r.MessageLink != nil {
+		out.Link = *r.MessageLink
 	}
 	if r.LastAttemptAt.Valid {
 		out.SentAt = r.LastAttemptAt.Time.UTC().Format(time.RFC3339)

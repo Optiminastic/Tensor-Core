@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,6 +66,11 @@ type Config struct {
 type Client struct {
 	http *http.Client
 	cfg  Config
+
+	// The approved template copy, read back lazily so a sent message can be
+	// written into the log in the words the customer saw. See template.go.
+	once      sync.Once
+	templates *templateCache
 }
 
 // New returns a client, or nil when it could not send.

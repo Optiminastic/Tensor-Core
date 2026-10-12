@@ -22,7 +22,7 @@ INSERT INTO abandoned_checkout_calls (
     $6, $7, 'claimed'
 )
 ON CONFLICT (brand_slug, phone, channel) DO NOTHING
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at
 `
 
 type ClaimWinbackContactParams struct {
@@ -75,6 +75,8 @@ func (q *Queries) ClaimWinbackContact(ctx context.Context, arg ClaimWinbackConta
 		&i.Status,
 		&i.Detail,
 		&i.Attempts,
+		&i.MessageBody,
+		&i.MessageLink,
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 	)
@@ -82,7 +84,7 @@ func (q *Queries) ClaimWinbackContact(ctx context.Context, arg ClaimWinbackConta
 }
 
 const listCheckoutCalls = `-- name: ListCheckoutCalls :many
-SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at FROM abandoned_checkout_calls
+SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at FROM abandoned_checkout_calls
 WHERE brand_slug = $1
   AND ($2::varchar IS NULL OR channel = $2)
 ORDER BY created_at DESC
@@ -122,6 +124,8 @@ func (q *Queries) ListCheckoutCalls(ctx context.Context, arg ListCheckoutCallsPa
 			&i.Status,
 			&i.Detail,
 			&i.Attempts,
+			&i.MessageBody,
+			&i.MessageLink,
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 		); err != nil {
@@ -223,27 +227,37 @@ UPDATE abandoned_checkout_calls
 SET status          = $1,
     attempt_id      = coalesce($2, attempt_id),
     detail          = $3,
+    message_body    = coalesce($4, message_body),
+    message_link    = coalesce($5, message_link),
     attempts        = attempts + 1,
     last_attempt_at = now()
-WHERE id = $4
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, last_attempt_at, created_at
+WHERE id = $6
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at
 `
 
 type SettleWinbackContactParams struct {
-	Status    string
-	AttemptID *string
-	Detail    *string
-	ID        uuid.UUID
+	Status      string
+	AttemptID   *string
+	Detail      *string
+	MessageBody *string
+	MessageLink *string
+	ID          uuid.UUID
 }
 
 // Records how the claimed contact actually went.
 //
 // attempts is incremented rather than set, so a row that was retried says so.
+//
+// message_body and message_link COALESCE rather than overwrite, so a voice
+// settle passing null does not wipe what a message settle wrote, and a retry
+// that fails keeps the words of the attempt that succeeded.
 func (q *Queries) SettleWinbackContact(ctx context.Context, arg SettleWinbackContactParams) (AbandonedCheckoutCall, error) {
 	row := q.db.QueryRow(ctx, settleWinbackContact,
 		arg.Status,
 		arg.AttemptID,
 		arg.Detail,
+		arg.MessageBody,
+		arg.MessageLink,
 		arg.ID,
 	)
 	var i AbandonedCheckoutCall
@@ -260,6 +274,8 @@ func (q *Queries) SettleWinbackContact(ctx context.Context, arg SettleWinbackCon
 		&i.Status,
 		&i.Detail,
 		&i.Attempts,
+		&i.MessageBody,
+		&i.MessageLink,
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 	)

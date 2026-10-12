@@ -483,9 +483,10 @@ func (w *WinbackCallWorker) message(
 		buttons = append(buttons, shop)
 	}
 
+	bodyParams := winbackBodyParams(c.checkout, discount)
 	result, sendErr := client.SendTemplate(ctx, whatsapp.TemplateMessage{
 		To:           c.phone,
-		BodyParams:   winbackBodyParams(c.checkout, discount),
+		BodyParams:   bodyParams,
 		ButtonParams: buttons,
 	})
 	if sendErr != nil {
@@ -512,7 +513,13 @@ func (w *WinbackCallWorker) message(
 	// a phone showed it - it accepts sends to numbers that are not on WhatsApp
 	// and drops them. Without the delivery webhook this is the strongest claim
 	// the data supports.
-	w.settle(ctx, claim.ID, "sent", result.MessageID, result.Status)
+	//
+	// The words are composed AFTER the send and never before it. Reading the
+	// template is a second round trip to Meta, and a message that went out
+	// must not be recorded as failed because the log could not be written
+	// prettily - so a failure here costs the body and nothing else.
+	w.settleWith(ctx, claim.ID, "sent", result.MessageID, result.Status,
+		w.sentWords(ctx, client, bodyParams), winbackFullLink(linkHost, link.Param))
 	// The customer's number is NOT logged. It is personal data and the
 	// checkout name is enough to find them.
 	w.logger.Info("win-back message sent",
@@ -587,12 +594,49 @@ func (w *WinbackCallWorker) claimFor(
 // Failing to record is logged and swallowed: the message is already sent, so
 // losing the row costs the audit trail, not a repeat - the claim still holds
 // the number.
+// sentWords renders the message in the copy the customer saw, or "" if it
+// could not be read.
+//
+// Empty is a real answer and is stored as null: a log that says nothing is
+// honest about not knowing, while one that prints the five parameters in a
+// row would be inventing a message nobody sent.
+func (w *WinbackCallWorker) sentWords(
+	ctx context.Context, client *whatsapp.Client, params []string,
+) string {
+	tmpl, err := client.Template(ctx, "", "")
+	if err != nil {
+		w.logger.Warn("win-back: the message went out but its copy could not be read",
+			"error", err)
+		return ""
+	}
+	return whatsapp.Fill(tmpl.Body, params)
+}
+
 func (w *WinbackCallWorker) settle(
 	ctx context.Context, id uuid.UUID, status, attemptID, detail string,
+) {
+	w.settleWith(ctx, id, status, attemptID, detail, "", "")
+}
+
+// settleWith is settle plus the words that were sent.
+//
+// Separate from settle rather than two more arguments on every call site: a
+// call has no text and never will, and a voice settle passing two empty
+// strings reads as though it were missing something.
+func (w *WinbackCallWorker) settleWith(
+	ctx context.Context, id uuid.UUID, status, attemptID, detail, body, link string,
 ) {
 	params := gen.SettleWinbackContactParams{ID: id, Status: status, Detail: &detail}
 	if attemptID != "" {
 		params.AttemptID = &attemptID
+	}
+	// Left null rather than written empty, so "we did not record this" and
+	// "the message said nothing" stay distinguishable on the page.
+	if body != "" {
+		params.MessageBody = &body
+	}
+	if link != "" {
+		params.MessageLink = &link
 	}
 	if _, err := w.server.store.Q.SettleWinbackContact(ctx, params); err != nil {
 		w.logger.Error("win-back: could not record the outcome",

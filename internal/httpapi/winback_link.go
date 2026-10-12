@@ -99,6 +99,23 @@ func buildWinbackLink(recoveryURL, discountCode, templateHost string) winbackLin
 	}
 }
 
+// winbackFullLink reassembles the whole address the button carries.
+//
+// The template variable is path and query only, because the approved
+// template bakes in the host and scheme - which makes the stored parameter
+// useless to a human. A log row has to be tappable, so the two halves are put
+// back together exactly as Meta puts them together.
+func winbackFullLink(templateHost, param string) string {
+	host := strings.TrimSuffix(strings.TrimSpace(templateHost), "/")
+	if host == "" || strings.TrimSpace(param) == "" {
+		return ""
+	}
+	if !strings.Contains(host, "://") {
+		host = "https://" + host
+	}
+	return host + "/" + strings.TrimPrefix(param, "/")
+}
+
 // trimWWW so a shop whose recovery URLs carry www and whose template does not
 // is not treated as a different site.
 func trimWWW(host string) string {
