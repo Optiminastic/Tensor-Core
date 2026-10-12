@@ -36,6 +36,49 @@ func (s *Server) registerMessageLogs(r *gin.Engine) {
 	// order:read, like the call logs beside it: the same customers, the same
 	// baskets, reached a different way.
 	g.GET("", s.guards.RequirePermission(auth.OrderRead.Key()), s.listMessageLogs)
+	// The approved copy itself, for rows sent before Tensor recorded the
+	// words. Same permission: it is the same question, asked about a message
+	// whose values were not kept.
+	g.GET("/template", s.guards.RequirePermission(auth.OrderRead.Key()), s.messageTemplate)
+}
+
+// messageTemplateResponse is the approved template as Meta holds it.
+//
+// SENT SEPARATELY FROM THE ROWS, and read live rather than frozen, because it
+// answers a different question. A row's own body is the record of one send
+// and must never change; this is "what does the agent send", which is
+// whatever the template says today. Conflating them would let today's copy
+// be presented as last week's message.
+type messageTemplateResponse struct {
+	Name     string `json:"name"`
+	Language string `json:"language"`
+	// Status is Meta's own word - APPROVED, PENDING, REJECTED. A template
+	// that exists but is not approved will not send, and that is worth saying
+	// on a page about messages that did not arrive.
+	Status string `json:"status"`
+	// Body carries its {{1}}…{{5}} placeholders, unfilled. The caller knows
+	// which values it can honestly supply for a given row and which it
+	// cannot.
+	Body string `json:"body"`
+}
+
+func (s *Server) messageTemplate(c *gin.Context) {
+	client := s.whatsappFor(c.Request.Context(), c.Param("slug"))
+	if !client.Configured() {
+		detail(c, http.StatusNotFound, "WhatsApp is not connected for this brand.")
+		return
+	}
+	tmpl, err := client.Template(c.Request.Context(), "", "")
+	if err != nil {
+		// Meta's own sentence. Its refusals name the thing to fix - a wrong
+		// locale, an expired token - and inventing a friendlier one here
+		// would throw that away.
+		detail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, messageTemplateResponse{
+		Name: tmpl.Name, Language: tmpl.Language, Status: tmpl.Status, Body: tmpl.Body,
+	})
 }
 
 type messageLogResponse struct {
