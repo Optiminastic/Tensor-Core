@@ -106,10 +106,19 @@ type messageLogResponse struct {
 	// the redirect back to this customer's own basket. Separate from the body
 	// because Meta keeps button URLs out of the body text, so the message on
 	// its own refers to a link that is not in it.
-	Link      string `json:"link"`
-	Attempts  int    `json:"attempts"`
-	SentAt    string `json:"sent_at"`
-	CreatedAt string `json:"created_at"`
+	Link string `json:"link"`
+	// Reconstructed says the body and link were rebuilt from Shopify after
+	// the fact rather than recorded at send time.
+	//
+	// IT MUST REACH THE PAGE. A rebuilt message is the right wording with
+	// this checkout's real values, but it is not evidence of what was sent -
+	// the template may have been edited since. The page labels it, because
+	// the reader is often deciding whether to honour a discount somebody is
+	// quoting.
+	Reconstructed bool   `json:"reconstructed"`
+	Attempts      int    `json:"attempts"`
+	SentAt        string `json:"sent_at"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type messageLogsResponse struct {
@@ -139,9 +148,20 @@ func (s *Server) listMessageLogs(c *gin.Context) {
 		return
 	}
 
+	// Rows written before Tensor recorded the words are rebuilt from Shopify
+	// where it still has the basket. Best effort, and never fatal: this
+	// decorates rows that have already loaded.
+	rebuilds := s.rebuildMessages(ctx, c.Param("slug"), records)
+
 	items := make([]messageLogResponse, 0, len(records))
 	for _, r := range records {
-		items = append(items, toMessageLog(r))
+		item := toMessageLog(r)
+		if item.Body == "" {
+			if from, ok := rebuilds[r.CheckoutID]; ok {
+				item.Body, item.Link, item.Reconstructed = from.Body, from.Link, true
+			}
+		}
+		items = append(items, item)
 	}
 	c.JSON(http.StatusOK, messageLogsResponse{Items: items})
 }

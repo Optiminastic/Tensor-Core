@@ -195,3 +195,95 @@ func (c *Client) AccessScopes(ctx context.Context, shop, token string) ([]string
 	}
 	return out, nil
 }
+
+// --- reading a code back -----------------------------------------------------
+
+// ExistingDiscount is a code that is already on the shop.
+type ExistingDiscount struct {
+	// Code as Shopify stores it, which may differ in case from what was asked.
+	Code     string
+	Title    string
+	StartsAt time.Time
+	// EndsAt is zero for a code with no expiry.
+	EndsAt time.Time
+}
+
+const findDiscountQuery = `query FindDiscount($code: String!) {
+  codeDiscountNodeByCode(code: $code) {
+    codeDiscount {
+      ... on DiscountCodeBasic {
+        title
+        startsAt
+        endsAt
+        codes(first: 1) { nodes { code } }
+      }
+    }
+  }
+}`
+
+type findDiscountResponse struct {
+	Data struct {
+		CodeDiscountNodeByCode *struct {
+			CodeDiscount struct {
+				Title    string  `json:"title"`
+				StartsAt string  `json:"startsAt"`
+				EndsAt   *string `json:"endsAt"`
+				Codes    struct {
+					Nodes []struct {
+						Code string `json:"code"`
+					} `json:"nodes"`
+				} `json:"codes"`
+			} `json:"codeDiscount"`
+		} `json:"codeDiscountNodeByCode"`
+	} `json:"data"`
+}
+
+// ErrDiscountNotFound is returned when the shop has no such code.
+//
+// Its own error, like ErrDiscountCodeTaken, because the caller's answer is to
+// try the next candidate rather than to report a failure: a win-back code is
+// one of a short list of names, and "not this one" is an ordinary step.
+var ErrDiscountNotFound = fmt.Errorf("no such discount code on this shop")
+
+// FindDiscountCode looks one code up by name.
+//
+// READ ONLY, and deliberately not part of the create path. It exists to
+// reconstruct what a message said after the fact: the code a win-back
+// promised was minted per customer and never written down, so the only way
+// back to it is to ask the shop whether the name that would have been chosen
+// exists.
+func (c *Client) FindDiscountCode(
+	ctx context.Context, shop, token, code string,
+) (ExistingDiscount, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ExistingDiscount{}, ErrDiscountNotFound
+	}
+
+	var resp findDiscountResponse
+	if err := c.do(ctx, shop, token, findDiscountQuery,
+		map[string]any{"code": code}, &resp); err != nil {
+		return ExistingDiscount{}, err
+	}
+	node := resp.Data.CodeDiscountNodeByCode
+	// A null node is "no such code", not an error. Shopify also returns null
+	// for a code that exists but is not a DiscountCodeBasic, which is not one
+	// of ours either.
+	if node == nil || node.CodeDiscount.Title == "" {
+		return ExistingDiscount{}, ErrDiscountNotFound
+	}
+
+	out := ExistingDiscount{Title: node.CodeDiscount.Title, Code: code}
+	if len(node.CodeDiscount.Codes.Nodes) > 0 && node.CodeDiscount.Codes.Nodes[0].Code != "" {
+		out.Code = node.CodeDiscount.Codes.Nodes[0].Code
+	}
+	if t, err := time.Parse(time.RFC3339, node.CodeDiscount.StartsAt); err == nil {
+		out.StartsAt = t
+	}
+	if node.CodeDiscount.EndsAt != nil {
+		if t, err := time.Parse(time.RFC3339, *node.CodeDiscount.EndsAt); err == nil {
+			out.EndsAt = t
+		}
+	}
+	return out, nil
+}
