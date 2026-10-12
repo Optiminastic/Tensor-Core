@@ -518,18 +518,3 @@ func (a WinbackCallsArgs) InsertOpts() river.InsertOpts {
 		},
 	}
 }
-
-// PeriodicWinbackCallConstructor builds the recurring sweep.
-//
-// RunOnStart is false, deliberately. A worker restart is not a reason to ring
-// anybody, and during a deploy loop it would be a reason to ring them
-// repeatedly. The first sweep happens one interval in, by which time the
-// process has proved it can stay up.
-func PeriodicWinbackCallConstructor(period time.Duration) func() (river.JobArgs, *river.InsertOpts) {
-	return func() (river.JobArgs, *river.InsertOpts) {
-		return WinbackCallsArgs{}, &river.InsertOpts{
-			Queue:      WinbackCallQueueName,
-			UniqueOpts: river.UniqueOpts{ByPeriod: period},
-		}
-	}
-}

@@ -22,11 +22,13 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -41,15 +43,54 @@ import (
 
 const stopTimeout = 30 * time.Second
 
+// schedule enqueues a sweep every interval, for as long as this process lives.
+//
+// It inserts a job rather than calling Sweep directly, so the sweep keeps
+// River's retries, its one-at-a-time queue and its row in river_job - a sweep
+// that telephones people should be visible after the fact, not a goroutine
+// that left no trace.
+//
+// Duplicates are impossible rather than unlikely: WinbackCallsArgs.InsertOpts
+// is unique by args over a minute across pending, scheduled, available,
+// running and retryable, so a tick that lands while the previous sweep is
+// still going is refused by the database, not by this loop's timing.
+//
+// The first tick is one interval in, deliberately. A restart is not a reason
+// to ring anybody, and during a deploy loop it would be a reason to ring them
+// repeatedly.
+func schedule(ctx context.Context, client *river.Client[pgx.Tx], every time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			res, err := client.Insert(ctx, production.WinbackCallsArgs{}, nil)
+			switch {
+			case err != nil:
+				// Logged, never fatal. A database blip should cost one sweep,
+				// not the scheduler.
+				logger.Error("could not enqueue the win-back sweep", "err", err)
+			case res.UniqueSkippedAsDuplicate:
+				// Said out loud, because the alternative is silence that looks
+				// exactly like the bug this ticker replaced.
+				logger.Info("win-back sweep already queued or still running; this tick does nothing")
+			default:
+				logger.Info("win-back sweep enqueued", "job_id", res.Job.ID)
+			}
+		}
+	}
+}
+
 func main() {
 	// -once runs one sweep in this process and exits.
 	//
-	// Not a convenience: the periodic tick only fires on the River LEADER, and
-	// the leader is whichever process took the lease first - usually the API.
-	// So starting this worker and waiting proves nothing, and an operator who
-	// wants to know what the rules would do right now has no way to ask.
-	// With calling disabled this is a read-only question, which is why it is
-	// safe to answer on demand.
+	// The long-running mode now ticks for itself rather than waiting on a
+	// River leader election it would lose, so this is no longer the only way
+	// to make a sweep happen. It is still the only way to make one happen
+	// NOW: an operator asking what the rules would do should not have to wait
+	// out an interval, and with calling disabled the question is read-only.
 	once := flag.Bool("once", false, "run one sweep now, print what it would do, and exit")
 	flag.Parse()
 
@@ -99,17 +140,22 @@ func main() {
 			// strangers' phones ringing at once from a burst nobody intended.
 			production.WinbackCallQueueName: {MaxWorkers: 1},
 		},
-		PeriodicJobs: []*river.PeriodicJob{
-			river.NewPeriodicJob(
-				river.PeriodicInterval(every),
-				production.PeriodicWinbackCallConstructor(every),
-				// Not on start: a restart is not a reason to ring anybody, and
-				// during a deploy loop it would be a reason to ring them
-				// repeatedly. The first sweep is one interval in, by which
-				// time the process has proved it can stay up.
-				&river.PeriodicJobOpts{RunOnStart: false},
-			),
-		},
+		// NO PeriodicJobs, and that is the whole point of this file's ticker.
+		//
+		// River runs periodic jobs on the ELECTED LEADER only, and there is
+		// one leader per database across every River client - the API, the
+		// production worker, the slice worker and this. The lease goes to
+		// whoever took it first and stays there while that process lives, so
+		// this container, started last and restarted least, is almost never
+		// the leader. Registering the sweep here therefore scheduled nothing:
+		// on production the lease sat with tensor-production-worker, whose
+		// build predated the win-back code entirely, and the result was a
+		// worker that started cleanly, reported both channels enabled, and
+		// swept exactly zero times in three days with nothing in any log to
+		// say why.
+		//
+		// Inserting is not leader-gated. Working the queue is not either.
+		// Only the periodic tick was, so the tick is ours now.
 	})
 	if err != nil {
 		log.Fatalf("build the win-back worker: %v", err)
@@ -127,6 +173,8 @@ func main() {
 	if !cfg.WinbackCallsEnabled {
 		logger.Warn("WINBACK_CALLS_ENABLED is false: every sweep will run and log, and no call will be placed")
 	}
+
+	go schedule(ctx, client, every, logger)
 
 	<-ctx.Done()
 	log.Println("shutting down")
