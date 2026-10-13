@@ -445,6 +445,10 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	// update: this is something to look at before making the thing, and
 	// everyone on the floor needs it.
 	g.GET("/:id/personalisation-changes", s.guards.RequirePermission(auth.ProductionRead.Key()), s.personalisationChanges)
+	// The customer's own link, while their window is open, so the person
+	// taking the phone call can send them back to the page they are
+	// describing.
+	g.GET("/:id/personalisation-link", s.guards.RequirePermission(auth.ProductionRead.Key()), s.personalisationLink)
 	g.POST("/:id/print-file", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.setPrintFile)
 	g.POST("/:id/rerender", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.rerenderProductionJob)
 	s.registerJobModelUpload(g)

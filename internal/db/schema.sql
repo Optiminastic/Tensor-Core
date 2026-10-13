@@ -1191,6 +1191,10 @@ CREATE TABLE IF NOT EXISTS personalisation_links (
     order_id     uuid NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
     -- SHA-256 of a 32-byte random token; the raw token is never stored.
     token_hash   varchar(64) NOT NULL UNIQUE,
+    -- The same token sealed with TOKEN_ENCRYPTION_KEY, so the floor can hand
+    -- a customer back the page they are describing on the phone. NULLED the
+    -- moment the window closes: the hash outlives the link and this must not.
+    token_sealed text,
     phone        varchar(24) NOT NULL DEFAULT '',
     -- 'pending' | 'sent' | 'opened' | 'confirmed' | 'expired' | 'failed'
     status       varchar(16) NOT NULL,

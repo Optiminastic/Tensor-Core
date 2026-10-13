@@ -14,22 +14,24 @@ import (
 
 const claimPersonalisationLink = `-- name: ClaimPersonalisationLink :one
 INSERT INTO personalisation_links (
-    id, brand_slug, order_id, token_hash, phone, status, expires_at
+    id, brand_slug, order_id, token_hash, token_sealed, phone, status, expires_at
 ) VALUES (
     $1, $2, $3,
-    $4, $5, 'pending', $6
+    $4, $5, $6,
+    'pending', $7
 )
 ON CONFLICT (order_id) DO NOTHING
-RETURNING id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
+RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
 `
 
 type ClaimPersonalisationLinkParams struct {
-	ID        uuid.UUID
-	BrandSlug string
-	OrderID   uuid.UUID
-	TokenHash string
-	Phone     string
-	ExpiresAt pgtype.Timestamptz
+	ID          uuid.UUID
+	BrandSlug   string
+	OrderID     uuid.UUID
+	TokenHash   string
+	TokenSealed *string
+	Phone       string
+	ExpiresAt   pgtype.Timestamptz
 }
 
 // Takes the right to message this ORDER, or reports that it is already taken.
@@ -48,6 +50,7 @@ func (q *Queries) ClaimPersonalisationLink(ctx context.Context, arg ClaimPersona
 		arg.BrandSlug,
 		arg.OrderID,
 		arg.TokenHash,
+		arg.TokenSealed,
 		arg.Phone,
 		arg.ExpiresAt,
 	)
@@ -57,6 +60,7 @@ func (q *Queries) ClaimPersonalisationLink(ctx context.Context, arg ClaimPersona
 		&i.BrandSlug,
 		&i.OrderID,
 		&i.TokenHash,
+		&i.TokenSealed,
 		&i.Phone,
 		&i.Status,
 		&i.IssuedAt,
@@ -73,7 +77,7 @@ func (q *Queries) ClaimPersonalisationLink(ctx context.Context, arg ClaimPersona
 
 const confirmPersonalisationLink = `-- name: ConfirmPersonalisationLink :exec
 UPDATE personalisation_links
-SET status = 'confirmed', confirmed_at = now()
+SET status = 'confirmed', confirmed_at = now(), token_sealed = NULL
 WHERE id = $1
 `
 
@@ -105,7 +109,7 @@ func (q *Queries) EnsurePersonalisationWatermark(ctx context.Context, brandSlug 
 
 const expirePersonalisationLink = `-- name: ExpirePersonalisationLink :exec
 UPDATE personalisation_links
-SET status = 'expired'
+SET status = 'expired', token_sealed = NULL
 WHERE id = $1
 `
 
@@ -115,7 +119,7 @@ func (q *Queries) ExpirePersonalisationLink(ctx context.Context, id uuid.UUID) e
 }
 
 const getOpenPersonalisationLinkForJob = `-- name: GetOpenPersonalisationLinkForJob :one
-SELECT l.id, l.brand_slug, l.order_id, l.token_hash, l.phone, l.status, l.issued_at, l.expires_at, l.sent_at, l.opened_at, l.confirmed_at, l.message_id, l.detail, l.created_at FROM personalisation_links l
+SELECT l.id, l.brand_slug, l.order_id, l.token_hash, l.token_sealed, l.phone, l.status, l.issued_at, l.expires_at, l.sent_at, l.opened_at, l.confirmed_at, l.message_id, l.detail, l.created_at FROM personalisation_links l
 JOIN production_jobs j ON j.order_id = l.order_id
 WHERE j.id = $1
   AND l.status IN ('sent', 'opened')
@@ -137,6 +141,41 @@ func (q *Queries) GetOpenPersonalisationLinkForJob(ctx context.Context, jobID uu
 		&i.BrandSlug,
 		&i.OrderID,
 		&i.TokenHash,
+		&i.TokenSealed,
+		&i.Phone,
+		&i.Status,
+		&i.IssuedAt,
+		&i.ExpiresAt,
+		&i.SentAt,
+		&i.OpenedAt,
+		&i.ConfirmedAt,
+		&i.MessageID,
+		&i.Detail,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getOpenPersonalisationLinkForOrder = `-- name: GetOpenPersonalisationLinkForOrder :one
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+WHERE order_id = $1
+  AND status IN ('sent', 'opened')
+  AND expires_at > now()
+`
+
+// The live link for an order, for the floor to hand back to a customer.
+//
+// OPEN ONLY. A closed window has no token left to return - the sweep nulls it
+// - and this query refuses to pretend otherwise by returning the row at all.
+func (q *Queries) GetOpenPersonalisationLinkForOrder(ctx context.Context, orderID uuid.UUID) (PersonalisationLink, error) {
+	row := q.db.QueryRow(ctx, getOpenPersonalisationLinkForOrder, orderID)
+	var i PersonalisationLink
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.OrderID,
+		&i.TokenHash,
+		&i.TokenSealed,
 		&i.Phone,
 		&i.Status,
 		&i.IssuedAt,
@@ -172,7 +211,7 @@ func (q *Queries) GetOrderBrandSlug(ctx context.Context, orderID uuid.UUID) (str
 }
 
 const getPersonalisationLinkByOrder = `-- name: GetPersonalisationLinkByOrder :one
-SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE order_id = $1
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE order_id = $1
 `
 
 func (q *Queries) GetPersonalisationLinkByOrder(ctx context.Context, orderID uuid.UUID) (PersonalisationLink, error) {
@@ -183,6 +222,7 @@ func (q *Queries) GetPersonalisationLinkByOrder(ctx context.Context, orderID uui
 		&i.BrandSlug,
 		&i.OrderID,
 		&i.TokenHash,
+		&i.TokenSealed,
 		&i.Phone,
 		&i.Status,
 		&i.IssuedAt,
@@ -198,7 +238,7 @@ func (q *Queries) GetPersonalisationLinkByOrder(ctx context.Context, orderID uui
 }
 
 const getPersonalisationLinkByTokenHash = `-- name: GetPersonalisationLinkByTokenHash :one
-SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE token_hash = $1
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE token_hash = $1
 `
 
 // The public page's own read. Expiry is judged in Go, not here, so that an
@@ -211,6 +251,7 @@ func (q *Queries) GetPersonalisationLinkByTokenHash(ctx context.Context, tokenHa
 		&i.BrandSlug,
 		&i.OrderID,
 		&i.TokenHash,
+		&i.TokenSealed,
 		&i.Phone,
 		&i.Status,
 		&i.IssuedAt,
@@ -257,7 +298,7 @@ func (q *Queries) ListConnectedShopifyBrandSlugs(ctx context.Context) ([]string,
 }
 
 const listExpiredPersonalisationLinks = `-- name: ListExpiredPersonalisationLinks :many
-SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
 WHERE status IN ('sent', 'opened')
   AND expires_at <= now()
 ORDER BY expires_at
@@ -283,6 +324,7 @@ func (q *Queries) ListExpiredPersonalisationLinks(ctx context.Context, rowLimit 
 			&i.BrandSlug,
 			&i.OrderID,
 			&i.TokenHash,
+			&i.TokenSealed,
 			&i.Phone,
 			&i.Status,
 			&i.IssuedAt,
@@ -305,7 +347,7 @@ func (q *Queries) ListExpiredPersonalisationLinks(ctx context.Context, rowLimit 
 }
 
 const listPersonalisationLinks = `-- name: ListPersonalisationLinks :many
-SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
 WHERE brand_slug = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -331,6 +373,7 @@ func (q *Queries) ListPersonalisationLinks(ctx context.Context, arg ListPersonal
 			&i.BrandSlug,
 			&i.OrderID,
 			&i.TokenHash,
+			&i.TokenSealed,
 			&i.Phone,
 			&i.Status,
 			&i.IssuedAt,
@@ -401,7 +444,7 @@ SET status     = $1,
     message_id = coalesce($2, message_id),
     detail     = $3
 WHERE id = $4
-RETURNING id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
+RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
 `
 
 type SettlePersonalisationLinkParams struct {
@@ -425,6 +468,7 @@ func (q *Queries) SettlePersonalisationLink(ctx context.Context, arg SettlePerso
 		&i.BrandSlug,
 		&i.OrderID,
 		&i.TokenHash,
+		&i.TokenSealed,
 		&i.Phone,
 		&i.Status,
 		&i.IssuedAt,

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -104,4 +105,63 @@ func personalisationChangesFor(j gen.ProductionJob) []personalisationChange {
 		out = append(out, personalisationChange{Label: "Colour", From: from, To: after})
 	}
 	return out
+}
+
+// --- handing the link back to the floor ---------------------------------------
+
+type personalisationLinkResponse struct {
+	// URL is empty whenever there is nothing to give: no link was issued, the
+	// window has closed, or this deployment has no encryption key and so never
+	// kept a copy. One field, three causes, and the page says the same thing
+	// for all of them - there is nothing to copy.
+	URL string `json:"url"`
+	// ExpiresAt lets the page say how long the thing it just copied will work.
+	ExpiresAt string `json:"expires_at"`
+}
+
+// personalisationLink returns the live customer link for a job's order.
+//
+// WHILE THE WINDOW IS OPEN, AND NOT A MOMENT LONGER. The sealed copy is nulled
+// when the window closes, so this cannot return a stale link even if somebody
+// asks - and a staff member who copies a link knows it is the one the customer
+// is looking at right now rather than one that quietly stopped working.
+//
+// production:read, the same gate as the table the button sits in. Whoever is
+// making the thing is who takes the phone call about it, and they can already
+// see the customer's name, order and personalisation on that row.
+func (s *Server) personalisationLink(c *gin.Context) {
+	ctx := c.Request.Context()
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	job, err := s.store.Q.GetProductionJobByID(ctx, id)
+	if err != nil {
+		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
+		return
+	}
+	if job.OrderID == nil {
+		c.JSON(http.StatusOK, personalisationLinkResponse{})
+		return
+	}
+
+	link, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID)
+	if err != nil || link.TokenSealed == nil || s.secrets == nil {
+		c.JSON(http.StatusOK, personalisationLinkResponse{})
+		return
+	}
+	token, err := s.secrets.Open(*link.TokenSealed)
+	if err != nil || strings.TrimSpace(token) == "" {
+		// A sealed value that will not open is reported as nothing rather than
+		// as an error: the key has changed, which is an operator's problem and
+		// not something the floor can act on mid-shift.
+		c.JSON(http.StatusOK, personalisationLinkResponse{})
+		return
+	}
+
+	out := personalisationLinkResponse{URL: personalisationLinkURL(s.cfg.FrontendURL, token)}
+	if link.ExpiresAt.Valid {
+		out.ExpiresAt = link.ExpiresAt.Time.UTC().Format(time.RFC3339)
+	}
+	c.JSON(http.StatusOK, out)
 }

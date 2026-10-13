@@ -408,6 +408,7 @@ type PersonalisationLink struct {
 	BrandSlug   string
 	OrderID     uuid.UUID
 	TokenHash   string
+	TokenSealed *string
 	Phone       string
 	Status      string
 	IssuedAt    pgtype.Timestamptz

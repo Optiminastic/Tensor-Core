@@ -227,12 +227,29 @@ func (w *PersonalisationLinkWorker) ask(
 	// nothing recorded - and the next re-import of the same order messages
 	// them again. Claiming first means a crash costs a missed link, which is
 	// recoverable, rather than a duplicate, which is not.
-	claim, err := w.server.store.Q.ClaimPersonalisationLink(ctx,
-		gen.ClaimPersonalisationLinkParams{
-			ID: uuid.New(), BrandSlug: slug, OrderID: order.ID,
-			TokenHash: hash, Phone: phone,
-			ExpiresAt: timestamptzAt(time.Now().UTC().Add(window)),
-		})
+	params := gen.ClaimPersonalisationLinkParams{
+		ID: uuid.New(), BrandSlug: slug, OrderID: order.ID,
+		TokenHash: hash, Phone: phone,
+		ExpiresAt: timestamptzAt(time.Now().UTC().Add(window)),
+	}
+	// Sealed, not stored plain, and only while the window is open - the sweep
+	// nulls it when the window closes. It exists so somebody taking a phone
+	// call can send the customer back to the page they are describing; the
+	// hash is still what the link is looked up by.
+	//
+	// A service with no encryption key simply does not keep it. The link
+	// still works for the customer, and the floor cannot copy it, which is
+	// better than keeping somebody's live link in plain text.
+	if w.server.secrets != nil {
+		if sealed, sealErr := w.server.secrets.Seal(token); sealErr == nil {
+			params.TokenSealed = &sealed
+		} else {
+			w.logger.Warn("personalisation: the link could not be sealed, so the floor cannot copy it",
+				"order", order.OrderNumber, "error", sealErr)
+		}
+	}
+
+	claim, err := w.server.store.Q.ClaimPersonalisationLink(ctx, params)
 	if err != nil {
 		// No row back means this order already has a link - another worker
 		// won, or this is simply the same order arriving on another sync.

@@ -10,10 +10,11 @@
 -- DO NOTHING on conflict, so a second worker - or the next re-import of the
 -- same order - gets no row back and stands down.
 INSERT INTO personalisation_links (
-    id, brand_slug, order_id, token_hash, phone, status, expires_at
+    id, brand_slug, order_id, token_hash, token_sealed, phone, status, expires_at
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('order_id'),
-    sqlc.arg('token_hash'), sqlc.arg('phone'), 'pending', sqlc.arg('expires_at')
+    sqlc.arg('token_hash'), sqlc.narg('token_sealed'), sqlc.arg('phone'),
+    'pending', sqlc.arg('expires_at')
 )
 ON CONFLICT (order_id) DO NOTHING
 RETURNING *;
@@ -56,7 +57,7 @@ WHERE id = sqlc.arg('id');
 
 -- name: ConfirmPersonalisationLink :exec
 UPDATE personalisation_links
-SET status = 'confirmed', confirmed_at = now()
+SET status = 'confirmed', confirmed_at = now(), token_sealed = NULL
 WHERE id = sqlc.arg('id');
 
 -- name: ListExpiredPersonalisationLinks :many
@@ -73,7 +74,7 @@ LIMIT sqlc.arg('row_limit');
 
 -- name: ExpirePersonalisationLink :exec
 UPDATE personalisation_links
-SET status = 'expired'
+SET status = 'expired', token_sealed = NULL
 WHERE id = sqlc.arg('id');
 
 -- name: ListPersonalisationLinks :many
@@ -137,3 +138,13 @@ WHERE o.id = sqlc.arg('order_id');
 SELECT brand_slug FROM brand_connections
 WHERE provider = 'shopify' AND status = 'connected'
 ORDER BY brand_slug;
+
+-- name: GetOpenPersonalisationLinkForOrder :one
+-- The live link for an order, for the floor to hand back to a customer.
+--
+-- OPEN ONLY. A closed window has no token left to return - the sweep nulls it
+-- - and this query refuses to pretend otherwise by returning the row at all.
+SELECT * FROM personalisation_links
+WHERE order_id = sqlc.arg('order_id')
+  AND status IN ('sent', 'opened')
+  AND expires_at > now();
