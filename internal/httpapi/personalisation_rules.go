@@ -147,3 +147,29 @@ func spokenCount(n int) string {
 func timestamptzAt(t time.Time) pgtype.Timestamptz {
 	return db.Timestamptz(&t)
 }
+
+// personalisationRecipient decides which phone actually receives the message.
+//
+// WHILE A TEST RECIPIENT IS CONFIGURED, NOBODY ELSE CAN BE REACHED. Not a
+// filter that lets some customers through - a redirect that takes all of them.
+// Testing against a live shop means testing against real people's orders, and
+// the only safe way to do that is for every message to arrive on one phone
+// that belongs to whoever is testing.
+//
+// Returns the number to message and whether it was redirected, so the caller
+// can say so in the log and in the ledger rather than recording a message to
+// a customer who never got one.
+// FAILS CLOSED ON A BAD TEST NUMBER. If the setting is present but cannot be
+// read as a phone number - a typo, a stray quote, a number pasted with a
+// label - this returns an empty recipient and the caller sends nothing. The
+// alternative, falling back to the customer, means the very first message of
+// a botched test run reaches a stranger, which is the one outcome this
+// setting exists to make impossible.
+func personalisationRecipient(configured, customer string) (to string, redirected bool) {
+	if strings.TrimSpace(configured) != "" {
+		// Redirected either way: a configured test recipient means no customer
+		// is reachable, whether or not the number turns out to be usable.
+		return normaliseIndianMobile(configured), true
+	}
+	return normaliseIndianMobile(customer), false
+}

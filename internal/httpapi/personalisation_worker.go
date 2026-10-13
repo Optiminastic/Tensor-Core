@@ -170,7 +170,26 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		return nil
 	}
 
-	return w.ask(ctx, slug, order, phone, messenger)
+	// EVERY MESSAGE GOES TO ONE PHONE while a test recipient is configured.
+	// The customer's own number is resolved and then deliberately discarded,
+	// so the eligibility rules above are still exercised in full against a
+	// real order while nobody but the tester is reached.
+	to, redirected := personalisationRecipient(w.server.cfg.PersonalisationTestRecipient, phone)
+	if redirected {
+		if to == "" {
+			// Set but unreadable. Nothing is sent, and emphatically not to the
+			// customer: a typo in the test number must not become a message to
+			// a stranger.
+			w.logger.Error("personalisation: PERSONALISATION_TEST_RECIPIENT is not a usable number, so nothing was sent",
+				"brand", slug, "order", order.OrderNumber)
+			w.releaseUnasked(ctx, order.ID, "system (test recipient unusable)")
+			return nil
+		}
+		w.logger.Warn("personalisation: REDIRECTED to the test recipient, the customer was not messaged",
+			"brand", slug, "order", order.OrderNumber, "to", to)
+	}
+
+	return w.ask(ctx, slug, order, to, redirected, messenger)
 }
 
 // eligible returns the number to message, or the one rule that refused.
@@ -229,7 +248,7 @@ func (s *Server) personalisationEligible(
 
 // ask mints the link, claims the order and sends it.
 func (w *PersonalisationLinkWorker) ask(
-	ctx context.Context, slug string, order gen.Order, phone string,
+	ctx context.Context, slug string, order gen.Order, phone string, redirected bool,
 	messenger *whatsapp.Client,
 ) error {
 	token, hash, err := newPersonalisationToken()
@@ -314,7 +333,13 @@ func (w *PersonalisationLinkWorker) ask(
 		return fmt.Errorf("send the personalisation link: %w", sendErr)
 	}
 
-	w.settle(ctx, claim.ID, "sent", result.MessageID, result.Status)
+	detail := result.Status
+	if redirected {
+		// The row must not read like a message to the customer. Somebody
+		// reading this log later needs to know this one went to a tester.
+		detail = "sent to the test recipient, not the customer"
+	}
+	w.settle(ctx, claim.ID, "sent", result.MessageID, detail)
 	// The customer's number is NOT logged. The order number finds them.
 	w.logger.Info("personalisation link sent",
 		"brand", slug, "order", order.OrderNumber,

@@ -155,3 +155,43 @@ func TestACustomerNameWithANewlineIsFlattened(t *testing.T) {
 		t.Errorf("name = %q, want the newline flattened", got)
 	}
 }
+
+func TestATestRecipientTakesEveryMessage(t *testing.T) {
+	// Not a filter that lets some customers through - a redirect that takes
+	// all of them. Testing against a live shop means testing against real
+	// people's orders, and the only safe way is for every message to land on
+	// one phone belonging to whoever is testing.
+	to, redirected := personalisationRecipient("9799931864", "9136361465")
+	if !redirected {
+		t.Fatal("the message was not redirected")
+	}
+	if to != "+919799931864" {
+		t.Errorf("to = %q, want the tester's number in E.164", to)
+	}
+}
+
+func TestWithNoTestRecipientTheCustomerIsMessaged(t *testing.T) {
+	to, redirected := personalisationRecipient("", "9136361465")
+	if redirected {
+		t.Error("a message was redirected with no test recipient configured")
+	}
+	if to != "+919136361465" {
+		t.Errorf("to = %q, want the customer's own number", to)
+	}
+}
+
+func TestAnUnreadableTestRecipientDoesNotSilentlyFallThrough(t *testing.T) {
+	// The dangerous failure: a typo in the test number falls back to the
+	// customer, and the first "test" reaches a stranger. normaliseIndianMobile
+	// returns empty for rubbish, so this asserts what happens then.
+	to, redirected := personalisationRecipient("not-a-number", "9136361465")
+	if !redirected {
+		t.Fatal("a configured test recipient did not take the message")
+	}
+	// Empty, so the caller sends nothing. Falling back to the customer would
+	// mean the first message of a botched test run reaches a stranger - the
+	// one outcome this setting exists to make impossible.
+	if to != "" {
+		t.Errorf("to = %q, want nothing sent at all", to)
+	}
+}

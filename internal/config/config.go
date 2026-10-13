@@ -291,6 +291,20 @@ type Settings struct {
 	// The same shape as WINBACK_CALL_ONLY and for the same reason - it is
 	// what makes it safe to point this at the live store with one real order.
 	PersonalisationOnly []string
+	// PersonalisationTestRecipient REDIRECTS EVERY MESSAGE to one number.
+	//
+	// While it is set, no customer can be messaged at all - whatever the
+	// rules allow, whatever the switch says, whoever placed the order. The
+	// message is still built from that customer's real order, so what arrives
+	// is exactly what they would have received; it simply arrives on the
+	// tester's phone.
+	//
+	// This is a different safety from PERSONALISATION_ONLY, which narrows
+	// WHICH ORDERS are considered and still messages whoever placed them.
+	// That is the wrong gate for testing against a live shop, because the
+	// orders are real people's. This one is the right gate: the blast radius
+	// is one phone, and it is the tester's own.
+	PersonalisationTestRecipient string
 	// PersonalisationTemplate is the approved WhatsApp template carrying the
 	// link. SEPARATE from the win-back template: this one is a utility
 	// message about an order the customer has already paid for, and
@@ -684,6 +698,7 @@ func Load() Settings {
 		PersonalisationLinkMinutes:       intEnvOr("PERSONALISATION_LINK_MINUTES", 30),
 		PersonalisationOnly:              csvEnv("PERSONALISATION_ONLY"),
 		PersonalisationTemplate:          envOr("PERSONALISATION_TEMPLATE_NAME", ""),
+		PersonalisationTestRecipient:     envOr("PERSONALISATION_TEST_RECIPIENT", ""),
 		WinbackLinkHost:                  envOr("WINBACK_LINK_HOST", ""),
 		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
 		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
