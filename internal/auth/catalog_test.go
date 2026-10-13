@@ -9,11 +9,11 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	// 41: registry:read split reading the product registry away from reading
+	// 43: registry:read split reading the product registry away from reading
 	// cost configuration, and bulk_order:read/manage are admin-only by being
-	// granted to no other role. See catalog.go.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 41 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 41 each", len(admin), len(AllPermissions))
+	// granted to no other role. whatsapp:read/reply added the inbox. See catalog.go.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 43 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 43 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -177,8 +177,8 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 41 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 12 (operator)
-	// + 6 (packaging_qc) = 96.
+	// 43 (admin) + 6 (designer) + 30 (project lead) + 3 (marketer) + 14 (operator)
+	// + 6 (packaging_qc) = 102.
 	//
 	// Moved from 84 when the shop restated three roles: +1 admin and +1 project
 	// lead for registry:read, +1 designer for pricing:read (Costing), and the
@@ -188,11 +188,29 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// brand:read then went to every role (+5), because without it no non-admin
 	// could list the brands their own pages live under - see
 	// TestProjectAndBrandManageAreAdminOnly.
+	//
+	// whatsapp:read and whatsapp:reply then went to admin, project lead and
+	// operator (+6): the people who already see orders answer the customers
+	// asking about them.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 96 {
-		t.Fatalf("total grants = %d, want 96", total)
+	if total != 102 {
+		t.Fatalf("total grants = %d, want 102", total)
+	}
+}
+
+func TestWhatsAppInboxGoesToTheRolesThatSeeOrders(t *testing.T) {
+	for _, role := range []RoleName{RoleAdmin, RoleProjectLead, RoleOperator} {
+		perms := PermissionsFor(role)
+		if !has(perms, WhatsAppRead.Key()) || !has(perms, WhatsAppReply.Key()) {
+			t.Errorf("%s cannot use the WhatsApp inbox", role)
+		}
+	}
+	for _, role := range []RoleName{RoleDesigner, RolePerformanceMarketer, RolePackagingQc} {
+		if has(PermissionsFor(role), WhatsAppRead.Key()) {
+			t.Errorf("%s must not read customer chats", role)
+		}
 	}
 }

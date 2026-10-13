@@ -24,10 +24,14 @@ SET state = $3, context = $4, last_customer_at = $5, last_staff_at = $6,
 WHERE brand_slug = $1 AND wa_id = $2;
 
 -- name: TouchWhatsAppConversation :exec
--- Keeps the inbox's chat list current: the latest message and, when Meta sent
--- one, the customer's profile name.
+-- Keeps the inbox's chat list current: the latest message, when the customer
+-- last wrote (which opens WhatsApp's 24-hour reply window whether or not the
+-- bot is on) and, when Meta sent one, the customer's profile name.
 UPDATE whatsapp_conversations
-SET last_message_at = GREATEST(COALESCE(last_message_at, sqlc.arg(at)), sqlc.arg(at)),
+SET last_customer_at = CASE WHEN sqlc.arg(from_customer)::boolean
+                            THEN GREATEST(COALESCE(last_customer_at, sqlc.arg(at)), sqlc.arg(at))
+                            ELSE last_customer_at END,
+    last_message_at = GREATEST(COALESCE(last_message_at, sqlc.arg(at)), sqlc.arg(at)),
     last_message_preview = CASE WHEN last_message_at IS NULL OR sqlc.arg(at) >= last_message_at
                                 THEN sqlc.arg(preview) ELSE last_message_preview END,
     profile_name = COALESCE(NULLIF(sqlc.arg(profile_name)::text, ''), profile_name),
@@ -107,3 +111,6 @@ SET status = sqlc.arg(status),
     updated_at = now()
 WHERE order_id = sqlc.arg(order_id)
   AND status = ANY(sqlc.arg(from_statuses)::text[]);
+
+-- name: GetWhatsAppMessageByWAID :one
+SELECT * FROM whatsapp_messages WHERE wa_message_id = $1;

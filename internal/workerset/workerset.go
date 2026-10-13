@@ -39,6 +39,14 @@ import (
 // re-rendering the whole catalogue; the work is embarrassingly parallel.
 const defaultModelGenConcurrency = 4
 
+const (
+	// whatsappConfirmSweep is how often newly synced paid orders are checked
+	// for a personalisation confirmation.
+	whatsappConfirmSweep = 5 * time.Minute
+	// whatsappPurge is how often message history past retention is deleted.
+	whatsappPurge = 24 * time.Hour
+)
+
 // Runner is a started worker set. Stop it to drain in-flight jobs.
 type Runner struct {
 	client *river.Client[pgx.Tx]
@@ -122,6 +130,19 @@ func Start(
 	// The rule is one owner: the process that holds the credentials is the
 	// process that schedules the sweep and the process that runs it.
 
+	// The WhatsApp bot, confirmations and inbox housekeeping. Registered
+	// unconditionally: whether a brand's bot answers is that brand's own
+	// setting (bot_enabled, confirmations_enabled), read from the database by
+	// whichever process runs the job, so there is no per-process switch to get
+	// out of step - unlike the win-back sweep above.
+	river.AddWorker(workers, httpapi.NewWhatsAppInboundWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppEchoWorker(server))
+	river.AddWorker(workers, httpapi.NewWhatsAppFailedWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppConfirmSweepWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppReminderWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppAutoConfirmWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppPurgeWorker(server, logger))
+
 	fleetSync := time.Duration(cfg.FleetSyncIntervalSeconds) * time.Second
 	if fleetSync > 0 {
 		river.AddWorker(workers, httpapi.NewFleetSyncWorker(
@@ -154,6 +175,10 @@ func Start(
 			// upserts, and two running together would race to write the same
 			// rows for no gain - Shopify is the bottleneck, not Tensor.
 			production.OrderSyncQueueName: {MaxWorkers: 1},
+			// One at a time, so a customer's messages are answered in the
+			// order they arrived. See WhatsAppInboundQueueName.
+			production.WhatsAppInboundQueueName: {MaxWorkers: 1},
+			production.WhatsAppQueueName:        {MaxWorkers: 2},
 		},
 		Workers:      workers,
 		Logger:       logger,
@@ -168,6 +193,7 @@ func Start(
 		production.NewBatchPlanEnqueuer(client, debounce),
 	)
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(client))
+	server.EnableWhatsAppQueue(production.NewWhatsAppEnqueuer(client))
 	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(client, debounce))
 	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(client))
 	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(client))
@@ -213,6 +239,19 @@ func modelGenConcurrency(cfg config.Settings) int {
 // been doing while you were down.
 func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*river.PeriodicJob {
 	jobs := []*river.PeriodicJob{
+		// Confirmations ride on the order sync, which pulls every
+		// ORDER_SYNC_INTERVAL_MINUTES; sweeping more often than that only
+		// finds nothing new.
+		river.NewPeriodicJob(
+			river.PeriodicInterval(whatsappConfirmSweep),
+			production.PeriodicWhatsAppConstructor(production.WhatsAppConfirmSweepArgs{}, whatsappConfirmSweep),
+			&river.PeriodicJobOpts{RunOnStart: true},
+		),
+		river.NewPeriodicJob(
+			river.PeriodicInterval(whatsappPurge),
+			production.PeriodicWhatsAppConstructor(production.WhatsAppPurgeArgs{}, whatsappPurge),
+			&river.PeriodicJobOpts{RunOnStart: true},
+		),
 		river.NewPeriodicJob(
 			river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
 			production.PeriodicBatchPlanConstructor(debounce),

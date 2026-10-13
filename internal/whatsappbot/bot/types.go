@@ -51,6 +51,10 @@ const (
 	ConfirmationChangeRequested ConfirmationStatus = "change_requested"
 	ConfirmationAutoConfirmed   ConfirmationStatus = "auto_confirmed"
 	ConfirmationUnreachable     ConfirmationStatus = "unreachable"
+	// ConfirmationNotNeeded marks an order with nothing personalised to confirm.
+	ConfirmationNotNeeded ConfirmationStatus = "not_needed"
+	// ConfirmationSkipped marks an order whose customer opted out of messages.
+	ConfirmationSkipped ConfirmationStatus = "skipped"
 )
 
 // Purpose says why an order is being looked up.

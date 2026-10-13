@@ -162,6 +162,29 @@ func (q *Queries) GetWhatsAppConversation(ctx context.Context, arg GetWhatsAppCo
 	return i, err
 }
 
+const getWhatsAppMessageByWAID = `-- name: GetWhatsAppMessageByWAID :one
+SELECT id, brand_slug, wa_id, wa_message_id, direction, kind, body, status, error_code, sent_by, created_at FROM whatsapp_messages WHERE wa_message_id = $1
+`
+
+func (q *Queries) GetWhatsAppMessageByWAID(ctx context.Context, waMessageID string) (WhatsappMessage, error) {
+	row := q.db.QueryRow(ctx, getWhatsAppMessageByWAID, waMessageID)
+	var i WhatsappMessage
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WaID,
+		&i.WaMessageID,
+		&i.Direction,
+		&i.Kind,
+		&i.Body,
+		&i.Status,
+		&i.ErrorCode,
+		&i.SentBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertOrderConfirmation = `-- name: InsertOrderConfirmation :execrows
 INSERT INTO order_confirmations (order_id, brand_slug, order_number, shopify_gid, wa_id, first_name, summary, status)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -538,26 +561,32 @@ func (q *Queries) StopWhatsAppConfirmations(ctx context.Context, brandSlug strin
 
 const touchWhatsAppConversation = `-- name: TouchWhatsAppConversation :exec
 UPDATE whatsapp_conversations
-SET last_message_at = GREATEST(COALESCE(last_message_at, $1), $1),
-    last_message_preview = CASE WHEN last_message_at IS NULL OR $1 >= last_message_at
-                                THEN $2 ELSE last_message_preview END,
-    profile_name = COALESCE(NULLIF($3::text, ''), profile_name),
+SET last_customer_at = CASE WHEN $1::boolean
+                            THEN GREATEST(COALESCE(last_customer_at, $2), $2)
+                            ELSE last_customer_at END,
+    last_message_at = GREATEST(COALESCE(last_message_at, $2), $2),
+    last_message_preview = CASE WHEN last_message_at IS NULL OR $2 >= last_message_at
+                                THEN $3 ELSE last_message_preview END,
+    profile_name = COALESCE(NULLIF($4::text, ''), profile_name),
     updated_at = now()
-WHERE brand_slug = $4 AND wa_id = $5
+WHERE brand_slug = $5 AND wa_id = $6
 `
 
 type TouchWhatsAppConversationParams struct {
-	At          pgtype.Timestamptz
-	Preview     string
-	ProfileName string
-	BrandSlug   string
-	WaID        string
+	FromCustomer bool
+	At           pgtype.Timestamptz
+	Preview      string
+	ProfileName  string
+	BrandSlug    string
+	WaID         string
 }
 
-// Keeps the inbox's chat list current: the latest message and, when Meta sent
-// one, the customer's profile name.
+// Keeps the inbox's chat list current: the latest message, when the customer
+// last wrote (which opens WhatsApp's 24-hour reply window whether or not the
+// bot is on) and, when Meta sent one, the customer's profile name.
 func (q *Queries) TouchWhatsAppConversation(ctx context.Context, arg TouchWhatsAppConversationParams) error {
 	_, err := q.db.Exec(ctx, touchWhatsAppConversation,
+		arg.FromCustomer,
 		arg.At,
 		arg.Preview,
 		arg.ProfileName,
