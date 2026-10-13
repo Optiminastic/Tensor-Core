@@ -382,6 +382,23 @@ type Order struct {
 	UpdatedAt           pgtype.Timestamptz
 }
 
+type OrderConfirmation struct {
+	OrderID     uuid.UUID
+	BrandSlug   string
+	OrderNumber string
+	ShopifyGid  string
+	WaID        string
+	FirstName   string
+	Summary     string
+	Status      string
+	WaMessageID *string
+	ChangeText  *string
+	SentAt      pgtype.Timestamptz
+	RespondedAt pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type OrderLineItem struct {
 	ID                uuid.UUID
 	OrderID           uuid.UUID
@@ -751,6 +768,41 @@ type VariantDesign struct {
 	DesignID    *uuid.UUID
 	Version     int32
 	Status      string
+	CreatedAt   pgtype.Timestamptz
+}
+
+type WhatsappBrandState struct {
+	BrandSlug          string
+	ConfirmationsSince pgtype.Timestamptz
+}
+
+type WhatsappConversation struct {
+	BrandSlug          string
+	WaID               string
+	ProfileName        string
+	State              string
+	Context            []byte
+	LastCustomerAt     pgtype.Timestamptz
+	LastStaffAt        pgtype.Timestamptz
+	HumanSince         pgtype.Timestamptz
+	OptedOut           bool
+	LastMessageAt      pgtype.Timestamptz
+	LastMessagePreview string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
+type WhatsappMessage struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	WaID        string
+	WaMessageID string
+	Direction   string
+	Kind        string
+	Body        string
+	Status      string
+	ErrorCode   *int32
+	SentBy      *string
 	CreatedAt   pgtype.Timestamptz
 }
 
