@@ -9,6 +9,7 @@ package httpapi
 import (
 	"testing"
 
+	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -162,5 +163,79 @@ func TestTheColourSetFollowsTheChosenColour(t *testing.T) {
 	}
 	if got := string(coloursJSON("  ")); got != "[]" {
 		t.Errorf("no colour = %s, want an empty list", got)
+	}
+}
+
+// --- one job per unit ---------------------------------------------------------
+
+func TestThreePlanksBecomeThreeJobsOnlyWhenTheCustomerWillBeAsked(t *testing.T) {
+	// The whole point of splitting: three planks ordered together are three
+	// things to name, and they cannot have different names while quantity is
+	// an integer on one row carrying one set of values.
+	on := &Server{cfg: config.Settings{PersonalisationCheckEnabled: true}}
+	off := &Server{cfg: config.Settings{PersonalisationCheckEnabled: false}}
+	plank := production.LineItem{PersonalisationRequired: true}
+
+	if !on.splitsPerUnit(plank, 3) {
+		t.Error("three personalised planks should become three jobs")
+	}
+	// With the check off, job creation must behave exactly as it always did.
+	// This is the one change that alters the queue's shape for every order.
+	if off.splitsPerUnit(plank, 3) {
+		t.Error("the queue's shape changed with the feature switched off")
+	}
+}
+
+func TestAPlainLineIsNeverSplit(t *testing.T) {
+	// Nothing on it is made to instructions, so three of them are three
+	// identical things and one job of quantity three is the honest shape.
+	on := &Server{cfg: config.Settings{PersonalisationCheckEnabled: true}}
+	if on.splitsPerUnit(production.LineItem{}, 5) {
+		t.Error("a plain line was split per unit")
+	}
+}
+
+func TestASingleUnitIsNeverSplit(t *testing.T) {
+	on := &Server{cfg: config.Settings{PersonalisationCheckEnabled: true}}
+	if on.splitsPerUnit(production.LineItem{PersonalisationRequired: true}, 1) {
+		t.Error("a single unit was split")
+	}
+}
+
+func TestABulkLineIsLeftWhole(t *testing.T) {
+	// Fifty units would be half an hour of OpenSCAD before anybody is
+	// messaged, and nobody edits fifty names on a phone inside thirty
+	// minutes.
+	on := &Server{cfg: config.Settings{PersonalisationCheckEnabled: true}}
+	big := production.LineItem{PersonalisationRequired: true}
+	if on.splitsPerUnit(big, maxPerUnitSplit+1) {
+		t.Errorf("a line of %d was split per unit", maxPerUnitSplit+1)
+	}
+	if !on.splitsPerUnit(big, maxPerUnitSplit) {
+		t.Errorf("a line of exactly %d should still split", maxPerUnitSplit)
+	}
+}
+
+func TestRepeatsOfOneProductAreNumberedForTheCustomer(t *testing.T) {
+	// Three identical headings with different names under them is a page
+	// nobody can check. Counted from the page rather than from the line's
+	// quantity, which reads 1 on each of the three jobs.
+	items := []publicItemResponse{
+		{ProductName: "Dual Name Plank"},
+		{ProductName: "Soulmate Combo"},
+		{ProductName: "Dual Name Plank"},
+		{ProductName: "Dual Name Plank"},
+	}
+	numberSiblings(items)
+
+	if items[0].UnitIndex != 1 || items[0].UnitCount != 3 {
+		t.Errorf("first plank = %d of %d, want 1 of 3", items[0].UnitIndex, items[0].UnitCount)
+	}
+	if items[3].UnitIndex != 3 {
+		t.Errorf("last plank = %d, want 3", items[3].UnitIndex)
+	}
+	// The only Soulmate says nothing rather than "1 of 1".
+	if items[1].UnitIndex != 0 || items[1].UnitCount != 0 {
+		t.Errorf("lone item = %d of %d, want unnumbered", items[1].UnitIndex, items[1].UnitCount)
 	}
 }

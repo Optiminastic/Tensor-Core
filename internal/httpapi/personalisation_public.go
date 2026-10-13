@@ -64,6 +64,11 @@ type publicItemResponse struct {
 	Colour      string                `json:"colour"`
 	ColourHex   string                `json:"colour_hex"`
 	Fields      []publicFieldResponse `json:"fields"`
+	// UnitIndex and UnitCount distinguish three of the same product from each
+	// other. Zero when the order holds only one, so the page can say nothing
+	// rather than "1 of 1".
+	UnitIndex int `json:"unit_index"`
+	UnitCount int `json:"unit_count"`
 	// ModelReady says whether there is something to show yet. The link is sent
 	// the moment the order lands and a render is 20-45 seconds behind it, so
 	// "not yet" is the ordinary first answer rather than a fault.
@@ -132,7 +137,33 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 		}
 		out.Items = append(out.Items, publicItem(j))
 	}
+	numberSiblings(out.Items)
 	c.JSON(http.StatusOK, out)
+}
+
+// numberSiblings labels repeats of the same product "1 of 3".
+//
+// Counted from what is actually on the page rather than from the line's
+// quantity, because the two disagree exactly when it matters: a line of three
+// becomes three separate jobs, and the quantity on each of them is one.
+//
+// Done after the list is built, in the order it is drawn, so the numbering
+// matches what the customer reads down the screen.
+func numberSiblings(items []publicItemResponse) {
+	counts := make(map[string]int, len(items))
+	for _, item := range items {
+		counts[item.ProductName]++
+	}
+	seen := make(map[string]int, len(items))
+	for i := range items {
+		name := items[i].ProductName
+		if counts[name] < 2 {
+			continue
+		}
+		seen[name]++
+		items[i].UnitIndex = seen[name]
+		items[i].UnitCount = counts[name]
+	}
 }
 
 func publicItem(j gen.ProductionJob) publicItemResponse {

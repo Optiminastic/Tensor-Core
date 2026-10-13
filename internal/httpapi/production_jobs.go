@@ -793,6 +793,28 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 // printed neither. Three jobs is also what is physically true, since a job is
 // what carries a colour, takes a place on a bed and gets its own QC - and the
 // rose is not the plank's colour.
+// maxPerUnitSplit bounds how far a line is broken up for the customer.
+//
+// Each unit costs its own 20-45 second render at import, so fifty personalised
+// keychains would be half an hour of OpenSCAD before anybody is messaged - and
+// nobody is editing fifty names on a phone inside a thirty-minute window
+// anyway. Past this the line stays one job and the customer's correction
+// applies to every unit of it, which is what happened before any of this
+// existed.
+const maxPerUnitSplit = 10
+
+// splitsPerUnit reports whether this line becomes one job per unit.
+//
+// Gated on the feature switch, so a deployment with the check turned off
+// creates jobs exactly as it always did. That matters more than it looks: this
+// is the one change here that alters the shape of the production queue for
+// every order, not just the ones a customer is asked about.
+func (s *Server) splitsPerUnit(li production.LineItem, quantity int32) bool {
+	return s.cfg.PersonalisationCheckEnabled &&
+		li.PersonalisationRequired &&
+		quantity > 1 && quantity <= maxPerUnitSplit
+}
+
 func (s *Server) buildJobsForOrder(
 	ctx context.Context, order gen.Order, items []production.LineItem,
 ) ([]gen.InsertProductionJobParams, error) {
@@ -824,22 +846,44 @@ func (s *Server) buildJobsForOrder(
 		// otherwise be three identical registry lookups.
 		roles := s.jobPartRoles(ctx, li, generated)
 
-		for _, role := range roles {
-			// Named for the Shopify order, so the job, the order and the
-			// customer's own paperwork all carry the same number. Falls back
-			// to the sequence when the order number has no digits to borrow.
-			jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, jobIndex)
-			if err != nil {
-				return nil, err
-			}
-			jobIndex++
+		// ONE JOB PER UNIT when the customer will be asked about them.
+		//
+		// Three planks ordered together are three things to name, and the
+		// customer wants different names on each - which is impossible while
+		// quantity is an integer on one row carrying one set of
+		// personalisation values. Each unit needs its own values, its own
+		// render and its own model to look at, which is exactly what a job
+		// already is.
+		//
+		// Siblings, not splits: split_of_job_id is for a bed peeling units off
+		// a job it could not fit whole, and those fragments share one set of
+		// values. These do not share values, and grouping them as one order of
+		// three would be claiming they do.
+		perUnit := s.splitsPerUnit(li, quantity)
+		units, jobQuantity := int32(1), quantity
+		if perUnit {
+			units, jobQuantity = quantity, 1
+		}
 
-			p := s.jobParamsFor(jobParamsInput{
-				order: order, shopifyID: shopifyID, li: li, jobNumber: jobNumber,
-				role: role, quantity: quantity, status: status, confirms: confirms,
-				generated: generated, match: match,
-			})
-			out = append(out, p)
+		for _, role := range roles {
+			for range units {
+				// Named for the Shopify order, so the job, the order and the
+				// customer's own paperwork all carry the same number. Falls
+				// back to the sequence when the order number has no digits to
+				// borrow.
+				jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, jobIndex)
+				if err != nil {
+					return nil, err
+				}
+				jobIndex++
+
+				p := s.jobParamsFor(jobParamsInput{
+					order: order, shopifyID: shopifyID, li: li, jobNumber: jobNumber,
+					role: role, quantity: jobQuantity, status: status, confirms: confirms,
+					generated: generated, match: match,
+				})
+				out = append(out, p)
+			}
 		}
 	}
 	return out, nil
