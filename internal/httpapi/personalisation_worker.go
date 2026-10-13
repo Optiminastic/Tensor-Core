@@ -470,11 +470,28 @@ func (w *PersonalisationExpiryWorker) release(
 // the template missing - and that is handled on the other side: a send that
 // cannot happen releases the order's jobs rather than leaving them held.
 func (s *Server) personalisationWillAsk(ctx context.Context, jobID uuid.UUID) bool {
-	if !s.cfg.PersonalisationCheckEnabled {
-		return false
-	}
 	job, err := s.store.Q.GetProductionJobByID(ctx, jobID)
 	if err != nil || job.OrderID == nil {
+		return false
+	}
+
+	// A LIVE LINK OUTRANKS THE SWITCH, and this has to be asked first.
+	//
+	// The switch decides whether to START holding orders. It must not decide
+	// whether to release one already held: a customer with the page open in
+	// front of them is mid-edit, and turning the feature off - or re-rendering
+	// a job for any other reason - would send their order to the floor while
+	// their link still worked and still accepted changes that would never be
+	// made.
+	//
+	// Found by a job that re-rendered with the switch off and came back
+	// 'validated by system' while its window was still open. Releasing is the
+	// expiry sweep's job and nobody else's.
+	if _, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID); err == nil {
+		return true
+	}
+
+	if !s.cfg.PersonalisationCheckEnabled {
 		return false
 	}
 	order, err := s.store.Q.GetOrderByID(ctx, *job.OrderID)
@@ -485,12 +502,6 @@ func (s *Server) personalisationWillAsk(ctx context.Context, jobID uuid.UUID) bo
 	slug, err := worker.brandFor(ctx, *job.OrderID)
 	if err != nil {
 		return false
-	}
-	// An order that already has a live link is still being asked about, even
-	// though a second claim would be refused - a later part of a combo
-	// finishing must not send its job to the floor.
-	if _, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID); err == nil {
-		return true
 	}
 	_, reason := s.personalisationEligible(ctx, slug, order)
 	return reason == ""
@@ -545,6 +556,22 @@ func (w *PersonalisationLinkWorker) unrenderedJobs(
 func (w *PersonalisationLinkWorker) releaseUnasked(
 	ctx context.Context, orderID uuid.UUID, by string,
 ) {
+	// NEVER RELEASE AN ORDER WHOSE CUSTOMER IS STILL HOLDING A LINK.
+	//
+	// "No link is coming" and "a link is already open" are different states,
+	// and the rules above cannot tell them apart: they answer whether this
+	// order WOULD be asked now, which is false for an order already asked
+	// whose circumstances have since changed - a phone number cleared, the
+	// switch turned off, the watermark moved.
+	//
+	// Found the hard way. A re-render enqueues a send; the send found an order
+	// with no phone, concluded nobody could be asked, and sent six jobs to the
+	// floor while their customer had the page open and was editing them. The
+	// window is the expiry sweep's to close, and nobody else's.
+	if _, err := w.server.store.Q.GetOpenPersonalisationLinkForOrder(ctx, orderID); err == nil {
+		return
+	}
+
 	if err := w.server.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
 		gen.ReleaseOrderPersonalisationToPrintParams{OrderID: &orderID, ValidatedBy: &by}); err != nil {
 		w.logger.Error("personalisation: could not release the order's jobs",

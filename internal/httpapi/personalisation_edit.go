@@ -156,6 +156,7 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 		return
 	}
 
+	colourChanged := false
 	colour := strings.TrimSpace(req.Colour)
 	if colour != "" {
 		// Only a colour the shop can actually print. Accepting anything else
@@ -167,13 +168,13 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 			return
 		}
 		if !strings.EqualFold(colour, deref(job.PersonalisationColour)) {
-			changed = true
+			colourChanged = true
 		}
 	} else {
 		colour = deref(job.PersonalisationColour)
 	}
 
-	if !changed {
+	if !changed && !colourChanged {
 		// Nothing moved. Not an error, and deliberately not a write: an edit
 		// that changes nothing must not stamp personalisation_original, or
 		// every job a customer merely opened would read as "Changed".
@@ -206,6 +207,24 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 		// Save being pressed, or this job has already gone to the floor.
 		refusePublicLink(c)
 		return
+	}
+
+	// A COLOUR ON ITS OWN NEEDS NO RENDER. Not one triangle moves: the plank
+	// is the same plank and the lettering the same lettering, so the model is
+	// read back, the hex is swapped on the pieces that follow the customer,
+	// and it is written out again. That is the edit people make most, and it
+	// is the difference between a moment and most of a minute.
+	//
+	// Attempted only when the text is untouched. A name change really is
+	// different geometry, and the render it needs applies the new colour on
+	// the way through anyway.
+	if !changed && colourChanged {
+		if s.recolourModel(ctx, job, colour) {
+			c.JSON(http.StatusOK, gin.H{"saved": true, "rendering": false})
+			return
+		}
+		// Fell through - no model yet, an STL, a design whose pieces are all
+		// fixed. The render below is the answer for all of them.
 	}
 
 	// The render is the slow half and the customer is watching it, so it goes
