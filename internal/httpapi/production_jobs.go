@@ -198,8 +198,7 @@ func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed bool) *string 
 	}
 
 	blocked := j.Held ||
-		(j.PersonalisationStatus != production.PersonalisationValidated &&
-			j.PersonalisationStatus != production.PersonalisationNotRequired) ||
+		!production.PersonalisationBatchable(j.PersonalisationStatus) ||
 		j.IssueReason != nil
 	if !blocked {
 		// Nothing the pre-planning queries know about is wrong with this job,

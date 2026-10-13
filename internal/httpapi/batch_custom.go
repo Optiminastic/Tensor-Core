@@ -350,8 +350,7 @@ func unavailableBecause(j gen.ProductionJob, bed gen.ListBatchIdentityForIDsRow)
 		return "on hold"
 	case j.IssueReason != nil:
 		return "needs attention: " + *j.IssueReason
-	case j.PersonalisationStatus != production.PersonalisationValidated &&
-		j.PersonalisationStatus != production.PersonalisationNotRequired:
+	case !production.PersonalisationBatchable(j.PersonalisationStatus):
 		return "personalisation not checked yet"
 	case j.PrintFileID == nil:
 		// The model is what goes on the plate. Without one there is nothing to
@@ -700,8 +699,7 @@ func batchableNow(j gen.ProductionJob) error {
 		return fmt.Errorf("%s is on hold", j.JobNumber)
 	case j.IssueReason != nil:
 		return fmt.Errorf("%s needs attention first: %s", j.JobNumber, *j.IssueReason)
-	case j.PersonalisationStatus != production.PersonalisationValidated &&
-		j.PersonalisationStatus != production.PersonalisationNotRequired:
+	case !production.PersonalisationBatchable(j.PersonalisationStatus):
 		return fmt.Errorf("%s's personalisation has not been checked yet", j.JobNumber)
 	}
 	return nil

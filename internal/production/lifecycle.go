@@ -51,11 +51,32 @@ const (
 )
 
 // Personalisation sub-status. Only validated or not_required jobs are batchable.
+//
+// AwaitingCustomer is the customer's own check: a public link has gone out and
+// the window has not closed. It is a separate value from Pending because the
+// two wait on different people and need different answers - Pending is blocked
+// on somebody in the shop and sits there until they act, while
+// AwaitingCustomer clears itself when the window expires. Collapsing them
+// would mean the floor could not tell a job nobody has looked at from one the
+// customer is looking at right now.
 const (
-	PersonalisationPending     = "pending"
-	PersonalisationValidated   = "validated"
-	PersonalisationNotRequired = "not_required"
+	PersonalisationPending          = "pending"
+	PersonalisationAwaitingCustomer = "awaiting_customer"
+	PersonalisationValidated        = "validated"
+	PersonalisationNotRequired      = "not_required"
 )
+
+// PersonalisationBatchable reports whether a job's personalisation lets it be
+// planned onto a bed.
+//
+// THE RULE IS AN ALLOW-LIST, and this function exists so it stays one. The SQL
+// says `personalisation_status IN ('validated','not_required')` in five
+// places, so a new value is excluded from batching automatically; the Go side
+// was written as `== PersonalisationPending` in four places, which is the same
+// rule inverted and silently admits anything new. Those now call this.
+func PersonalisationBatchable(status string) bool {
+	return status == PersonalisationValidated || status == PersonalisationNotRequired
+}
 
 // Failure stages and reasons recorded by /fail (and later QC failures).
 const (
@@ -424,17 +445,22 @@ func PersonalisationLog(c Confirms, required bool) []string {
 // would be the same condition. FAILED is added - a job whose print or QC
 // failed needs a real bucket rather than silently misrepresenting it.
 const (
-	StageNew          = "NEW"
-	StageValidating   = "VALIDATING"
-	StageReady        = "READY"
-	StageWaitingBatch = "WAITING_BATCH"
-	StageReserved     = "RESERVED"
-	StageBatched      = "BATCHED"
-	StagePrinting     = "PRINTING"
-	StageQC           = "QC"
-	StagePacked       = "PACKED"
-	StageDispatched   = "DISPATCHED"
-	StageFailed       = "FAILED"
+	StageNew        = "NEW"
+	StageValidating = "VALIDATING"
+	// StageAwaitingCustomer is its own bucket rather than part of NEW: the
+	// floor can do nothing about these and should not be asked to, and a
+	// window that is open right now is worth seeing separately from a job
+	// that has been sitting unlooked-at.
+	StageAwaitingCustomer = "AWAITING_CUSTOMER"
+	StageReady            = "READY"
+	StageWaitingBatch     = "WAITING_BATCH"
+	StageReserved         = "RESERVED"
+	StageBatched          = "BATCHED"
+	StagePrinting         = "PRINTING"
+	StageQC               = "QC"
+	StagePacked           = "PACKED"
+	StageDispatched       = "DISPATCHED"
+	StageFailed           = "FAILED"
 )
 
 // PipelineStageInput is everything PipelineStage needs about one job and
@@ -503,6 +529,9 @@ func PipelineStage(in PipelineStageInput) string {
 	}
 	if in.IssueReason != nil {
 		return StageValidating
+	}
+	if in.PersonalisationStatus == PersonalisationAwaitingCustomer {
+		return StageAwaitingCustomer
 	}
 	if in.PersonalisationStatus == PersonalisationPending {
 		return StageNew

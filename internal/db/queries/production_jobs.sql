@@ -54,7 +54,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -68,7 +69,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs WHERE id = $1;
@@ -88,7 +90,8 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs WHERE job_number = sqlc.arg('job_number');
@@ -114,7 +117,14 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title,
-          '[]'::jsonb AS personalisation_properties, part_role,
+          '[]'::jsonb AS personalisation_properties,
+          -- Emptied, not dropped, for the same reason as the line above -
+          -- but NULL is kept as NULL, because null here means "the customer
+          -- changed nothing" and that one bit is what the list's
+          -- personalisation tag reads. The values themselves are heavy and
+          -- only the detail page needs them.
+          CASE WHEN personalisation_original IS NULL THEN NULL
+               ELSE '{}'::jsonb END AS personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
@@ -170,7 +180,14 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
           quality_mm, machine_family, variant_title,
-          '[]'::jsonb AS personalisation_properties, part_role,
+          '[]'::jsonb AS personalisation_properties,
+          -- Emptied, not dropped, for the same reason as the line above -
+          -- but NULL is kept as NULL, because null here means "the customer
+          -- changed nothing" and that one bit is what the list's
+          -- personalisation tag reads. The values themselves are heavy and
+          -- only the detail page needs them.
+          CASE WHEN personalisation_original IS NULL THEN NULL
+               ELSE '{}'::jsonb END AS personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 FROM production_jobs
@@ -227,7 +244,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -255,7 +273,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -292,7 +311,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -308,7 +328,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -439,7 +460,8 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
           personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
           colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
-          quality_mm, machine_family, variant_title, personalisation_properties, part_role,
+          quality_mm, machine_family, variant_title, personalisation_properties,
+          personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
           support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
 
@@ -826,3 +848,22 @@ WHERE id = ANY(sqlc.arg('job_ids')::uuid[])
   AND (batch_id IS NULL
        OR batch_id IN (SELECT id FROM batches
                         WHERE status IN ('pending_approval', 'open')));
+
+-- name: ReleaseOrderPersonalisationToPrint :exec
+-- Lets an order's jobs through to batching once the customer's window is over,
+-- whether they confirmed or it simply ran out.
+--
+-- Scoped to awaiting_customer, so it cannot disturb a job that a person in the
+-- shop is still checking by hand, nor re-stamp one already validated.
+UPDATE production_jobs
+SET personalisation_status       = 'validated',
+    personalisation_validated_by = sqlc.arg('validated_by'),
+    personalisation_validated_at = now()
+WHERE order_id = sqlc.arg('order_id')
+  AND personalisation_status = 'awaiting_customer';
+
+-- name: ListProductionJobsForOrder :many
+-- Every job an order produced, oldest first, for the customer's own page.
+SELECT * FROM production_jobs
+WHERE order_id = sqlc.arg('order_id')
+ORDER BY created_at, job_number;

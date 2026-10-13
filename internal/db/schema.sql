@@ -412,6 +412,10 @@ CREATE TABLE production_jobs (
     -- What the customer asked for, snapshotted at creation - see 0064.
     variant_title                 varchar(255),
     personalisation_properties    jsonb NOT NULL DEFAULT '[]',
+    -- What the order said before the customer edited it, written once on the
+    -- first edit and never moved. Null means nothing was ever changed. Carries
+    -- the colour as well as the properties - colour is not a property.
+    personalisation_original      jsonb,
     -- Which of its product's design files this job prints - see 0081. A
     -- product may print from several, and a combo prints three: a plank, a
     -- rose and a keychain, one job each.
@@ -1176,3 +1180,43 @@ CREATE TABLE IF NOT EXISTS integration_settings (
 
 CREATE INDEX IF NOT EXISTS ix_integration_settings_provider
     ON integration_settings (brand_slug, provider);
+
+-- One personalisation link per ORDER. Keyed on the order and never on the
+-- phone: a returning customer's second order must get its own link, and the
+-- win-back ledger's one-contact-per-person-forever key would silently refuse
+-- it. The unique order_id is also what makes a re-import safe.
+CREATE TABLE IF NOT EXISTS personalisation_links (
+    id           uuid PRIMARY KEY,
+    brand_slug   varchar(64) NOT NULL,
+    order_id     uuid NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+    -- SHA-256 of a 32-byte random token; the raw token is never stored.
+    token_hash   varchar(64) NOT NULL UNIQUE,
+    phone        varchar(24) NOT NULL DEFAULT '',
+    -- 'pending' | 'sent' | 'opened' | 'confirmed' | 'expired' | 'failed'
+    status       varchar(16) NOT NULL,
+    -- The countdown runs from issue. One instant for both the sweep and the
+    -- timer on the page, so they cannot disagree.
+    issued_at    timestamptz NOT NULL DEFAULT now(),
+    expires_at   timestamptz NOT NULL,
+    sent_at      timestamptz,
+    opened_at    timestamptz,
+    confirmed_at timestamptz,
+    message_id   varchar(160),
+    detail       varchar(500),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_personalisation_links_brand_status
+    ON personalisation_links (brand_slug, status);
+
+CREATE INDEX IF NOT EXISTS ix_personalisation_links_expiry
+    ON personalisation_links (expires_at)
+    WHERE status IN ('sent', 'opened');
+
+-- When this brand started asking customers, so switching the feature on does
+-- not message a month of past orders.
+CREATE TABLE IF NOT EXISTS personalisation_watermarks (
+    brand_slug varchar(64) PRIMARY KEY,
+    watch_from timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);

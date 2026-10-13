@@ -70,6 +70,12 @@ const (
 	// so the job must not reach a plate in that state.
 	ReasonPersonalisationPending = "Waiting for personalisation details to be confirmed."
 
+	// ReasonAwaitingCustomer - the customer has the link and the window is
+	// open. Named separately because nobody in the shop should act on it: it
+	// clears itself when the window closes, and an operator validating it by
+	// hand would be overruling a customer mid-edit.
+	ReasonAwaitingCustomer = "Waiting for the customer to confirm their personalisation."
+
 	// ReasonConfigurationMissing - no printer profile, so the job has no
 	// machine family and no batch containing it could ever be assigned to a
 	// machine. Carried as an issue_reason on the job itself.

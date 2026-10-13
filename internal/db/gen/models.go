@@ -403,6 +403,29 @@ type Permission struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type PersonalisationLink struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	OrderID     uuid.UUID
+	TokenHash   string
+	Phone       string
+	Status      string
+	IssuedAt    pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+	SentAt      pgtype.Timestamptz
+	OpenedAt    pgtype.Timestamptz
+	ConfirmedAt pgtype.Timestamptz
+	MessageID   *string
+	Detail      *string
+	CreatedAt   pgtype.Timestamptz
+}
+
+type PersonalisationWatermark struct {
+	BrandSlug string
+	WatchFrom pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
 type Product struct {
 	ID        uuid.UUID
 	Code      string
@@ -513,6 +536,7 @@ type ProductionJob struct {
 	MachineFamily              *string
 	VariantTitle               *string
 	PersonalisationProperties  []byte
+	PersonalisationOriginal    []byte
 	PartRole                   string
 	ModelError                 *string
 	ModelErrorAt               pgtype.Timestamptz

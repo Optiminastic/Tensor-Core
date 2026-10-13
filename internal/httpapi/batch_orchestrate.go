@@ -838,6 +838,8 @@ func exclusionReason(held bool, personalisation string, issue *string) string {
 	switch {
 	case held:
 		return production.ReasonHeld
+	case personalisation == production.PersonalisationAwaitingCustomer:
+		return production.ReasonAwaitingCustomer
 	case personalisation == production.PersonalisationPending:
 		return production.ReasonPersonalisationPending
 	case issue != nil && *issue == production.IssueProfileMissing:

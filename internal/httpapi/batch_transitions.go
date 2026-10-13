@@ -95,7 +95,11 @@ func writeStatusError(c *gin.Context, err error, genericMsg string) {
 func unprintableJob(jobs []gen.ProductionJob) string {
 	for _, j := range jobs {
 		switch {
-		case j.PersonalisationStatus == production.PersonalisationPending:
+		case !production.PersonalisationBatchable(j.PersonalisationStatus):
+			// Asked as an allow-list. Written as `== pending` this admitted
+			// every value added later - and the one added later is a job whose
+			// customer is editing it right now, which is the single worst
+			// thing to commit to a printer.
 			return "A job in this batch has unvalidated personalisation."
 		case j.IssueReason != nil:
 			return "A job in this batch has an unresolved issue."

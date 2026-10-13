@@ -244,7 +244,7 @@ INSERT INTO production_jobs (
     -- like any other.
     $12
 )
-RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, personalisation_original, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
 `
 
 type InsertBulkProductionJobParams struct {
@@ -345,6 +345,7 @@ func (q *Queries) InsertBulkProductionJob(ctx context.Context, arg InsertBulkPro
 		&i.MachineFamily,
 		&i.VariantTitle,
 		&i.PersonalisationProperties,
+		&i.PersonalisationOriginal,
 		&i.PartRole,
 		&i.ModelError,
 		&i.ModelErrorAt,
