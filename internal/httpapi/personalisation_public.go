@@ -21,7 +21,6 @@ package httpapi
 
 import (
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +41,10 @@ func (s *Server) registerPersonalisationPublic(r *gin.Engine) {
 	g.GET("", s.publicPersonalisation)
 	g.GET("/items/:jobID/model", s.publicPersonalisationModel)
 	g.PATCH("/items/:jobID", s.publicPersonalisationEdit)
+	// One item, for a page waiting on its own re-render. Cheaper than
+	// re-reading the whole order every few seconds, and it is the only thing
+	// changing.
+	g.GET("/items/:jobID", s.publicPersonalisationItem)
 	g.POST("/confirm", s.publicPersonalisationConfirm)
 }
 
@@ -77,6 +80,15 @@ type publicItemResponse struct {
 	// the moment the order lands and a render is 20-45 seconds behind it, so
 	// "not yet" is the ordinary first answer rather than a fault.
 	ModelReady bool `json:"model_ready"`
+	// ModelVersion changes when the model does.
+	//
+	// It is the print file's id, and a re-render mints a NEW file rather than
+	// overwriting the old one - so this is an exact signal rather than a
+	// guess. The page needs it because "is there a model" is true both before
+	// and after a save: without a version it would poll, see the old file
+	// answer 200, and show the customer the colour they just changed away
+	// from.
+	ModelVersion string `json:"model_version"`
 }
 
 type publicColourResponse struct {
@@ -125,7 +137,7 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 		OrderNumber:  order.OrderNumber,
 		CustomerName: deref(order.CustomerName),
 		Confirmed:    link.Status == "confirmed",
-		Colours:      sellableColours(),
+		Colours:      s.sellableColours(),
 		Items:        make([]publicItemResponse, 0, len(jobs)),
 	}
 	if link.ExpiresAt.Valid {
@@ -189,14 +201,15 @@ func numberSiblings(items []publicItemResponse) {
 
 func publicItem(j gen.ProductionJob, registry map[string]bool) publicItemResponse {
 	item := publicItemResponse{
-		JobID:       j.ID.String(),
-		JobNumber:   j.JobNumber,
-		ProductName: deref(j.ProductName),
-		Quantity:    int(j.Quantity),
-		Colour:      deref(j.PersonalisationColour),
-		ModelReady:  j.PrintFileID != nil,
-		Part:        partLabel(j),
-		Fields:      make([]publicFieldResponse, 0, 4),
+		JobID:        j.ID.String(),
+		JobNumber:    j.JobNumber,
+		ProductName:  deref(j.ProductName),
+		Quantity:     int(j.Quantity),
+		Colour:       deref(j.PersonalisationColour),
+		ModelReady:   j.PrintFileID != nil,
+		ModelVersion: deref(uuidPtrStr(j.PrintFileID)),
+		Part:         partLabel(j),
+		Fields:       make([]publicFieldResponse, 0, 4),
 	}
 	if item.Colour == "" {
 		item.Colour = deref(j.Colour)
@@ -224,14 +237,22 @@ func publicItem(j gen.ProductionJob, registry map[string]bool) publicItemRespons
 // a colour the shop sells is a colour it can order filament for, and offering
 // only what happens to be on a printer this afternoon would narrow the
 // customer's choice to the state of the floor at one moment.
-func sellableColours() []publicColourResponse {
-	out := make([]publicColourResponse, 0, len(fallbackColours))
-	for name, hex := range fallbackColours {
-		out = append(out, publicColourResponse{
-			Name: strings.ToUpper(name), Hex: strings.ToUpper(hex),
-		})
+func (s *Server) sellableColours() []publicColourResponse {
+	out := make([]publicColourResponse, 0, len(s.cfg.PersonalisationColours))
+	for _, name := range s.cfg.PersonalisationColours {
+		hex := colourHexFor(name)
+		if hex == "" {
+			// A name the renderer cannot resolve is dropped rather than
+			// offered. Showing it would let a customer pick a colour that
+			// holds their own job at "no swatch for ..." - a choice that
+			// looks accepted and stops the order.
+			continue
+		}
+		out = append(out, publicColourResponse{Name: strings.ToUpper(name), Hex: hex})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// NOT SORTED. The order is the shop's, and the list is short enough that
+	// where a colour sits is a deliberate choice rather than an accident of
+	// the alphabet.
 	return out
 }
 
@@ -271,6 +292,18 @@ func secondsUntil(t time.Time) int {
 		return 0
 	}
 	return left
+}
+
+func (s *Server) publicPersonalisationItem(c *gin.Context) {
+	link, ok := s.openLink(c)
+	if !ok {
+		return
+	}
+	job, ok := s.jobOnLink(c, link)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, publicItem(job, s.editableFields(c.Request.Context(), job)))
 }
 
 // --- the model ----------------------------------------------------------------

@@ -311,6 +311,15 @@ type Settings struct {
 	// categorising it as marketing would subject it to India's per-recipient
 	// cap, which drops accepted messages silently.
 	PersonalisationTemplate string
+	// PersonalisationColours is what the customer may choose from, in the
+	// order the picker draws them.
+	//
+	// THE SHOP'S LIST, not the renderer's. The built-in table knows sixteen
+	// colours because that is what has been seen on a spool; offering all of
+	// them invites somebody to pick one the shop does not sell, and a colour
+	// that cannot be resolved holds the job. Every name here must exist in
+	// that table or it is dropped.
+	PersonalisationColours []string
 
 	// OpenSCADBin is the OpenSCAD executable used to render personalised
 	// models. A bare name is looked up on PATH; an absolute path is used as
@@ -699,20 +708,22 @@ func Load() Settings {
 		PersonalisationOnly:              csvEnv("PERSONALISATION_ONLY"),
 		PersonalisationTemplate:          envOr("PERSONALISATION_TEMPLATE_NAME", ""),
 		PersonalisationTestRecipient:     envOr("PERSONALISATION_TEST_RECIPIENT", ""),
-		WinbackLinkHost:                  envOr("WINBACK_LINK_HOST", ""),
-		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
-		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),
-		BambuStatusTTL:                   secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
-		BambuPrinterIndexTTL:             secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
-		BambuErrorTTL:                    secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
-		FleetSyncIntervalSeconds:         intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
-		FleetSyncTimeoutMinutes:          intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
-		RunMigrations:                    boolEnvOr("RUN_MIGRATIONS", true),
-		RunSeed:                          boolEnvOr("RUN_SEED", true),
-		RunProductionWorkers:             boolEnvOr("RUN_PRODUCTION_WORKERS", true),
-		OrderSyncIntervalMinutes:         intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
-		OrderSyncTimeoutMinutes:          intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
-		BambuBuddyTimeoutSeconds:         intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
+		PersonalisationColours: csvEnvOr("PERSONALISATION_COLOURS",
+			[]string{"PINK", "BLUE", "BLACK", "GOLD", "YELLOW", "GREEN", "RED", "WHITE"}),
+		WinbackLinkHost:          envOr("WINBACK_LINK_HOST", ""),
+		OpenSCADBin:              envOr("OPENSCAD_BIN", ""),
+		OpenSCADAssetDir:         envOr("OPENSCAD_ASSET_DIR", ""),
+		BambuStatusTTL:           secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
+		BambuPrinterIndexTTL:     secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
+		BambuErrorTTL:            secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
+		FleetSyncIntervalSeconds: intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
+		FleetSyncTimeoutMinutes:  intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
+		RunMigrations:            boolEnvOr("RUN_MIGRATIONS", true),
+		RunSeed:                  boolEnvOr("RUN_SEED", true),
+		RunProductionWorkers:     boolEnvOr("RUN_PRODUCTION_WORKERS", true),
+		OrderSyncIntervalMinutes: intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
+		OrderSyncTimeoutMinutes:  intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
+		BambuBuddyTimeoutSeconds: intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),
@@ -899,4 +910,16 @@ func csvEnv(key string) []string {
 		}
 	}
 	return out
+}
+
+// csvEnvOr is csvEnv with a fallback, for a list that has a sensible default.
+//
+// Separate from csvEnv because the two mean opposite things when unset: an
+// allow-list left blank must allow nothing in particular, while a catalogue
+// left blank should be the one the shop already uses.
+func csvEnvOr(key string, fallback []string) []string {
+	if v := csvEnv(key); len(v) > 0 {
+		return v
+	}
+	return fallback
 }

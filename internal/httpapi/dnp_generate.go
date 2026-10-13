@@ -249,7 +249,24 @@ func (s *Server) renderColouredPlank(
 	// column beside the empty one being read.
 	parts := s.colourPartsForJob(ctx, job)
 
-	colour := colourFromVariant(job.VariantTitle)
+	// THE CUSTOMER'S OWN CHOICE WINS, when they made one.
+	//
+	// personalisation_colour is what the customer's link writes when they pick
+	// a colour, and without reading it first a saved choice changed the job,
+	// the bed and the ledger while the model carried on being rendered in the
+	// colour of the variant they bought. The preview would not move, which
+	// reads as the save having failed - and the plank would print the old
+	// colour.
+	//
+	// Safe to put ahead of the variant because it is otherwise almost never
+	// set: measured on this database, 1 job of 535 carries it, and that one is
+	// a deliberate edit. A Shopify order that genuinely sends a
+	// personalisation_colour property is stating the customer's colour too, so
+	// it should win there as well.
+	colour := strings.TrimSpace(deref(job.PersonalisationColour))
+	if colour == "" {
+		colour = colourFromVariant(job.VariantTitle)
+	}
 	if colour == "" {
 		colour = strings.TrimSpace(deref(job.Colour))
 	}
