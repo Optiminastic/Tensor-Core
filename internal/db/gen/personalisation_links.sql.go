@@ -439,8 +439,8 @@ func (q *Queries) ResetPersonalisationWatermark(ctx context.Context, brandSlug s
 
 const settlePersonalisationLink = `-- name: SettlePersonalisationLink :one
 UPDATE personalisation_links
-SET status     = $1,
-    sent_at    = CASE WHEN $1 = 'sent' THEN now() ELSE sent_at END,
+SET status     = $1::varchar,
+    sent_at    = CASE WHEN $1::varchar = 'sent' THEN now() ELSE sent_at END,
     message_id = coalesce($2, message_id),
     detail     = $3
 WHERE id = $4
@@ -455,6 +455,14 @@ type SettlePersonalisationLinkParams struct {
 }
 
 // Records how the send went.
+// CAST, and not decoration. The status argument is used twice - assigned to
+// a varchar column and compared with a string literal - and without an
+// explicit type Postgres deduces two different ones for the same placeholder
+// and refuses the whole statement with "inconsistent types deduced for
+// parameter $1". Nothing catches that until it runs: sqlc generates happily,
+// the Go compiles, and every settle fails at the database. A link would then
+// stay 'pending' forever, which reads as a send that never happened - the job
+// is never held, and the floor's copy button finds nothing.
 func (q *Queries) SettlePersonalisationLink(ctx context.Context, arg SettlePersonalisationLinkParams) (PersonalisationLink, error) {
 	row := q.db.QueryRow(ctx, settlePersonalisationLink,
 		arg.Status,

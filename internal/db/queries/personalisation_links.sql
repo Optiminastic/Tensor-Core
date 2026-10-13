@@ -21,9 +21,17 @@ RETURNING *;
 
 -- name: SettlePersonalisationLink :one
 -- Records how the send went.
+-- CAST, and not decoration. The status argument is used twice - assigned to
+-- a varchar column and compared with a string literal - and without an
+-- explicit type Postgres deduces two different ones for the same placeholder
+-- and refuses the whole statement with "inconsistent types deduced for
+-- parameter $1". Nothing catches that until it runs: sqlc generates happily,
+-- the Go compiles, and every settle fails at the database. A link would then
+-- stay 'pending' forever, which reads as a send that never happened - the job
+-- is never held, and the floor's copy button finds nothing.
 UPDATE personalisation_links
-SET status     = sqlc.arg('status'),
-    sent_at    = CASE WHEN sqlc.arg('status') = 'sent' THEN now() ELSE sent_at END,
+SET status     = sqlc.arg('status')::varchar,
+    sent_at    = CASE WHEN sqlc.arg('status')::varchar = 'sent' THEN now() ELSE sent_at END,
     message_id = coalesce(sqlc.narg('message_id'), message_id),
     detail     = sqlc.narg('detail')
 WHERE id = sqlc.arg('id')
