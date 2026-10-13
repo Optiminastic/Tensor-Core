@@ -32,8 +32,7 @@ const (
 var numberedChoices = map[string]string{
 	"1": content.OptionTrack,
 	"2": content.OptionDamage,
-	"3": content.OptionExplore,
-	"4": content.OptionMore,
+	"3": content.OptionMore,
 }
 
 var (
@@ -124,18 +123,12 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 	case content.OptionDamage:
 		c.State = StateAwaitDamageOrder
 		return c, []Action{SendText{Text: content.AskOrderNumber}}
-	case content.OptionExplore:
-		return c, []Action{withMenuHint(content.Explore)}
 	case content.OptionMore:
 		return c, []Action{SendMenu{Text: content.MoreIntro, Menu: content.MoreMenu}}
-	case content.OptionDelivery:
-		return c, []Action{withMenuHint(content.DeliveryInfo)}
-	case content.OptionPayment:
-		return c, []Action{withMenuHint(content.PaymentInfo)}
-	case content.OptionBulk:
-		return handoff(c, now, content.BulkHandoff)
-	case content.OptionChange:
-		return handoff(c, now, content.ChangeHandoff)
+	case content.OptionExplore:
+		return c, []Action{withMenuHint(content.Explore)}
+	case content.OptionDeliveryPayment:
+		return c, []Action{withMenuHint(content.DeliveryPaymentInfo)}
 	case content.OptionTeam:
 		return handoff(c, now, content.Handoff)
 	}

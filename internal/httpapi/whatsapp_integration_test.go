@@ -44,7 +44,7 @@ type metaSend struct {
 	To       string
 	Type     string
 	Text     string
-	ListRows int
+	Buttons  int
 	Template string
 	Payloads []string
 }
@@ -64,9 +64,7 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 		Interactive struct {
 			Body   struct{ Text string } `json:"body"`
 			Action struct {
-				Sections []struct {
-					Rows []any `json:"rows"`
-				} `json:"sections"`
+				Buttons []any `json:"buttons"`
 			} `json:"action"`
 		} `json:"interactive"`
 		Template struct {
@@ -91,9 +89,7 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 	s := metaSend{To: m.To, Type: m.Type, Text: m.Text.Body, Template: m.Template.Name}
 	if m.Type == "interactive" {
 		s.Text = m.Interactive.Body.Text
-		if len(m.Interactive.Action.Sections) > 0 {
-			s.ListRows = len(m.Interactive.Action.Sections[0].Rows)
-		}
+		s.Buttons = len(m.Interactive.Action.Buttons)
 	}
 	for _, c := range m.Template.Components {
 		if c.SubType == "quick_reply" && len(c.Parameters) > 0 {
@@ -317,12 +313,12 @@ func TestIntegrationWhatsAppMenuAndOrderLookup(t *testing.T) {
 	h := newWAHarness(t, nil)
 
 	h.say(t, "hi")
-	if s := h.meta.last(t); s.Type != "interactive" || s.ListRows != 4 || s.To != waCustomer {
+	if s := h.meta.last(t); s.Type != "interactive" || s.Buttons != 3 || s.To != waCustomer {
 		t.Fatalf("greeting = %+v", s)
 	}
 
 	h.tap(t, content.OptionMore)
-	if s := h.meta.last(t); s.ListRows != 6 {
+	if s := h.meta.last(t); s.Buttons != 3 || s.Text != content.MoreIntro {
 		t.Fatalf("More menu = %+v", s)
 	}
 

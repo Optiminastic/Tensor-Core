@@ -168,7 +168,7 @@ func (t *botTurn) perform(ctx context.Context, q *gen.Queries, a bot.Action) (bo
 		res, err := t.wa.SendText(ctx, t.waID, v.Text)
 		return nil, t.recordSend(ctx, q, res, err, "text", v.Text)
 	case bot.SendMenu:
-		res, err := t.wa.SendList(ctx, t.waID, v.Text, v.Menu.Button, listRows(v.Menu))
+		res, err := t.wa.SendButtons(ctx, t.waID, v.Text, menuButtons(v.Menu))
 		return nil, t.recordSend(ctx, q, res, err, "menu", v.Text)
 	case bot.LookupOrder:
 		return t.lookup(ctx, v)
@@ -281,12 +281,12 @@ func buttonEvent(ctx context.Context, q *gen.Queries, id string) (bot.Event, err
 	return bot.ConfirmationReply{OrderID: conf.ShopifyGid, OrderName: conf.OrderNumber, Confirmed: confirmed}, nil
 }
 
-func listRows(m content.Menu) []whatsapp.ListRow {
-	rows := make([]whatsapp.ListRow, 0, len(m.Options))
+func menuButtons(m content.Menu) []whatsapp.Button {
+	buttons := make([]whatsapp.Button, 0, len(m.Options))
 	for _, o := range m.Options {
-		rows = append(rows, whatsapp.ListRow{ID: o.ID, Title: o.Title, Description: o.Description})
+		buttons = append(buttons, whatsapp.Button{ID: o.ID, Title: o.Title})
 	}
-	return rows
+	return buttons
 }
 
 // botOrder converts a live Shopify order to the bot's order shape. The

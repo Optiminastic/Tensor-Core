@@ -49,32 +49,40 @@ func assertMenu(t *testing.T, c Conversation, actions []Action) {
 	}
 }
 
-func TestMainMenuHasFourOptions(t *testing.T) {
-	var titles []string
-	for _, o := range content.MainMenu.Options {
-		titles = append(titles, o.Title)
+func TestMainMenuButtons(t *testing.T) {
+	want := []string{"Where is my order", "Damage concern", "More"}
+	if got := titles(content.MainMenu); !reflect.DeepEqual(got, want) {
+		t.Fatalf("main menu = %v", got)
 	}
-	want := []string{"Where is my order", "Damage concern", "Explore more", "More"}
-	if !reflect.DeepEqual(titles, want) {
-		t.Fatalf("main menu = %v", titles)
+	want = []string{"Explore more", "Delivery & payment", "Talk to us"}
+	if got := titles(content.MoreMenu); !reflect.DeepEqual(got, want) {
+		t.Fatalf("More menu = %v", got)
 	}
 }
 
-func TestMenuLimits(t *testing.T) {
+func titles(m content.Menu) []string {
+	var out []string
+	for _, o := range m.Options {
+		out = append(out, o.Title)
+	}
+	return out
+}
+
+func TestMenusFitWhatsAppButtons(t *testing.T) {
 	for _, m := range []content.Menu{content.MainMenu, content.MoreMenu} {
-		if len([]rune(m.Button)) > 20 || len(m.Options) > 10 {
-			t.Errorf("menu %q breaks WhatsApp list limits", m.Button)
+		if len(m.Options) == 0 || len(m.Options) > 3 {
+			t.Errorf("a reply-button message carries 1 to 3 buttons, got %d", len(m.Options))
 		}
 		for _, o := range m.Options {
-			if len([]rune(o.Title)) > 24 || len([]rune(o.Description)) > 72 {
-				t.Errorf("option %q breaks WhatsApp list limits", o.Title)
+			if len([]rune(o.Title)) > 20 {
+				t.Errorf("button %q is longer than WhatsApp's 20 characters", o.Title)
 			}
 		}
 	}
 }
 
-func TestMoreOpensFAQMenu(t *testing.T) {
-	for _, ev := range []Event{ButtonIn{ID: content.OptionMore}, TextIn{Text: "4"}} {
+func TestMoreShowsTheSecondButtons(t *testing.T) {
+	for _, ev := range []Event{ButtonIn{ID: content.OptionMore}, TextIn{Text: "3"}} {
 		c, actions := Step(idle(), ev, now)
 		want := []Action{SendMenu{Text: content.MoreIntro, Menu: content.MoreMenu}}
 		if c.State != StateIdle || !reflect.DeepEqual(actions, want) {
@@ -83,35 +91,17 @@ func TestMoreOpensFAQMenu(t *testing.T) {
 	}
 }
 
-func TestFAQAnswers(t *testing.T) {
-	for id, want := range map[string]string{
-		content.OptionDelivery: content.DeliveryInfo,
-		content.OptionPayment:  content.PaymentInfo,
-	} {
-		c, actions := Step(idle(), ButtonIn{ID: id}, now)
-		got := texts(actions)
-		if c.State != StateIdle || len(got) != 1 || !strings.HasPrefix(got[0], want) || !strings.Contains(got[0], "MENU") {
-			t.Errorf("%s: %s %v", id, c.State, got)
-		}
+func TestDeliveryAndPayment(t *testing.T) {
+	c, actions := Step(idle(), ButtonIn{ID: content.OptionDeliveryPayment}, now)
+	got := texts(actions)
+	if c.State != StateIdle || len(got) != 1 || !strings.HasPrefix(got[0], content.DeliveryPaymentInfo) || !strings.Contains(got[0], "MENU") {
+		t.Fatalf("delivery & payment: %s %v", c.State, got)
 	}
 }
 
-func TestFAQHandoffs(t *testing.T) {
-	for id, want := range map[string]string{
-		content.OptionBulk:   content.BulkHandoff,
-		content.OptionChange: content.ChangeHandoff,
-		content.OptionTeam:   content.Handoff,
-	} {
-		c, actions := Step(idle(), ButtonIn{ID: id}, now)
-		if c.State != StateHuman || c.HumanSince == nil || texts(actions)[0] != want {
-			t.Errorf("%s: %s %v", id, c.State, texts(actions))
-		}
-	}
-}
-
-func TestBackToMenu(t *testing.T) {
-	c, actions := Step(idle(), ButtonIn{ID: content.OptionBackToMenu}, now)
-	assertMenu(t, c, actions)
+func TestTalkToUs(t *testing.T) {
+	c, actions := Step(idle(), ButtonIn{ID: content.OptionTeam}, now)
+	assertHandoff(t, c, actions)
 }
 
 func TestGreetingShowsMenu(t *testing.T) {
@@ -152,7 +142,7 @@ func TestMenuChoices(t *testing.T) {
 }
 
 func TestExplore(t *testing.T) {
-	for _, ev := range []Event{ButtonIn{ID: content.OptionExplore}, TextIn{Text: "3"}} {
+	for _, ev := range []Event{ButtonIn{ID: content.OptionExplore}} {
 		c, actions := Step(idle(), ev, now)
 		if c.State != StateIdle {
 			t.Fatalf("state = %s", c.State)

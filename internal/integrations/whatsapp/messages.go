@@ -4,17 +4,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
-// listSectionTitle heads the single section of every list this package sends.
-const listSectionTitle = "Options"
+// Meta's limits on a reply-button message, checked here because a refusal
+// from Meta names neither the button nor the rule.
+const (
+	maxReplyButtons     = 3
+	maxButtonTitleRunes = 20
+)
 
-// ListRow is one choice in a list message. Meta caps the title at 24
-// characters and the description at 72.
-type ListRow struct {
-	ID          string
-	Title       string
-	Description string
+// Button is one reply button shown under a message.
+type Button struct {
+	ID    string
+	Title string
 }
 
 // SendText sends a free-form message.
@@ -36,31 +39,32 @@ func (c *Client) SendText(ctx context.Context, to, text string) (SendResult, err
 	})
 }
 
-// SendList sends text with a list menu: buttonText opens a sheet of up to ten
-// rows. Used instead of reply buttons, which Meta caps at three. The same
-// 24-hour rule as SendText applies.
-func (c *Client) SendList(ctx context.Context, to, body, buttonText string, rows []ListRow) (SendResult, error) {
+// SendButtons sends text with up to three reply buttons shown right under it.
+// The same 24-hour rule as SendText applies.
+func (c *Client) SendButtons(ctx context.Context, to, body string, buttons []Button) (SendResult, error) {
 	if !c.Configured() {
 		return SendResult{}, fmt.Errorf("WhatsApp is not configured")
 	}
-	items := make([]map[string]any, 0, len(rows))
-	for _, r := range rows {
-		item := map[string]any{"id": r.ID, "title": r.Title}
-		if r.Description != "" {
-			item["description"] = r.Description
+	if len(buttons) == 0 || len(buttons) > maxReplyButtons {
+		return SendResult{}, fmt.Errorf("a message carries 1 to %d reply buttons, not %d", maxReplyButtons, len(buttons))
+	}
+	replies := make([]map[string]any, 0, len(buttons))
+	for _, b := range buttons {
+		if utf8.RuneCountInString(b.Title) > maxButtonTitleRunes {
+			return SendResult{}, fmt.Errorf("button %q is over %d characters", b.Title, maxButtonTitleRunes)
 		}
-		items = append(items, item)
+		replies = append(replies, map[string]any{
+			"type":  "reply",
+			"reply": map[string]any{"id": b.ID, "title": b.Title},
+		})
 	}
 	return c.post(ctx, map[string]any{
 		"to":   strings.TrimPrefix(strings.TrimSpace(to), "+"),
 		"type": "interactive",
 		"interactive": map[string]any{
-			"type": "list",
-			"body": map[string]any{"text": body},
-			"action": map[string]any{
-				"button":   buttonText,
-				"sections": []map[string]any{{"title": listSectionTitle, "rows": items}},
-			},
+			"type":   "button",
+			"body":   map[string]any{"text": body},
+			"action": map[string]any{"buttons": replies},
 		},
 	})
 }

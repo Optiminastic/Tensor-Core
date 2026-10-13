@@ -2,60 +2,41 @@
 // here; no other package builds customer-facing copy.
 package content
 
-// List option IDs. They come back to us verbatim when tapped.
+// Button IDs. They come back to us verbatim when tapped.
 const (
-	OptionTrack   = "track"
-	OptionDamage  = "damage"
-	OptionExplore = "explore"
-	OptionMore    = "more"
-
-	OptionDelivery   = "faq_delivery"
-	OptionPayment    = "faq_payment"
-	OptionBulk       = "faq_bulk"
-	OptionChange     = "faq_change"
-	OptionTeam       = "faq_team"
-	OptionBackToMenu = "back_to_menu"
+	OptionTrack           = "track"
+	OptionDamage          = "damage"
+	OptionMore            = "more"
+	OptionExplore         = "explore"
+	OptionDeliveryPayment = "delivery_payment"
+	OptionTeam            = "team"
 )
 
-// Option is one row of a WhatsApp list message. WhatsApp limits the title to
-// 24 characters and the description to 72.
+// Option is one reply button. WhatsApp limits its title to 20 characters.
 type Option struct {
-	ID          string
-	Title       string
-	Description string
+	ID    string
+	Title string
 }
 
-// Menu is a WhatsApp list message: Button is the label that opens the list
-// (max 20 characters), Options its rows (max 10).
+// Menu is a message with reply buttons shown right under it. WhatsApp allows
+// at most 3, which is why the fourth choice lives behind "More".
 type Menu struct {
-	Button  string
 	Options []Option
 }
 
-// MainMenu is what any message gets. It is a list, not reply buttons, because
-// WhatsApp allows only 3 reply buttons and the menu has 4 options.
-var MainMenu = Menu{
-	Button: "Choose an option",
-	Options: []Option{
-		{ID: OptionTrack, Title: "Where is my order", Description: "Order status and tracking"},
-		{ID: OptionDamage, Title: "Damage concern", Description: "Received a damaged product?"},
-		{ID: OptionExplore, Title: "Explore more", Description: "Browse our personalised gifts"},
-		{ID: OptionMore, Title: "More", Description: "Delivery, payment, bulk orders and more"},
-	},
-}
+// MainMenu is what any message gets.
+var MainMenu = Menu{Options: []Option{
+	{ID: OptionTrack, Title: "Where is my order"},
+	{ID: OptionDamage, Title: "Damage concern"},
+	{ID: OptionMore, Title: "More"},
+}}
 
-// MoreMenu is the FAQ list behind "More".
-var MoreMenu = Menu{
-	Button: "See topics",
-	Options: []Option{
-		{ID: OptionDelivery, Title: "Delivery time", Description: "When will my order arrive?"},
-		{ID: OptionPayment, Title: "Payment & COD", Description: "How to pay for your order"},
-		{ID: OptionBulk, Title: "Bulk / corporate order", Description: "Gifts for teams, events and clients"},
-		{ID: OptionChange, Title: "Change my order", Description: "Edit names or details"},
-		{ID: OptionTeam, Title: "Talk to our team", Description: "Chat with a person"},
-		{ID: OptionBackToMenu, Title: "Back to main menu", Description: "See the main options again"},
-	},
-}
+// MoreMenu is the second set of buttons, behind "More".
+var MoreMenu = Menu{Options: []Option{
+	{ID: OptionExplore, Title: "Explore more"},
+	{ID: OptionDeliveryPayment, Title: "Delivery & payment"},
+	{ID: OptionTeam, Title: "Talk to us"},
+}}
 
 // Confirmation template button payload prefixes: "confirm:<order gid>".
 const (
@@ -80,24 +61,19 @@ const (
 )
 
 const (
-	Greeting = "Hi! 👋 Welcome to *The 3D Printing Store*.\n\nHow can we help you today? Tap *Choose an option* below."
+	Greeting = "👋 Hi! Welcome to *The 3D Printing Store*.\n\nHow can we help you today?"
 
-	MoreIntro = "What would you like to know? Tap *See topics* below."
+	MoreIntro = "What else can we help with?"
 
-	DeliveryInfo = "🚚 *Delivery time*\n\n" +
+	DeliveryPaymentInfo = "🚚 *Delivery*\n" +
 		"Every product is crafted after you order:\n" +
 		"• Free dispatch: within 10 working days\n" +
-		"• Express dispatch (₹100): within 3 working days\n\n" +
-		"After dispatch, delivery takes 2-5 working days across India. You'll get a tracking link as soon as it ships."
-
-	PaymentInfo = "💳 *Payment*\n\n" +
-		"All our products are 100% personalised and crafted only after a prepaid order, so we don't offer Cash on Delivery. " +
-		"You can pay securely online at checkout.\n\n" +
+		"• Express dispatch (₹100): within 3 working days\n" +
+		"After dispatch, delivery takes 2-5 working days across India. You'll get a tracking link as soon as it ships.\n\n" +
+		"💳 *Payment*\n" +
+		"Everything is 100% personalised and crafted only after a prepaid order, so we don't offer Cash on Delivery. " +
+		"Pay securely online at checkout.\n\n" +
 		"🎁 20% OFF on orders above ₹2000!"
-
-	BulkHandoff = "🎁 Lovely! Please share the product, quantity and the date you need it by. Our team will reply here shortly with a quote."
-
-	ChangeHandoff = "✏️ Please type your order number and what you'd like to change. Our team will reply here shortly.\n\nNote: changes are only possible before we start crafting."
 
 	MenuHint = "Type *MENU* any time to see the options again."
 

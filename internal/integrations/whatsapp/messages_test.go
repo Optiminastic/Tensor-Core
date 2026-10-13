@@ -46,20 +46,30 @@ func TestSendTextRefusesAnEmptyMessage(t *testing.T) {
 	}
 }
 
-func TestSendListShapesAListMessage(t *testing.T) {
+func TestSendButtonsShapesReplyButtons(t *testing.T) {
 	c, got := capture(t)
-	rows := []ListRow{{ID: "track", Title: "Where is my order", Description: "Order status"}, {ID: "more", Title: "More"}}
-	if _, err := c.SendList(context.Background(), "919876543210", "Pick one", "Choose an option", rows); err != nil {
+	buttons := []Button{{ID: "track", Title: "Where is my order"}, {ID: "more", Title: "More"}}
+	if _, err := c.SendButtons(context.Background(), "919876543210", "How can we help?", buttons); err != nil {
 		t.Fatal(err)
 	}
 	interactive := (*got)["interactive"].(map[string]any)
-	action := interactive["action"].(map[string]any)
-	sent := action["sections"].([]any)[0].(map[string]any)["rows"].([]any)
-	if interactive["type"] != "list" || action["button"] != "Choose an option" || len(sent) != 2 {
+	sent := interactive["action"].(map[string]any)["buttons"].([]any)
+	first := sent[0].(map[string]any)
+	reply := first["reply"].(map[string]any)
+	if interactive["type"] != "button" || len(sent) != 2 || first["type"] != "reply" || reply["id"] != "track" {
 		t.Fatalf("interactive = %v", interactive)
 	}
-	if _, has := sent[1].(map[string]any)["description"]; has {
-		t.Fatalf("an empty description must be left out: %v", sent[1])
+}
+
+func TestSendButtonsRefusesWhatMetaWould(t *testing.T) {
+	c, _ := capture(t)
+	four := []Button{{ID: "a", Title: "a"}, {ID: "b", Title: "b"}, {ID: "c", Title: "c"}, {ID: "d", Title: "d"}}
+	if _, err := c.SendButtons(context.Background(), "91", "x", four); err == nil {
+		t.Error("four buttons must be refused before the network")
+	}
+	long := []Button{{ID: "a", Title: "a title well over twenty characters"}}
+	if _, err := c.SendButtons(context.Background(), "91", "x", long); err == nil {
+		t.Error("a title over 20 characters must be refused before the network")
 	}
 }
 

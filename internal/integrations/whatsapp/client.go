@@ -1,8 +1,8 @@
 // Package whatsapp talks to Meta's WhatsApp Cloud API: approved templates,
-// free-form text and list menus out (client.go, messages.go), and the webhook
+// free-form text and reply buttons out (client.go, messages.go), and the webhook
 // Meta posts back in (webhook.go).
 //
-// Free-form text and lists are only allowed inside the 24-hour window that
+// Free-form text and buttons are only allowed inside the 24-hour window that
 // opens when the customer writes; anything business-initiated is a template.
 //
 // ACCEPTED IS NOT DELIVERED. A 200 from /messages carries a message id and
