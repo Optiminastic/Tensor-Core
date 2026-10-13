@@ -2197,6 +2197,41 @@ func (q *Queries) ReleaseOrderPersonalisationToPrint(ctx context.Context, arg Re
 	return err
 }
 
+const releaseStrandedPersonalisationHolds = `-- name: ReleaseStrandedPersonalisationHolds :execrows
+UPDATE production_jobs j
+SET personalisation_status       = 'validated',
+    personalisation_validated_by = 'system (never asked)',
+    personalisation_validated_at = now()
+WHERE j.personalisation_status = 'awaiting_customer'
+  AND j.updated_at < now() - $1::interval
+  AND NOT EXISTS (
+      SELECT 1 FROM personalisation_links l WHERE l.order_id = j.order_id
+  )
+`
+
+// Frees jobs held for a link that never arrived.
+//
+// THE BACKSTOP, and the reason the whole design is safe to run unattended.
+// The renderer holds a job before the sender has run, so between those two
+// moments a crash, a lost trigger or a refusal nobody handled would leave a
+// job waiting for a customer who was never asked - and the expiry sweep walks
+// LINKS, so it would never see it.
+//
+// Scoped to jobs whose order has no link at all. A job whose link exists is
+// the expiry sweep's business, whether that link is open or already closed;
+// this only takes the ones nothing else can reach.
+//
+// The age bound is what keeps it from racing the sender: a model lands, the
+// job is held, and the send is queued behind it. Anything still stranded well
+// after that was never going to be asked.
+func (q *Queries) ReleaseStrandedPersonalisationHolds(ctx context.Context, strandedAfter pgtype.Interval) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseStrandedPersonalisationHolds, strandedAfter)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const removeJobFromBatch = `-- name: RemoveJobFromBatch :one
 UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE id = $1 AND batch_id = $2

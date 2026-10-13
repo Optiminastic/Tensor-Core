@@ -26,10 +26,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/whatsapp"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -125,10 +127,28 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		return nil
 	}
 
-	phone, reason := w.eligible(ctx, slug, order)
+	phone, reason := w.server.personalisationEligible(ctx, slug, order)
 	if reason != "" {
 		w.logger.Info("personalisation: not asking",
 			"brand", slug, "order", order.OrderNumber, "reason", reason)
+		// Anything the renderer held for a link that is not coming has to go
+		// to the floor now. Without this an order refused here waits for an
+		// expiry sweep that will never see it, because the sweep walks links
+		// and this order has none.
+		w.releaseUnasked(ctx, order.ID, "system (not asked)")
+		return nil
+	}
+
+	// EVERY MODEL, not the first. A combo renders three times and a line of
+	// five renders five; each one triggers this, and sending on the first
+	// would open the customer's window on a page still building most of what
+	// they came to look at. The later renders trigger it again, so skipping
+	// here costs nothing.
+	if pending, err := w.unrenderedJobs(ctx, order.ID); err != nil || pending > 0 {
+		if err == nil {
+			w.logger.Info("personalisation: waiting for the rest of the models",
+				"brand", slug, "order", order.OrderNumber, "pending", pending)
+		}
 		return nil
 	}
 
@@ -146,6 +166,7 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		w.logger.Info("personalisation: not asking",
 			"brand", slug, "order", order.OrderNumber,
 			"reason", "WhatsApp is not connected for this brand")
+		w.releaseUnasked(ctx, order.ID, "system (not asked)")
 		return nil
 	}
 
@@ -157,10 +178,15 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 // One named rule per branch, deliberately not a compound condition: of an
 // order whose customer was messaged, somebody will eventually need to know
 // which rule let it through.
-func (w *PersonalisationLinkWorker) eligible(
+// personalisationEligible is on the SERVER, not the worker, because two
+// different places now have to reach the same answer: the renderer deciding
+// whether to hold a finished job, and the sender deciding whether to message
+// anybody. If those two ever disagreed, a job would be held for a link that
+// never comes - and nothing would release it.
+func (s *Server) personalisationEligible(
 	ctx context.Context, slug string, order gen.Order,
 ) (phone string, reason skipReason) {
-	only := w.server.cfg.PersonalisationOnly
+	only := s.cfg.PersonalisationOnly
 
 	// 1. THE TESTING GATE outranks everything. While it names any order,
 	//    nothing else is asked about whatever the rules allow - which is what
@@ -181,7 +207,7 @@ func (w *PersonalisationLinkWorker) eligible(
 	//    anything since August - all at once, about orders long since
 	//    delivered.
 	if len(only) == 0 {
-		mark, err := w.server.store.Q.EnsurePersonalisationWatermark(ctx, slug)
+		mark, err := s.store.Q.EnsurePersonalisationWatermark(ctx, slug)
 		if err != nil {
 			// Fail closed. Not knowing when watching began is not a licence
 			// to message a month of customers.
@@ -275,6 +301,10 @@ func (w *PersonalisationLinkWorker) ask(
 		var metaErr *whatsapp.Error
 		if errors.As(sendErr, &metaErr) && metaErr.Permanent() {
 			w.settle(ctx, claim.ID, "failed", "", sendErr.Error())
+			// The jobs are released as well. A message that will refuse
+			// identically forever is not worth holding an order for, and the
+			// row keeps the reason.
+			w.releaseUnasked(ctx, order.ID, "system (could not ask)")
 			w.logger.Error("personalisation: refused, and it will refuse again",
 				"brand", slug, "order", order.OrderNumber,
 				"code", metaErr.Code, "error", sendErr)
@@ -313,6 +343,14 @@ func (w *PersonalisationLinkWorker) settle(
 // expiredLinkBatch bounds one sweep. A backlog after an outage must not become
 // one enormous transaction, and the next tick is a minute away.
 const expiredLinkBatch = 200
+
+// strandedHoldAfter is how long a job may wait for a link before the backstop
+// assumes none is coming.
+//
+// Comfortably longer than a render plus a send, so it cannot race them, and
+// short enough that a lost trigger costs one order a few minutes rather than a
+// shift.
+var strandedHoldAfter = pgtype.Interval{Microseconds: 15 * 60 * 1_000_000, Valid: true}
 
 // PersonalisationExpiryWorker releases jobs whose customer's window has closed.
 //
@@ -359,6 +397,17 @@ func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
 		w.logger.Info("personalisation window closed, the order proceeds as placed",
 			"brand", link.BrandSlug, "order", link.OrderID)
 	}
+	// The backstop, run on the same tick. A job held for a link that never
+	// arrived is invisible to the loop above, because that walks links.
+	if freed, err := w.server.store.Q.ReleaseStrandedPersonalisationHolds(ctx,
+		strandedHoldAfter); err != nil {
+		w.logger.Error("personalisation: could not free stranded holds", "error", err)
+	} else if freed > 0 {
+		w.logger.Warn("personalisation: freed jobs held for a link that never arrived",
+			"jobs", freed)
+		w.server.triggerBatchPlan(ctx)
+	}
+
 	if len(due) > 0 {
 		// The planner is not told per link: one trigger after the batch is
 		// the same work and a fraction of the churn.
@@ -378,4 +427,104 @@ func (w *PersonalisationExpiryWorker) release(
 		w.logger.Error("personalisation: could not release the order's jobs",
 			"order", orderID, "error", err)
 	}
+}
+
+// --- deciding to hold, at the moment a model lands ----------------------------
+
+// personalisationWillAsk reports whether this finished job should wait for its
+// customer rather than go to the floor.
+//
+// ASKED BEFORE THE LINK EXISTS, which is the whole difficulty. The link is now
+// sent after the model is built, so at the moment this is called there is
+// nothing to look up - the decision has to be made from the same rules the
+// sender will apply, or a job is held for a message that never comes and
+// nothing releases it.
+//
+// Both callers therefore go through personalisationEligible. The remaining
+// gap is a failure the sender hits and this cannot predict - Meta refusing,
+// the template missing - and that is handled on the other side: a send that
+// cannot happen releases the order's jobs rather than leaving them held.
+func (s *Server) personalisationWillAsk(ctx context.Context, jobID uuid.UUID) bool {
+	if !s.cfg.PersonalisationCheckEnabled {
+		return false
+	}
+	job, err := s.store.Q.GetProductionJobByID(ctx, jobID)
+	if err != nil || job.OrderID == nil {
+		return false
+	}
+	order, err := s.store.Q.GetOrderByID(ctx, *job.OrderID)
+	if err != nil {
+		return false
+	}
+	worker := NewPersonalisationLinkWorker(s, s.baseLogger())
+	slug, err := worker.brandFor(ctx, *job.OrderID)
+	if err != nil {
+		return false
+	}
+	// An order that already has a live link is still being asked about, even
+	// though a second claim would be refused - a later part of a combo
+	// finishing must not send its job to the floor.
+	if _, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID); err == nil {
+		return true
+	}
+	_, reason := s.personalisationEligible(ctx, slug, order)
+	return reason == ""
+}
+
+// enqueuePersonalisationLink asks for the order's link to be considered.
+//
+// Best effort and never fatal: a render that produced a model has done its
+// job, and failing to schedule a message must not fail it. The stranded-hold
+// sweep is what catches an order whose trigger was lost.
+func (s *Server) enqueuePersonalisationLink(ctx context.Context, jobID uuid.UUID) {
+	if s.personalisationEnqueuer == nil {
+		return
+	}
+	job, err := s.store.Q.GetProductionJobByID(ctx, jobID)
+	if err != nil || job.OrderID == nil {
+		return
+	}
+	if err := s.personalisationEnqueuer.Enqueue(ctx,
+		production.SendPersonalisationLinkArgs{OrderID: *job.OrderID}); err != nil {
+		obs.FromContext(ctx).Warn("personalisation: could not schedule the link",
+			"order", *job.OrderID, "error", err)
+	}
+}
+
+// unrenderedJobs counts the order's held jobs that have no model yet.
+func (w *PersonalisationLinkWorker) unrenderedJobs(
+	ctx context.Context, orderID uuid.UUID,
+) (int, error) {
+	jobs, err := w.server.store.Q.ListProductionJobsForOrder(ctx, &orderID)
+	if err != nil {
+		return 0, err
+	}
+	pending := 0
+	for _, j := range jobs {
+		if j.PersonalisationStatus == production.PersonalisationAwaitingCustomer &&
+			j.PrintFileID == nil {
+			pending++
+		}
+	}
+	return pending, nil
+}
+
+// releaseUnasked sends an order's held jobs to the floor when no link is
+// coming.
+//
+// THE INVARIANT THIS KEEPS: a job is only ever held while a link is coming or
+// already live. The renderer decides to hold before the sender runs, so every
+// path out of the sender that does not produce a live link has to undo that -
+// otherwise the order waits for an expiry sweep that walks links and will
+// never see it.
+func (w *PersonalisationLinkWorker) releaseUnasked(
+	ctx context.Context, orderID uuid.UUID, by string,
+) {
+	if err := w.server.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
+		gen.ReleaseOrderPersonalisationToPrintParams{OrderID: &orderID, ValidatedBy: &by}); err != nil {
+		w.logger.Error("personalisation: could not release the order's jobs",
+			"order", orderID, "error", err)
+		return
+	}
+	w.server.triggerBatchPlan(ctx)
 }

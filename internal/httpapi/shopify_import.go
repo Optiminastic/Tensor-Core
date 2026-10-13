@@ -94,22 +94,12 @@ func (s *Server) importShopifyOrder(
 				return err
 			}
 		}
-		// The customer's own check, scheduled on the same transaction and for
-		// the same reason: an order that imported but whose link was never
-		// queued would be indistinguishable from a brand that has this
-		// switched off.
-		//
-		// Enqueued for EVERY order, including ones that turn out to need no
-		// link at all. Whether to ask is decided when the job runs, where the
-		// brand's settings, the watermark and the customer's phone number can
-		// all be read - none of which is knowable inside this transaction,
-		// and all of which can change before it runs.
-		if s.personalisationEnqueuer != nil {
-			if err := s.personalisationEnqueuer.EnqueueTx(ctx, tx,
-				production.SendPersonalisationLinkArgs{OrderID: order.ID}); err != nil {
-				return err
-			}
-		}
+		// NO PERSONALISATION LINK FROM HERE. It used to be scheduled on this
+		// transaction, which sent it within seconds of the order arriving -
+		// and the customer opened a page that spent its first half-minute
+		// building the preview they had come to look at. The link is now sent
+		// by the renderer, once every model on the order exists. See
+		// confirmGeneratedPersonalisation.
 		return nil
 	})
 	if err != nil {

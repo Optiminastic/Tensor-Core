@@ -608,16 +608,19 @@ func NewPersonalisationLinkEnqueuer(client *river.Client[pgx.Tx]) *Personalisati
 	return &PersonalisationLinkEnqueuer{client: client}
 }
 
-// EnqueueTx inserts on the order's own transaction, beside job creation.
+// Enqueue asks for one order's link to be considered.
 //
-// The same atomicity argument: commit and the customer will be asked, roll
-// back and the order never existed. An order that imported but whose link was
-// never scheduled is the failure this prevents - it would look identical to a
-// brand with the feature switched off.
-func (e *PersonalisationLinkEnqueuer) EnqueueTx(
-	ctx context.Context, tx pgx.Tx, args SendPersonalisationLinkArgs,
+// Called by the render worker the moment a model lands, not by the import -
+// the customer should open the link to a finished preview rather than to a
+// page building one. Every render on the order triggers it; the send itself
+// decides whether the rest of them have landed yet.
+//
+// Not transactional, unlike job creation: there is no row being written
+// alongside it to be atomic with.
+func (e *PersonalisationLinkEnqueuer) Enqueue(
+	ctx context.Context, args SendPersonalisationLinkArgs,
 ) error {
-	_, err := e.client.InsertTx(ctx, tx, args, nil)
+	_, err := e.client.Insert(ctx, args, nil)
 	return err
 }
 

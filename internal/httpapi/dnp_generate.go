@@ -716,7 +716,7 @@ func (s *Server) confirmGeneratedPersonalisation(
 		PersonalisationValidatedBy: &by,
 		PersonalisationValidatedAt: db.Timestamptz(&now),
 	}
-	if _, err := s.store.Q.GetOpenPersonalisationLinkForJob(ctx, jobID); err == nil {
+	if s.personalisationWillAsk(ctx, jobID) {
 		params.PersonalisationStatus = production.PersonalisationAwaitingCustomer
 		// Left unstamped on purpose: nobody has validated this yet. Writing
 		// "system" here would make the job page claim it was checked at a
@@ -726,6 +726,21 @@ func (s *Server) confirmGeneratedPersonalisation(
 	}
 	if _, err := s.store.Q.ValidateProductionJobPersonalisation(ctx, params); err != nil {
 		return fmt.Errorf("confirm personalisation on job %s: %w", jobID, err)
+	}
+
+	// THE LINK GOES OUT NOW, not when the order arrived.
+	//
+	// The customer opens it to a finished model rather than to "building your
+	// preview", which is the whole reason this moved: the preview is the part
+	// they came to look at, and a page that has to build it first spends the
+	// first half of its thirty minutes being useless.
+	//
+	// Enqueued rather than sent here. This runs inside a render worker that
+	// has just spent 20-45 seconds on OpenSCAD and still holds its slot; a
+	// Meta round trip on top of that is time the next render waits for. The
+	// send decides for itself whether every model on the order has landed.
+	if params.PersonalisationStatus == production.PersonalisationAwaitingCustomer {
+		s.enqueuePersonalisationLink(ctx, jobID)
 	}
 
 	return recordJobEvent(ctx, s.store.Q, jobEvent{

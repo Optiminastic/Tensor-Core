@@ -45,11 +45,10 @@ type Server struct {
 	jobEnqueuer   *production.JobCreationEnqueuer
 	batchEnqueuer *production.BatchPlanEnqueuer
 
-	// personalisationEnqueuer schedules the customer's own check on an
-	// arriving order. Nil until EnablePersonalisationCheck is called, in which
-	// case orders import exactly as they always did and nobody is asked -
-	// which is the correct behaviour for a deployment that has not turned
-	// this on.
+	// personalisationEnqueuer schedules the customer's own check once a job's
+	// model has been built. Nil until EnablePersonalisationCheck is called, in
+	// which case models render exactly as they always did and nobody is asked
+	// - the correct behaviour for a deployment that has not turned this on.
 	personalisationEnqueuer *production.PersonalisationLinkEnqueuer
 
 	// orderSyncEnqueuer schedules Shopify order pulls. Nil until
