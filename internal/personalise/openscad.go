@@ -248,6 +248,24 @@ func (r *Renderer) render(
 		return nil, err
 	}
 
+	// textmetrics IS AN EXPERIMENTAL FEATURE and is off unless asked for.
+	//
+	// Having a new enough OpenSCAD is not enough: 2026.09.12 answers
+	// "Ignoring unknown function 'textmetrics'" without it, and the keychain
+	// template then says so and carries on - "the name is drawn at the
+	// reference height but NOT fitted to the heart". That is a quiet wrong
+	// answer rather than a loud one. Measured on sc_keychain: the name
+	// PRIYADARSHINI needs shrinking 44.9% to fit the 46mm heart, and without
+	// the flag it is drawn full size and runs off the piece. Even a short name
+	// is wrong - "M<heart>B" came out 26.77mm tall instead of 29.57mm.
+	//
+	// Safe to add unconditionally here because checkRendererVersion has
+	// already refused anything older than 2022, and --enable did not exist
+	// before that.
+	if needsTextmetrics(source) {
+		extra = append(extra, "--enable", "textmetrics")
+	}
+
 	dir, err := os.MkdirTemp("", "personalise-*")
 	if err != nil {
 		return nil, fmt.Errorf("scratch directory: %w", err)
