@@ -20,7 +20,9 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
@@ -113,7 +115,16 @@ func (s *Server) recolourModel(
 	}
 	// Stored as a NEW file, like a render, so the job's model id changes and
 	// the customer's page knows the picture it is holding is stale.
-	fileID, err := s.storeGeneratedModel(ctx, job, renderPlan{}, model)
+	//
+	// CARRYING THE OLD FILE'S RECORD FORWARD, not storing an empty one. The
+	// record beside a model is what answers "is this still what the order
+	// says?" (modelAgreesWithOrder) and, now, how many hearts the preview
+	// draws. A recolour changes neither: it is the same plank, the same names
+	// and the same template, with one hex swapped. Written blank, every
+	// colour-only edit made the model read as built-from-nothing - which meant
+	// a re-render on the next bed rebuild, undoing the whole point of this fast
+	// path, and a preview that silently lost its heart.
+	fileID, err := s.storeGeneratedModel(ctx, job, recolouredPlan(job, row), model)
 	if err != nil {
 		return false
 	}
@@ -144,4 +155,30 @@ func followedPiece(partName string, follows []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// recolouredPlan is the record the model already carried, so a recolour leaves
+// the same answer behind that the render did.
+//
+// The label is taken back out of the old filename rather than rebuilt from the
+// names: the filename is jobNumber + "-" + label + ext exactly as
+// storeGeneratedModel wrote it, and that holds for a registry product whose
+// label is built another way entirely.
+func recolouredPlan(job gen.ProductionJob, row gen.FileAsset) renderPlan {
+	plan := renderPlan{
+		Label: strings.TrimSuffix(
+			strings.TrimPrefix(row.Filename, job.JobNumber+"-"),
+			filepath.Ext(row.Filename)),
+	}
+	if len(row.RenderParams) == 0 {
+		// Rendered before Tensor recorded this. There is nothing to carry, and
+		// inventing a record would claim knowledge the old file never had.
+		return plan
+	}
+	var stored storedRenderParams
+	if err := json.Unmarshal(row.RenderParams, &stored); err != nil {
+		return plan
+	}
+	plan.Template, plan.Stored = stored.Template, stored
+	return plan
 }
