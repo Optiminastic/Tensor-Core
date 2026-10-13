@@ -80,3 +80,36 @@ func TestAnOpenCheckoutLeavesCompletedAtNilNotZero(t *testing.T) {
 		t.Errorf("completed_at = %v, want nil for a checkout nobody finished", got.CompletedAt)
 	}
 }
+
+// The drawer shows each address as the customer gave it. Unlike the name and
+// phone, nothing is borrowed from the other one: a billing address with only a
+// name stays that way rather than picking up the shipping city.
+func TestAddressesAreKeptWholeAndApart(t *testing.T) {
+	got := toAbandonedCheckout(abandonedNode{
+		BillingAddress:  &abandonedAddress{FirstName: "Thanduri", LastName: "Sampath"},
+		ShippingAddress: &abandonedAddress{FirstName: "Thanduri", Address1: "12 MG Road", City: "Hyderabad", Zip: "500001", Country: "India"},
+	})
+
+	if got.ShippingAddress == nil || got.ShippingAddress.Address1 != "12 MG Road" || got.ShippingAddress.Zip != "500001" {
+		t.Fatalf("shipping address = %+v, want it whole", got.ShippingAddress)
+	}
+	if got.BillingAddress == nil || got.BillingAddress.City != "" {
+		t.Errorf("billing address = %+v, want its own blank city, not shipping's", got.BillingAddress)
+	}
+}
+
+// Lists the page iterates are [] rather than null, and a nullable tax total
+// is blank rather than a crash.
+func TestAbsentListsAndTaxComeBackEmpty(t *testing.T) {
+	got := toAbandonedCheckout(abandonedNode{})
+
+	if got.DiscountCodes == nil || got.Attributes == nil {
+		t.Errorf("discount codes = %v, attributes = %v; want empty slices, not nil", got.DiscountCodes, got.Attributes)
+	}
+	if got.TaxAmount != "" {
+		t.Errorf("tax = %q, want blank when Shopify sends no tax set", got.TaxAmount)
+	}
+	if got.ShippingAddress != nil {
+		t.Errorf("shipping address = %+v, want nil when none was given", got.ShippingAddress)
+	}
+}
