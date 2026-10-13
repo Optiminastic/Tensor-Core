@@ -20,6 +20,7 @@ package httpapi
 //     guessed token must learn as little as possible beyond that.
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -344,11 +345,37 @@ func (s *Server) publicPersonalisationModel(c *gin.Context) {
 	}
 	defer func() { _ = obj.Body.Close() }()
 
+	model, err := io.ReadAll(io.LimitReader(obj.Body, maxRecolourBytes))
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the preview.")
+		return
+	}
+
+	// THE HEART GOES IN HERE AND NOWHERE ELSE.
+	//
+	// A one- or two-heart plank is printed without its hearts - they are
+	// separate pieces fitted into the margins the template reserves - so the
+	// stored model has a blank end, and a customer asked to approve that is
+	// being shown something they did not order. Composed on the way out, so
+	// the file on disk stays the file the floor slices.
+	//
+	// Read rather than streamed for the same reason recolourModel reads: the
+	// bytes have to be understood, not forwarded. Bounded by the same limit.
+	hearts := heartsForPreview(job, row.RenderParams)
+	withHearts := heartedPreview(model, hearts)
+	if hearts > 0 && len(withHearts) == len(model) {
+		// Not fatal - the preview is still a true picture of what prints - but
+		// it is the whole reason this product reserves that margin, so a plank
+		// that quietly lost its heart should be findable.
+		obs.FromContext(ctx).Warn("personalisation: the preview kept no heart",
+			"job", job.ID, "hearts", hearts, "content_type", row.ContentType)
+	}
+
 	// Inline, not an attachment: the browser hands these bytes to a 3D viewer
 	// rather than to the downloads folder.
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=60")
-	c.DataFromReader(http.StatusOK, obj.Size, row.ContentType, obj.Body, nil)
+	c.Data(http.StatusOK, row.ContentType, withHearts)
 }
 
 // --- confirming ----------------------------------------------------------------
