@@ -122,6 +122,19 @@ func Start(
 	// The rule is one owner: the process that holds the credentials is the
 	// process that schedules the sweep and the process that runs it.
 
+	// The customer's own check on an arriving order, and the sweep that lets
+	// the order go again when their window closes.
+	//
+	// REGISTERED HERE, unlike the win-back. That worker is deliberately
+	// elsewhere because it holds credentials no pipeline process has; this one
+	// is triggered by the order import that happens in this very process, and
+	// a queue registered nowhere is a queue whose jobs sit unworked - which is
+	// indistinguishable from the feature being switched off. Extracting it to
+	// its own container later is a deployment move, and the day it happens the
+	// queue has to move with it.
+	river.AddWorker(workers, httpapi.NewPersonalisationLinkWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewPersonalisationExpiryWorker(server, logger))
+
 	fleetSync := time.Duration(cfg.FleetSyncIntervalSeconds) * time.Second
 	if fleetSync > 0 {
 		river.AddWorker(workers, httpapi.NewFleetSyncWorker(
@@ -154,6 +167,10 @@ func Start(
 			// upserts, and two running together would race to write the same
 			// rows for no gain - Shopify is the bottleneck, not Tensor.
 			production.OrderSyncQueueName: {MaxWorkers: 1},
+			// One at a time. This queue messages customers, and the cost of
+			// getting concurrency wrong is several strangers' phones buzzing
+			// at once from a burst nobody intended.
+			production.PersonalisationLinkQueueName: {MaxWorkers: 1},
 		},
 		Workers:      workers,
 		Logger:       logger,
@@ -168,6 +185,7 @@ func Start(
 		production.NewBatchPlanEnqueuer(client, debounce),
 	)
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(client))
+	server.EnablePersonalisationCheck(production.NewPersonalisationLinkEnqueuer(client))
 	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(client, debounce))
 	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(client))
 	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(client))
@@ -242,6 +260,19 @@ func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*riv
 	// would hand the tick to a process with neither the credentials nor the
 	// consent switches, which is how it came to be scheduled nowhere at all.
 	// cmd/winbackworker ticks for itself.
+
+	// The personalisation window, closed every minute.
+	//
+	// UNCONDITIONAL, and before the fleet-sync early return. This is the only
+	// thing that releases a held job, so it must not be switchable off by an
+	// unrelated setting about printers - and it must keep running even after
+	// the feature itself is turned off, or the orders held by the last link
+	// sent would wait forever.
+	jobs = append(jobs, river.NewPeriodicJob(
+		river.PeriodicInterval(time.Minute),
+		production.PeriodicExpirePersonalisationConstructor(),
+		&river.PeriodicJobOpts{RunOnStart: true},
+	))
 
 	if fleetSync <= 0 {
 		return jobs // FLEET_SYNC_INTERVAL_SECONDS=0 opts out entirely

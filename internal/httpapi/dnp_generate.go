@@ -692,19 +692,39 @@ func (s *Server) confirmGeneratedPersonalisation(
 ) error {
 	now := time.Now().UTC()
 	by := "system"
-	if _, err := s.store.Q.ValidateProductionJobPersonalisation(
-		ctx, gen.ValidateProductionJobPersonalisationParams{
-			ID:                         jobID,
-			NameConfirmed:              true,
-			PhotoConfirmed:             true,
-			FontConfirmed:              true,
-			ColourConfirmed:            true,
-			VariantConfirmed:           true,
-			CustomerApprovalReceived:   true,
-			PersonalisationStatus:      production.PersonalisationValidated,
-			PersonalisationValidatedBy: &by,
-			PersonalisationValidatedAt: db.Timestamptz(&now),
-		}); err != nil {
+
+	// THE CUSTOMER GETS FIRST LOOK, when there is one to give.
+	//
+	// Rendering proves the model was built from the order's own inputs, which
+	// is what this function has always certified. It does not prove the inputs
+	// were right - that is the one thing only the person whose name is being
+	// engraved can say - so when their window is open the job waits for them
+	// instead of going straight to the floor.
+	//
+	// No open link means the old behaviour exactly: the feature switched off,
+	// a send that failed, a customer with no phone, or a window that has
+	// already closed. A job must never be held by a check that cannot happen.
+	params := gen.ValidateProductionJobPersonalisationParams{
+		ID:                         jobID,
+		NameConfirmed:              true,
+		PhotoConfirmed:             true,
+		FontConfirmed:              true,
+		ColourConfirmed:            true,
+		VariantConfirmed:           true,
+		CustomerApprovalReceived:   true,
+		PersonalisationStatus:      production.PersonalisationValidated,
+		PersonalisationValidatedBy: &by,
+		PersonalisationValidatedAt: db.Timestamptz(&now),
+	}
+	if _, err := s.store.Q.GetOpenPersonalisationLinkForJob(ctx, jobID); err == nil {
+		params.PersonalisationStatus = production.PersonalisationAwaitingCustomer
+		// Left unstamped on purpose: nobody has validated this yet. Writing
+		// "system" here would make the job page claim it was checked at a
+		// moment when the customer had not yet opened the message.
+		params.PersonalisationValidatedBy = nil
+		params.PersonalisationValidatedAt = db.Timestamptz(nil)
+	}
+	if _, err := s.store.Q.ValidateProductionJobPersonalisation(ctx, params); err != nil {
 		return fmt.Errorf("confirm personalisation on job %s: %w", jobID, err)
 	}
 

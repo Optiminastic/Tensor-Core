@@ -584,3 +584,42 @@ func (e *PersonalisationLinkEnqueuer) EnqueueTx(
 	_, err := e.client.InsertTx(ctx, tx, args, nil)
 	return err
 }
+
+// ExpirePersonalisationLinksArgs closes every window whose time is up.
+//
+// No payload: like a replan, it always considers the whole set, so there is
+// nothing per-trigger to carry - which is also what lets River collapse a
+// burst of ticks onto one run.
+type ExpirePersonalisationLinksArgs struct{}
+
+func (ExpirePersonalisationLinksArgs) Kind() string { return "expire_personalisation_links" }
+
+func (ExpirePersonalisationLinksArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue: PersonalisationLinkQueueName,
+		UniqueOpts: river.UniqueOpts{
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending, rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable, rivertype.JobStateRunning,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
+
+// PeriodicExpirePersonalisationConstructor builds the recurring sweep that
+// releases jobs once their customer's window has closed.
+//
+// THIS IS WHAT MAKES "EXPIRY PROCEEDS WITH SHOPIFY'S VALUES" TRUE. Without it
+// running, a job whose customer never answered waits for a confirmation that
+// is never coming, and the order never prints. It is registered in the
+// workerset - which the elected River leader runs - rather than beside the
+// sender, because a periodic job registered only in a follower never fires at
+// all.
+func PeriodicExpirePersonalisationConstructor() func() (river.JobArgs, *river.InsertOpts) {
+	return func() (river.JobArgs, *river.InsertOpts) {
+		return ExpirePersonalisationLinksArgs{}, &river.InsertOpts{
+			Queue: PersonalisationLinkQueueName,
+		}
+	}
+}

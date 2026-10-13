@@ -252,6 +252,10 @@ func (s *Server) Router() *gin.Engine {
 	s.registerVoiceCalls(r)
 	s.registerCallLogs(r)
 	s.registerMessageLogs(r)
+	// UNAUTHENTICATED, and the only group here that is. A customer confirming
+	// their own order has no account; the random token in the path is the
+	// whole authority. See personalisation_public.go.
+	s.registerPersonalisationPublic(r)
 	s.registerShipments(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)

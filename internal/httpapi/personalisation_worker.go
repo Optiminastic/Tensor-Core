@@ -247,3 +247,75 @@ func (w *PersonalisationLinkWorker) settle(
 			"id", id, "status", status, "error", err)
 	}
 }
+
+// --- closing the window ------------------------------------------------------
+
+// expiredLinkBatch bounds one sweep. A backlog after an outage must not become
+// one enormous transaction, and the next tick is a minute away.
+const expiredLinkBatch = 200
+
+// PersonalisationExpiryWorker releases jobs whose customer's window has closed.
+//
+// THIS IS WHAT MAKES THE WHOLE FEATURE SAFE TO SHIP. Everything else holds
+// work back; this is the only thing that lets it go again. If it stops running,
+// every order whose customer did not answer waits forever for a confirmation
+// that is never coming - so it is registered where the River leader will run
+// it, and it treats "the customer said nothing" exactly as it treats "the
+// customer said yes".
+type PersonalisationExpiryWorker struct {
+	river.WorkerDefaults[production.ExpirePersonalisationLinksArgs]
+	server *Server
+	logger *slog.Logger
+}
+
+func NewPersonalisationExpiryWorker(s *Server, logger *slog.Logger) *PersonalisationExpiryWorker {
+	return &PersonalisationExpiryWorker{server: s, logger: logger}
+}
+
+func (w *PersonalisationExpiryWorker) Work(
+	ctx context.Context, _ *river.Job[production.ExpirePersonalisationLinksArgs],
+) error {
+	return w.Sweep(ctx)
+}
+
+// Sweep closes every window whose time is up. Exported so an operator can ask
+// for one now, and so a test can drive it without River.
+func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
+	due, err := w.server.store.Q.ListExpiredPersonalisationLinks(ctx, expiredLinkBatch)
+	if err != nil {
+		return fmt.Errorf("list expired personalisation links: %w", err)
+	}
+	for _, link := range due {
+		// Released FIRST, closed second. The other order would leave a window
+		// in which the link reads 'expired' while its jobs still wait for a
+		// customer who can no longer reach them - and nothing would ever come
+		// back for those jobs, because the next sweep would not find the link.
+		w.release(ctx, link.OrderID, "system (window closed)")
+		if err := w.server.store.Q.ExpirePersonalisationLink(ctx, link.ID); err != nil {
+			w.logger.Error("personalisation: could not close the window",
+				"order", link.OrderID, "error", err)
+			continue
+		}
+		w.logger.Info("personalisation window closed, the order proceeds as placed",
+			"brand", link.BrandSlug, "order", link.OrderID)
+	}
+	if len(due) > 0 {
+		// The planner is not told per link: one trigger after the batch is
+		// the same work and a fraction of the churn.
+		w.server.triggerBatchPlan(ctx)
+	}
+	return nil
+}
+
+// release lets an order's held jobs through to batching.
+func (w *PersonalisationExpiryWorker) release(
+	ctx context.Context, orderID uuid.UUID, by string,
+) {
+	if err := w.server.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
+		gen.ReleaseOrderPersonalisationToPrintParams{
+			OrderID: &orderID, ValidatedBy: &by,
+		}); err != nil {
+		w.logger.Error("personalisation: could not release the order's jobs",
+			"order", orderID, "error", err)
+	}
+}
