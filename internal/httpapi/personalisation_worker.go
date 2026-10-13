@@ -60,6 +60,49 @@ func (w *PersonalisationLinkWorker) Work(
 	return w.send(ctx, job.Args.OrderID)
 }
 
+// brandFor works out whose shop an order came from.
+//
+// THE OBVIOUS JOIN IS NOT ENOUGH, and measuring it is the only way anybody
+// would know. orders.shop_connection_id points at a brand_connections row, and
+// reconnecting Shopify REPLACES that row with a new id - so every order
+// imported before the reconnect points at a connection that no longer exists.
+// On this database that is all of them: 202 orders carry a connection id and
+// not one of them resolves, because the shop was reconnected after they
+// arrived. Relying on the join alone would mean this feature silently never
+// fired, with "the order has no brand" in the log and nothing to suggest the
+// log was wrong.
+//
+// So the join is tried first - it is exact when it works, and it is the only
+// thing that can be right on a multi-brand install - and the fallback is the
+// single connected Shopify brand. With exactly one, there is no ambiguity to
+// resolve. With several, an orphaned order genuinely cannot be attributed and
+// is refused rather than guessed at: messaging the wrong shop's customer about
+// an order they did not place is worse than not messaging anybody.
+func (w *PersonalisationLinkWorker) brandFor(
+	ctx context.Context, orderID uuid.UUID,
+) (string, error) {
+	if slug, err := w.server.store.Q.GetOrderBrandSlug(ctx, orderID); err == nil {
+		if trimmed := strings.TrimSpace(slug); trimmed != "" {
+			return trimmed, nil
+		}
+	}
+
+	slugs, err := w.server.store.Q.ListConnectedShopifyBrandSlugs(ctx)
+	if err != nil {
+		return "", fmt.Errorf("the connected brands could not be read")
+	}
+	switch len(slugs) {
+	case 0:
+		return "", fmt.Errorf("no brand has Shopify connected")
+	case 1:
+		return slugs[0], nil
+	default:
+		return "", fmt.Errorf(
+			"this order's connection is gone and %d brands are connected, so it cannot be attributed",
+			len(slugs))
+	}
+}
+
 // skipReason says why an order is not being asked about, or "" when it is.
 //
 // A string rather than a bool so the log line names the rule. "No link was
@@ -75,10 +118,10 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		return nil
 	}
 
-	slug, err := w.server.store.Q.GetOrderBrandSlug(ctx, orderID)
-	if err != nil || strings.TrimSpace(slug) == "" {
-		w.logger.Info("personalisation: the order has no brand",
-			"order", order.OrderNumber)
+	slug, err := w.brandFor(ctx, orderID)
+	if err != nil {
+		w.logger.Info("personalisation: not asking",
+			"order", order.OrderNumber, "reason", err.Error())
 		return nil
 	}
 

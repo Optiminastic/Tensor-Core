@@ -69,6 +69,10 @@ type publicItemResponse struct {
 	// rather than "1 of 1".
 	UnitIndex int `json:"unit_index"`
 	UnitCount int `json:"unit_count"`
+	// Part is which piece of a multi-part product this is - a Soulmate Combo
+	// prints as a plank, a rose and a keychain. Empty for a product that is
+	// one piece.
+	Part string `json:"part"`
 	// ModelReady says whether there is something to show yet. The link is sent
 	// the moment the order lands and a render is 20-45 seconds behind it, so
 	// "not yet" is the ordinary first answer rather than a fault.
@@ -135,7 +139,7 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 			// nothing for the customer to check.
 			continue
 		}
-		out.Items = append(out.Items, publicItem(j))
+		out.Items = append(out.Items, publicItem(j, s.editableFields(ctx, j)))
 	}
 	numberSiblings(out.Items)
 	c.JSON(http.StatusOK, out)
@@ -149,24 +153,41 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 //
 // Done after the list is built, in the order it is drawn, so the numbering
 // matches what the customer reads down the screen.
+// PART ROLES ARE NOT UNITS, and a live order proved it. A Soulmate Combo
+// prints from three design files - a plank, a rose and a keychain - so one
+// combo arrives as three jobs sharing a product name. Counting those as
+// repeats labelled a single combo "1 of 3", "2 of 3", "3 of 3", which tells
+// the customer they bought three of something they bought one of.
+//
+// So siblings are counted within a part: three combos are three planks, three
+// roses and three keychains, and each set of three is numbered 1-3 while the
+// three pieces of one combo are not numbered at all.
 func numberSiblings(items []publicItemResponse) {
-	counts := make(map[string]int, len(items))
-	for _, item := range items {
-		counts[item.ProductName]++
+	// A struct key, not a joined string: a separator has to be a character
+	// that can appear in neither a product name nor a part, and there is no
+	// such character worth betting on.
+	type sibling struct{ product, part string }
+	key := func(item publicItemResponse) sibling {
+		return sibling{item.ProductName, item.Part}
 	}
-	seen := make(map[string]int, len(items))
+
+	counts := make(map[sibling]int, len(items))
+	for _, item := range items {
+		counts[key(item)]++
+	}
+	seen := make(map[sibling]int, len(items))
 	for i := range items {
-		name := items[i].ProductName
-		if counts[name] < 2 {
+		k := key(items[i])
+		if counts[k] < 2 {
 			continue
 		}
-		seen[name]++
-		items[i].UnitIndex = seen[name]
-		items[i].UnitCount = counts[name]
+		seen[k]++
+		items[i].UnitIndex = seen[k]
+		items[i].UnitCount = counts[k]
 	}
 }
 
-func publicItem(j gen.ProductionJob) publicItemResponse {
+func publicItem(j gen.ProductionJob, registry map[string]bool) publicItemResponse {
 	item := publicItemResponse{
 		JobID:       j.ID.String(),
 		JobNumber:   j.JobNumber,
@@ -174,6 +195,7 @@ func publicItem(j gen.ProductionJob) publicItemResponse {
 		Quantity:    int(j.Quantity),
 		Colour:      deref(j.PersonalisationColour),
 		ModelReady:  j.PrintFileID != nil,
+		Part:        partLabel(j),
 		Fields:      make([]publicFieldResponse, 0, 4),
 	}
 	if item.Colour == "" {
@@ -190,7 +212,7 @@ func publicItem(j gen.ProductionJob) publicItemResponse {
 			continue
 		}
 		item.Fields = append(item.Fields, publicFieldResponse{
-			Label: p.Name, Value: p.Value, Editable: editableProperty(p.Name),
+			Label: p.Name, Value: p.Value, Editable: canEdit(registry, p.Name),
 		})
 	}
 	return item
@@ -218,6 +240,29 @@ func colourHexFor(name string) string {
 		return strings.ToUpper(hex)
 	}
 	return ""
+}
+
+// partLabel names the piece, for a product that prints as several.
+//
+// Empty for the default role, so a one-piece product says nothing rather than
+// "body" - a word that means something to the floor and nothing to a customer.
+func partLabel(j gen.ProductionJob) string {
+	role := strings.TrimSpace(j.PartRole)
+	if role == "" || strings.EqualFold(role, "body") {
+		return ""
+	}
+	// The registry stores these as identifiers - dnp_plank, heart_keychain -
+	// which are the floor's words and the template's. A customer reading
+	// "Heart_keychain" is being shown a database value.
+	words := strings.FieldsFunc(role, func(r rune) bool { return r == '_' || r == '-' })
+	for i, w := range words {
+		if i == 0 && w != "" {
+			words[i] = strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
+			continue
+		}
+		words[i] = strings.ToLower(w)
+	}
+	return strings.Join(words, " ")
 }
 
 func secondsUntil(t time.Time) int {

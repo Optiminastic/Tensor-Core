@@ -13,6 +13,7 @@ package httpapi
 // recognise as editable text is shown and left alone.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -57,9 +58,67 @@ var editableKeys = map[string]bool{
 	"keychain name":        true,
 }
 
-// editableProperty reports whether a customer may change this field.
+// editableProperty reports whether a customer may change this field, from the
+// hardcoded list alone.
+//
+// The fallback, for products the registry does not describe - DNP is still on
+// the hardcoded render path and has no product_field_maps rows at all.
 func editableProperty(label string) bool {
 	return editableKeys[personalise.NormaliseKey(label)]
+}
+
+// editableFields asks the registry which of a job's properties the model
+// actually reads.
+//
+// THE HARDCODED LIST IS NOT ENOUGH, and only real data showed it. It was
+// written from the plank's own key lists - "step 4 first name", "rose name" -
+// and a real Soulmate Combo asks "STEP 2 - First Name-", "STEP 4 - Name On 3D
+// Rose", "STEP 5 - Name On Heart Keychain". Not one of them matched, so every
+// field on a live order came back read-only: a page that looks like it works
+// and lets nobody change anything.
+//
+// product_field_maps is the right source because it is the same table the
+// RENDERER matches on, so a field editable here is one the model will pick up.
+// Numeric and fixed-value fields are excluded: a number is a dimension or a
+// count rather than a word, and a fixed value is the shop's decision, not the
+// customer's.
+//
+// Returns nil when the product is not in the registry, and the caller falls
+// back to the hardcoded list.
+func (s *Server) editableFields(ctx context.Context, job gen.ProductionJob) map[string]bool {
+	sku := strings.TrimSpace(deref(job.Sku))
+	if sku == "" {
+		return nil
+	}
+	product, err := s.store.Q.FindProductBySKU(ctx, sku)
+	if err != nil {
+		return nil
+	}
+	rows, err := s.store.Q.ListProductFieldMaps(ctx, gen.ListProductFieldMapsParams{
+		ProductID: product.ID, Role: partRoleOf(job),
+	})
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	out := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if r.ValueType == "number" || strings.TrimSpace(deref(r.FixedValue)) != "" {
+			continue
+		}
+		// Stored already normalised (migration 0079), and normalised again on
+		// the way in, so the two sides cannot drift.
+		out[personalise.NormaliseKey(r.PropertyKey)] = true
+	}
+	return out
+}
+
+// canEdit answers for one field, registry first and the hardcoded list second.
+func canEdit(registry map[string]bool, label string) bool {
+	if registry != nil {
+		return registry[personalise.NormaliseKey(label)]
+	}
+	return editableProperty(label)
 }
 
 // --- the request --------------------------------------------------------------
@@ -91,7 +150,7 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 	}
 
 	current, _ := jobLineProperties(job)
-	updated, changed, err := applyCustomerEdit(current, req.Fields)
+	updated, changed, err := applyCustomerEdit(current, req.Fields, s.editableFields(ctx, job))
 	if err != nil {
 		detail(c, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -172,13 +231,13 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 // answered the questions in and the page renders it that way. Rebuilding the
 // list from the submitted map would reorder it by whatever the browser sent.
 func applyCustomerEdit(
-	current []production.LineProp, fields map[string]string,
+	current []production.LineProp, fields map[string]string, registry map[string]bool,
 ) (updated []production.LineProp, changed bool, err error) {
 	updated = make([]production.LineProp, 0, len(current))
 	for _, p := range current {
 		value, submitted := fields[p.Name]
 		switch {
-		case !submitted, p.Hidden(), !editableProperty(p.Name):
+		case !submitted, p.Hidden(), !canEdit(registry, p.Name):
 			// Not offered, or not editable. Kept exactly as it was - a field
 			// the page did not let them change must not change because a
 			// request said so.

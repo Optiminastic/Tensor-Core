@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Optiminastic/tensor-core/internal/config"
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -50,7 +51,7 @@ func TestAnUneditableFieldIsIgnoredEvenIfSubmitted(t *testing.T) {
 	updated, changed, err := applyCustomerEdit(current, map[string]string{
 		"STEP 4 - First Name": "ARJUN",
 		"Hearts":              "99",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestTheAnswerOrderIsKept(t *testing.T) {
 	// renders it that way. Rebuilding from the submitted map would reorder it
 	// by whatever the browser happened to send.
 	current := props("Left Name", "A", "Right Name", "B", "Hearts", "1")
-	updated, _, err := applyCustomerEdit(current, map[string]string{"Right Name": "C"})
+	updated, _, err := applyCustomerEdit(current, map[string]string{"Right Name": "C"}, nil)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestTheAnswerOrderIsKept(t *testing.T) {
 func TestAnEmptyValueIsRefused(t *testing.T) {
 	// Meta's template would refuse it, the model would engrave nothing, and
 	// the customer would not know until it arrived blank.
-	_, _, err := applyCustomerEdit(props("Left Name", "A"), map[string]string{"Left Name": "   "})
+	_, _, err := applyCustomerEdit(props("Left Name", "A"), map[string]string{"Left Name": "   "}, nil)
 	if err == nil {
 		t.Fatal("an empty name was accepted")
 	}
@@ -95,7 +96,7 @@ func TestATooLongNameIsRefusedInTheFormNotInTheRender(t *testing.T) {
 	// The plank caps at twelve. Finding out in a render that fails thirty
 	// seconds later gives an error naming neither the field nor the reason.
 	_, _, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": "ABCDEFGHIJKLMNOP"})
+		map[string]string{"Left Name": "ABCDEFGHIJKLMNOP"}, nil)
 	if err == nil {
 		t.Fatal("a sixteen-character name was accepted")
 	}
@@ -105,7 +106,7 @@ func TestLengthIsCountedInCharactersNotBytes(t *testing.T) {
 	// "आरव" is three characters and nine bytes. Counting bytes would refuse
 	// names that fit perfectly well.
 	updated, changed, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": "आरवकुमार"})
+		map[string]string{"Left Name": "आरवकुमार"}, nil)
 	if err != nil {
 		t.Fatalf("a short Devanagari name was refused: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestSubmittingTheSameValueChangesNothing(t *testing.T) {
 	// the original snapshot and every job a customer merely opened would
 	// read as "Changed" on the floor's queue.
 	_, changed, err := applyCustomerEdit(props("Left Name", "AARAV"),
-		map[string]string{"Left Name": "AARAV"})
+		map[string]string{"Left Name": "AARAV"}, nil)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestWhitespaceIsFlattenedBeforeItIsCompared(t *testing.T) {
 	// also be refused downstream, and more to the point it is not what the
 	// customer meant to type.
 	updated, _, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": " AARAV \n KUMAR "})
+		map[string]string{"Left Name": " AARAV \n KUMAR "}, nil)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestHiddenShopifyPlumbingIsNeverTouched(t *testing.T) {
 	// `_`-prefixed keys are the storefront's own state, not something a
 	// customer typed.
 	current := props("_gift_wrap_id", "abc", "Left Name", "A")
-	updated, _, err := applyCustomerEdit(current, map[string]string{"_gift_wrap_id": "hacked"})
+	updated, _, err := applyCustomerEdit(current, map[string]string{"_gift_wrap_id": "hacked"}, nil)
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -237,5 +238,64 @@ func TestRepeatsOfOneProductAreNumberedForTheCustomer(t *testing.T) {
 	// The only Soulmate says nothing rather than "1 of 1".
 	if items[1].UnitIndex != 0 || items[1].UnitCount != 0 {
 		t.Errorf("lone item = %d of %d, want unnumbered", items[1].UnitIndex, items[1].UnitCount)
+	}
+}
+
+func TestTheThreePiecesOfOneComboAreNotThreeCombos(t *testing.T) {
+	// A live order proved this one. A Soulmate Combo prints from three design
+	// files - a plank, a rose and a keychain - so one combo arrives as three
+	// jobs sharing a product name. Counting those as repeats told the
+	// customer they had bought three of something they bought one of.
+	items := []publicItemResponse{
+		{ProductName: "Soulmate Combo", Part: ""},
+		{ProductName: "Soulmate Combo", Part: "Rose"},
+		{ProductName: "Soulmate Combo", Part: "Keychain"},
+	}
+	numberSiblings(items)
+	for i, item := range items {
+		if item.UnitCount != 0 {
+			t.Errorf("piece %d was numbered %d of %d - one combo is not three",
+				i, item.UnitIndex, item.UnitCount)
+		}
+	}
+}
+
+func TestThreeCombosAreNumberedWithinEachPiece(t *testing.T) {
+	// Three combos are three planks, three roses and three keychains. Each
+	// set is numbered 1-3 so the customer can tell which rose goes with which
+	// plank.
+	items := []publicItemResponse{
+		{ProductName: "Soulmate Combo", Part: ""},
+		{ProductName: "Soulmate Combo", Part: "Rose"},
+		{ProductName: "Soulmate Combo", Part: ""},
+		{ProductName: "Soulmate Combo", Part: "Rose"},
+	}
+	numberSiblings(items)
+	if items[0].UnitIndex != 1 || items[0].UnitCount != 2 {
+		t.Errorf("first plank = %d of %d, want 1 of 2", items[0].UnitIndex, items[0].UnitCount)
+	}
+	if items[1].UnitIndex != 1 || items[1].UnitCount != 2 {
+		t.Errorf("first rose = %d of %d, want 1 of 2", items[1].UnitIndex, items[1].UnitCount)
+	}
+	if items[2].UnitIndex != 2 {
+		t.Errorf("second plank = %d, want 2", items[2].UnitIndex)
+	}
+}
+
+func TestThePartIsNamedInWordsNotIdentifiers(t *testing.T) {
+	// The registry stores these as identifiers - the floor's words and the
+	// template's. A customer reading "Heart_keychain" is being shown a
+	// database value.
+	cases := map[string]string{
+		"heart_keychain": "Heart keychain",
+		"rose":           "Rose",
+		"dnp_plank":      "Dnp plank",
+		"body":           "",
+		"":               "",
+	}
+	for role, want := range cases {
+		if got := partLabel(gen.ProductionJob{PartRole: role}); got != want {
+			t.Errorf("partLabel(%q) = %q, want %q", role, got, want)
+		}
 	}
 }

@@ -225,6 +225,37 @@ func (q *Queries) GetPersonalisationLinkByTokenHash(ctx context.Context, tokenHa
 	return i, err
 }
 
+const listConnectedShopifyBrandSlugs = `-- name: ListConnectedShopifyBrandSlugs :many
+SELECT brand_slug FROM brand_connections
+WHERE provider = 'shopify' AND status = 'connected'
+ORDER BY brand_slug
+`
+
+// Brands with a live Shopify connection, names only.
+//
+// Slim on purpose: ListConnectedShopifyBrands returns access tokens because
+// its caller's next act is to pull orders with them, and this caller has no
+// business holding one - it only needs to know whose shop this is.
+func (q *Queries) ListConnectedShopifyBrandSlugs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listConnectedShopifyBrandSlugs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var brand_slug string
+		if err := rows.Scan(&brand_slug); err != nil {
+			return nil, err
+		}
+		items = append(items, brand_slug)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExpiredPersonalisationLinks = `-- name: ListExpiredPersonalisationLinks :many
 SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
 WHERE status IN ('sent', 'opened')

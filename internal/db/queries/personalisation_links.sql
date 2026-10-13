@@ -127,3 +127,13 @@ SELECT c.brand_slug
 FROM orders o
 JOIN brand_connections c ON c.id = o.shop_connection_id
 WHERE o.id = sqlc.arg('order_id');
+
+-- name: ListConnectedShopifyBrandSlugs :many
+-- Brands with a live Shopify connection, names only.
+--
+-- Slim on purpose: ListConnectedShopifyBrands returns access tokens because
+-- its caller's next act is to pull orders with them, and this caller has no
+-- business holding one - it only needs to know whose shop this is.
+SELECT brand_slug FROM brand_connections
+WHERE provider = 'shopify' AND status = 'connected'
+ORDER BY brand_slug;
