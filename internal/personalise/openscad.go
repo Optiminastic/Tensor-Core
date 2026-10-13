@@ -62,6 +62,10 @@ type Renderer struct {
 	assetDir string
 	timeout  time.Duration
 	loadTmpl TemplateLoader
+	// version is the binary's own version, read once and shared with every
+	// clone WithTemplateLoader makes. A pointer so the clone stays a plain
+	// struct copy. See version.go.
+	version *versionCache
 }
 
 // WithTemplateLoader returns a Renderer that prefers uploaded templates.
@@ -85,7 +89,10 @@ func NewRenderer(bin, assetDir string, timeout time.Duration) *Renderer {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Renderer{bin: bin, assetDir: assetDir, timeout: timeout}
+	return &Renderer{
+		bin: bin, assetDir: assetDir, timeout: timeout,
+		version: &versionCache{},
+	}
 }
 
 // Available reports whether OpenSCAD can actually be run.
@@ -230,6 +237,14 @@ func (r *Renderer) render(
 ) ([]byte, error) {
 	source, err := r.templateSource(ctx, template)
 	if err != nil {
+		return nil, err
+	}
+
+	// BEFORE anything is rendered. A template this binary cannot build does
+	// not fail - it draws the template's own "wrong version" placard and
+	// exits 0, which Tensor stored and batched for a printer once already.
+	// See version.go.
+	if err := r.checkRendererVersion(ctx, template, source); err != nil {
 		return nil, err
 	}
 
