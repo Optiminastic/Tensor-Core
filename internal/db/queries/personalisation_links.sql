@@ -115,3 +115,15 @@ JOIN production_jobs j ON j.order_id = l.order_id
 WHERE j.id = sqlc.arg('job_id')
   AND l.status IN ('sent', 'opened')
   AND l.expires_at > now();
+
+-- name: GetOrderBrandSlug :one
+-- Which brand an order belongs to.
+--
+-- Through the connection it was imported on, because that is the only link an
+-- order has to a brand - orders carry no brand_slug of their own, and the
+-- customer's check needs one to resolve that brand's WhatsApp credentials and
+-- its watermark.
+SELECT c.brand_slug
+FROM orders o
+JOIN brand_connections c ON c.id = o.shop_connection_id
+WHERE o.id = sqlc.arg('order_id');

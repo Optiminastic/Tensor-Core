@@ -151,6 +151,26 @@ func (q *Queries) GetOpenPersonalisationLinkForJob(ctx context.Context, jobID uu
 	return i, err
 }
 
+const getOrderBrandSlug = `-- name: GetOrderBrandSlug :one
+SELECT c.brand_slug
+FROM orders o
+JOIN brand_connections c ON c.id = o.shop_connection_id
+WHERE o.id = $1
+`
+
+// Which brand an order belongs to.
+//
+// Through the connection it was imported on, because that is the only link an
+// order has to a brand - orders carry no brand_slug of their own, and the
+// customer's check needs one to resolve that brand's WhatsApp credentials and
+// its watermark.
+func (q *Queries) GetOrderBrandSlug(ctx context.Context, orderID uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getOrderBrandSlug, orderID)
+	var brand_slug string
+	err := row.Scan(&brand_slug)
+	return brand_slug, err
+}
+
 const getPersonalisationLinkByOrder = `-- name: GetPersonalisationLinkByOrder :one
 SELECT id, brand_slug, order_id, token_hash, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE order_id = $1
 `

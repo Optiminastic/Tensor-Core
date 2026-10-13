@@ -268,6 +268,36 @@ type Settings struct {
 	// point at a different site; see internal/httpapi/winback_link.go.
 	WinbackLinkHost string
 
+	// --- the personalisation check -----------------------------------------
+
+	// PersonalisationCheckEnabled is CONSENT, not configuration, and it
+	// defaults to false like every other switch that reaches a customer.
+	//
+	// With it off, an arriving order still works out whether it would have
+	// asked and logs who it would have asked, and nothing is sent and no job
+	// is held. That is how the rules get checked against a real store before
+	// a stranger's phone buzzes.
+	PersonalisationCheckEnabled bool
+	// PersonalisationLinkMinutes is how long the customer has, counted from
+	// the moment the link is ISSUED rather than from when they open it.
+	//
+	// One instant decides both the expiry sweep and the countdown drawn on
+	// the page, so the two cannot disagree - a page promising four minutes
+	// while the window has already closed is worse than a shorter window.
+	PersonalisationLinkMinutes int
+	// PersonalisationOnly is the testing gate: while it names any order,
+	// NOTHING else is contacted whatever the rules allow.
+	//
+	// The same shape as WINBACK_CALL_ONLY and for the same reason - it is
+	// what makes it safe to point this at the live store with one real order.
+	PersonalisationOnly []string
+	// PersonalisationTemplate is the approved WhatsApp template carrying the
+	// link. SEPARATE from the win-back template: this one is a utility
+	// message about an order the customer has already paid for, and
+	// categorising it as marketing would subject it to India's per-recipient
+	// cap, which drops accepted messages silently.
+	PersonalisationTemplate string
+
 	// OpenSCADBin is the OpenSCAD executable used to render personalised
 	// models. A bare name is looked up on PATH; an absolute path is used as
 	// given, which is the normal case on Windows where the installer never
@@ -650,6 +680,10 @@ func Load() Settings {
 		WinbackWhatsAppEnabled:           boolEnvOr("WINBACK_WHATSAPP_ENABLED", false),
 		WinbackWhatsAppMaxPerRun:         intEnvOr("WINBACK_WHATSAPP_MAX_PER_RUN", 10),
 		WinbackShopPath:                  envOr("WINBACK_SHOP_PATH", "#"),
+		PersonalisationCheckEnabled:      boolEnvOr("PERSONALISATION_CHECK_ENABLED", false),
+		PersonalisationLinkMinutes:       intEnvOr("PERSONALISATION_LINK_MINUTES", 30),
+		PersonalisationOnly:              csvEnv("PERSONALISATION_ONLY"),
+		PersonalisationTemplate:          envOr("PERSONALISATION_TEMPLATE_NAME", ""),
 		WinbackLinkHost:                  envOr("WINBACK_LINK_HOST", ""),
 		OpenSCADBin:                      envOr("OPENSCAD_BIN", ""),
 		OpenSCADAssetDir:                 envOr("OPENSCAD_ASSET_DIR", ""),

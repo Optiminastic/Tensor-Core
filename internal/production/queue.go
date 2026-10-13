@@ -518,3 +518,69 @@ func (a WinbackCallsArgs) InsertOpts() river.InsertOpts {
 		},
 	}
 }
+
+// PersonalisationLinkQueueName carries the customer's own check.
+//
+// Its own queue, like the win-back's, so it has an off switch that costs
+// nothing else: stop consuming it and no customer is messaged while orders
+// keep importing, plates keep slicing and the floor keeps printing.
+const PersonalisationLinkQueueName = "personalisation_links"
+
+const personalisationLinkMaxAttempts = 3
+
+// SendPersonalisationLinkArgs asks one order's customer to check what they
+// ordered.
+//
+// Carries the order id and nothing else. The phone number, the Shopify token
+// and the WhatsApp credentials are resolved when the job runs: a River job is
+// a database row that outlives the request, and none of those has any business
+// sitting in one.
+type SendPersonalisationLinkArgs struct {
+	OrderID uuid.UUID `json:"order_id"`
+}
+
+// Kind is River's stable job type name; it must not change once jobs exist.
+func (SendPersonalisationLinkArgs) Kind() string { return "send_personalisation_link" }
+
+// InsertOpts deduplicates per order.
+//
+// The unique index on personalisation_links.order_id is the real defence -
+// two workers racing both insert and one gets no row back - but not racing in
+// the first place is cheaper, and a re-imported order enqueues this again on
+// every sync.
+func (SendPersonalisationLinkArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       PersonalisationLinkQueueName,
+		MaxAttempts: personalisationLinkMaxAttempts,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending, rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable, rivertype.JobStateRunning,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
+}
+
+// PersonalisationLinkEnqueuer inserts the send trigger.
+type PersonalisationLinkEnqueuer struct {
+	client *river.Client[pgx.Tx]
+}
+
+func NewPersonalisationLinkEnqueuer(client *river.Client[pgx.Tx]) *PersonalisationLinkEnqueuer {
+	return &PersonalisationLinkEnqueuer{client: client}
+}
+
+// EnqueueTx inserts on the order's own transaction, beside job creation.
+//
+// The same atomicity argument: commit and the customer will be asked, roll
+// back and the order never existed. An order that imported but whose link was
+// never scheduled is the failure this prevents - it would look identical to a
+// brand with the feature switched off.
+func (e *PersonalisationLinkEnqueuer) EnqueueTx(
+	ctx context.Context, tx pgx.Tx, args SendPersonalisationLinkArgs,
+) error {
+	_, err := e.client.InsertTx(ctx, tx, args, nil)
+	return err
+}

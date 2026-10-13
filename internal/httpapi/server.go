@@ -45,6 +45,13 @@ type Server struct {
 	jobEnqueuer   *production.JobCreationEnqueuer
 	batchEnqueuer *production.BatchPlanEnqueuer
 
+	// personalisationEnqueuer schedules the customer's own check on an
+	// arriving order. Nil until EnablePersonalisationCheck is called, in which
+	// case orders import exactly as they always did and nobody is asked -
+	// which is the correct behaviour for a deployment that has not turned
+	// this on.
+	personalisationEnqueuer *production.PersonalisationLinkEnqueuer
+
 	// orderSyncEnqueuer schedules Shopify order pulls. Nil until
 	// EnableOrderSync is called, in which case the sync endpoint says so rather
 	// than running the pull on the request - see order_sync_worker.go for why
@@ -170,6 +177,12 @@ func (s *Server) EnablePipeline(objects *storage.Client, enqueuer *slicing.Enque
 func (s *Server) EnableProductionQueue(jobs *production.JobCreationEnqueuer, batches *production.BatchPlanEnqueuer) {
 	s.jobEnqueuer = jobs
 	s.batchEnqueuer = batches
+}
+
+// EnablePersonalisationCheck attaches the enqueuer that asks a customer to
+// check an arriving order.
+func (s *Server) EnablePersonalisationCheck(e *production.PersonalisationLinkEnqueuer) {
+	s.personalisationEnqueuer = e
 }
 
 // EnableBatchDispatchQueue attaches the dispatch enqueuer, so creating a full
