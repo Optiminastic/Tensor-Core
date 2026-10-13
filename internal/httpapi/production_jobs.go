@@ -99,18 +99,23 @@ type productionJobResponse struct {
 	PersonalisationPhotoFileID *string         `json:"personalisation_photo_file_id"`
 	PersonalisationValidatedBy *string         `json:"personalisation_validated_by"`
 	PersonalisationValidatedAt *time.Time      `json:"personalisation_validated_at"`
-	ReprintOfJobID             *string         `json:"reprint_of_job_id"`
-	SplitOfJobID               *string         `json:"split_of_job_id"`
-	Held                       bool            `json:"held"`
-	Colours                    []string        `json:"colours"`
-	SupportUsed                *bool           `json:"support_used"`
-	InfillPct                  *float64        `json:"infill_pct"`
-	LeftNozzleMm               *float64        `json:"left_nozzle_mm"`
-	RightNozzleMm              *float64        `json:"right_nozzle_mm"`
-	FlowPct                    *float64        `json:"flow_pct"`
-	QualityMm                  *float64        `json:"quality_mm"`
-	MachineFamily              *string         `json:"machine_family"`
-	IssueReason                *string         `json:"issue_reason"`
+	// PersonalisationChanged says the customer altered something on their own
+	// link. A bare bool, not the values: the list carries hundreds of these
+	// and the values belong to the one row somebody opens. See
+	// GET /production-jobs/:id/personalisation-changes.
+	PersonalisationChanged bool     `json:"personalisation_changed"`
+	ReprintOfJobID         *string  `json:"reprint_of_job_id"`
+	SplitOfJobID           *string  `json:"split_of_job_id"`
+	Held                   bool     `json:"held"`
+	Colours                []string `json:"colours"`
+	SupportUsed            *bool    `json:"support_used"`
+	InfillPct              *float64 `json:"infill_pct"`
+	LeftNozzleMm           *float64 `json:"left_nozzle_mm"`
+	RightNozzleMm          *float64 `json:"right_nozzle_mm"`
+	FlowPct                *float64 `json:"flow_pct"`
+	QualityMm              *float64 `json:"quality_mm"`
+	MachineFamily          *string  `json:"machine_family"`
+	IssueReason            *string  `json:"issue_reason"`
 	// Geometry/slice snapshot taken from the matched design at creation time
 	// (see 0030_job_geometry_snapshot.sql). BboxXMm/YMm/ZMm and ColourCount
 	// are per-unit facts; SupportWeightG/PurgeWeightG are already scaled to
@@ -289,6 +294,9 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
 	}
 	required := j.PersonalisationStatus != production.PersonalisationNotRequired
+	// Null means nothing was ever edited. The light list queries preserve
+	// exactly that distinction while emptying the value itself.
+	changed := len(j.PersonalisationOriginal) > 0
 	stage := production.PipelineStage(production.PipelineStageInput{
 		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
 		QcStatus:        j.QcStatus,
@@ -296,8 +304,9 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
 	})
 	return productionJobResponse{
-		BatchingBlockedReason: batchingBlockedReason(j, colourGatesTheBed),
-		ID:                    j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
+		BatchingBlockedReason:  batchingBlockedReason(j, colourGatesTheBed),
+		PersonalisationChanged: changed,
+		ID:                     j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
 		Status: j.Status, AssemblyStatus: j.AssemblyStatus, FinishingStatus: j.FinishingStatus,
 		QcStatus:        j.QcStatus,
@@ -432,6 +441,10 @@ func (s *Server) registerProductionJobs(r *gin.Engine) {
 	g.PATCH("/:id", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.patchProductionJob)
 	g.POST("/from-order/:order_id", s.guards.RequirePermission(auth.ProductionCreate.Key()), s.createJobsFromOrder)
 	g.POST("/:id/personalisation", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.validatePersonalisation)
+	// What the customer changed on their own link. production:read, not
+	// update: this is something to look at before making the thing, and
+	// everyone on the floor needs it.
+	g.GET("/:id/personalisation-changes", s.guards.RequirePermission(auth.ProductionRead.Key()), s.personalisationChanges)
 	g.POST("/:id/print-file", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.setPrintFile)
 	g.POST("/:id/rerender", s.guards.RequirePermission(auth.ProductionUpdate.Key()), s.rerenderProductionJob)
 	s.registerJobModelUpload(g)

@@ -171,6 +171,11 @@ func Start(
 			// getting concurrency wrong is several strangers' phones buzzing
 			// at once from a burst nobody intended.
 			production.PersonalisationLinkQueueName: {MaxWorkers: 1},
+			// Renders a customer is waiting on, kept off the floor's own pool
+			// so neither can starve the other. Two at a time: enough that a
+			// second customer editing is not stuck behind the first, few
+			// enough that OpenSCAD does not take the box.
+			production.PersonalisationPreviewQueueName: {MaxWorkers: 2},
 		},
 		Workers:      workers,
 		Logger:       logger,

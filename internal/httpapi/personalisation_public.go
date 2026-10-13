@@ -41,6 +41,7 @@ func (s *Server) registerPersonalisationPublic(r *gin.Engine) {
 
 	g.GET("", s.publicPersonalisation)
 	g.GET("/items/:jobID/model", s.publicPersonalisationModel)
+	g.PATCH("/items/:jobID", s.publicPersonalisationEdit)
 	g.POST("/confirm", s.publicPersonalisationConfirm)
 }
 
@@ -158,7 +159,7 @@ func publicItem(j gen.ProductionJob) publicItemResponse {
 			continue
 		}
 		item.Fields = append(item.Fields, publicFieldResponse{
-			Label: p.Name, Value: p.Value, Editable: false,
+			Label: p.Name, Value: p.Value, Editable: editableProperty(p.Name),
 		})
 	}
 	return item

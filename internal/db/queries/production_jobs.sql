@@ -867,3 +867,26 @@ WHERE order_id = sqlc.arg('order_id')
 SELECT * FROM production_jobs
 WHERE order_id = sqlc.arg('order_id')
 ORDER BY created_at, job_number;
+
+-- name: SaveCustomerPersonalisation :execrows
+-- Writes what the customer changed on their own link.
+--
+-- GUARDED ON awaiting_customer, which is the whole safety of the edit path.
+-- It means an edit can only land while that customer's window is open: not
+-- after it closed, not after they confirmed, not on a job somebody in the shop
+-- already validated, and never on a job that has reached a bed. Returning the
+-- row count rather than the row lets the caller tell "refused" from "saved"
+-- without a second read.
+--
+-- personalisation_original is written ONCE. coalesce keeps whatever is already
+-- there, so a second edit cannot overwrite the values the order arrived with -
+-- which would make the customer's own first correction look like what they
+-- bought.
+UPDATE production_jobs
+SET personalisation_properties = sqlc.arg('properties'),
+    personalisation_colour     = sqlc.narg('colour'),
+    colours                    = sqlc.arg('colours'),
+    personalisation_original   = coalesce(personalisation_original, sqlc.arg('original')),
+    updated_at                 = now()
+WHERE id = sqlc.arg('id')
+  AND personalisation_status = 'awaiting_customer';

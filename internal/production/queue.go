@@ -283,6 +283,42 @@ func (e *ModelGenEnqueuer) Enqueue(ctx context.Context, jobID uuid.UUID) error {
 	return err
 }
 
+// PersonalisationPreviewQueueName carries renders a customer is waiting on.
+//
+// THE SAME WORK ON A DIFFERENT QUEUE. River routes a job to a worker by kind
+// and uses the queue only to decide which pool of workers may pick it up, so
+// this reuses GenerateModelArgs and the existing worker exactly - it just
+// stops the two kinds of render competing for the same slots.
+//
+// They must not compete. model_generation runs one or two at a time because
+// OpenSCAD is 20-45 seconds of CPU; a handful of customers pressing Save
+// would fill that pool and the floor's own renders would wait behind people
+// editing their names. The customer is the one watching a spinner, and the
+// floor is the one with a printer going idle - starving either for the other
+// is the wrong trade.
+const PersonalisationPreviewQueueName = "personalisation_preview"
+
+// EnquePreview schedules a render the customer is waiting for.
+//
+// Deduplicated by job across every pending state, so somebody pressing Save
+// five times queues one render rather than five. The last one wins anyway -
+// each render reads the job's current properties when it runs, not when it
+// was queued.
+func (e *ModelGenEnqueuer) EnqueuePreview(ctx context.Context, jobID uuid.UUID) error {
+	_, err := e.client.Insert(ctx, GenerateModelArgs{JobID: jobID}, &river.InsertOpts{
+		Queue: PersonalisationPreviewQueueName,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending, rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable, rivertype.JobStateRunning,
+				rivertype.JobStateRetryable,
+			},
+		},
+	})
+	return err
+}
+
 // OrderSyncEnqueuer inserts SyncOrdersArgs jobs into River.
 type OrderSyncEnqueuer struct{ client *river.Client[pgx.Tx] }
 

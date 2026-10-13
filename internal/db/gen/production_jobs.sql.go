@@ -2321,6 +2321,52 @@ func (q *Queries) RequeueFinishedJob(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const saveCustomerPersonalisation = `-- name: SaveCustomerPersonalisation :execrows
+UPDATE production_jobs
+SET personalisation_properties = $1,
+    personalisation_colour     = $2,
+    colours                    = $3,
+    personalisation_original   = coalesce(personalisation_original, $4),
+    updated_at                 = now()
+WHERE id = $5
+  AND personalisation_status = 'awaiting_customer'
+`
+
+type SaveCustomerPersonalisationParams struct {
+	Properties []byte
+	Colour     *string
+	Colours    []byte
+	Original   []byte
+	ID         uuid.UUID
+}
+
+// Writes what the customer changed on their own link.
+//
+// GUARDED ON awaiting_customer, which is the whole safety of the edit path.
+// It means an edit can only land while that customer's window is open: not
+// after it closed, not after they confirmed, not on a job somebody in the shop
+// already validated, and never on a job that has reached a bed. Returning the
+// row count rather than the row lets the caller tell "refused" from "saved"
+// without a second read.
+//
+// personalisation_original is written ONCE. coalesce keeps whatever is already
+// there, so a second edit cannot overwrite the values the order arrived with -
+// which would make the customer's own first correction look like what they
+// bought.
+func (q *Queries) SaveCustomerPersonalisation(ctx context.Context, arg SaveCustomerPersonalisationParams) (int64, error) {
+	result, err := q.db.Exec(ctx, saveCustomerPersonalisation,
+		arg.Properties,
+		arg.Colour,
+		arg.Colours,
+		arg.Original,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const searchJobsForCustomBatch = `-- name: SearchJobsForCustomBatch :many
 SELECT j.id, j.job_number, j.order_id, j.batch_id, j.description, j.quantity, j.status, j.assembly_status, j.finishing_status, j.qc_status, j.packaging_status, j.shopify_order_id, j.sku, j.product_name, j.material, j.colour, j.nozzle_profile, j.filament_grams_required, j.print_file_id, j.estimated_print_time_minutes, j.due_date, j.priority, j.personalisation_name, j.personalisation_font, j.personalisation_colour, j.personalisation_variant, j.personalisation_status, j.name_confirmed, j.photo_confirmed, j.font_confirmed, j.colour_confirmed, j.variant_confirmed, j.customer_approval_received, j.personalisation_notes, j.personalisation_photo_file_id, j.personalisation_validated_by, j.personalisation_validated_at, j.reprint_of_job_id, j.split_of_job_id, j.shopify_customer_id, j.customer_name, j.held, j.colours, j.support_used, j.infill_pct, j.left_nozzle_mm, j.right_nozzle_mm, j.flow_pct, j.quality_mm, j.machine_family, j.variant_title, j.personalisation_properties, j.personalisation_original, j.part_role, j.model_error, j.model_error_at, j.issue_reason, j.bbox_x_mm, j.bbox_y_mm, j.bbox_z_mm, j.support_weight_g, j.purge_weight_g, j.colour_count, j.created_at, j.updated_at, j.bulk_order_id FROM production_jobs j
 LEFT JOIN orders o ON o.id = j.order_id
