@@ -141,7 +141,7 @@ func (t *botTurn) confirmOrder(ctx context.Context, o gen.Order) error {
 				return err
 			}
 			return t.tag(ctx, conf.ShopifyGid, content.TagUnreachable)
-		case optedOut(ctx, q, t.brand, to):
+		case optedOut(ctx, q, t.brand, to) || !t.settings.mayMessage(to):
 			conf.Status = string(bot.ConfirmationSkipped)
 			_, err := q.InsertOrderConfirmation(ctx, conf)
 			return err

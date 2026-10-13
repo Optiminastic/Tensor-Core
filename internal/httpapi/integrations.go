@@ -158,6 +158,10 @@ var integrationSpecs = []integrationSpec{
 				Help: "true messages each newly paid order's customer to confirm the names to be " +
 					"printed. Needs the approved order_personalisation_confirm and _reminder " +
 					"templates. Orders placed before it was switched on are never messaged."},
+			{Key: "test_numbers", Label: "Test numbers only", Required: false,
+				Help: "Leave empty to message every customer. Otherwise a comma-separated list " +
+					"(e.g. 9876543210, 9123456789): the bot answers only these numbers and " +
+					"confirmations go only to them. Everyone else's messages still reach the inbox."},
 			{Key: "order_prefix", Label: "Order number prefix", Required: false, Default: "T3DPS-",
 				Help: "What a customer's order number is prefixed with in Shopify. A customer " +
 					"types 115766; Tensor looks up T3DPS-115766."},

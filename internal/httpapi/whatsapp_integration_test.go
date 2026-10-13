@@ -58,8 +58,8 @@ type fakeMeta struct {
 func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var m struct {
-		To          string `json:"to"`
-		Type        string `json:"type"`
+		To          string                `json:"to"`
+		Type        string                `json:"type"`
 		Text        struct{ Body string } `json:"text"`
 		Interactive struct {
 			Body   struct{ Text string } `json:"body"`
@@ -559,3 +559,29 @@ func TestIntegrationWhatsAppInbox(t *testing.T) {
 	}
 }
 
+func TestIntegrationWhatsAppTestNumbersOnly(t *testing.T) {
+	h := newWAHarness(t, map[string]string{"test_numbers": "+91 90000 00001, 9000000002", "confirmations_enabled": "true"})
+
+	if code := serve(h.router, signedWebhook(textWebhook(waPhoneID, "wamid.in.t1", "hi"))).Code; code != http.StatusOK {
+		t.Fatalf("webhook = %d", code)
+	}
+	if h.jobs(t, production.WhatsAppInboundArgs{}.Kind()) != 0 {
+		t.Fatal("the bot answered a customer who is not on the test list")
+	}
+	var stored int
+	_ = h.store.Pool.QueryRow(h.ctx, `SELECT count(*) FROM whatsapp_messages`).Scan(&stored)
+	if stored != 1 {
+		t.Fatalf("the message must still reach the inbox, stored = %d", stored)
+	}
+
+	h.sweep(t)
+	time.Sleep(10 * time.Millisecond)
+	orderID := paidOrder(t, h.store, "T3DPS-401", 401)
+	h.sweep(t)
+	if h.meta.count() != 0 {
+		t.Fatal("a confirmation went to a customer who is not on the test list")
+	}
+	if c := h.confirmation(t, orderID); c.Status != string(bot.ConfirmationSkipped) {
+		t.Fatalf("status = %s", c.Status)
+	}
+}

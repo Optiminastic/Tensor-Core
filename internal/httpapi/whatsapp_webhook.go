@@ -114,7 +114,7 @@ func (s *Server) whatsappWebhook(c *gin.Context) {
 	}
 
 	for _, t := range targets {
-		if err := s.ingestWhatsApp(ctx, t.brand, t.change, t.settings.BotEnabled); err != nil {
+		if err := s.ingestWhatsApp(ctx, t.brand, t.change, t.settings); err != nil {
 			s.logger.Error("store whatsapp webhook", "brand", t.brand, "error", err)
 			detail(c, http.StatusInternalServerError, "Could not store the webhook.") // Meta retries
 			return
@@ -140,7 +140,7 @@ func (s *Server) brandForPhoneNumber(ctx context.Context, phoneNumberID string) 
 // ingestWhatsApp stores one brand's share of a webhook and enqueues the jobs
 // that answer it, in one transaction: a retried webhook finds its messages
 // already stored and enqueues nothing twice.
-func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.Change, botEnabled bool) error {
+func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.Change, settings whatsappBotSettings) error {
 	return pgx.BeginFunc(ctx, s.store.Pool, func(tx pgx.Tx) error {
 		q := s.store.Q.WithTx(tx)
 		var jobs []river.InsertManyParams
@@ -150,7 +150,7 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 			if err != nil {
 				return err
 			}
-			if fresh && botEnabled {
+			if fresh && settings.answers(m.From) {
 				jobs = append(jobs, river.InsertManyParams{Args: production.WhatsAppInboundArgs{
 					BrandSlug: brand, WaID: m.From, MessageID: m.ID,
 					MessageKind: m.Kind, Text: m.Text, ButtonID: m.ButtonID,

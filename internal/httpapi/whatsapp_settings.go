@@ -4,6 +4,8 @@ import (
 	"context"
 	"strconv"
 	"strings"
+
+	"github.com/Optiminastic/tensor-core/internal/whatsappbot/phone"
 )
 
 // defaultOrderPrefix is the store's Shopify order-name prefix when a brand has
@@ -18,6 +20,41 @@ type whatsappBotSettings struct {
 	OrderPrefix          string
 	BotEnabled           bool
 	ConfirmationsEnabled bool
+	// TestNumbers, when set, limits every automated message to these numbers:
+	// the bot answers only them and confirmations go only to them. Everyone
+	// else's messages still reach the inbox. It is how the bot is tried on the
+	// live number without answering real customers.
+	TestNumbers []string
+}
+
+// answers reports whether the bot replies to this customer.
+func (b whatsappBotSettings) answers(waID string) bool {
+	return b.BotEnabled && b.mayMessage(waID)
+}
+
+// mayMessage reports whether automated messages may go to this number.
+func (b whatsappBotSettings) mayMessage(waID string) bool {
+	if len(b.TestNumbers) == 0 {
+		return true
+	}
+	for _, n := range b.TestNumbers {
+		if phone.Match(n, waID) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTestNumbers reads a comma- or semicolon-separated list, dropping
+// anything that is not a phone number.
+func parseTestNumbers(raw string) []string {
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == ';' }) {
+		if n, ok := phone.Normalize(part); ok {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // whatsappBotSettingsFor reads them with the same precedence as whatsappFor:
@@ -44,6 +81,8 @@ func (s *Server) whatsappBotSettingsFor(ctx context.Context, brandSlug string) w
 			out.BotEnabled = settingOn(value)
 		case "confirmations_enabled":
 			out.ConfirmationsEnabled = settingOn(value)
+		case "test_numbers":
+			out.TestNumbers = parseTestNumbers(value)
 		}
 	}
 	return out
