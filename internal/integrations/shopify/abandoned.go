@@ -32,12 +32,38 @@ const abandonedPageSize = 50
 // nobody asked for.
 const maxAbandonedCheckouts = 250
 
+// CheckoutAttribute is one key/value the storefront attached to a checkout
+// or a line - on this store, the personalisation a customer typed (the names
+// on a plank), which is the part of the basket a call most needs to get right.
+type CheckoutAttribute struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// CheckoutAddress is one of the two addresses a checkout can carry, whole.
+type CheckoutAddress struct {
+	Name     string `json:"name"`
+	Phone    string `json:"phone"`
+	Address1 string `json:"address1"`
+	Address2 string `json:"address2"`
+	City     string `json:"city"`
+	Province string `json:"province"`
+	Zip      string `json:"zip"`
+	Country  string `json:"country"`
+}
+
 // AbandonedLineItem is one thing left in the basket.
 type AbandonedLineItem struct {
 	Title        string `json:"title"`
 	VariantTitle string `json:"variant_title"`
 	SKU          string `json:"sku"`
 	Quantity     int    `json:"quantity"`
+	ImageURL     string `json:"image_url"`
+	// UnitPrice is the list price; LineTotal is after any code discount, so
+	// the two disagreeing is how a discounted line shows itself.
+	UnitPrice  string              `json:"unit_price"`
+	LineTotal  string              `json:"line_total"`
+	Attributes []CheckoutAttribute `json:"attributes"`
 }
 
 // AbandonedCheckout is one unfinished checkout.
@@ -67,6 +93,22 @@ type AbandonedCheckout struct {
 	// field every one of them reads "ready to call" and the button rings
 	// somebody about a basket they already paid for. Nil while still open.
 	CompletedAt *time.Time `json:"completed_at"`
+
+	// What Shopify's own checkout page shows beyond the list: the money broken
+	// down, the codes applied, the note and both addresses in full. All of it
+	// is read_orders, the scope the list already needed.
+	UpdatedAt       time.Time           `json:"updated_at"`
+	Note            string              `json:"note"`
+	DiscountCodes   []string            `json:"discount_codes"`
+	TaxesIncluded   bool                `json:"taxes_included"`
+	Attributes      []CheckoutAttribute `json:"attributes"`
+	LineItemsAmount string              `json:"line_items_amount"`
+	SubtotalAmount  string              `json:"subtotal_amount"`
+	DiscountAmount  string              `json:"discount_amount"`
+	TaxAmount       string              `json:"tax_amount"`
+	// Nil when the customer never got as far as giving that address.
+	ShippingAddress *CheckoutAddress `json:"shipping_address"`
+	BillingAddress  *CheckoutAddress `json:"billing_address"`
 }
 
 const listAbandonedCheckoutsQuery = `
@@ -77,13 +119,30 @@ query AbandonedCheckouts($first: Int!, $after: String, $query: String) {
       id
       name
       createdAt
+      updatedAt
       completedAt
       abandonedCheckoutUrl
       lineItemsQuantity
+      note
+      discountCodes
+      taxesIncluded
+      customAttributes { key value }
       totalPriceSet { shopMoney { amount currencyCode } }
-      billingAddress { firstName lastName phone city province }
-      shippingAddress { firstName lastName phone city province }
-      lineItems(first: 10) { nodes { title quantity sku variantTitle } }
+      subtotalPriceSet { shopMoney { amount } }
+      totalLineItemsPriceSet { shopMoney { amount } }
+      totalDiscountSet { shopMoney { amount } }
+      totalTaxSet { shopMoney { amount } }
+      billingAddress { firstName lastName phone address1 address2 city province zip country }
+      shippingAddress { firstName lastName phone address1 address2 city province zip country }
+      lineItems(first: 10) {
+        nodes {
+          title quantity sku variantTitle
+          image { url }
+          originalUnitPriceSet { shopMoney { amount } }
+          discountedTotalPriceWithCodeDiscount { shopMoney { amount } }
+          customAttributes { key value }
+        }
+      }
     }
   }
 }`
@@ -92,18 +151,39 @@ type abandonedAddress struct {
 	FirstName string `json:"firstName"`
 	LastName  string `json:"lastName"`
 	Phone     string `json:"phone"`
+	Address1  string `json:"address1"`
+	Address2  string `json:"address2"`
 	City      string `json:"city"`
 	Province  string `json:"province"`
+	Zip       string `json:"zip"`
+	Country   string `json:"country"`
+}
+
+// moneyBag is Shopify's MoneyBag, read in the shop's currency only.
+type moneyBag struct {
+	ShopMoney struct {
+		Amount string `json:"amount"`
+	} `json:"shopMoney"`
 }
 
 type abandonedNode struct {
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	CreatedAt            string `json:"createdAt"`
-	CompletedAt          string `json:"completedAt"`
-	AbandonedCheckoutURL string `json:"abandonedCheckoutUrl"`
-	LineItemsQuantity    int    `json:"lineItemsQuantity"`
-	TotalPriceSet        struct {
+	ID                     string              `json:"id"`
+	Name                   string              `json:"name"`
+	CreatedAt              string              `json:"createdAt"`
+	CompletedAt            string              `json:"completedAt"`
+	AbandonedCheckoutURL   string              `json:"abandonedCheckoutUrl"`
+	LineItemsQuantity      int                 `json:"lineItemsQuantity"`
+	UpdatedAt              string              `json:"updatedAt"`
+	Note                   string              `json:"note"`
+	DiscountCodes          []string            `json:"discountCodes"`
+	TaxesIncluded          bool                `json:"taxesIncluded"`
+	CustomAttributes       []CheckoutAttribute `json:"customAttributes"`
+	SubtotalPriceSet       moneyBag            `json:"subtotalPriceSet"`
+	TotalLineItemsPriceSet moneyBag            `json:"totalLineItemsPriceSet"`
+	TotalDiscountSet       moneyBag            `json:"totalDiscountSet"`
+	// Nullable in Shopify's schema, unlike the three above.
+	TotalTaxSet   *moneyBag `json:"totalTaxSet"`
+	TotalPriceSet struct {
 		ShopMoney struct {
 			Amount       string `json:"amount"`
 			CurrencyCode string `json:"currencyCode"`
@@ -117,6 +197,12 @@ type abandonedNode struct {
 			Quantity     int    `json:"quantity"`
 			SKU          string `json:"sku"`
 			VariantTitle string `json:"variantTitle"`
+			Image        *struct {
+				URL string `json:"url"`
+			} `json:"image"`
+			OriginalUnitPriceSet                 moneyBag            `json:"originalUnitPriceSet"`
+			DiscountedTotalPriceWithCodeDiscount moneyBag            `json:"discountedTotalPriceWithCodeDiscount"`
+			CustomAttributes                     []CheckoutAttribute `json:"customAttributes"`
 		} `json:"nodes"`
 	} `json:"lineItems"`
 }
@@ -216,6 +302,22 @@ func toAbandonedCheckout(n abandonedNode) AbandonedCheckout {
 		ItemCount:   n.LineItemsQuantity,
 		TotalAmount: n.TotalPriceSet.ShopMoney.Amount,
 		Currency:    n.TotalPriceSet.ShopMoney.CurrencyCode,
+
+		Note:            strings.TrimSpace(n.Note),
+		DiscountCodes:   nonNil(n.DiscountCodes),
+		TaxesIncluded:   n.TaxesIncluded,
+		Attributes:      nonNil(n.CustomAttributes),
+		LineItemsAmount: n.TotalLineItemsPriceSet.ShopMoney.Amount,
+		SubtotalAmount:  n.SubtotalPriceSet.ShopMoney.Amount,
+		DiscountAmount:  n.TotalDiscountSet.ShopMoney.Amount,
+		ShippingAddress: toCheckoutAddress(n.ShippingAddress),
+		BillingAddress:  toCheckoutAddress(n.BillingAddress),
+	}
+	if n.TotalTaxSet != nil {
+		out.TaxAmount = n.TotalTaxSet.ShopMoney.Amount
+	}
+	if t, err := time.Parse(time.RFC3339, n.UpdatedAt); err == nil {
+		out.UpdatedAt = t
 	}
 	out.CustomerName = strings.TrimSpace(
 		pick(func(a *abandonedAddress) string { return a.FirstName }) + " " +
@@ -235,9 +337,45 @@ func toAbandonedCheckout(n abandonedNode) AbandonedCheckout {
 		}
 	}
 	for _, li := range n.LineItems.Nodes {
-		out.LineItems = append(out.LineItems, AbandonedLineItem{
+		item := AbandonedLineItem{
 			Title: li.Title, VariantTitle: li.VariantTitle, SKU: li.SKU, Quantity: li.Quantity,
-		})
+			UnitPrice:  li.OriginalUnitPriceSet.ShopMoney.Amount,
+			LineTotal:  li.DiscountedTotalPriceWithCodeDiscount.ShopMoney.Amount,
+			Attributes: nonNil(li.CustomAttributes),
+		}
+		if li.Image != nil {
+			item.ImageURL = li.Image.URL
+		}
+		out.LineItems = append(out.LineItems, item)
 	}
 	return out
+}
+
+// toCheckoutAddress keeps an address whole, as Shopify's page shows it.
+// Unlike the name and phone above, nothing here is merged across the two:
+// the shipping address is where the parcel goes, and borrowing its city for
+// the billing one would describe an address nobody gave.
+func toCheckoutAddress(a *abandonedAddress) *CheckoutAddress {
+	if a == nil {
+		return nil
+	}
+	return &CheckoutAddress{
+		Name:     strings.TrimSpace(strings.TrimSpace(a.FirstName) + " " + strings.TrimSpace(a.LastName)),
+		Phone:    strings.TrimSpace(a.Phone),
+		Address1: strings.TrimSpace(a.Address1),
+		Address2: strings.TrimSpace(a.Address2),
+		City:     strings.TrimSpace(a.City),
+		Province: strings.TrimSpace(a.Province),
+		Zip:      strings.TrimSpace(a.Zip),
+		Country:  strings.TrimSpace(a.Country),
+	}
+}
+
+// nonNil turns an absent list into an empty one, so the JSON says [] and the
+// page never has to tell "none" apart from "missing".
+func nonNil[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
