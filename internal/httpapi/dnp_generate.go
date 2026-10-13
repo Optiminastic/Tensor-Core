@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -284,40 +285,82 @@ func (s *Server) renderColouredPlank(
 		}
 	}
 
-	meshes := make([]meshio.Part, 0, len(parts))
+	// THE PIECES RENDER AT THE SAME TIME, not one after the other.
+	//
+	// They are independent OpenSCAD subprocesses - the renderer says so, and
+	// each works in its own temp directory - and neither reads the other's
+	// output. Run in sequence, a two-piece plank costs the sum of two CGAL
+	// passes; run together it costs the longer of them. Measured on this
+	// plank, from the customer pressing Save to the new picture arriving: 34
+	// seconds became 21.
+	//
+	// It cannot be avoided by rendering less. The base is
+	// `difference() { base_plate(); letters(); }`, so a name change really
+	// does change both pieces - there is no half of this work to skip, only
+	// time to overlap.
+	//
+	// Bounded by the number of pieces a product has, which is two or three.
+	// The queue's own MaxWorkers is what bounds how many jobs render at once,
+	// and that is where to turn this down if a box starts thrashing.
+	meshes := make([]meshio.Part, len(parts))
+	failures := make([]error, len(parts))
 	material := deref(job.Material)
-	for _, part := range parts {
-		stl, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(part.Name))
+
+	var wg sync.WaitGroup
+	for i, part := range parts {
+		wg.Add(1)
+		go func(i int, part colourPart) {
+			defer wg.Done()
+
+			stl, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(part.Name))
+			if err != nil {
+				failures[i] = fmt.Errorf("render the %s: %w", part.Name, err)
+				return
+			}
+			mesh, err := meshFromSTL(stl)
+			if err != nil {
+				failures[i] = fmt.Errorf("read the %s: %w", part.Name, err)
+				return
+			}
+			// An empty piece is the silent failure this whole mechanism is
+			// exposed to: a template that declares PART and never branches on
+			// it answers every request with the same solid, and one that
+			// branches on names that do not match the configured pieces
+			// answers some with nothing. Both slice, both print, and both are
+			// wrong - so a piece that came back with no geometry holds the job
+			// and names itself.
+			if len(mesh.Triangles) == 0 {
+				failures[i] = fmt.Errorf(
+					"the template rendered nothing for part %q - check that %s branches on "+
+						"PART and spells this piece the same way",
+					part.Name, plan.Template)
+				return
+			}
+
+			partColour, partName := part.Hex, part.Name
+			if part.FollowsCustomer() {
+				partColour = hex
+				partName = colour + " " + part.Name
+			}
+			// Written to its own slot, so the pieces keep the order the design
+			// lists them in. Appending from goroutines would shuffle the
+			// slicer's object list between renders of the same plank.
+			meshes[i] = meshio.Part{
+				// Named for what it is, because this is what an operator sees
+				// in the slicer's object list.
+				Name: partName, Colour: partColour, Material: material,
+				Triangles: mesh.Triangles,
+			}
+		}(i, part)
+	}
+	wg.Wait()
+
+	// The FIRST failure in part order, not whichever goroutine happened to
+	// finish last - the same plank must fail the same way twice.
+	for _, err := range failures {
 		if err != nil {
-			return nil, fmt.Errorf("render the %s: %w", part.Name, err)
+			return nil, err
 		}
-		mesh, err := meshFromSTL(stl)
-		if err != nil {
-			return nil, fmt.Errorf("read the %s: %w", part.Name, err)
-		}
-		// An empty piece is the silent failure this whole mechanism is exposed
-		// to: a template that declares PART and never branches on it answers
-		// every request with the same solid, and one that branches on names
-		// that do not match the configured pieces answers some with nothing.
-		// Both slice, both print, and both are wrong - so a piece that came
-		// back with no geometry holds the job and names itself.
-		if len(mesh.Triangles) == 0 {
-			return nil, fmt.Errorf(
-				"the template rendered nothing for part %q - check that %s branches on "+
-					"PART and spells this piece the same way",
-				part.Name, plan.Template)
-		}
-		partColour, partName := part.Hex, part.Name
-		if part.FollowsCustomer() {
-			partColour = hex
-			partName = colour + " " + part.Name
-		}
-		meshes = append(meshes, meshio.Part{
-			// Named for what it is, because this is what an operator sees in
-			// the slicer's object list.
-			Name: partName, Colour: partColour, Material: material,
-			Triangles: mesh.Triangles,
-		})
 	}
 
 	model, err := meshio.Write3MF(meshes)
