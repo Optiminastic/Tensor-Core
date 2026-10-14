@@ -77,6 +77,15 @@ type publicItemResponse struct {
 	// prints as a plank, a rose and a keychain. Empty for a product that is
 	// one piece.
 	Part string `json:"part"`
+	// HasPreview says whether a picture is coming AT ALL.
+	//
+	// Tensor renders the plank family and the products the registry
+	// describes; it does not render a Bone Tag, a DUOSNAP or a Couple's Date
+	// Plank, and nothing ever will produce a model for those. Without this
+	// the page cannot tell "the render is still running" from "there will
+	// never be one", so it showed "Building your preview..." forever on an
+	// item whose fields were the only thing to check.
+	HasPreview bool `json:"has_preview"`
 	// ModelReady says whether there is something to show yet. The link is sent
 	// the moment the order lands and a render is 20-45 seconds behind it, so
 	// "not yet" is the ordinary first answer rather than a fault.
@@ -152,7 +161,9 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 			// nothing for the customer to check.
 			continue
 		}
-		out.Items = append(out.Items, publicItem(j, s.editableFields(ctx, j)))
+		out.Items = append(out.Items, publicItem(
+			j, s.fieldRulesFor(ctx, j),
+			s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName))))
 	}
 	numberSiblings(out.Items)
 	c.JSON(http.StatusOK, out)
@@ -200,13 +211,14 @@ func numberSiblings(items []publicItemResponse) {
 	}
 }
 
-func publicItem(j gen.ProductionJob, registry map[string]bool) publicItemResponse {
+func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicItemResponse {
 	item := publicItemResponse{
 		JobID:        j.ID.String(),
 		JobNumber:    j.JobNumber,
 		ProductName:  deref(j.ProductName),
 		Quantity:     int(j.Quantity),
 		Colour:       deref(j.PersonalisationColour),
+		HasPreview:   hasPreview,
 		ModelReady:   j.PrintFileID != nil,
 		ModelVersion: deref(uuidPtrStr(j.PrintFileID)),
 		Part:         partLabel(j),
@@ -225,8 +237,14 @@ func publicItem(j gen.ProductionJob, registry map[string]bool) publicItemRespons
 		if p.Hidden() || strings.TrimSpace(p.Value) == "" {
 			continue
 		}
+		// A contact detail is left out of the response entirely, not merely
+		// locked: this page is a token in a link, and what a guessed one may
+		// expose is a decision already taken. See contactProperty.
+		if contactProperty(p.Name) {
+			continue
+		}
 		item.Fields = append(item.Fields, publicFieldResponse{
-			Label: p.Name, Value: p.Value, Editable: canEdit(registry, p.Name),
+			Label: p.Name, Value: p.Value, Editable: rules.canEdit(p.Name, p.Value),
 		})
 	}
 	return item
@@ -296,6 +314,7 @@ func secondsUntil(t time.Time) int {
 }
 
 func (s *Server) publicPersonalisationItem(c *gin.Context) {
+	ctx := c.Request.Context()
 	link, ok := s.openLink(c)
 	if !ok {
 		return
@@ -304,7 +323,9 @@ func (s *Server) publicPersonalisationItem(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, publicItem(job, s.editableFields(c.Request.Context(), job)))
+	c.JSON(http.StatusOK, publicItem(
+		job, s.fieldRulesFor(ctx, job),
+		s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName))))
 }
 
 // --- the model ----------------------------------------------------------------

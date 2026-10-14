@@ -67,6 +67,110 @@ func editableProperty(label string) bool {
 	return editableKeys[personalise.NormaliseKey(label)]
 }
 
+// maxFreeTextRunes bounds a field on a product Tensor does not render.
+//
+// The twelve-rune cap above is the PLANK's: a longer name does not fit the
+// model, so refusing it in the form beats failing a render. A product nobody
+// renders has no such model to overflow - a Couple's Date Plank carries
+// "10-07-2016" and a Bone Tag a ten-digit number, both close enough to twelve
+// to be refused by accident - so the limit there is only against abuse of a
+// public form.
+const maxFreeTextRunes = 60
+
+// fieldRules decides which of one job's properties the customer may change,
+// and how long a value may be.
+//
+// THE ALLOW-LIST EXISTS BECAUSE AN EDIT CAN CHANGE WHICH MODEL IS MADE. A
+// heart count picks a different .scad; a number is a dimension. That reasoning
+// is about a product Tensor RENDERS. For one it does not - a Bone Tag, a
+// DUOSNAP, a Couple's Date Plank - there is no template to re-select and no
+// render to feed: a person reads these values and makes the thing by hand. The
+// customer correcting their own spelling there is the entire point of the
+// page, and an allow-list written from plank keys refuses every one of them.
+//
+// So those products edit freely, minus the two kinds of value that are not
+// theirs to retype - see canEdit.
+type fieldRules struct {
+	// registry is the product's field map, nil when it has none.
+	registry map[string]bool
+	// open is true for a product Tensor does not render, where every text
+	// property the customer filled in is theirs to correct.
+	open     bool
+	maxRunes int
+}
+
+// canEdit answers for one field.
+func (r fieldRules) canEdit(label, value string) bool {
+	// NEVER, whatever else says so. A contact detail is how the shop reaches
+	// them rather than something printed, and this page is reachable by
+	// anyone holding the link - see the note on contactProperty. A URL is an
+	// upload's address, and a text box over it only offers the chance to
+	// break it.
+	if contactProperty(label) || looksLikeURL(value) {
+		return false
+	}
+	if r.open {
+		return true
+	}
+	if r.registry != nil {
+		return r.registry[personalise.NormaliseKey(label)]
+	}
+	return editableProperty(label)
+}
+
+// fieldRulesFor reads the rules for one job.
+func (s *Server) fieldRulesFor(ctx context.Context, job gen.ProductionJob) fieldRules {
+	registry := s.editableFields(ctx, job)
+	if registry != nil {
+		return fieldRules{registry: registry, maxRunes: maxCustomerFieldRunes}
+	}
+	if s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
+		// A rendered product with no field map: the plank, still on the
+		// hardcoded path. Its keys are the ones editableKeys was written from.
+		return fieldRules{maxRunes: maxCustomerFieldRunes}
+	}
+	return fieldRules{open: true, maxRunes: maxFreeTextRunes}
+}
+
+// contactWords name a way of reaching somebody rather than something printed.
+//
+// Matched as whole words against the normalised label, NOT as substrings, and
+// that distinction is the whole care in this list: a Bone Tag asks for
+// "number-1" and engraves it on the tag, because a pet tag carries its owner's
+// phone number - that one IS the personalisation. "Whatsapp Number", on the
+// DUOSNAP, is not: it is how the shop reaches the buyer.
+var contactWords = map[string]bool{
+	"whatsapp": true, "email": true, "e mail": true, "mail": true,
+	"phone": true, "mobile": true, "contact": true, "telephone": true,
+}
+
+// contactProperty reports whether a field is a contact detail, which is never
+// shown on the public page at all.
+//
+// The page is a token in a link. What a guessed one may expose was decided
+// when it was built - the order number, the product names, the personalisation
+// text and the models, and deliberately no address, no payment and no contact
+// details. A phone number rendered into the form would quietly break that, so
+// it is dropped before the response is built rather than merely locked.
+func contactProperty(label string) bool {
+	for _, word := range strings.Fields(personalise.NormaliseKey(label)) {
+		if contactWords[word] {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeURL reports whether a value is a link rather than something typed.
+//
+// The DUOSNAP's PHOTO property is the address of the image the customer
+// uploaded at checkout. It is theirs and it is shown, but it is not text to
+// retype: an edit here can only turn a working link into a broken one.
+func looksLikeURL(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://")
+}
+
 // editableFields asks the registry which of a job's properties the model
 // actually reads.
 //
@@ -113,14 +217,6 @@ func (s *Server) editableFields(ctx context.Context, job gen.ProductionJob) map[
 	return out
 }
 
-// canEdit answers for one field, registry first and the hardcoded list second.
-func canEdit(registry map[string]bool, label string) bool {
-	if registry != nil {
-		return registry[personalise.NormaliseKey(label)]
-	}
-	return editableProperty(label)
-}
-
 // --- the request --------------------------------------------------------------
 
 type personalisationEditRequest struct {
@@ -150,7 +246,7 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 	}
 
 	current, _ := jobLineProperties(job)
-	updated, changed, err := applyCustomerEdit(current, req.Fields, s.editableFields(ctx, job))
+	updated, changed, err := applyCustomerEdit(current, req.Fields, s.fieldRulesFor(ctx, job))
 	if err != nil {
 		detail(c, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -250,13 +346,13 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 // answered the questions in and the page renders it that way. Rebuilding the
 // list from the submitted map would reorder it by whatever the browser sent.
 func applyCustomerEdit(
-	current []production.LineProp, fields map[string]string, registry map[string]bool,
+	current []production.LineProp, fields map[string]string, rules fieldRules,
 ) (updated []production.LineProp, changed bool, err error) {
 	updated = make([]production.LineProp, 0, len(current))
 	for _, p := range current {
 		value, submitted := fields[p.Name]
 		switch {
-		case !submitted, p.Hidden(), !canEdit(registry, p.Name):
+		case !submitted, p.Hidden(), !rules.canEdit(p.Name, p.Value):
 			// Not offered, or not editable. Kept exactly as it was - a field
 			// the page did not let them change must not change because a
 			// request said so.
@@ -268,8 +364,8 @@ func applyCustomerEdit(
 		if strings.TrimSpace(value) == "" {
 			return nil, false, errBlankField(p.Name)
 		}
-		if utf8.RuneCountInString(value) > maxCustomerFieldRunes {
-			return nil, false, errFieldTooLong(p.Name)
+		if utf8.RuneCountInString(value) > rules.maxRunes {
+			return nil, false, errFieldTooLong(p.Name, rules.maxRunes)
 		}
 		if value != p.Value {
 			changed = true
@@ -316,7 +412,10 @@ func errBlankField(label string) error {
 	return fmt.Errorf("%s cannot be empty", strings.TrimSpace(label))
 }
 
-func errFieldTooLong(label string) error {
+// The limit is passed in rather than read from the constant: it differs by
+// product, and a message naming twelve while the form accepts sixty is worse
+// than no message.
+func errFieldTooLong(label string, max int) error {
 	return fmt.Errorf("%s is too long - %d characters at most",
-		strings.TrimSpace(label), maxCustomerFieldRunes)
+		strings.TrimSpace(label), max)
 }

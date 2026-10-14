@@ -7,6 +7,7 @@ package httpapi
 // finds out until it is on a plate.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Optiminastic/tensor-core/internal/config"
@@ -51,7 +52,7 @@ func TestAnUneditableFieldIsIgnoredEvenIfSubmitted(t *testing.T) {
 	updated, changed, err := applyCustomerEdit(current, map[string]string{
 		"STEP 4 - First Name": "ARJUN",
 		"Hearts":              "99",
-	}, nil)
+	}, plankRules())
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestTheAnswerOrderIsKept(t *testing.T) {
 	// renders it that way. Rebuilding from the submitted map would reorder it
 	// by whatever the browser happened to send.
 	current := props("Left Name", "A", "Right Name", "B", "Hearts", "1")
-	updated, _, err := applyCustomerEdit(current, map[string]string{"Right Name": "C"}, nil)
+	updated, _, err := applyCustomerEdit(current, map[string]string{"Right Name": "C"}, plankRules())
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestTheAnswerOrderIsKept(t *testing.T) {
 func TestAnEmptyValueIsRefused(t *testing.T) {
 	// Meta's template would refuse it, the model would engrave nothing, and
 	// the customer would not know until it arrived blank.
-	_, _, err := applyCustomerEdit(props("Left Name", "A"), map[string]string{"Left Name": "   "}, nil)
+	_, _, err := applyCustomerEdit(props("Left Name", "A"), map[string]string{"Left Name": "   "}, plankRules())
 	if err == nil {
 		t.Fatal("an empty name was accepted")
 	}
@@ -96,7 +97,7 @@ func TestATooLongNameIsRefusedInTheFormNotInTheRender(t *testing.T) {
 	// The plank caps at twelve. Finding out in a render that fails thirty
 	// seconds later gives an error naming neither the field nor the reason.
 	_, _, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": "ABCDEFGHIJKLMNOP"}, nil)
+		map[string]string{"Left Name": "ABCDEFGHIJKLMNOP"}, plankRules())
 	if err == nil {
 		t.Fatal("a sixteen-character name was accepted")
 	}
@@ -106,7 +107,7 @@ func TestLengthIsCountedInCharactersNotBytes(t *testing.T) {
 	// "आरव" is three characters and nine bytes. Counting bytes would refuse
 	// names that fit perfectly well.
 	updated, changed, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": "आरवकुमार"}, nil)
+		map[string]string{"Left Name": "आरवकुमार"}, plankRules())
 	if err != nil {
 		t.Fatalf("a short Devanagari name was refused: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestSubmittingTheSameValueChangesNothing(t *testing.T) {
 	// the original snapshot and every job a customer merely opened would
 	// read as "Changed" on the floor's queue.
 	_, changed, err := applyCustomerEdit(props("Left Name", "AARAV"),
-		map[string]string{"Left Name": "AARAV"}, nil)
+		map[string]string{"Left Name": "AARAV"}, plankRules())
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestWhitespaceIsFlattenedBeforeItIsCompared(t *testing.T) {
 	// also be refused downstream, and more to the point it is not what the
 	// customer meant to type.
 	updated, _, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": " AARAV \n KUMAR "}, nil)
+		map[string]string{"Left Name": " AARAV \n KUMAR "}, plankRules())
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestHiddenShopifyPlumbingIsNeverTouched(t *testing.T) {
 	// `_`-prefixed keys are the storefront's own state, not something a
 	// customer typed.
 	current := props("_gift_wrap_id", "abc", "Left Name", "A")
-	updated, _, err := applyCustomerEdit(current, map[string]string{"_gift_wrap_id": "hacked"}, nil)
+	updated, _, err := applyCustomerEdit(current, map[string]string{"_gift_wrap_id": "hacked"}, plankRules())
 	if err != nil {
 		t.Fatalf("edit: %v", err)
 	}
@@ -297,5 +298,138 @@ func TestThePartIsNamedInWordsNotIdentifiers(t *testing.T) {
 		if got := partLabel(gen.ProductionJob{PartRole: role}); got != want {
 			t.Errorf("partLabel(%q) = %q, want %q", role, got, want)
 		}
+	}
+}
+
+// plankRules is the rule set every test above was written against: no registry
+// entry, so the hardcoded plank allow-list decides, with the plank's own
+// twelve-rune cap.
+func plankRules() fieldRules {
+	return fieldRules{maxRunes: maxCustomerFieldRunes}
+}
+
+// The products Tensor does NOT render, which is where the allow-list's whole
+// reason stops applying: there is no template to re-select and no render to
+// feed, a person reads these values and makes the thing, and the customer
+// correcting their own spelling is the entire point of the page.
+func TestAProductNobodyRendersEditsItsOwnFields(t *testing.T) {
+	open := fieldRules{open: true, maxRunes: maxFreeTextRunes}
+
+	// Real labels, off real orders: a Couple's Date Plank, a Bone Tag, a
+	// DUOSNAP. Not one of them is in editableKeys, and every one of them was
+	// read-only on the customer's page.
+	for _, label := range []string{"name-left", "name-right", "date", "pet-name", "TOP NAME"} {
+		if !open.canEdit(label, "AMEER") {
+			t.Errorf("%q should be editable on a product nobody renders", label)
+		}
+		if plankRules().canEdit(label, "AMEER") {
+			t.Errorf("%q must stay locked where the value feeds a render", label)
+		}
+	}
+}
+
+func TestAContactDetailIsNeverEditableAndNeverShown(t *testing.T) {
+	open := fieldRules{open: true, maxRunes: maxFreeTextRunes}
+
+	// The DUOSNAP asks for one so the shop can reach the buyer. This page is a
+	// token in a link, and what a guessed one may expose was decided when it
+	// was built: no contact details.
+	for _, label := range []string{"Whatsapp Number", "Phone", "Mobile Number", "Email"} {
+		if !contactProperty(label) {
+			t.Errorf("%q should be recognised as a contact detail", label)
+		}
+		if open.canEdit(label, "9989259369") {
+			t.Errorf("%q must not be editable", label)
+		}
+	}
+
+	// MATCHED AS WHOLE WORDS. A Bone Tag asks for "number-1" and engraves it
+	// on the tag, because a pet tag carries its owner's phone number - that
+	// one IS the personalisation, and a substring test on "number" would have
+	// hidden it.
+	if contactProperty("number-1") {
+		t.Error(`"number-1" is engraved on a bone tag, not a way of reaching anybody`)
+	}
+	if !open.canEdit("number-1", "8197005533") {
+		t.Error(`"number-1" should be editable`)
+	}
+}
+
+func TestAnUploadedPhotoIsShownButNotRetyped(t *testing.T) {
+	open := fieldRules{open: true, maxRunes: maxFreeTextRunes}
+	const photo = "https://option.nyc3.digitaloceanspaces.com/uploads/96492/file-1791813733.jpg"
+	if open.canEdit("PHOTO", photo) {
+		t.Error("a link to the customer's upload must not become a text box")
+	}
+	if !open.canEdit("PHOTO", "a caption") {
+		t.Error("the rule is about the value being a link, not about the label")
+	}
+}
+
+func TestTheLengthLimitFollowsTheProduct(t *testing.T) {
+	// Twelve is the PLANK's: a longer name does not fit the model. A date is
+	// ten characters and a phone number ten digits, both close enough to be
+	// refused by accident on a product with no model to overflow.
+	current := props("date", "10-07-2016")
+	if _, _, err := applyCustomerEdit(current,
+		map[string]string{"date": "10-07-2016"},
+		fieldRules{open: true, maxRunes: maxFreeTextRunes}); err != nil {
+		t.Errorf("a ten-character date was refused: %v", err)
+	}
+
+	long := strings.Repeat("A", maxFreeTextRunes+1)
+	_, _, err := applyCustomerEdit(props("name-left", "A"),
+		map[string]string{"name-left": long},
+		fieldRules{open: true, maxRunes: maxFreeTextRunes})
+	if err == nil {
+		t.Error("a value past the free-text limit should still be refused")
+	}
+	if err != nil && !strings.Contains(err.Error(), "60") {
+		t.Errorf("the refusal should name the limit it applied, got %v", err)
+	}
+}
+
+// Which items get a picture on the customer's page, decided by the same
+// predicate job creation uses. Pure half only - the registry half needs a
+// database - which is enough, because every product below is one the registry
+// does not describe.
+func TestOnlyTheProductsTensorRendersGetAPreview(t *testing.T) {
+	for _, tc := range []struct {
+		sku, product string
+		renders      bool
+	}{
+		// Rendered: a picture, and the fields feed it.
+		{"DNP-BLU", "Dual Name Plank - BLUE / NO LIGHT", true},
+		{"SC-WHT", "Soulmate COMBO - WHITE", true},
+		{"DNPF-1", "DUAL NAME & PHOTO FRAME - GOLD", true},
+		// A plank whose variant lost its SKU in the catalogue - matched on the
+		// product name, which is why that fallback exists.
+		{"", "Dual Name Plank - GREEN / I NEED LIGHT", true},
+
+		// NOT rendered. Every one of these is a real line off a real order,
+		// and each showed "Building your preview..." forever.
+		{"", "3D Name Plank - Large - 4 cm height / BLUE / GOLD", false},
+		{"", "Couple's Date Plank - BLUE / BLUE / YELLOW", false},
+		{"DT-BoneTag-8", "Bone Tag - Black / Gold", false},
+		{"T3DPS-DUO-4", "DUOSNAP - Black", false},
+		{"SNP-PNK", "Single Name Plank - Pink / NO LIGHT", false},
+		{"3DMS01-6", "Night Lamp", false},
+		// KNOWN WRONG, and left wrong on purpose so it is visible. "DNP-Doc"
+		// splits to the segment "DNP", so Tensor files a Desk Name Plank as a
+		// Dual Name Plank. It is a different product - it asks for "NAME on
+		// PLANK", "BASE COLOUR" and "TEXT COLOUR", not two names - so its
+		// render never happened: JOB-115098 sat at stl_missing with no model
+		// and was made by hand. Its card will say "Building your preview..."
+		// as it always has. Fixing the classification is a separate change
+		// from showing fields-only cards, and guessing at it here would be
+		// changing which path a live product takes.
+		{"DNP-Doc", "Doctor - Desk Name Plank", true},
+	} {
+		t.Run(tc.product, func(t *testing.T) {
+			if got := IsGeneratedProduct(tc.sku, tc.product); got != tc.renders {
+				t.Errorf("IsGeneratedProduct(%q, %q) = %v, want %v",
+					tc.sku, tc.product, got, tc.renders)
+			}
+		})
 	}
 }

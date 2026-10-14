@@ -641,6 +641,43 @@ func (q *Queries) GetSplitJobProgress(ctx context.Context, id uuid.UUID) (GetSpl
 	return i, err
 }
 
+const holdOrderPersonalisationForCustomer = `-- name: HoldOrderPersonalisationForCustomer :execrows
+UPDATE production_jobs
+SET personalisation_status = 'awaiting_customer',
+    updated_at             = now()
+WHERE order_id = $1
+  AND batch_id IS NULL
+  AND status IN ('pending', 'queued')
+  AND personalisation_status IN ('pending', 'validated', 'not_required')
+  AND jsonb_array_length(coalesce(personalisation_properties, '[]'::jsonb)) > 0
+`
+
+// Holds the REST of an order's personalised jobs while the customer's window
+// is open.
+//
+// The renderer holds what it renders (confirmGeneratedPersonalisation), which
+// covers the plank family and anything the registry describes. It cannot hold
+// what it never renders - a Bone Tag, a DUOSNAP, a Couple's Date Plank - and
+// those jobs were therefore shown on the customer's page with every field
+// locked, because the edit path is guarded on awaiting_customer. A page of
+// read-only boxes is not a check.
+//
+// Run when the link is actually SENT, not when the jobs are made. That is what
+// keeps the invariant the hold depends on: every held job has a live link, so
+// the expiry sweep and the confirm both find it and release it. Holding at
+// creation would strand an order that never gets a link.
+//
+// NEVER TOUCHES A JOB ALREADY COMMITTED. A job on a bed, or one past the
+// queue, is work in progress: pulling it back into a customer check would take
+// it out of batching under a plate that already counts it.
+func (q *Queries) HoldOrderPersonalisationForCustomer(ctx context.Context, orderID *uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, holdOrderPersonalisationForCustomer, orderID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertProductionJob = `-- name: InsertProductionJob :one
 
 INSERT INTO production_jobs (

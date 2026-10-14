@@ -340,6 +340,30 @@ func (w *PersonalisationLinkWorker) ask(
 		detail = "sent to the test recipient, not the customer"
 	}
 	w.settle(ctx, claim.ID, "sent", result.MessageID, detail)
+
+	// THE REST OF THE ORDER IS HELD TOO, now that there is a live link.
+	//
+	// The renderer holds what it renders. It cannot hold what it never
+	// renders - a Bone Tag, a DUOSNAP, a Couple's Date Plank - so those jobs
+	// reached the customer's page with every field locked, the edit path
+	// being guarded on awaiting_customer. They are the items with nothing BUT
+	// fields to check, so a page that cannot change them is no check at all.
+	//
+	// Here rather than at job creation, which is what keeps the invariant the
+	// hold rests on: a job is only ever held while a link is live. This runs
+	// after the message is away, so every job it holds has one, and both the
+	// expiry sweep and the customer's own Confirm release the whole order.
+	if held, err := w.server.store.Q.HoldOrderPersonalisationForCustomer(ctx, &order.ID); err != nil {
+		// Not fatal, and deliberately not a release: the link is sent and the
+		// rendered jobs are held correctly. This only costs the customer the
+		// ability to correct the items nobody renders.
+		w.logger.Warn("personalisation: could not hold the rest of the order",
+			"brand", slug, "order", order.OrderNumber, "error", err)
+	} else if held > 0 {
+		w.logger.Info("personalisation: holding the order's unrendered items too",
+			"brand", slug, "order", order.OrderNumber, "jobs", held)
+	}
+
 	// The customer's number is NOT logged. The order number finds them.
 	w.logger.Info("personalisation link sent",
 		"brand", slug, "order", order.OrderNumber,
