@@ -82,7 +82,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: AdvanceJobFinishing :one
 UPDATE production_jobs SET finishing_status = sqlc.arg('finishing_status'), updated_at = now()
@@ -100,7 +100,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: AdvanceJobQc :one
 UPDATE production_jobs SET qc_status = sqlc.arg('qc_status'), updated_at = now()
@@ -118,7 +118,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: AdvanceJobPackaging :one
 UPDATE production_jobs SET packaging_status = sqlc.arg('packaging_status'), updated_at = now()
@@ -135,4 +135,4 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;

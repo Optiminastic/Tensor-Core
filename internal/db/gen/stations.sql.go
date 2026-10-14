@@ -27,7 +27,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 `
 
 type AdvanceJobAssemblyParams struct {
@@ -112,6 +112,7 @@ func (q *Queries) AdvanceJobAssembly(ctx context.Context, arg AdvanceJobAssembly
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.BulkOrderID,
+		&i.ModelRenderQueuedAt,
 	)
 	return i, err
 }
@@ -132,7 +133,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 `
 
 type AdvanceJobFinishingParams struct {
@@ -210,6 +211,7 @@ func (q *Queries) AdvanceJobFinishing(ctx context.Context, arg AdvanceJobFinishi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.BulkOrderID,
+		&i.ModelRenderQueuedAt,
 	)
 	return i, err
 }
@@ -229,7 +231,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 `
 
 type AdvanceJobPackagingParams struct {
@@ -307,6 +309,7 @@ func (q *Queries) AdvanceJobPackaging(ctx context.Context, arg AdvanceJobPackagi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.BulkOrderID,
+		&i.ModelRenderQueuedAt,
 	)
 	return i, err
 }
@@ -327,7 +330,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 `
 
 type AdvanceJobQcParams struct {
@@ -405,6 +408,7 @@ func (q *Queries) AdvanceJobQc(ctx context.Context, arg AdvanceJobQcParams) (Pro
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.BulkOrderID,
+		&i.ModelRenderQueuedAt,
 	)
 	return i, err
 }

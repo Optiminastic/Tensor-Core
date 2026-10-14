@@ -551,6 +551,7 @@ type ProductionJob struct {
 	CreatedAt                  pgtype.Timestamptz
 	UpdatedAt                  pgtype.Timestamptz
 	BulkOrderID                *uuid.UUID
+	ModelRenderQueuedAt        pgtype.Timestamptz
 }
 
 type ProductionJobAssemblyCheck struct {

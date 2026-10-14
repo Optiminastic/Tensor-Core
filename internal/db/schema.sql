@@ -441,7 +441,13 @@ CREATE TABLE production_jobs (
     -- every Shopify job. LAST, because migration 0089 adds it with ALTER TABLE
     -- ADD COLUMN, which appends - and this file has to describe the same table,
     -- column order included, or sqlc stops mapping SELECT * to gen.ProductionJob.
-    bulk_order_id                 uuid REFERENCES bulk_orders (id) ON DELETE SET NULL
+    bulk_order_id                 uuid REFERENCES bulk_orders (id) ON DELETE SET NULL,
+    -- When a rebuild of this job's model was queued, so the planner can tell a
+    -- model that is about to change from one that is settled. Set by the
+    -- customer's own edit, cleared when a print file is attached. See
+    -- migration 0102 for the race it closes. Appended for the same reason as
+    -- bulk_order_id above.
+    model_render_queued_at        timestamptz
 );
 CREATE UNIQUE INDEX uq_production_jobs_job_number ON production_jobs (job_number);
 CREATE INDEX ix_production_jobs_order_id ON production_jobs (order_id);

@@ -57,7 +57,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: GetProductionJobByID :one
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
@@ -72,7 +72,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 FROM production_jobs WHERE id = $1;
 
 -- name: GetProductionJobByNumber :one
@@ -93,7 +93,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 FROM production_jobs WHERE job_number = sqlc.arg('job_number');
 
 -- name: ListProductionJobs :many
@@ -126,7 +126,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           CASE WHEN personalisation_original IS NULL THEN NULL
                ELSE '{}'::jsonb END AS personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
@@ -189,7 +189,7 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
           CASE WHEN personalisation_original IS NULL THEN NULL
                ELSE '{}'::jsonb END AS personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
 FROM production_jobs
 WHERE (sqlc.narg('status')::text IS NULL OR status = sqlc.narg('status')::text)
   AND (sqlc.narg('assembly_status')::text IS NULL OR assembly_status = sqlc.narg('assembly_status')::text)
@@ -247,7 +247,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: ValidateProductionJobPersonalisation :one
 UPDATE production_jobs SET
@@ -276,7 +276,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: SetProductionJobPrintFile :one
 -- Clears the issue reasons this upload is the direct remedy for, and only
@@ -314,7 +314,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: SetProductionJobStatus :one
 UPDATE production_jobs SET status = sqlc.arg('status'), updated_at = now()
@@ -331,7 +331,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: ListBatchableJobs :many
 -- Unbatched, queued jobs whose personalisation is resolved and which cleared
@@ -463,7 +463,7 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
           quality_mm, machine_family, variant_title, personalisation_properties,
           personalisation_original, part_role,
           model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
-          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id;
+          support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at;
 
 -- name: GetSplitJobProgress :one
 -- Total ordered vs completed quantity across a split job's whole group (the
