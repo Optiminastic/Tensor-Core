@@ -17,12 +17,15 @@ package httpapi
 // constraint orders.go documents.
 
 import (
+	"context"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 func (s *Server) registerDesignJobRoutes(r *gin.Engine) {
@@ -65,11 +68,55 @@ func (s *Server) listDesignJobs(c *gin.Context) {
 
 	out := s.productionJobsDTO(ctx, mine)
 	// What the customer changed, computed in the same pass. The query carries
-	// the two jsonb columns in full for a stale row precisely so this needs no
-	// second request per job - and it is the question the designer opened the
-	// page to answer, so it should not be a click away.
+	// the two jsonb columns in full precisely so this needs no second request
+	// per job - and it is the question the designer opened the page to answer,
+	// so it should not be a click away.
 	for i := range out {
 		out[i].PersonalisationChanges = personalisationChangesFor(mine[i])
 	}
-	c.JSON(http.StatusOK, out)
+
+	// The filaments the shop can print, sent WITH the jobs rather than from a
+	// route of their own.
+	//
+	// A designer needs them to say what a colour in their file is - a slicer
+	// writes its own hex, and #C12E1F is Bambu Basic Red rather than this
+	// shop's RED. The existing colour-map endpoint is behind filament:read,
+	// which a DESIGNER does not hold, and a second route under /design-jobs
+	// would collide with /:id the way /designs/... already does.
+	c.JSON(http.StatusOK, designJobsResponse{
+		Jobs:    out,
+		Colours: s.printableColourNames(ctx),
+	})
+}
+
+// designJobsResponse is the queue and what a designer needs to act on it.
+type designJobsResponse struct {
+	Jobs    []productionJobResponse `json:"jobs"`
+	Colours []string                `json:"colours"`
+}
+
+// printableColourNames is every filament name this shop can resolve, in one
+// list for a picker.
+//
+// The confirmed spools and the built-in table together, because either alone
+// is a narrower answer than the renderer would give: resolveColourHex consults
+// both, so a name from either is one that can actually be printed.
+func (s *Server) printableColourNames(ctx context.Context) []string {
+	seen := map[string]bool{}
+	for name := range fallbackColours {
+		seen[production.CanonicalColourName(name)] = true
+	}
+	if rows, err := s.store.Q.ListColourMap(ctx); err == nil {
+		for _, r := range rows {
+			if name := production.CanonicalColourName(r.ColourName); name != "" {
+				seen[name] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

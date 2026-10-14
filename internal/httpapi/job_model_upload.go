@@ -223,29 +223,9 @@ func (s *Server) uploadJobModel(c *gin.Context) {
 func (s *Server) coloursForUpload(
 	ctx context.Context, c *gin.Context, tmpPath, ext string,
 ) (colours, unmapped []string, err error) {
-	if declared := strings.TrimSpace(c.PostForm("colours")); declared != "" {
-		var names []string
-		if jsonErr := json.Unmarshal([]byte(declared), &names); jsonErr != nil {
-			return nil, nil, fmt.Errorf(
-				"'colours' must be a JSON array of filament names, like [\"RED\",\"WHITE\"]")
-		}
-		out := make([]string, 0, len(names))
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			if _, resolveErr := s.resolveColourHex(ctx, name); resolveErr != nil {
-				return nil, nil, fmt.Errorf(
-					"%q is not a colour this shop can print, so the job would hold "+
-						"with nobody having chosen", name)
-			}
-			out = append(out, production.CanonicalColourName(name))
-		}
-		return out, nil, nil
-	}
-
 	if ext != ".3mf" {
+		// An STL carries no colour at all. Not an error - the job keeps
+		// whatever it had.
 		return nil, nil, nil
 	}
 	data, readErr := os.ReadFile(tmpPath)
@@ -260,8 +240,62 @@ func (s *Server) coloursForUpload(
 	if parseErr != nil || len(parts) == 0 {
 		return nil, nil, nil
 	}
-	colours, unmapped = coloursFromParts(parts, s.uploadColourNames(ctx))
+
+	byHex := s.uploadColourNames(ctx)
+	declared, err := declaredColourNames(c)
+	if err != nil {
+		return nil, nil, err
+	}
+	for hex, name := range declared {
+		if _, resolveErr := s.resolveColourHex(ctx, name); resolveErr != nil {
+			return nil, nil, fmt.Errorf(
+				"%q is not a colour this shop can print, so the job would hold "+
+					"with nobody having chosen", name)
+		}
+		byHex[hex] = name
+	}
+
+	colours, unmapped = coloursFromParts(parts, byHex)
 	return colours, unmapped, nil
+}
+
+// declaredColourNames is the designer saying what a hex in their file is.
+//
+// A slicer writes its OWN idea of a colour - a Bambu export of a red heart
+// says #C12E1F, which is Bambu Basic Red and not the hex this shop has
+// recorded for RED. Nothing can resolve that automatically and nothing should
+// try: guessing the nearest would reserve the wrong spool, and the person
+// looking at the model is the one who knows.
+//
+// So the upload may carry a map of hex to filament name - {"#C12E1F":"RED"} -
+// and it wins over everything for that hex. A name that cannot be printed is
+// refused rather than stored: a job holding at errUnknownColour with somebody
+// believing they had chosen is the worse outcome.
+//
+// Keyed on the hex rather than on the file, so one answer covers every piece
+// of a multi-file upload that shares a colour - which is the usual case, a
+// body and a clip printed in the same filament.
+func declaredColourNames(c *gin.Context) (map[string]string, error) {
+	raw := strings.TrimSpace(c.PostForm("colour_names"))
+	if raw == "" {
+		return map[string]string{}, nil
+	}
+	var declared map[string]string
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil {
+		return nil, fmt.Errorf(
+			`'colour_names' must be a JSON object of hex to filament name, like {"#C12E1F":"RED"}`)
+	}
+	out := make(map[string]string, len(declared))
+	for hex, name := range declared {
+		normalised, ok := normaliseHex(hex)
+		if !ok {
+			return nil, fmt.Errorf("%q is not a colour this file could declare", hex)
+		}
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			out[normalised] = trimmed
+		}
+	}
+	return out, nil
 }
 
 // uploadColourNames reads the shop's confirmed spools over the built-in table,

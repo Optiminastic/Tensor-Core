@@ -82,19 +82,36 @@ func Read3MF(data []byte) ([]Part, error) {
 		groups[g.ID] = colours
 	}
 
+	// A slicer export carries neither its geometry nor its colour where the
+	// core spec puts them. Both are resolved here rather than in a second
+	// reader, so every caller gets the same answer about the same file. See
+	// threemf_bambu.go.
+	external := componentGeometry(zr, componentPaths(m.Resources.Objects))
+	byExtruder := readBambuColours(zr)
+
 	parts := make([]Part, 0, len(m.Resources.Objects))
 	for _, o := range m.Resources.Objects {
 		tris := trianglesOf(o)
-		// An object with no geometry of its own is legitimate in 3MF - it can
-		// be an assembly of components - but it is not a part, and Write3MF
-		// rejects an empty one, so passing it on would produce a file this
-		// package cannot read back.
+		if len(tris) == 0 {
+			// Before giving up: an object with no mesh of its own may be an
+			// assembly pointing at one in another file.
+			tris = componentTriangles(external, o)
+		}
+		// Still nothing means an object that is genuinely empty. Write3MF
+		// rejects those, so passing one on would produce a file this package
+		// cannot read back.
 		if len(tris) == 0 {
 			continue
 		}
+		colour := colourFor(groups, o)
+		if colour == "" {
+			// No material, so ask the slicer's own record of which filament
+			// this object prints in.
+			colour = byExtruder[o.ID]
+		}
 		parts = append(parts, Part{
-			Name:      o.Name,
-			Colour:    colourFor(groups, o),
+			Name:      partName(o),
+			Colour:    colour,
 			Triangles: tris,
 		})
 	}
@@ -201,7 +218,16 @@ type xmlObject struct {
 	Name   string `xml:"name,attr"`
 	PID    string `xml:"pid,attr"`
 	PIndex *int   `xml:"pindex,attr"`
-	Mesh   struct {
+	// Components are how the production extension splits a package: the
+	// object here is a reference and its mesh lives in another file. A
+	// slicer export is always shaped this way.
+	Components struct {
+		Component []struct {
+			Path     string `xml:"path,attr"`
+			ObjectID string `xml:"objectid,attr"`
+		} `xml:"component"`
+	} `xml:"components"`
+	Mesh struct {
 		Vertices struct {
 			Vertex []struct {
 				X float64 `xml:"x,attr"`
@@ -217,4 +243,59 @@ type xmlObject struct {
 			} `xml:"triangle"`
 		} `xml:"triangles"`
 	} `xml:"mesh"`
+}
+
+// componentPaths lists the other model files these objects reference.
+func componentPaths(objects []xmlObject) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 2)
+	for _, o := range objects {
+		for _, c := range o.Components.Component {
+			if c.Path == "" || seen[c.Path] {
+				continue
+			}
+			seen[c.Path] = true
+			out = append(out, c.Path)
+		}
+	}
+	return out
+}
+
+// componentTriangles gathers the geometry an object references in other files.
+//
+// Transforms are deliberately NOT applied. Every caller here cares about the
+// mesh as drawn - its size, its colours, the plate it is merged onto - and the
+// placement a slicer recorded is about that slicer's bed, not ours. Merge3MF
+// does the positioning for a bed Tensor builds.
+func componentTriangles(
+	external map[string]map[string]xmlObject, o xmlObject,
+) []orientation.Triangle {
+	var out []orientation.Triangle
+	for _, c := range o.Components.Component {
+		objects, ok := external[c.Path]
+		if !ok {
+			continue
+		}
+		referenced, ok := objects[c.ObjectID]
+		if !ok {
+			continue
+		}
+		out = append(out, trianglesOf(referenced)...)
+	}
+	return out
+}
+
+// partName is what to call this piece in a slicer's object list.
+//
+// An object in a slicer export carries no name attribute - the name lives in
+// model_settings.config beside the extruder - so the id is used rather than an
+// empty string, which would make several parts indistinguishable.
+func partName(o xmlObject) string {
+	if name := strings.TrimSpace(o.Name); name != "" {
+		return name
+	}
+	if o.ID != "" {
+		return "object " + o.ID
+	}
+	return ""
 }
