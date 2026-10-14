@@ -33,6 +33,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/meshio"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
@@ -206,6 +207,21 @@ func (s *Server) storeDesignFile(
 		return storedDesignFile{}, false
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
+
+	// A SLICED PLATE IS NOT A DESIGN FILE, and it is the easy mistake to make:
+	// Bambu Studio writes both with a .3mf extension, and the sliced one is
+	// what you get from the Export button after pressing Slice. Named
+	// explicitly, because the generic "could not be read" sends a designer to
+	// check a file that opens perfectly well in their slicer.
+	if ext == ".3mf" {
+		if data, readErr := os.ReadFile(tmpPath); readErr == nil && meshio.IsSlicedPlate(data) {
+			detail(c, http.StatusUnprocessableEntity, fh.Filename+
+				" is a sliced plate rather than a model - it holds the toolpaths for one "+
+				"printer's bed. Export the model instead (File > Export > Export as STL/3MF), "+
+				"because Tensor arranges the bed itself.")
+			return storedDesignFile{}, false
+		}
+	}
 
 	bx, by, bz := modelBBox(tmpPath, ext)
 	if bx == nil || by == nil || bz == nil {

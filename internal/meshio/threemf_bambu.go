@@ -25,6 +25,7 @@ package meshio
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"io"
@@ -166,4 +167,34 @@ func componentGeometry(zr *zip.Reader, paths []string) map[string]map[string]xml
 		out[p] = byID
 	}
 	return out
+}
+
+// IsSlicedPlate reports whether a 3MF is a slicer's OUTPUT rather than a model.
+//
+// Bambu Studio writes two different things with the same extension. A project
+// holds the meshes somebody drew; a ".gcode.3mf" holds a finished plate - the
+// toolpaths, the supports, the prime tower, arranged for one bed on one
+// printer.
+//
+// They must not be confused at an upload. Tensor packs its own beds and merges
+// its own plates, so a plate that has already been packed measures as the whole
+// bed rather than as the product - the failure Load3MFItems describes, where
+// four figures side by side measure 428mm across and fit nothing. Accepting one
+// would put a job on the floor whose dimensions describe somebody else's
+// arrangement.
+//
+// Detected from the contents rather than the name: a file renamed on the way
+// out is still a plate, and the toolpaths are what make it one.
+func IsSlicedPlate(data []byte) bool {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return false
+	}
+	for _, f := range zr.File {
+		name := strings.ToLower(strings.ReplaceAll(f.Name, `\`, "/"))
+		if strings.HasSuffix(name, ".gcode") || strings.HasSuffix(name, ".gcode.md5") {
+			return true
+		}
+	}
+	return false
 }
