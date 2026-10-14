@@ -380,7 +380,10 @@ WHERE batch_id IS NULL
   AND quantity > 0
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
-  AND held = false;
+  AND held = false
+  -- Identical to ListBatchableJobs, as the note above promises: counting a job
+  -- the list would refuse is how the threshold fires a plan that finds nothing.
+  AND model_render_queued_at IS NULL;
 
 -- name: ListJobsForBatch :many
 SELECT * FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC;

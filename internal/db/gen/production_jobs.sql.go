@@ -277,6 +277,9 @@ WHERE batch_id IS NULL
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
   AND held = false
+  -- Identical to ListBatchableJobs, as the note above promises: counting a job
+  -- the list would refuse is how the threshold fires a plan that finds nothing.
+  AND model_render_queued_at IS NULL
 `
 
 // Cheap count-only companion to ListBatchableJobs (identical WHERE clause,
