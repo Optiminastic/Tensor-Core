@@ -1332,14 +1332,15 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
        personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
        colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
        quality_mm, machine_family, variant_title,
-       CASE WHEN issue_reason = 'design_file_stale'
-            THEN personalisation_properties ELSE '[]'::jsonb END AS personalisation_properties,
-       -- NULL::jsonb, not a bare NULL: an untyped NULL makes sqlc infer
-       -- interface{} for the column, and the row then stops being
-       -- field-for-field identical to gen.ProductionJob - which is what makes
-       -- the conversion in the handler free.
-       CASE WHEN issue_reason = 'design_file_stale'
-            THEN personalisation_original ELSE NULL::jsonb END AS personalisation_original,
+       -- IN FULL, for every row. The list elsewhere empties this because it is
+       -- 46% of the bytes and no list screen reads it; here it is the whole
+       -- point. A designer's first question about a job is what the customer
+       -- asked for, and this queue is a handful of rows rather than the
+       -- hundreds the production queue carries.
+       personalisation_properties,
+       -- The BEFORE values, kept only where something changed - that is what
+       -- the diff is computed from, and it is null on every other row anyway.
+       personalisation_original,
        part_role,
        model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
        support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id,
@@ -1351,76 +1352,6 @@ WHERE status = 'queued'
   AND (print_file_id IS NULL OR issue_reason = 'design_file_stale')
 ORDER BY COALESCE(due_date, created_at) ASC, job_number ASC
 `
-
-type ListJobsNeedingDesignFileRow struct {
-	ID                         uuid.UUID
-	JobNumber                  string
-	OrderID                    *uuid.UUID
-	BatchID                    *uuid.UUID
-	Description                string
-	Quantity                   int32
-	Status                     string
-	AssemblyStatus             string
-	FinishingStatus            string
-	QcStatus                   string
-	PackagingStatus            string
-	ShopifyOrderID             *int64
-	Sku                        *string
-	ProductName                *string
-	Material                   *string
-	Colour                     *string
-	NozzleProfile              *string
-	FilamentGramsRequired      pgtype.Numeric
-	PrintFileID                *uuid.UUID
-	EstimatedPrintTimeMinutes  *int32
-	DueDate                    pgtype.Timestamptz
-	Priority                   int32
-	PersonalisationName        *string
-	PersonalisationFont        *string
-	PersonalisationColour      *string
-	PersonalisationVariant     *string
-	PersonalisationStatus      string
-	NameConfirmed              bool
-	PhotoConfirmed             bool
-	FontConfirmed              bool
-	ColourConfirmed            bool
-	VariantConfirmed           bool
-	CustomerApprovalReceived   bool
-	PersonalisationNotes       *string
-	PersonalisationPhotoFileID *uuid.UUID
-	PersonalisationValidatedBy *string
-	PersonalisationValidatedAt pgtype.Timestamptz
-	ReprintOfJobID             *uuid.UUID
-	SplitOfJobID               *uuid.UUID
-	ShopifyCustomerID          *int64
-	CustomerName               *string
-	Held                       bool
-	Colours                    []byte
-	SupportUsed                *bool
-	InfillPct                  pgtype.Numeric
-	LeftNozzleMm               pgtype.Numeric
-	RightNozzleMm              pgtype.Numeric
-	FlowPct                    pgtype.Numeric
-	QualityMm                  pgtype.Numeric
-	MachineFamily              *string
-	VariantTitle               *string
-	PersonalisationProperties  []byte
-	PersonalisationOriginal    []byte
-	PartRole                   string
-	ModelError                 *string
-	ModelErrorAt               pgtype.Timestamptz
-	IssueReason                *string
-	BboxXMm                    pgtype.Numeric
-	BboxYMm                    pgtype.Numeric
-	BboxZMm                    pgtype.Numeric
-	SupportWeightG             pgtype.Numeric
-	PurgeWeightG               pgtype.Numeric
-	ColourCount                *int32
-	CreatedAt                  pgtype.Timestamptz
-	UpdatedAt                  pgtype.Timestamptz
-	BulkOrderID                *uuid.UUID
-	ModelRenderQueuedAt        pgtype.Timestamptz
-}
 
 // The designer's queue: jobs whose customer's window is over and that still
 // need a 3MF from a person.
@@ -1436,24 +1367,25 @@ type ListJobsNeedingDesignFileRow struct {
 // Two kinds of work, and the caller tells them apart by which predicate
 // matched: no file at all, or a file the customer has since outdated.
 //
-// The two personalisation jsonb columns are carried in FULL for a stale row
-// only. That is what lets the diff - what the customer changed - be computed
-// in the same pass rather than one request per row, and it is exactly the
-// question the designer opened the page to answer. Every other row gets the
-// same emptied shape ListProductionJobs uses, because they have nothing to
-// say and the column is 46% of the bytes.
+// The personalisation columns are carried in FULL, unlike every other list.
+// A designer's first question about a job is what the customer asked for -
+// the names, the engraving, the colours they chose - so the fields are the
+// content of this screen rather than a detail behind a click. The diff is
+// computed from the same rows in the same pass. This queue is a handful of
+// jobs needing work, not the hundreds the production queue carries, so the
+// bytes that rule out doing this elsewhere do not apply.
 //
 // NOT filtered to non-DNP here: that is IsGeneratedProduct, which lives in Go
 // and stays in one language. The caller drops the rest.
-func (q *Queries) ListJobsNeedingDesignFile(ctx context.Context) ([]ListJobsNeedingDesignFileRow, error) {
+func (q *Queries) ListJobsNeedingDesignFile(ctx context.Context) ([]ProductionJob, error) {
 	rows, err := q.db.Query(ctx, listJobsNeedingDesignFile)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListJobsNeedingDesignFileRow{}
+	items := []ProductionJob{}
 	for rows.Next() {
-		var i ListJobsNeedingDesignFileRow
+		var i ProductionJob
 		if err := rows.Scan(
 			&i.ID,
 			&i.JobNumber,
@@ -2928,6 +2860,27 @@ type SetJobModelErrorParams struct {
 // batching. This is the explanation, not the exclusion.
 func (q *Queries) SetJobModelError(ctx context.Context, arg SetJobModelErrorParams) error {
 	_, err := q.db.Exec(ctx, setJobModelError, arg.ModelError, arg.ID)
+	return err
+}
+
+const setProductionJobPartRole = `-- name: SetProductionJobPartRole :exec
+UPDATE production_jobs
+SET part_role = coalesce($1, part_role), updated_at = now()
+WHERE id = $2
+`
+
+type SetProductionJobPartRoleParams struct {
+	PartRole *string
+	ID       uuid.UUID
+}
+
+// Names which piece of a product this job is.
+//
+// Written after a designer's upload, because the file name is the only place
+// they say what a piece IS - "clip", "shade", "base". A product configured in
+// the registry already knows its pieces and the caller leaves those alone.
+func (q *Queries) SetProductionJobPartRole(ctx context.Context, arg SetProductionJobPartRoleParams) error {
+	_, err := q.db.Exec(ctx, setProductionJobPartRole, arg.PartRole, arg.ID)
 	return err
 }
 

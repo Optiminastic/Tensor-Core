@@ -73,38 +73,3 @@ func (s *Server) listDesignJobs(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
-
-// supplyDesignJobModel attaches a designer's 3MF to a job Tensor cannot build.
-//
-// A WRAPPER RATHER THAN THE UPLOAD ITSELF, because a route is not secured by
-// what the list shows: :id comes from the caller, and registering uploadJobModel
-// verbatim here would let a designer attach a hand-made file to a Dual Name
-// Plank - silently replacing a rendered model with one nothing re-renders, and
-// making design:job_supply mean something other than its own description.
-//
-// job_rerender.go refuses the mirror image of this, a re-render of a product
-// whose model is uploaded rather than rendered. Between them the two paths
-// cover every job exactly once.
-func (s *Server) supplyDesignJobModel(c *gin.Context) {
-	id, ok := parseUUIDParam(c, "id")
-	if !ok {
-		return
-	}
-	ctx := c.Request.Context()
-
-	job, err := s.store.Q.GetProductionJobByID(ctx, id)
-	if err != nil {
-		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
-		return
-	}
-	if s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
-		detail(c, http.StatusUnprocessableEntity,
-			"Tensor builds this product's model itself, so it is not a design file to supply. "+
-				"Use Rebuild model on the job instead.")
-		return
-	}
-
-	// Everything below here is shared with the operator's own upload, so a fix
-	// to one lands in both.
-	s.uploadJobModel(c)
-}
