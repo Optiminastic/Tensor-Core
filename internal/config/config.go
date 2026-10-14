@@ -483,13 +483,26 @@ type Settings struct {
 	// before anybody's phone does.
 	WinbackCallsEnabled bool
 	// WinbackCallDelayMinutes is how long a checkout must have been abandoned
-	// before it is called. Too soon and you ring somebody who is still typing
-	// their card number.
+	// before the first call and the message. ZERO by default: the shop wants
+	// the customer reached while the basket is still in their head, and the
+	// first call is placed on the first sweep that sees the checkout.
 	WinbackCallDelayMinutes int
+	// WinbackCallAgentVersion is the agent revision the FIRST call runs, and
+	// WinbackFollowUpAgentVersion the one the follow-up runs. Two scripts on
+	// one agent: the opening call, and the "your code runs out in ten
+	// minutes" reminder. Zero falls back to the brand's own version.
+	WinbackCallAgentVersion     int
+	WinbackFollowUpAgentVersion int
+	// WinbackFollowUpDelayMinutes is how long after the first call the second
+	// one is placed, if the basket is still unpaid. Twenty, so that it lands
+	// with ten minutes left on the thirty-minute code the message carried.
+	WinbackFollowUpDelayMinutes int
 	// WinbackCallMaxAgeHours stops the scheduler working through history. A
 	// basket left three weeks ago is not a win-back, it is a cold call.
 	WinbackCallMaxAgeHours int
-	// WinbackCallIntervalMinutes is how often the scheduler looks.
+	// WinbackCallIntervalMinutes is how often the scheduler looks. One
+	// minute: with no delay, this IS how soon after walking away a customer
+	// is rung, and it is the follow-up's precision too.
 	WinbackCallIntervalMinutes int
 	// WinbackCallMaxPerRun bounds one pass. A burst of calls from one tick is
 	// how a telephony account gets flagged, and a bug that selects everybody
@@ -677,29 +690,32 @@ func Load() Settings {
 		OrientationOverhangDeg:  floatEnvOr("ORIENTATION_OVERHANG_DEG", 45),
 		OrientationMaxTriangles: intEnvOr("ORIENTATION_MAX_TRIANGLES", 500_000),
 
-		SarvamAPIKey:               envOr("SARVAM_API_KEY", ""),
-		SarvamOrgID:                envOr("SARVAM_ORG_ID", ""),
-		SarvamWorkspaceID:          envOr("SARVAM_WORKSPACE_ID", ""),
-		SarvamAgentID:              envOr("SARVAM_AGENT_ID", ""),
-		SarvamAgentVersion:         intEnvOr("SARVAM_AGENT_VERSION", 1),
-		SarvamConnectionID:         envOr("SARVAM_CONNECTION_ID", ""),
-		SarvamAgentPhoneNumber:     envOr("SARVAM_AGENT_PHONE_NUMBER", ""),
-		SarvamBaseURL:              envOr("SARVAM_BASE_URL", ""),
-		SarvamProductVariable:      envOr("SARVAM_PRODUCT_VARIABLE", "cart_item_name"),
-		WinbackCallsEnabled:        boolEnvOr("WINBACK_CALLS_ENABLED", false),
-		WinbackCallDelayMinutes:    intEnvOr("WINBACK_CALL_DELAY_MINUTES", 10),
-		WinbackCallMaxAgeHours:     intEnvOr("WINBACK_CALL_MAX_AGE_HOURS", 24),
-		WinbackCallIntervalMinutes: intEnvOr("WINBACK_CALL_INTERVAL_MINUTES", 5),
-		WinbackCallMaxPerRun:       intEnvOr("WINBACK_CALL_MAX_PER_RUN", 5),
-		WinbackCallOnly:            csvEnv("WINBACK_CALL_ONLY"),
-		WhatsAppAccessToken:        os.Getenv("WHATSAPP_ACCESS_TOKEN"),
-		WhatsAppPhoneNumberID:      envOr("WHATSAPP_PHONE_NUMBER_ID", ""),
-		WhatsAppWABAID:             envOr("WHATSAPP_WABA_ID", ""),
-		WhatsAppAppID:              envOr("WHATSAPP_APP_ID", ""),
-		WhatsAppAppSecret:          os.Getenv("WHATSAPP_APP_SECRET"),
-		WhatsAppAPIVersion:         envOr("WHATSAPP_API_VERSION", "v25.0"),
-		WhatsAppTemplateName:       envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_personalised"),
-		WhatsAppTemplateLanguage:   envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
+		SarvamAPIKey:                envOr("SARVAM_API_KEY", ""),
+		SarvamOrgID:                 envOr("SARVAM_ORG_ID", ""),
+		SarvamWorkspaceID:           envOr("SARVAM_WORKSPACE_ID", ""),
+		SarvamAgentID:               envOr("SARVAM_AGENT_ID", ""),
+		SarvamAgentVersion:          intEnvOr("SARVAM_AGENT_VERSION", 1),
+		SarvamConnectionID:          envOr("SARVAM_CONNECTION_ID", ""),
+		SarvamAgentPhoneNumber:      envOr("SARVAM_AGENT_PHONE_NUMBER", ""),
+		SarvamBaseURL:               envOr("SARVAM_BASE_URL", ""),
+		SarvamProductVariable:       envOr("SARVAM_PRODUCT_VARIABLE", "cart_item_name"),
+		WinbackCallsEnabled:         boolEnvOr("WINBACK_CALLS_ENABLED", false),
+		WinbackCallDelayMinutes:     intEnvOr("WINBACK_CALL_DELAY_MINUTES", 0),
+		WinbackCallAgentVersion:     intEnvOr("WINBACK_CALL_AGENT_VERSION", 8),
+		WinbackFollowUpAgentVersion: intEnvOr("WINBACK_FOLLOWUP_AGENT_VERSION", 9),
+		WinbackFollowUpDelayMinutes: intEnvOr("WINBACK_FOLLOWUP_DELAY_MINUTES", 20),
+		WinbackCallMaxAgeHours:      intEnvOr("WINBACK_CALL_MAX_AGE_HOURS", 24),
+		WinbackCallIntervalMinutes:  intEnvOr("WINBACK_CALL_INTERVAL_MINUTES", 1),
+		WinbackCallMaxPerRun:        intEnvOr("WINBACK_CALL_MAX_PER_RUN", 5),
+		WinbackCallOnly:             csvEnv("WINBACK_CALL_ONLY"),
+		WhatsAppAccessToken:         os.Getenv("WHATSAPP_ACCESS_TOKEN"),
+		WhatsAppPhoneNumberID:       envOr("WHATSAPP_PHONE_NUMBER_ID", ""),
+		WhatsAppWABAID:              envOr("WHATSAPP_WABA_ID", ""),
+		WhatsAppAppID:               envOr("WHATSAPP_APP_ID", ""),
+		WhatsAppAppSecret:           os.Getenv("WHATSAPP_APP_SECRET"),
+		WhatsAppAPIVersion:          envOr("WHATSAPP_API_VERSION", "v25.0"),
+		WhatsAppTemplateName:        envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_personalised"),
+		WhatsAppTemplateLanguage:    envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
 
 		DelhiveryAPIKey:  os.Getenv("DELHIVERY_API_KEY"),
 		DelhiveryBaseURL: envOr("DELHIVERY_BASE_URL", ""),

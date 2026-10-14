@@ -119,6 +119,14 @@ type CallRequest struct {
 	// saying the literal placeholder down the phone - so these are the agent's
 	// contract, not a free-form bag.
 	Variables map[string]string
+	// AgentVersion runs this one call on a particular revision of the agent,
+	// overriding the client's own. Zero keeps the client's.
+	//
+	// The win-back sweep rings twice with two different scripts - the opening
+	// call and the "your code runs out in ten minutes" follow-up - and both
+	// are revisions of the same agent, so the version is per call rather than
+	// a second client.
+	AgentVersion int
 }
 
 // CallResult is Sarvam's acknowledgement.
@@ -168,10 +176,15 @@ func (c *Client) Call(ctx context.Context, req CallRequest) (CallResult, error) 
 		return CallResult{}, fmt.Errorf("a call needs a phone number")
 	}
 
+	version := c.cfg.AgentVersion
+	if req.AgentVersion > 0 {
+		version = req.AgentVersion
+	}
+
 	body, err := json.Marshal(callBody{
 		AppConfig: appConfig{
 			AppID:      c.cfg.AgentID,
-			AppVersion: c.cfg.AgentVersion,
+			AppVersion: version,
 			AppType:    "agent",
 			ConnectionConfig: connectionConfig{
 				ConnectionID:     c.cfg.ConnectionID,

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
@@ -201,14 +203,17 @@ func TestAChannelThatIsNotConnectedDoesNotSilenceTheOther(t *testing.T) {
 	if len(only) != 1 || only[0].Name != channelWhatsApp {
 		t.Fatalf("got %+v, want WhatsApp alone", only)
 	}
-	if got := winbackChannels(cfg, true, false); len(got) != 1 || got[0].Name != channelVoice {
-		t.Fatalf("got %+v, want voice alone", got)
+	// Voice alone is two passes: the first call and the follow-up.
+	voiceOnly := winbackChannels(cfg, true, false)
+	if len(voiceOnly) != 2 || voiceOnly[0].Name != channelVoice ||
+		voiceOnly[1].Name != channelVoiceFollowUp {
+		t.Fatalf("got %+v, want the first call and its follow-up", voiceOnly)
 	}
 	if got := winbackChannels(cfg, false, false); len(got) != 0 {
 		t.Errorf("got %+v, want nothing when neither is connected", got)
 	}
-	if got := winbackChannels(cfg, true, true); len(got) != 2 {
-		t.Errorf("got %+v, want both", got)
+	if got := winbackChannels(cfg, true, true); len(got) != 3 {
+		t.Errorf("got %+v, want all three", got)
 	}
 }
 
@@ -281,5 +286,113 @@ func TestOnlyThisChannelsHistoryCounts(t *testing.T) {
 	}
 	if n := len(doneFor(nil, channelVoice)); n != 0 {
 		t.Errorf("empty history has %d", n)
+	}
+}
+
+// The two calls run two different scripts, and neither may run the other's.
+func TestEachCallRunsItsOwnAgentVersion(t *testing.T) {
+	cfg := config.Settings{
+		WinbackCallsEnabled: true, WinbackCallMaxPerRun: 5,
+		WinbackCallAgentVersion: 8, WinbackFollowUpAgentVersion: 9,
+	}
+	versions := map[string]int{}
+	for _, ch := range winbackChannels(cfg, true, false) {
+		versions[ch.Name] = ch.AgentVersion
+		if !ch.Enabled {
+			t.Errorf("%s is off although calling is on", ch.Name)
+		}
+	}
+	if versions[channelVoice] != 8 || versions[channelVoiceFollowUp] != 9 {
+		t.Errorf("versions = %v, want first 8 and follow-up 9", versions)
+	}
+
+	// The follow-up is a phone call: switching calling off silences it too.
+	cfg.WinbackCallsEnabled = false
+	for _, ch := range winbackChannels(cfg, true, false) {
+		if ch.Enabled {
+			t.Errorf("%s still on with calling switched off", ch.Name)
+		}
+	}
+}
+
+func placedCall(phone string, at time.Time) gen.ListWinbackContactsRow {
+	return gen.ListWinbackContactsRow{
+		Phone: phone, Channel: channelVoice, Status: "placed",
+		LastAttemptAt: pgtype.Timestamptz{Time: at, Valid: true},
+	}
+}
+
+func followUpAt(now time.Time) followUpWindow {
+	return followUpWindow{Now: now, After: 20 * time.Minute, Before: 30 * time.Minute}
+}
+
+// Twenty minutes after the first call, with ten left on the code - not
+// before, and not once the code has run out.
+func TestTheFollowUpLandsBetweenTwentyAndThirtyMinutes(t *testing.T) {
+	now := time.Now()
+	cart := checkout("#1", 25*time.Minute, "9000000001")
+	ready := []candidate{{checkout: cart, phone: "+919000000001"}}
+
+	for _, tc := range []struct {
+		name   string
+		called time.Duration
+		want   int
+	}{
+		{"nineteen minutes is too soon", 19 * time.Minute, 0},
+		{"twenty minutes is due", 20 * time.Minute, 1},
+		{"twenty-nine minutes is still due", 29 * time.Minute, 1},
+		{"thirty minutes, the code is gone", 30 * time.Minute, 0},
+		{"a day-old first call is never followed up", 24 * time.Hour, 0},
+	} {
+		contacts := []gen.ListWinbackContactsRow{placedCall("+919000000001", now.Add(-tc.called))}
+		got := dueForFollowUp(ready, []shopify.AbandonedCheckout{cart}, contacts, followUpAt(now))
+		if len(got) != tc.want {
+			t.Errorf("%s: got %d, want %d", tc.name, len(got), tc.want)
+		}
+	}
+}
+
+// The follow-up's script assumes a first call happened.
+func TestNoFollowUpWithoutAPlacedFirstCall(t *testing.T) {
+	now := time.Now()
+	cart := checkout("#1", 25*time.Minute, "9000000001")
+	ready := []candidate{{checkout: cart, phone: "+919000000001"}}
+	at := pgtype.Timestamptz{Time: now.Add(-22 * time.Minute), Valid: true}
+
+	for name, contacts := range map[string][]gen.ListWinbackContactsRow{
+		"never called": nil,
+		"only messaged": {{Phone: "+919000000001", Channel: channelWhatsApp,
+			Status: "sent", LastAttemptAt: at}},
+		"claimed, never settled": {{Phone: "+919000000001", Channel: channelVoice,
+			Status: "claimed", LastAttemptAt: at}},
+	} {
+		if got := dueForFollowUp(ready, nil, contacts, followUpAt(now)); len(got) != 0 {
+			t.Errorf("%s: got a follow-up", name)
+		}
+	}
+}
+
+// Buying through a fresh checkout leaves the abandoned one open in Shopify's
+// list, and must still count as having bought.
+func TestNoFollowUpForSomebodyWhoPaidThroughAnotherCheckout(t *testing.T) {
+	now := time.Now()
+	cart := checkout("#1", 25*time.Minute, "9000000001")
+	ready := []candidate{{checkout: cart, phone: "+919000000001"}}
+	contacts := []gen.ListWinbackContactsRow{placedCall("+919000000001", now.Add(-21*time.Minute))}
+
+	done := now.Add(-5 * time.Minute)
+	paid := checkout("#2", 10*time.Minute, "+91 90000 00001")
+	paid.CompletedAt = &done
+	if got := dueForFollowUp(ready, []shopify.AbandonedCheckout{cart, paid}, contacts,
+		followUpAt(now)); len(got) != 0 {
+		t.Error("paid through a later checkout: must not be rung again")
+	}
+
+	// An order from BEFORE this basket is an earlier purchase, not this one.
+	older := checkout("#0", 48*time.Hour, "9000000001")
+	older.CompletedAt = &done
+	if got := dueForFollowUp(ready, []shopify.AbandonedCheckout{cart, older}, contacts,
+		followUpAt(now)); len(got) != 1 {
+		t.Error("an older completed checkout must not cancel this follow-up")
 	}
 }
