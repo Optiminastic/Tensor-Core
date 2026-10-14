@@ -1321,6 +1321,218 @@ func (q *Queries) ListJobsForBatch(ctx context.Context, batchID *uuid.UUID) ([]P
 	return items, nil
 }
 
+const listJobsNeedingDesignFile = `-- name: ListJobsNeedingDesignFile :many
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       nozzle_profile, filament_grams_required, print_file_id,
+       estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+       personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+       photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+       personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+       personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+       colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+       quality_mm, machine_family, variant_title,
+       CASE WHEN issue_reason = 'design_file_stale'
+            THEN personalisation_properties ELSE '[]'::jsonb END AS personalisation_properties,
+       -- NULL::jsonb, not a bare NULL: an untyped NULL makes sqlc infer
+       -- interface{} for the column, and the row then stops being
+       -- field-for-field identical to gen.ProductionJob - which is what makes
+       -- the conversion in the handler free.
+       CASE WHEN issue_reason = 'design_file_stale'
+            THEN personalisation_original ELSE NULL::jsonb END AS personalisation_original,
+       part_role,
+       model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+       support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id,
+       model_render_queued_at
+FROM production_jobs
+WHERE status = 'queued'
+  AND quantity > 0
+  AND personalisation_status <> 'awaiting_customer'
+  AND (print_file_id IS NULL OR issue_reason = 'design_file_stale')
+ORDER BY COALESCE(due_date, created_at) ASC, job_number ASC
+`
+
+type ListJobsNeedingDesignFileRow struct {
+	ID                         uuid.UUID
+	JobNumber                  string
+	OrderID                    *uuid.UUID
+	BatchID                    *uuid.UUID
+	Description                string
+	Quantity                   int32
+	Status                     string
+	AssemblyStatus             string
+	FinishingStatus            string
+	QcStatus                   string
+	PackagingStatus            string
+	ShopifyOrderID             *int64
+	Sku                        *string
+	ProductName                *string
+	Material                   *string
+	Colour                     *string
+	NozzleProfile              *string
+	FilamentGramsRequired      pgtype.Numeric
+	PrintFileID                *uuid.UUID
+	EstimatedPrintTimeMinutes  *int32
+	DueDate                    pgtype.Timestamptz
+	Priority                   int32
+	PersonalisationName        *string
+	PersonalisationFont        *string
+	PersonalisationColour      *string
+	PersonalisationVariant     *string
+	PersonalisationStatus      string
+	NameConfirmed              bool
+	PhotoConfirmed             bool
+	FontConfirmed              bool
+	ColourConfirmed            bool
+	VariantConfirmed           bool
+	CustomerApprovalReceived   bool
+	PersonalisationNotes       *string
+	PersonalisationPhotoFileID *uuid.UUID
+	PersonalisationValidatedBy *string
+	PersonalisationValidatedAt pgtype.Timestamptz
+	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
+	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	VariantTitle               *string
+	PersonalisationProperties  []byte
+	PersonalisationOriginal    []byte
+	PartRole                   string
+	ModelError                 *string
+	ModelErrorAt               pgtype.Timestamptz
+	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	BulkOrderID                *uuid.UUID
+	ModelRenderQueuedAt        pgtype.Timestamptz
+}
+
+// The designer's queue: jobs whose customer's window is over and that still
+// need a 3MF from a person.
+//
+// THE WINDOW GATE IS personalisation_status <> 'awaiting_customer', and it is
+// the whole ordering this page rests on. While a customer holds a live link
+// they can still change a name or a colour, so anything a designer modelled
+// from could still move; the job appears here the moment any of the three
+// close paths releases it, and not before. A job that never had a window -
+// the feature off, no phone - is validated or not_required from creation and
+// so is visible straight away, which is right.
+//
+// Two kinds of work, and the caller tells them apart by which predicate
+// matched: no file at all, or a file the customer has since outdated.
+//
+// The two personalisation jsonb columns are carried in FULL for a stale row
+// only. That is what lets the diff - what the customer changed - be computed
+// in the same pass rather than one request per row, and it is exactly the
+// question the designer opened the page to answer. Every other row gets the
+// same emptied shape ListProductionJobs uses, because they have nothing to
+// say and the column is 46% of the bytes.
+//
+// NOT filtered to non-DNP here: that is IsGeneratedProduct, which lives in Go
+// and stays in one language. The caller drops the rest.
+func (q *Queries) ListJobsNeedingDesignFile(ctx context.Context) ([]ListJobsNeedingDesignFileRow, error) {
+	rows, err := q.db.Query(ctx, listJobsNeedingDesignFile)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJobsNeedingDesignFileRow{}
+	for rows.Next() {
+		var i ListJobsNeedingDesignFileRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.FinishingStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.VariantTitle,
+			&i.PersonalisationProperties,
+			&i.PersonalisationOriginal,
+			&i.PartRole,
+			&i.ModelError,
+			&i.ModelErrorAt,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BulkOrderID,
+			&i.ModelRenderQueuedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductionJobs = `-- name: ListProductionJobs :many
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,

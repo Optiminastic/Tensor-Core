@@ -9,11 +9,13 @@ func has(set map[string]struct{}, key string) bool {
 
 func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
-	// 41: registry:read split reading the product registry away from reading
-	// cost configuration, and bulk_order:read/manage are admin-only by being
-	// granted to no other role. See catalog.go.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 41 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 41 each", len(admin), len(AllPermissions))
+	// 43: registry:read split reading the product registry away from reading
+	// cost configuration, bulk_order:read/manage are admin-only by being
+	// granted to no other role, and design:job_read/job_supply give a designer
+	// the production jobs waiting for a 3MF without giving them production:*.
+	// See catalog.go.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 43 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 43 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -192,7 +194,28 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	if total != 96 {
-		t.Fatalf("total grants = %d, want 96", total)
+	// 102: design:job_read and design:job_supply each go to DESIGNER,
+	// PROJECT_LEAD and ADMIN.
+	if total != 102 {
+		t.Fatalf("total grants = %d, want 102", total)
+	}
+}
+
+// A designer can be handed the jobs waiting for a 3MF WITHOUT being handed the
+// production queue. Asserted both ways round, because the separation is only
+// worth anything if the second half holds: production:update would also carry
+// patching any job, failing one, and validating somebody's personalisation.
+func TestDesignerSuppliesDesignFilesWithoutProductionAccess(t *testing.T) {
+	designer := PermissionsFor(RoleDesigner)
+
+	for _, p := range []PermissionSpec{DesignJobRead, DesignJobSupply} {
+		if !has(designer, p.Key()) {
+			t.Errorf("designer cannot %s, so the Non-DNP queue is unreachable for them", p.Key())
+		}
+	}
+	for _, p := range []PermissionSpec{ProductionRead, ProductionUpdate, ProductionCreate, ProductionFail} {
+		if has(designer, p.Key()) {
+			t.Errorf("designer holds %s; supplying a design file must not open the production queue", p.Key())
+		}
 	}
 }

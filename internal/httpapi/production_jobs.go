@@ -23,6 +23,11 @@ import (
 // productionJobResponse is the API shape of a production job. machine_* are resolved via the
 // job's batch and stay null until the batching phase.
 type productionJobResponse struct {
+	// PersonalisationChanges is what the customer altered after the order was
+	// placed, sent only by the design queue - the one screen whose whole
+	// purpose is answering it. Omitted everywhere else, where the boolean
+	// personalisation_changed is enough and the values are heavy.
+	PersonalisationChanges []personalisationChange `json:"personalisation_changes,omitempty"`
 	// UnmappedColours is set only on an upload response, and only when the
 	// file asked for a colour the shop has never recorded. Omitted otherwise,
 	// so every other response keeps the shape it had.

@@ -235,6 +235,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerConnections(r)
 	s.registerShopifyProducts(r)
 	s.registerDesigns(r)
+	s.registerDesignJobRoutes(r)
 	s.registerFiles(r)
 	s.registerOrders(r)
 	s.registerProductionJobs(r)

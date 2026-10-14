@@ -59,6 +59,30 @@ var (
 	DesignApprove = PermissionSpec{"design", "approve", "Approve a design and its selling price"}
 	DesignReject  = PermissionSpec{"design", "reject", "Send a design back to the designer"}
 
+	// The designer's half of the production queue, and ONLY that half.
+	//
+	// A production job for a product Tensor cannot render needs a 3MF from a
+	// person before it can print. That is a designer's work, but the endpoints
+	// that expose it live behind production:read and production:update, which
+	// a DESIGNER does not hold and should not: guards are per-permission, so
+	// granting production:update to reach "upload a model" would also grant
+	// patching any job, failing one, and validating somebody's
+	// personalisation.
+	//
+	// Not design:create either, whose description is "Upload a new design".
+	// Attaching geometry to a live job that goes straight to a printer is a
+	// different act, and overloading the word would make this catalog describe
+	// something other than what it does.
+	//
+	// Both are scoped to non-DNP work by the handlers rather than by the page
+	// they are drawn on - the list filters generated products out and the
+	// upload refuses one outright - so a designer never reads or writes a
+	// plank through them.
+	DesignJobRead = PermissionSpec{"design", "job_read",
+		"See production jobs waiting for a design file"}
+	DesignJobSupply = PermissionSpec{"design", "job_supply",
+		"Supply or replace the design file on a production job Tensor does not render"}
+
 	PricingRead     = PermissionSpec{"pricing", "read", "See Design CP, selling price and margins"}
 	PricingGenerate = PermissionSpec{"pricing", "generate", "Generate a selling price from the ladder"}
 	PricingOverride = PermissionSpec{"pricing", "override", "Override a generated selling price"}
@@ -142,6 +166,7 @@ var (
 // AllPermissions is the full catalog in seed order (38 permissions).
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
+	DesignJobRead, DesignJobSupply,
 	PricingRead, PricingGenerate, PricingOverride,
 	ConfigRead, ConfigManage,
 	RegistryRead,
@@ -200,11 +225,13 @@ var roleGrants = map[RoleName][]PermissionSpec{
 	// to show. Still cannot approve, generate or override a price.
 	RoleDesigner: {
 		DesignCreate, DesignRead, DesignUpdate, DesignSubmit,
+		DesignJobRead, DesignJobSupply,
 		PricingRead,
 		BrandRead,
 	},
 	RoleProjectLead: {
 		DesignRead, DesignApprove, DesignReject,
+		DesignJobRead, DesignJobSupply,
 		PricingRead, PricingGenerate, PricingOverride,
 		ShopifyPublish, ConfigRead, RegistryRead, AuditRead,
 		// Runs the whole production pipeline.
