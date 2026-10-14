@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -58,6 +59,9 @@ func (s *Server) listDesignJobs(c *gin.Context) {
 	mine := make([]gen.ProductionJob, 0, len(rows))
 	for _, j := range rows {
 		if IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)) {
+			continue
+		}
+		if isChargeLine(deref(j.ProductName)) {
 			continue
 		}
 		// Field-for-field identical to gen.ProductionJob, as every list row
@@ -119,4 +123,36 @@ func (s *Server) printableColourNames(ctx context.Context) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// chargeLineNames are storefront lines that are money rather than an object.
+//
+// A customer pays a customisation charge; nobody draws one. The line still
+// becomes a production job, because job creation makes one per line and has no
+// way to tell - so it arrives in the design queue asking a designer to model a
+// fee, and sits there for ever because there is nothing they could upload.
+//
+// Matched as a substring of the lower-cased product name, the same way
+// generatedProductNames is, because the storefront appends and reorders words
+// around its own names freely. A short explicit list rather than a rule: "has
+// no SKU and no customisation" would also describe a real product somebody
+// forgot to configure, and hiding that from the one screen that would surface
+// it is the opposite of helpful.
+var chargeLineNames = []string{
+	"customization charge",
+	"customisation charge",
+}
+
+// isChargeLine reports whether a line is a fee rather than something to make.
+func isChargeLine(productName string) bool {
+	name := strings.ToLower(strings.TrimSpace(productName))
+	if name == "" {
+		return false
+	}
+	for _, known := range chargeLineNames {
+		if strings.Contains(name, known) {
+			return true
+		}
+	}
+	return false
 }

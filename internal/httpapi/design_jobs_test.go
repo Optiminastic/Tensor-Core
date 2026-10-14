@@ -41,3 +41,31 @@ func TestTheDesignQueueCoversExactlyTheProductsTensorCannotBuild(t *testing.T) {
 		})
 	}
 }
+
+// A customer pays a customisation charge; nobody draws one. The line still
+// becomes a production job - job creation makes one per line and cannot tell -
+// so without this a designer is asked to model a fee, for ever, because there
+// is nothing they could upload that would clear it.
+func TestAChargeLineIsNotDesignWork(t *testing.T) {
+	for _, name := range []string{
+		"Customization charge",
+		"customisation charge",
+		"CUSTOMIZATION CHARGE - RUSH",
+	} {
+		if !isChargeLine(name) {
+			t.Errorf("%q is a fee, not something to make", name)
+		}
+	}
+	// Everything a designer might actually be handed stays in the queue.
+	for _, name := range []string{
+		"DUOSNAP - Black",
+		"3D Name Plank - Regular - 3 cm height / RED / BLUE",
+		"Bone Tag - Black / Gold",
+		"Night Lamp",
+		"",
+	} {
+		if isChargeLine(name) {
+			t.Errorf("%q was wrongly dropped from the design queue", name)
+		}
+	}
+}
