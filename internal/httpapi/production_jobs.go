@@ -23,9 +23,13 @@ import (
 // productionJobResponse is the API shape of a production job. machine_* are resolved via the
 // job's batch and stay null until the batching phase.
 type productionJobResponse struct {
-	ID        string  `json:"id"`
-	JobNumber string  `json:"job_number"`
-	OrderID   *string `json:"order_id"`
+	// UnmappedColours is set only on an upload response, and only when the
+	// file asked for a colour the shop has never recorded. Omitted otherwise,
+	// so every other response keeps the shape it had.
+	UnmappedColours []string `json:"unmapped_colours,omitempty"`
+	ID              string   `json:"id"`
+	JobNumber       string   `json:"job_number"`
+	OrderID         *string  `json:"order_id"`
 	// OrderNumber is the store's own number for that order, e.g. T3DPS-115251.
 	// Sent so a list does not have to read it out of the job number, which
 	// holds only for jobs numbered after their order.

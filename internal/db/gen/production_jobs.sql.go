@@ -2712,12 +2712,16 @@ func (q *Queries) SetJobModelError(ctx context.Context, arg SetJobModelErrorPara
 const setProductionJobPrintFile = `-- name: SetProductionJobPrintFile :one
 UPDATE production_jobs SET
     print_file_id          = $1,
+    colours                = CASE WHEN $2::bool
+                                  THEN $3::jsonb ELSE colours END,
+    colour_count           = CASE WHEN $2::bool
+                                  THEN $4 ELSE colour_count END,
     issue_reason           = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design',
                                                         'sku_missing', 'design_file_stale')
                                   THEN NULL ELSE issue_reason END,
     model_render_queued_at = NULL,
     updated_at             = now()
-WHERE id = $2
+WHERE id = $5
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
           finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
           nozzle_profile, filament_grams_required, print_file_id,
@@ -2735,6 +2739,9 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 
 type SetProductionJobPrintFileParams struct {
 	PrintFileID *uuid.UUID
+	SetColours  bool
+	Colours     []byte
+	ColourCount *int32
 	ID          uuid.UUID
 }
 
@@ -2766,8 +2773,21 @@ type SetProductionJobPrintFileParams struct {
 // exactly what that column waits for. Every path that stores a model comes
 // through here - GenerateModelForJob, recolourModel, uploadJobModel,
 // setPrintFile - so one clear covers all four and none of them can forget.
+//
+// THE COLOURS COME WITH THE FILE, optionally, and in the same statement for a
+// reason: a model and the filaments it declares describe one thing, and
+// writing them apart leaves an instant where the job is batchable by a colour
+// that is not the one the uploaded file asks for. set_colours false leaves
+// both columns exactly as they were, which is what every caller but the
+// upload passes.
 func (q *Queries) SetProductionJobPrintFile(ctx context.Context, arg SetProductionJobPrintFileParams) (ProductionJob, error) {
-	row := q.db.QueryRow(ctx, setProductionJobPrintFile, arg.PrintFileID, arg.ID)
+	row := q.db.QueryRow(ctx, setProductionJobPrintFile,
+		arg.PrintFileID,
+		arg.SetColours,
+		arg.Colours,
+		arg.ColourCount,
+		arg.ID,
+	)
 	var i ProductionJob
 	err := row.Scan(
 		&i.ID,

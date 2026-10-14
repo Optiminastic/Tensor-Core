@@ -305,8 +305,19 @@ RETURNING id, job_number, order_id, batch_id, description, quantity, status, ass
 -- exactly what that column waits for. Every path that stores a model comes
 -- through here - GenerateModelForJob, recolourModel, uploadJobModel,
 -- setPrintFile - so one clear covers all four and none of them can forget.
+--
+-- THE COLOURS COME WITH THE FILE, optionally, and in the same statement for a
+-- reason: a model and the filaments it declares describe one thing, and
+-- writing them apart leaves an instant where the job is batchable by a colour
+-- that is not the one the uploaded file asks for. set_colours false leaves
+-- both columns exactly as they were, which is what every caller but the
+-- upload passes.
 UPDATE production_jobs SET
     print_file_id          = sqlc.arg('print_file_id'),
+    colours                = CASE WHEN sqlc.arg('set_colours')::bool
+                                  THEN sqlc.arg('colours')::jsonb ELSE colours END,
+    colour_count           = CASE WHEN sqlc.arg('set_colours')::bool
+                                  THEN sqlc.narg('colour_count') ELSE colour_count END,
     issue_reason           = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design',
                                                         'sku_missing', 'design_file_stale')
                                   THEN NULL ELSE issue_reason END,
