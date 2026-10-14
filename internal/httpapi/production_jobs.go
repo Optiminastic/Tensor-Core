@@ -778,6 +778,12 @@ func (s *Server) CreateJobsForOrder(ctx context.Context, orderID uuid.UUID) ([]g
 	if err != nil {
 		return nil, fmt.Errorf("insert jobs: %w", err)
 	}
+
+	// THE CUSTOMER'S WINDOW OPENS HERE, for every order rather than only the
+	// ones Tensor renders. Outside the transaction deliberately: it touches
+	// the link queue and re-reads the order, and holding the insert open
+	// across that would make job creation wait on it.
+	s.openPersonalisationWindow(ctx, order)
 	return created, nil
 }
 

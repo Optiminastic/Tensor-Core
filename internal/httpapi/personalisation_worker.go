@@ -83,13 +83,23 @@ func (w *PersonalisationLinkWorker) Work(
 func (w *PersonalisationLinkWorker) brandFor(
 	ctx context.Context, orderID uuid.UUID,
 ) (string, error) {
-	if slug, err := w.server.store.Q.GetOrderBrandSlug(ctx, orderID); err == nil {
+	return w.server.brandForOrder(ctx, orderID)
+}
+
+// brandForOrder is on the SERVER for the reason personalisationEligible is:
+// three places now have to reach the same answer - the sender, the renderer
+// deciding whether to hold, and job creation deciding whether to open a window
+// at all. One of them was building a throwaway worker just to call this.
+func (s *Server) brandForOrder(
+	ctx context.Context, orderID uuid.UUID,
+) (string, error) {
+	if slug, err := s.store.Q.GetOrderBrandSlug(ctx, orderID); err == nil {
 		if trimmed := strings.TrimSpace(slug); trimmed != "" {
 			return trimmed, nil
 		}
 	}
 
-	slugs, err := w.server.store.Q.ListConnectedShopifyBrandSlugs(ctx)
+	slugs, err := s.store.Q.ListConnectedShopifyBrandSlugs(ctx)
 	if err != nil {
 		return "", fmt.Errorf("the connected brands could not be read")
 	}
@@ -543,8 +553,7 @@ func (s *Server) personalisationWillAsk(ctx context.Context, jobID uuid.UUID) bo
 	if err != nil {
 		return false
 	}
-	worker := NewPersonalisationLinkWorker(s, s.baseLogger())
-	slug, err := worker.brandFor(ctx, *job.OrderID)
+	slug, err := s.brandForOrder(ctx, *job.OrderID)
 	if err != nil {
 		return false
 	}
@@ -565,11 +574,25 @@ func (s *Server) enqueuePersonalisationLink(ctx context.Context, jobID uuid.UUID
 	if err != nil || job.OrderID == nil {
 		return
 	}
-	if err := s.personalisationEnqueuer.Enqueue(ctx,
-		production.SendPersonalisationLinkArgs{OrderID: *job.OrderID}); err != nil {
+	if err := s.enqueuePersonalisationLinkForOrder(ctx, *job.OrderID); err != nil {
 		obs.FromContext(ctx).Warn("personalisation: could not schedule the link",
 			"order", *job.OrderID, "error", err)
 	}
+}
+
+// enqueuePersonalisationLinkForOrder asks for an order's link by order.
+//
+// The caller that opens a window has the order and no job in particular; the
+// one that has just rendered a model has a job and wants the same thing. This
+// is the half they share, and it REPORTS its failure rather than logging it,
+// because opening a window and then failing to ask for the link leaves the
+// order held and has to be undone.
+func (s *Server) enqueuePersonalisationLinkForOrder(ctx context.Context, orderID uuid.UUID) error {
+	if s.personalisationEnqueuer == nil {
+		return fmt.Errorf("the personalisation link queue is not configured")
+	}
+	return s.personalisationEnqueuer.Enqueue(ctx,
+		production.SendPersonalisationLinkArgs{OrderID: orderID})
 }
 
 // unrenderedJobs counts the order's held jobs that have no model yet.
@@ -582,10 +605,23 @@ func (w *PersonalisationLinkWorker) unrenderedJobs(
 	}
 	pending := 0
 	for _, j := range jobs {
-		if j.PersonalisationStatus == production.PersonalisationAwaitingCustomer &&
-			j.PrintFileID == nil {
-			pending++
+		if j.PersonalisationStatus != production.PersonalisationAwaitingCustomer ||
+			j.PrintFileID != nil {
+			continue
 		}
+		// ONLY A MODEL THAT IS ACTUALLY COMING. Every personalisable job is
+		// held from the moment it is created now, including the ones Tensor
+		// never renders - a Bone Tag, a Couple's Date Plank. Counting those
+		// would make the order read as permanently mid-render and the link
+		// would never be sent at all.
+		//
+		// So the rule says what it always meant: wait for every model that is
+		// on its way. An order with nothing to render answers zero and is sent
+		// straight away, which is right - its page is fields only.
+		if !w.server.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)) {
+			continue
+		}
+		pending++
 	}
 	return pending, nil
 }
@@ -624,4 +660,73 @@ func (w *PersonalisationLinkWorker) releaseUnasked(
 		return
 	}
 	w.server.triggerBatchPlan(ctx)
+}
+
+// openPersonalisationWindow holds an order's personalisable jobs and asks for
+// its link, at the moment the jobs are created.
+//
+// EVERY ORDER GETS A WINDOW, which is what this exists to make true. The send
+// used to be triggered only by a render finishing, so an order of things Tensor
+// does not render - a Bone Tag, a DUOSNAP, a Couple's Date Plank - was never
+// asked about at all: no link, no window, and a job that could reach a bed with
+// nobody having checked the spelling.
+//
+// Held HERE rather than when the link is sent, and that is not a detail. A
+// non-DNP job whose SKU already matched an approved design is batchable the
+// instant it exists, and the planner runs on its own schedule - so between
+// creation and the send there is a window in which the bed is formed, and
+// HoldOrderPersonalisationForCustomer deliberately skips a job already on one.
+// Holding first closes it.
+//
+// The send is only ASKED for. The sender re-checks every rule and waits for any
+// model still coming (see unrenderedJobs), so a DNP order still gets its link
+// after its previews exist. Anything it then refuses releases the order through
+// releaseUnasked, so nothing is held for a message that is not coming.
+func (s *Server) openPersonalisationWindow(ctx context.Context, order gen.Order) {
+	log := obs.FromContext(ctx)
+
+	// The switch first, because it decides whether to START holding orders -
+	// and a service with the feature off must behave exactly as it did before
+	// this existed, not hold every order for the fifteen minutes the stranded
+	// backstop takes to notice.
+	if !s.cfg.PersonalisationCheckEnabled {
+		return
+	}
+	slug, err := s.brandForOrder(ctx, order.ID)
+	if err != nil {
+		log.Info("personalisation: not opening a window",
+			"order", order.OrderNumber, "reason", err.Error())
+		return
+	}
+	if _, reason := s.personalisationEligible(ctx, slug, order); reason != "" {
+		log.Info("personalisation: not opening a window",
+			"brand", slug, "order", order.OrderNumber, "reason", reason)
+		return
+	}
+
+	held, err := s.store.Q.HoldOrderPersonalisationForCustomer(ctx, &order.ID)
+	if err != nil {
+		// Not fatal, and deliberately no return: the send is still worth
+		// asking for. A job that was not held is one the customer's edit will
+		// be refused on, which is a worse page rather than a wrong product.
+		log.Error("personalisation: could not hold the order for its customer",
+			"brand", slug, "order", order.OrderNumber, "error", err)
+	}
+	if held == 0 {
+		// Nothing on this order is personalised, so there is nothing to check
+		// and no link worth sending.
+		return
+	}
+
+	if err := s.enqueuePersonalisationLinkForOrder(ctx, order.ID); err != nil {
+		// The jobs are held and nothing will ask about them. Release now
+		// rather than leaving the order waiting on the backstop.
+		log.Error("personalisation: could not ask for the link, releasing the hold",
+			"brand", slug, "order", order.OrderNumber, "error", err)
+		worker := NewPersonalisationLinkWorker(s, s.baseLogger())
+		worker.releaseUnasked(ctx, order.ID, "system (link could not be queued)")
+		return
+	}
+	log.Info("personalisation window opened",
+		"brand", slug, "order", order.OrderNumber, "jobs", held)
 }
