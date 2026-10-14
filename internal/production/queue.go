@@ -645,20 +645,3 @@ func (ExpirePersonalisationLinksArgs) InsertOpts() river.InsertOpts {
 		},
 	}
 }
-
-// PeriodicExpirePersonalisationConstructor builds the recurring sweep that
-// releases jobs once their customer's window has closed.
-//
-// THIS IS WHAT MAKES "EXPIRY PROCEEDS WITH SHOPIFY'S VALUES" TRUE. Without it
-// running, a job whose customer never answered waits for a confirmation that
-// is never coming, and the order never prints. It is registered in the
-// workerset - which the elected River leader runs - rather than beside the
-// sender, because a periodic job registered only in a follower never fires at
-// all.
-func PeriodicExpirePersonalisationConstructor() func() (river.JobArgs, *river.InsertOpts) {
-	return func() (river.JobArgs, *river.InsertOpts) {
-		return ExpirePersonalisationLinksArgs{}, &river.InsertOpts{
-			Queue: PersonalisationLinkQueueName,
-		}
-	}
-}

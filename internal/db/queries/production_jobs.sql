@@ -933,10 +933,18 @@ ORDER BY created_at, job_number;
 -- branch on "did the text change?" would also miss the colour-only
 -- fall-through, where recolourModel declines and the render is queued anyway.
 -- It is cleared by SetProductionJobPrintFile when the new model lands.
+--
+-- colours is only REPLACED when the customer actually has one. A job whose
+-- colour came from somewhere else - an uploaded 3MF declaring its own
+-- filaments - has no personalisation_colour, and writing an unconditional
+-- coloursJSON("") emptied it: the customer corrected a name and the job went
+-- colour-invisible to the planner, which groups a bed on this column alone.
+-- Measured on JOB-115768, whose ["RED","WHITE"] became [] on a name change.
 UPDATE production_jobs
 SET personalisation_properties = sqlc.arg('properties'),
     personalisation_colour     = sqlc.narg('colour'),
-    colours                    = sqlc.arg('colours'),
+    colours                    = CASE WHEN sqlc.arg('set_colours')::bool
+                                      THEN sqlc.arg('colours')::jsonb ELSE colours END,
     personalisation_original   = coalesce(personalisation_original, sqlc.arg('original')),
     model_render_queued_at     = now(),
     updated_at                 = now()

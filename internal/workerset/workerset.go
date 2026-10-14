@@ -42,6 +42,9 @@ const defaultModelGenConcurrency = 4
 // Runner is a started worker set. Stop it to drain in-flight jobs.
 type Runner struct {
 	client *river.Client[pgx.Tx]
+	// stopTickers ends the process-local schedulers this runner owns. They are
+	// not River periodic jobs, deliberately - see startWindowSweep.
+	stopTickers context.CancelFunc
 }
 
 // Stop drains and shuts the workers down. Safe on a nil Runner, so a caller
@@ -49,6 +52,9 @@ type Runner struct {
 func (r *Runner) Stop(ctx context.Context) error {
 	if r == nil || r.client == nil {
 		return nil
+	}
+	if r.stopTickers != nil {
+		r.stopTickers()
 	}
 	return r.client.Stop(ctx)
 }
@@ -213,7 +219,57 @@ func Start(
 		"concurrency", concurrency, "renders", modelGenConcurrency(cfg),
 		"auto_dispatch", cfg.BatchAutoDispatch,
 		"order_sync_minutes", cfg.OrderSyncIntervalMinutes)
-	return &Runner{client: client}, nil
+	tickerCtx, stopTickers := context.WithCancel(context.WithoutCancel(ctx))
+	startWindowSweep(tickerCtx, client, logger)
+
+	return &Runner{client: client, stopTickers: stopTickers}, nil
+}
+
+// windowSweepInterval is how often a closed window is noticed. A customer's
+// thirty minutes does not need second-accuracy, and a minute keeps the
+// released order moving while the floor is still looking at the screen.
+const windowSweepInterval = time.Minute
+
+// startWindowSweep closes expired personalisation windows on a ticker THIS
+// PROCESS owns.
+//
+// NOT A RIVER PERIODIC JOB, which is what it used to be. River runs those on
+// the elected leader alone, and on a shared database the lease is held by
+// whichever client took it first - routinely a deployed container rather than
+// the process that was meant to be doing the work. When that container runs a
+// build without this job registered, the tick simply never happens: the sweep
+// was observed running every minute for the five minutes this process held the
+// lease, then stopping dead for the next eighteen while a container held it,
+// with an order held open the whole time.
+//
+// That matters more here than anywhere else. The sweep is the ONLY thing that
+// releases a job held for its customer, so when it stops, orders stop - and
+// nothing on any screen says why.
+//
+// Safe in every process at once: ExpirePersonalisationLinksArgs is unique by
+// state, so a second insert while one is pending or running is skipped rather
+// than doubling the work.
+func startWindowSweep(ctx context.Context, client *river.Client[pgx.Tx], logger *slog.Logger) {
+	go func() {
+		ticker := time.NewTicker(windowSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				res, err := client.Insert(ctx, production.ExpirePersonalisationLinksArgs{}, nil)
+				switch {
+				case err != nil:
+					// One missed sweep, not a dead scheduler.
+					logger.Error("could not enqueue the personalisation window sweep", "error", err)
+				case res.UniqueSkippedAsDuplicate:
+					// Ordinary when several processes tick: one of them wins.
+					logger.Debug("personalisation window sweep already queued")
+				}
+			}
+		}
+	}()
 }
 
 // modelGenConcurrency is the configured render concurrency, floored at one so a
@@ -266,18 +322,16 @@ func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*riv
 	// consent switches, which is how it came to be scheduled nowhere at all.
 	// cmd/winbackworker ticks for itself.
 
-	// The personalisation window, closed every minute.
+	// The personalisation window is NOT closed from here any more. River runs
+	// periodic jobs on the elected leader alone, and the lease is held by
+	// whichever client took it first - which on a shared database is routinely
+	// a deployed container, not this process. Measured on 2026-10-14: the
+	// sweep ticked every minute for the five minutes this process happened to
+	// hold the lease and then stopped dead when a container took it back,
+	// leaving every held order waiting for a window that would never close.
 	//
-	// UNCONDITIONAL, and before the fleet-sync early return. This is the only
-	// thing that releases a held job, so it must not be switchable off by an
-	// unrelated setting about printers - and it must keep running even after
-	// the feature itself is turned off, or the orders held by the last link
-	// sent would wait forever.
-	jobs = append(jobs, river.NewPeriodicJob(
-		river.PeriodicInterval(time.Minute),
-		production.PeriodicExpirePersonalisationConstructor(),
-		&river.PeriodicJobOpts{RunOnStart: true},
-	))
+	// That is the same way the win-back sweep came to run twice in three days.
+	// It ticks for itself now, and so does this - see startWindowSweep.
 
 	if fleetSync <= 0 {
 		return jobs // FLEET_SYNC_INTERVAL_SECONDS=0 opts out entirely

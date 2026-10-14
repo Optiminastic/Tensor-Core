@@ -291,8 +291,13 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 
 	rows, err := s.store.Q.SaveCustomerPersonalisation(ctx, gen.SaveCustomerPersonalisationParams{
 		ID: job.ID, Properties: properties, Original: original,
-		Colour:  nonEmptyPtr(colour),
-		Colours: coloursJSON(colour),
+		Colour: nonEmptyPtr(colour),
+		// Only when there is one to write. See the note on the query: a job
+		// whose colours came from its uploaded model has no
+		// personalisation_colour, and overwriting with an empty list took it
+		// out of colour grouping entirely.
+		SetColours: strings.TrimSpace(colour) != "",
+		Colours:    coloursJSON(colour),
 	})
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not save that just now.")

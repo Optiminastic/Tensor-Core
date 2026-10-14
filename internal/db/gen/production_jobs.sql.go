@@ -2714,17 +2714,19 @@ const saveCustomerPersonalisation = `-- name: SaveCustomerPersonalisation :execr
 UPDATE production_jobs
 SET personalisation_properties = $1,
     personalisation_colour     = $2,
-    colours                    = $3,
-    personalisation_original   = coalesce(personalisation_original, $4),
+    colours                    = CASE WHEN $3::bool
+                                      THEN $4::jsonb ELSE colours END,
+    personalisation_original   = coalesce(personalisation_original, $5),
     model_render_queued_at     = now(),
     updated_at                 = now()
-WHERE id = $5
+WHERE id = $6
   AND personalisation_status = 'awaiting_customer'
 `
 
 type SaveCustomerPersonalisationParams struct {
 	Properties []byte
 	Colour     *string
+	SetColours bool
 	Colours    []byte
 	Original   []byte
 	ID         uuid.UUID
@@ -2751,10 +2753,18 @@ type SaveCustomerPersonalisationParams struct {
 // branch on "did the text change?" would also miss the colour-only
 // fall-through, where recolourModel declines and the render is queued anyway.
 // It is cleared by SetProductionJobPrintFile when the new model lands.
+//
+// colours is only REPLACED when the customer actually has one. A job whose
+// colour came from somewhere else - an uploaded 3MF declaring its own
+// filaments - has no personalisation_colour, and writing an unconditional
+// coloursJSON("") emptied it: the customer corrected a name and the job went
+// colour-invisible to the planner, which groups a bed on this column alone.
+// Measured on JOB-115768, whose ["RED","WHITE"] became [] on a name change.
 func (q *Queries) SaveCustomerPersonalisation(ctx context.Context, arg SaveCustomerPersonalisationParams) (int64, error) {
 	result, err := q.db.Exec(ctx, saveCustomerPersonalisation,
 		arg.Properties,
 		arg.Colour,
+		arg.SetColours,
 		arg.Colours,
 		arg.Original,
 		arg.ID,
