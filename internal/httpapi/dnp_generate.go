@@ -665,6 +665,13 @@ func (s *Server) holdJobForModelFailure(ctx context.Context, jobID uuid.UUID, ca
 	}); err != nil {
 		return err
 	}
+	// A render that failed is not a render in flight. Left set, the hold would
+	// keep the job out of batching for ever AND make modelStatusOf report it
+	// as still being made, hiding the very error just recorded.
+	if err := s.store.Q.ClearJobModelRenderHold(ctx, jobID); err != nil {
+		obs.FromContext(ctx).Warn("could not release the render hold after a failure",
+			"job", jobID, "error", err)
+	}
 	return recordJobEvent(ctx, s.store.Q, jobEvent{
 		JobID:     jobID,
 		EventType: production.EventModelFailed,

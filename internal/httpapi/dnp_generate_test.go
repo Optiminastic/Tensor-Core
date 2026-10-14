@@ -3,8 +3,10 @@ package httpapi
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/personalise"
@@ -109,6 +111,43 @@ func TestModelStatusOf(t *testing.T) {
 		{
 			"has a model already",
 			gen.ProductionJob{PrintFileID: &fileID, Sku: sku("THO-PLA-FFF-0022")},
+			ModelReady,
+		},
+		{
+			// THE CASE THE COLUMN EXISTS FOR. It has a model and that model is
+			// about to be replaced, so "ready" is the one answer that is
+			// certainly wrong - it is what let a bed be planned from geometry
+			// the customer had already corrected.
+			"a model being rebuilt is not ready",
+			gen.ProductionJob{
+				PrintFileID:         &fileID,
+				Sku:                 sku("T3DPS-DNP-9"),
+				ModelRenderQueuedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+			},
+			ModelGenerating,
+		},
+		{
+			// A rebuild supersedes the error from the render before it. The
+			// job is being made again right now; reporting the old failure
+			// would send somebody to look at a problem already being fixed.
+			"a rebuild outranks a stale failure",
+			gen.ProductionJob{
+				PrintFileID:         &fileID,
+				Sku:                 sku("T3DPS-DNP-9"),
+				ModelError:          sku("boom"),
+				ModelRenderQueuedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+			},
+			ModelGenerating,
+		},
+		{
+			// And once it lands the hold is cleared by the same statement that
+			// attaches the file, so the job reads ready again.
+			"cleared after the rebuild lands",
+			gen.ProductionJob{
+				PrintFileID:         &fileID,
+				Sku:                 sku("T3DPS-DNP-9"),
+				ModelRenderQueuedAt: pgtype.Timestamptz{},
+			},
 			ModelReady,
 		},
 		{

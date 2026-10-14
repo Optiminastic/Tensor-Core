@@ -100,6 +100,45 @@ func (q *Queries) ClearJobModelError(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const clearJobModelRenderHold = `-- name: ClearJobModelRenderHold :exec
+UPDATE production_jobs
+SET model_render_queued_at = NULL, updated_at = now()
+WHERE id = $1 AND model_render_queued_at IS NOT NULL
+`
+
+// Releases a job whose render is not coming after all.
+//
+// For the two paths that save an edit and then find they cannot queue a
+// render - no enqueuer configured, or the insert failed - and for a render
+// that failed outright. The values are saved either way; holding the job for
+// a rebuild that will never happen would strand it until the sweep.
+func (q *Queries) ClearJobModelRenderHold(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearJobModelRenderHold, id)
+	return err
+}
+
+const clearStalledModelRenderHolds = `-- name: ClearStalledModelRenderHolds :execrows
+UPDATE production_jobs
+SET model_render_queued_at = NULL, updated_at = now()
+WHERE model_render_queued_at IS NOT NULL
+  AND model_render_queued_at < now() - $1::interval
+`
+
+// The backstop: frees anything still waiting on a render long after one could
+// plausibly still be running.
+//
+// A render is one to two seconds now, so a hold minutes old is a worker that
+// died between queueing and storing, not a slow day. Without this such a job
+// waits for ever, because the thing that would clear it is the thing that did
+// not happen. Returns the count so the sweep can say so out loud.
+func (q *Queries) ClearStalledModelRenderHolds(ctx context.Context, stalledAfter pgtype.Interval) (int64, error) {
+	result, err := q.db.Exec(ctx, clearStalledModelRenderHolds, stalledAfter)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const completeJobsForFulfilledOrder = `-- name: CompleteJobsForFulfilledOrder :many
 UPDATE production_jobs j SET
     status     = 'completed',
@@ -1015,6 +1054,11 @@ WHERE batch_id IS NULL
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
   AND held = false
+  -- A model being rebuilt is about to change. Planning from the one on file
+  -- would pack the bed to the old geometry while grouping it by the colour
+  -- the customer just chose. Cleared the moment the new file is attached, so
+  -- the very next run picks the job up - see migration 0102.
+  AND model_render_queued_at IS NULL
 ORDER BY created_at ASC, id ASC
 `
 
@@ -1131,6 +1175,10 @@ WHERE batch_id IS NULL
     held = true
     OR personalisation_status NOT IN ('validated', 'not_required')
     OR issue_reason IS NOT NULL
+    -- The exact complement of ListBatchableJobs, which is the whole value of
+    -- this query: a job excluded there and missing here is a job nobody can
+    -- find out about.
+    OR model_render_queued_at IS NOT NULL
   )
 ORDER BY created_at ASC, id ASC
 `
@@ -1859,6 +1907,10 @@ WHERE (j.batch_id IS NULL OR (b.status = 'pending_approval' AND b.manual = false
   AND j.personalisation_status IN ('validated', 'not_required')
   AND j.issue_reason IS NULL
   AND j.held = false
+  -- See ListBatchableJobs: a model mid-rebuild is not the model that will
+  -- print. This is the planner's only input, so this is the line that makes
+  -- "what reaches a bed is what the customer last approved" true.
+  AND j.model_render_queued_at IS NULL
 ORDER BY COALESCE(o.placed_at, j.created_at) ASC, j.job_number ASC, j.id ASC
 `
 
@@ -1984,6 +2036,11 @@ WHERE batch_id IS NULL
   AND personalisation_status IN ('validated', 'not_required')
   AND issue_reason IS NULL
   AND held = false
+  -- A model being rebuilt is about to change. Planning from the one on file
+  -- would pack the bed to the old geometry while grouping it by the colour
+  -- the customer just chose. Cleared the moment the new file is attached, so
+  -- the very next run picks the job up - see migration 0102.
+  AND model_render_queued_at IS NULL
 ORDER BY created_at ASC, id ASC
 `
 
@@ -2413,6 +2470,7 @@ SET personalisation_properties = $1,
     personalisation_colour     = $2,
     colours                    = $3,
     personalisation_original   = coalesce(personalisation_original, $4),
+    model_render_queued_at     = now(),
     updated_at                 = now()
 WHERE id = $5
   AND personalisation_status = 'awaiting_customer'
@@ -2439,6 +2497,14 @@ type SaveCustomerPersonalisationParams struct {
 // there, so a second edit cannot overwrite the values the order arrived with -
 // which would make the customer's own first correction look like what they
 // bought.
+//
+// model_render_queued_at IS STAMPED HERE, unconditionally and in the same
+// statement as the values. The claim it makes is true of both kinds of edit -
+// the model on file is now older than the order - and writing it alongside
+// leaves no instant where the new values are saved and the hold is not. A
+// branch on "did the text change?" would also miss the colour-only
+// fall-through, where recolourModel declines and the render is queued anyway.
+// It is cleared by SetProductionJobPrintFile when the new model lands.
 func (q *Queries) SaveCustomerPersonalisation(ctx context.Context, arg SaveCustomerPersonalisationParams) (int64, error) {
 	result, err := q.db.Exec(ctx, saveCustomerPersonalisation,
 		arg.Properties,
@@ -2611,10 +2677,11 @@ func (q *Queries) SetJobModelError(ctx context.Context, arg SetJobModelErrorPara
 
 const setProductionJobPrintFile = `-- name: SetProductionJobPrintFile :one
 UPDATE production_jobs SET
-    print_file_id = $1,
-    issue_reason  = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design', 'sku_missing')
-                         THEN NULL ELSE issue_reason END,
-    updated_at    = now()
+    print_file_id          = $1,
+    issue_reason           = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design', 'sku_missing')
+                                  THEN NULL ELSE issue_reason END,
+    model_render_queued_at = NULL,
+    updated_at             = now()
 WHERE id = $2
 RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
           finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
@@ -2655,6 +2722,11 @@ type SetProductionJobPrintFileParams struct {
 // Any other reason survives untouched: an upload does not fix colour_missing
 // or filament_out_of_stock, and blanket-clearing would push a genuinely
 // unvalidated job into batching.
+//
+// AND IT CLEARS model_render_queued_at, because attaching a print file is
+// exactly what that column waits for. Every path that stores a model comes
+// through here - GenerateModelForJob, recolourModel, uploadJobModel,
+// setPrintFile - so one clear covers all four and none of them can forget.
 func (q *Queries) SetProductionJobPrintFile(ctx context.Context, arg SetProductionJobPrintFileParams) (ProductionJob, error) {
 	row := q.db.QueryRow(ctx, setProductionJobPrintFile, arg.PrintFileID, arg.ID)
 	var i ProductionJob

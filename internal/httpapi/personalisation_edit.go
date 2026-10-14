@@ -325,8 +325,14 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 
 	// The render is the slow half and the customer is watching it, so it goes
 	// on the queue kept for exactly that - not the floor's.
+	//
+	// ONLY FOR A PRODUCT TENSOR RENDERS. A Bone Tag or a Couple's Date Plank
+	// was being queued too, where GenerateModelForJob returns
+	// errNotPersonalisable and the worker shrugs - a wasted round trip that
+	// also left the job holding model_render_queued_at for a rebuild that was
+	// never going to happen.
 	rendering := false
-	if s.modelEnqueuer != nil {
+	if s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) && s.modelEnqueuer != nil {
 		if err := s.modelEnqueuer.EnqueuePreview(ctx, job.ID); err != nil {
 			// The values are saved either way, and that is what gets printed.
 			// A preview that did not rebuild is a worse picture, not a wrong
@@ -335,6 +341,16 @@ func (s *Server) publicPersonalisationEdit(c *gin.Context) {
 				"job", job.ID, "error", err)
 		} else {
 			rendering = true
+		}
+	}
+	if !rendering {
+		// SaveCustomerPersonalisation stamped the hold on the way in, because
+		// it cannot know whether a render will follow. Nothing is coming, so
+		// release it here rather than leaving the job out of batching until
+		// the sweep notices.
+		if err := s.store.Q.ClearJobModelRenderHold(ctx, job.ID); err != nil {
+			obs.FromContext(ctx).Warn("personalisation: could not release the render hold",
+				"job", job.ID, "error", err)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"saved": true, "rendering": rendering})

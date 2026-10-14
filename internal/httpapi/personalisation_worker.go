@@ -393,6 +393,15 @@ func (w *PersonalisationLinkWorker) settle(
 // one enormous transaction, and the next tick is a minute away.
 const expiredLinkBatch = 200
 
+// stalledRenderAfter is how long a job may wait for a model that was queued
+// before the backstop assumes it is never coming.
+//
+// A render is one to two seconds, so ten minutes is not a slow day - it is a
+// worker that died between queueing the rebuild and storing its result. The
+// thing that would normally clear the hold is the thing that did not happen,
+// so without this the job waits for ever.
+var stalledRenderAfter = pgtype.Interval{Microseconds: 10 * 60 * 1_000_000, Valid: true}
+
 // strandedHoldAfter is how long a job may wait for a link before the backstop
 // assumes none is coming.
 //
@@ -453,6 +462,18 @@ func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
 		w.logger.Error("personalisation: could not free stranded holds", "error", err)
 	} else if freed > 0 {
 		w.logger.Warn("personalisation: freed jobs held for a link that never arrived",
+			"jobs", freed)
+		w.server.triggerBatchPlan(ctx)
+	}
+
+	// And the same shape for a model rebuild that was queued and never landed.
+	// A different hold with the same failure mode: the thing that clears it is
+	// the thing that did not happen, so only an age can find it.
+	if freed, err := w.server.store.Q.ClearStalledModelRenderHolds(ctx,
+		stalledRenderAfter); err != nil {
+		w.logger.Error("personalisation: could not free stalled render holds", "error", err)
+	} else if freed > 0 {
+		w.logger.Warn("personalisation: freed jobs waiting on a model that never arrived",
 			"jobs", freed)
 		w.server.triggerBatchPlan(ctx)
 	}

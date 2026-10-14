@@ -1085,6 +1085,23 @@ func (s *Server) findProductionJob(ctx context.Context, ref string) (gen.Product
 // modelStatusOf reports whether a job can be printed, and if not, who is
 // waiting on whom.
 func modelStatusOf(j gen.ProductionJob) string {
+	// A REBUILD IN FLIGHT OUTRANKS HAVING A FILE, and this has to be the first
+	// branch. A job being re-rendered does have a model; it is the wrong one,
+	// and until this said so nothing could tell a settled model from one about
+	// to be replaced.
+	//
+	// Three things follow from the order. The queue pill reads "Creating"
+	// during a rebuild instead of "Ready". batchingBlockedReason's existing
+	// ModelGenerating early return then treats a render-pending job as making
+	// progress rather than blocked, so excluding it from planning puts no red
+	// row on the screen. And replateWhenRendersSettle's sibling guard starts
+	// working: it asks whether a sibling is ModelGenerating, which was false
+	// for any sibling still holding its OLD file - so a four-plank bed
+	// re-plated on the first render to land and baked in three models that
+	// were about to change, the exact failure its own comment says it prevents.
+	if j.ModelRenderQueuedAt.Valid {
+		return ModelGenerating
+	}
 	if j.PrintFileID != nil {
 		return ModelReady
 	}
