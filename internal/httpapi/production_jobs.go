@@ -268,6 +268,8 @@ var noModelIssues = map[string]bool{
 // sentence for, and those leaked to the queue as "stl_missing" - a column name
 // shown to somebody who has never seen the schema.
 var issueWording = map[string]string{
+	production.IssueDesignFileStale: "The customer changed this item after its " +
+		"design file was made. Upload a replacement 3MF.",
 	production.IssueSTLMissing:         "No model file yet. Upload one to release this job.",
 	production.IssueSKUMissing:         "This line has no SKU, so nothing can be matched to it.",
 	production.IssueNoApprovedDesign:   "No approved design for this SKU.",

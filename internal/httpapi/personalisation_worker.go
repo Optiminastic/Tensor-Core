@@ -500,13 +500,7 @@ func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
 func (w *PersonalisationExpiryWorker) release(
 	ctx context.Context, orderID uuid.UUID, by string,
 ) {
-	if err := w.server.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
-		gen.ReleaseOrderPersonalisationToPrintParams{
-			OrderID: &orderID, ValidatedBy: &by,
-		}); err != nil {
-		w.logger.Error("personalisation: could not release the order's jobs",
-			"order", orderID, "error", err)
-	}
+	w.server.closePersonalisationWindow(ctx, orderID, by)
 }
 
 // --- deciding to hold, at the moment a model lands ----------------------------
@@ -653,12 +647,7 @@ func (w *PersonalisationLinkWorker) releaseUnasked(
 		return
 	}
 
-	if err := w.server.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
-		gen.ReleaseOrderPersonalisationToPrintParams{OrderID: &orderID, ValidatedBy: &by}); err != nil {
-		w.logger.Error("personalisation: could not release the order's jobs",
-			"order", orderID, "error", err)
-		return
-	}
+	w.server.closePersonalisationWindow(ctx, orderID, by)
 	w.server.triggerBatchPlan(ctx)
 }
 
@@ -729,4 +718,77 @@ func (s *Server) openPersonalisationWindow(ctx context.Context, order gen.Order)
 	}
 	log.Info("personalisation window opened",
 		"brand", slug, "order", order.OrderNumber, "jobs", held)
+}
+
+// closePersonalisationWindow is what happens when a customer's thirty minutes
+// are over, however they ended.
+//
+// THREE PATHS END A WINDOW and they must end it identically: the customer
+// pressed Confirm, the sweep found the link expired, or the sender decided
+// nobody could be asked. Each one used to call
+// ReleaseOrderPersonalisationToPrint for itself, so a rule added to the end of
+// a window had three places to be added to and two of them would be found
+// later, by somebody wondering why confirming behaved differently from waiting.
+//
+// Two things happen here, in this order. The order's jobs are released to the
+// floor. Then anything on it that a designer has to remake is flagged, which
+// is only possible now: while the window was open the customer could still
+// change their mind, so a design file marked stale mid-window could be remade
+// from values that then moved again.
+//
+// Returns nothing. Every failure is logged and none of them is worth refusing
+// the caller for: a confirm that released the jobs and could not flag a stale
+// file has still done the thing the customer asked for.
+func (s *Server) closePersonalisationWindow(ctx context.Context, orderID uuid.UUID, by string) {
+	log := obs.FromContext(ctx)
+	if err := s.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
+		gen.ReleaseOrderPersonalisationToPrintParams{OrderID: &orderID, ValidatedBy: &by}); err != nil {
+		log.Error("personalisation: could not release the order's jobs",
+			"order", orderID, "error", err)
+		return
+	}
+	s.flagStaleDesignFiles(ctx, orderID)
+}
+
+// flagStaleDesignFiles marks the order's hand-made items whose design file no
+// longer matches what the customer asked for.
+//
+// Runs once, as the window closes, and only over the products Tensor does NOT
+// render - a plank rebuilds itself and Part A's hold covers it. What is left is
+// the job a person makes by hand from a 3MF somebody drew, where the only way
+// the file catches up is for a designer to draw it again.
+//
+// Three jobs are skipped, each for its own reason:
+//
+//   - nothing was changed: personalisation_original is null, so the file still
+//     describes the order and the designer has nothing to do;
+//   - there is no file yet: the job already says so through stl_missing or
+//     no_approved_design, and the design queue finds it by that;
+//   - Tensor renders it: not a designer's work at any point.
+func (s *Server) flagStaleDesignFiles(ctx context.Context, orderID uuid.UUID) {
+	log := obs.FromContext(ctx)
+	jobs, err := s.store.Q.ListProductionJobsForOrder(ctx, &orderID)
+	if err != nil {
+		log.Error("personalisation: could not read the order's jobs to flag stale designs",
+			"order", orderID, "error", err)
+		return
+	}
+	for _, j := range jobs {
+		if len(j.PersonalisationOriginal) == 0 || j.PrintFileID == nil {
+			continue
+		}
+		if s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)) {
+			continue
+		}
+		flagged, err := s.store.Q.MarkJobDesignFileStale(ctx, j.ID)
+		if err != nil {
+			log.Error("personalisation: could not flag a stale design file",
+				"job", j.JobNumber, "error", err)
+			continue
+		}
+		if flagged > 0 {
+			log.Info("personalisation: the design file no longer matches the order",
+				"job", j.JobNumber, "order", orderID)
+		}
+	}
 }

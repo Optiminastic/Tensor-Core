@@ -142,6 +142,14 @@ const (
 	IssueMaterialMissing    = "material_missing"
 	IssueProfileMissing     = "profile_missing"
 	IssueFilamentOutOfStock = "filament_out_of_stock"
+	// IssueDesignFileStale means the customer changed this item after its
+	// design file was made, so the file on it describes the old order.
+	//
+	// Only ever set on a job that HAS a file - a job without one is already
+	// saying so through stl_missing or no_approved_design, and three words for
+	// "there is no model" is two too many. Cleared by the upload that replaces
+	// the file, the same way those three are.
+	IssueDesignFileStale = "design_file_stale"
 )
 
 var batchStatusTargets = set(BatchOpen, BatchInProgress, BatchCompleted)
@@ -208,6 +216,10 @@ var packagingStatuses = set(PackagingPending, PackagingPackaged)
 var issueReasons = set(
 	IssueSKUMissing, IssueNoApprovedDesign, IssueSTLMissing, IssueColourMissing,
 	IssueMaterialMissing, IssueProfileMissing, IssueFilamentOutOfStock,
+	// PATCH-settable so a lead can overrule it - "that rename does not touch
+	// the geometry" is a judgement only a person can make - and set it by hand
+	// for the other half of the same thought, "this file is wrong, redo it".
+	IssueDesignFileStale,
 )
 
 var failureStages = set(FailureStagePrint, FailureStageQc)

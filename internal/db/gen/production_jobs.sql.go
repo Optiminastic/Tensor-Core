@@ -2180,6 +2180,37 @@ func (q *Queries) LockOrderForJobCreation(ctx context.Context, orderID string) e
 	return err
 }
 
+const markJobDesignFileStale = `-- name: MarkJobDesignFileStale :execrows
+UPDATE production_jobs
+SET issue_reason           = 'design_file_stale',
+    model_render_queued_at = NULL,
+    updated_at             = now()
+WHERE id = $1
+  AND issue_reason IS NULL
+  AND print_file_id IS NOT NULL
+`
+
+// Says that the customer changed this item after its design file was made.
+//
+// Set when the window CLOSES, never while it is open: until then the customer
+// can still change their mind, and a designer sent to remake a file mid-window
+// could remake it from values that then move again.
+//
+// issue_reason IS NULL so it cannot mask something worse - a job already out
+// of filament has a more urgent problem than a rename. print_file_id IS NOT
+// NULL so this only ever means stale, never missing; a job with no file is
+// already saying so, and the design queue finds it by that.
+//
+// Both predicates are restated here as well as in the caller on purpose: the
+// statement has to be safe on its own, because a second caller will exist.
+func (q *Queries) MarkJobDesignFileStale(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, markJobDesignFileStale, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const moveJobsToBatch = `-- name: MoveJobsToBatch :execrows
 UPDATE production_jobs SET batch_id = $1, updated_at = now()
 WHERE id = ANY($2::uuid[])
@@ -2681,7 +2712,8 @@ func (q *Queries) SetJobModelError(ctx context.Context, arg SetJobModelErrorPara
 const setProductionJobPrintFile = `-- name: SetProductionJobPrintFile :one
 UPDATE production_jobs SET
     print_file_id          = $1,
-    issue_reason           = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design', 'sku_missing')
+    issue_reason           = CASE WHEN issue_reason IN ('stl_missing', 'no_approved_design',
+                                                        'sku_missing', 'design_file_stale')
                                   THEN NULL ELSE issue_reason END,
     model_render_queued_at = NULL,
     updated_at             = now()
@@ -2717,7 +2749,11 @@ type SetProductionJobPrintFileParams struct {
 //	no_approved_design nothing in the design tables matches the SKU
 //	sku_missing        the line carries no SKU to match on at all
 //
-// An operator uploading the file answers every one of them. This is how a
+// An operator uploading the file answers every one of them.
+//
+// design_file_stale is the fourth and means something different - there IS a
+// file and the customer changed the order after it was made - but the remedy
+// is the same upload, so it clears here too. This is how a
 // product Tensor does not generate - a photo frame, a night lamp - reaches a
 // bed at all: somebody supplies the 3MF and the job joins the colour it was
 // already recorded against.

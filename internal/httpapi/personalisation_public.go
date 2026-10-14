@@ -412,14 +412,7 @@ func (s *Server) publicPersonalisationConfirm(c *gin.Context) {
 	// and for the same reason: the other way round leaves a link that reads
 	// 'confirmed' while its jobs still wait for a customer who can no longer
 	// reach them.
-	by := "customer"
-	if err := s.store.Q.ReleaseOrderPersonalisationToPrint(ctx,
-		gen.ReleaseOrderPersonalisationToPrintParams{
-			OrderID: &link.OrderID, ValidatedBy: &by,
-		}); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not confirm this just now.")
-		return
-	}
+	s.closePersonalisationWindow(ctx, link.OrderID, "customer")
 	if err := s.store.Q.ConfirmPersonalisationLink(ctx, link.ID); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not confirm this just now.")
 		return
