@@ -116,6 +116,11 @@ const (
 	channelVoiceFollowUp = "voice_followup"
 )
 
+// twoCallFlowMark keys the two-call flow's own start in winback_watermarks,
+// beside the brand's original mark. A row rather than a migration, so it is
+// set by the worker that runs the flow, at the moment it first runs it.
+const twoCallFlowMark = "#two-call"
+
 // winbackChannel is one way of reaching a customer in this sweep.
 type winbackChannel struct {
 	Name string
@@ -214,6 +219,23 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	if err != nil {
 		return fmt.Errorf("read the watch mark for %s: %w", slug, err)
 	}
+	// When the TWO-CALL flow started for this brand: set on the first sweep
+	// this version of the worker makes, and kept from then on. A checkout
+	// from before it belongs to the old flow - it was rung, or deliberately
+	// not, under the old rules - and must not be picked up by the new one.
+	// Without this, the deploy itself would ring every open cart of the last
+	// day that the old flow had not reached.
+	//
+	// Fails CLOSED: no mark, no sweep. A sweep that cannot tell old carts
+	// from new is one that may ring the old ones.
+	flow, err := w.server.store.Q.EnsureWinbackWatermark(ctx, slug+twoCallFlowMark)
+	if err != nil {
+		return fmt.Errorf("read the two-call flow's start for %s: %w", slug, err)
+	}
+	watchFrom := mark.WatchFrom.Time
+	if flow.WatchFrom.Time.After(watchFrom) {
+		watchFrom = flow.WatchFrom.Time
+	}
 
 	// Read from the LATER of the watch mark and the age limit. Before the mark
 	// there is nothing to contact, and a worker watching for a month should
@@ -223,7 +245,6 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	// by design - it names one checkout deliberately - and narrowing the fetch
 	// here would mean the named checkout never arrives to be allowed, so the
 	// testing gate would silently do nothing. Found exactly that way.
-	watchFrom := mark.WatchFrom.Time
 	since := time.Now().Add(-time.Duration(cfg.WinbackCallMaxAgeHours) * time.Hour)
 	if len(cfg.WinbackCallOnly) == 0 && watchFrom.After(since) {
 		since = watchFrom

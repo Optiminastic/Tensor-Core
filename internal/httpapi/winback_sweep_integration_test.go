@@ -190,9 +190,12 @@ func newE2EWorld(t *testing.T, callsEnabled bool) *e2eWorld {
 	}); err != nil {
 		t.Fatalf("connect the fake shop: %v", err)
 	}
-	// Watching began an hour ago, so the carts below are all new ones.
-	if _, err := store.Q.EnsureWinbackWatermark(ctx, slug); err != nil {
-		t.Fatalf("watch mark: %v", err)
+	// Watching - and the two-call flow - began an hour ago, so the carts
+	// below are all new ones.
+	for _, key := range []string{slug, slug + twoCallFlowMark} {
+		if _, err := store.Q.EnsureWinbackWatermark(ctx, key); err != nil {
+			t.Fatalf("watch mark %s: %v", key, err)
+		}
 	}
 	if _, err := store.Pool.Exec(ctx,
 		`UPDATE winback_watermarks SET watch_from = now() - interval '1 hour'`); err != nil {
@@ -361,5 +364,48 @@ func TestIntegrationWinbackDisabledRingsNobody(t *testing.T) {
 	if err := w.store.Pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM abandoned_checkout_calls`).Scan(&rows); err != nil || rows != 1 {
 		t.Errorf("ledger has %d rows (%v), want only the seeded one", rows, err)
+	}
+}
+
+// The two-call flow reaches only carts abandoned after it started. One left
+// before - an open cart the old flow never rang - stays untouched, and so
+// does its owner's phone.
+func TestIntegrationWinbackLeavesCheckoutsFromBeforeTheFlowAlone(t *testing.T) {
+	w := newE2EWorld(t, true)
+	ctx := context.Background()
+	slug := string(pricing.BrandGifting)
+	if _, err := w.store.Pool.Exec(ctx,
+		`UPDATE winback_watermarks SET watch_from = now() - interval '5 minutes'
+		 WHERE brand_slug = $1`, slug+twoCallFlowMark); err != nil {
+		t.Fatalf("start the flow five minutes ago: %v", err)
+	}
+	now := time.Now()
+	w.shop.set(
+		fakeCheckout{Name: "#3001", Phone: "9000000031", Created: now.Add(-10 * time.Minute)},
+		fakeCheckout{Name: "#3002", Phone: "9000000032", Created: now.Add(-time.Minute)},
+	)
+
+	w.sweep(t)
+	calls := w.sarvam.since(0)
+	if len(calls) != 1 || calls[0].Phone != "+919000000032" {
+		t.Fatalf("calls = %+v, want only the cart abandoned after the flow began", calls)
+	}
+}
+
+// The first sweep of the new flow sets its start to now, so everything
+// already in Shopify's list - however recent - is left to the old flow.
+func TestIntegrationWinbackFirstRunOfTheFlowRingsNobodyFromBefore(t *testing.T) {
+	w := newE2EWorld(t, true)
+	if _, err := w.store.Pool.Exec(context.Background(),
+		`DELETE FROM winback_watermarks WHERE brand_slug = $1`,
+		string(pricing.BrandGifting)+twoCallFlowMark); err != nil {
+		t.Fatalf("forget the flow's start: %v", err)
+	}
+	w.shop.set(fakeCheckout{Name: "#4001", Phone: "9000000041",
+		Created: time.Now().Add(-30 * time.Second)})
+
+	w.sweep(t)
+	if calls := w.sarvam.since(0); len(calls) != 0 {
+		t.Fatalf("the flow's first sweep rang a cart from before it: %+v", calls)
 	}
 }
