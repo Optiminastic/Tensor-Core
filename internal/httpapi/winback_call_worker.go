@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/config"
@@ -483,13 +484,7 @@ func (w *WinbackCallWorker) call(
 	// one, which is not.
 	claim, err := w.claimFor(ctx, slug, c, ch.Name)
 	if err != nil {
-		// No row: another replica claimed this number between our read and
-		// our write. Exactly what the unique index is for - but LOGGED, not
-		// silent, because until 0098 the index and the read asked different
-		// questions and a legitimate candidate vanished here on every sweep
-		// with nothing to show for it.
-		w.logger.Info("win-back: already claimed on this channel",
-			"brand", slug, "channel", ch.Name, "checkout", c.checkout.Name)
+		w.claimRefused(slug, ch.Name, c, err)
 		return false
 	}
 
@@ -558,8 +553,7 @@ func (w *WinbackCallWorker) message(
 	// unexplained, every single sweep.
 	claim, claimErr := w.claimFor(ctx, slug, c, channelWhatsApp)
 	if claimErr != nil {
-		w.logger.Info("win-back: already claimed on this channel",
-			"brand", slug, "channel", channelWhatsApp, "checkout", c.checkout.Name)
+		w.claimRefused(slug, channelWhatsApp, c, claimErr)
 		return false
 	}
 
@@ -690,6 +684,24 @@ func (w *WinbackCallWorker) mintWinbackCode(
 		return "", err
 	}
 	return "", fmt.Errorf("every candidate code was taken: %w", lastErr)
+}
+
+// claimRefused says why a claim came back empty-handed.
+//
+// No row is the expected case: another replica claimed this number between
+// our read and our write, which is exactly what the unique index is for.
+// ANYTHING ELSE is the database refusing the write, and it used to be logged
+// as the same "already claimed" line - so when production ran this code
+// against a schema one migration behind, every customer for a day was
+// silently skipped with a log that looked like routine deduplication.
+func (w *WinbackCallWorker) claimRefused(slug, channel string, c candidate, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.logger.Info("win-back: already claimed on this channel",
+			"brand", slug, "channel", channel, "checkout", c.checkout.Name)
+		return
+	}
+	w.logger.Error("win-back: could not record the contact, so nothing was sent",
+		"brand", slug, "channel", channel, "checkout", c.checkout.Name, "error", err)
 }
 
 // claimFor takes the right to contact this person on this channel.

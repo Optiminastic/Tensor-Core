@@ -8,6 +8,7 @@ package httpapi
 // does. Time is moved by rewriting the ledger, not by waiting.
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,6 +152,25 @@ type e2eWorld struct {
 	shop   *fakeShopify
 	river  *river.Client[pgx.Tx]
 	done   <-chan *river.Event
+	logs   *syncBuffer
+}
+
+// syncBuffer is the worker's log, readable by the test while River writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func newE2EWorld(t *testing.T, callsEnabled bool) *e2eWorld {
@@ -179,7 +200,8 @@ func newE2EWorld(t *testing.T, callsEnabled bool) *e2eWorld {
 		WinbackCallMaxPerRun: 5, WinbackCallAgentVersion: 8,
 		WinbackFollowUpAgentVersion: 9, WinbackFollowUpDelayMinutes: 20,
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
 	server := NewServer(cfg, store, auth.NewGuards(nil, ""), logger)
 
 	slug := string(pricing.BrandGifting)
@@ -220,7 +242,9 @@ func newE2EWorld(t *testing.T, callsEnabled bool) *e2eWorld {
 	}
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
 
-	return &e2eWorld{store: store, sarvam: sarvamFake, shop: shopFake, river: client, done: done}
+	return &e2eWorld{
+		store: store, sarvam: sarvamFake, shop: shopFake, river: client, done: done, logs: logs,
+	}
 }
 
 // sweep enqueues one sweep exactly as the worker's ticker does and waits for it.
@@ -407,5 +431,35 @@ func TestIntegrationWinbackFirstRunOfTheFlowRingsNobodyFromBefore(t *testing.T) 
 	w.sweep(t)
 	if calls := w.sarvam.since(0); len(calls) != 0 {
 		t.Fatalf("the flow's first sweep rang a cart from before it: %+v", calls)
+	}
+}
+
+// Production ran this worker against a schema one migration behind: every
+// claim failed, and each failure was logged as "already claimed" - routine
+// deduplication, to anyone reading - while nobody was contacted for a day.
+// A refused write must say so, and must still contact nobody.
+func TestIntegrationWinbackSaysWhenTheLedgerRefusesTheWrite(t *testing.T) {
+	w := newE2EWorld(t, true)
+	ctx := context.Background()
+	if _, err := w.store.Pool.Exec(ctx, `ALTER TABLE abandoned_checkout_calls
+		DROP COLUMN message_body, DROP COLUMN message_link`); err != nil {
+		t.Fatalf("roll the table back to migration 98: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = w.store.Pool.Exec(context.Background(), `ALTER TABLE abandoned_checkout_calls
+			ADD COLUMN IF NOT EXISTS message_body text, ADD COLUMN IF NOT EXISTS message_link text`)
+	})
+	w.shop.set(fakeCheckout{Name: "#5001", Phone: "9000000051", Created: time.Now()})
+
+	w.sweep(t)
+	if calls := w.sarvam.since(0); len(calls) != 0 {
+		t.Fatalf("calls placed with no record of them: %+v", calls)
+	}
+	logs := w.logs.String()
+	if !strings.Contains(logs, "could not record the contact") {
+		t.Errorf("the refused write was not reported; log:\n%s", logs)
+	}
+	if strings.Contains(logs, "already claimed") {
+		t.Errorf("a refused write was reported as a duplicate; log:\n%s", logs)
 	}
 }
