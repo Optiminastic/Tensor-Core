@@ -80,6 +80,17 @@ type publicItemResponse struct {
 	// prints as a plank, a rose and a keychain. Empty for a product that is
 	// one piece.
 	Part string `json:"part"`
+	// Editable is whether THIS ITEM can still be changed, as against whether
+	// the window is open.
+	//
+	// They come apart on an order that reached a printer before the link was
+	// sent. SaveCustomerPersonalisation writes only to a job the hold
+	// reached, and the hold does not touch a job on a locked or dispatched
+	// bed - that plate is on its way to a machine. Without this the page
+	// offered a field, a clock and a Save button that answered "this link is
+	// no longer available", which reads as a broken page rather than as an
+	// order already being made.
+	Editable bool `json:"editable"`
 	// HasPreview says whether a picture is coming AT ALL.
 	//
 	// Tensor renders the plank family and the products the registry
@@ -225,7 +236,10 @@ func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicIt
 		ModelReady:   j.PrintFileID != nil,
 		ModelVersion: deref(uuidPtrStr(j.PrintFileID)),
 		Part:         partLabel(j),
-		Fields:       make([]publicFieldResponse, 0, 4),
+		// The one state the edit path accepts. Anything else means the job
+		// has moved on, whatever the clock at the top of the page says.
+		Editable: j.PersonalisationStatus == production.PersonalisationAwaitingCustomer,
+		Fields:   make([]publicFieldResponse, 0, 4),
 	}
 	if item.Colour == "" {
 		item.Colour = deref(j.Colour)
@@ -247,7 +261,10 @@ func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicIt
 			continue
 		}
 		item.Fields = append(item.Fields, publicFieldResponse{
-			Label: p.Name, Value: p.Value, Editable: rules.canEdit(p.Name, p.Value),
+			Label: p.Name, Value: p.Value,
+			// Both have to be true: the field has to be one a customer may
+			// set, and the job has to be one that can still accept a write.
+			Editable: item.Editable && rules.canEdit(p.Name, p.Value),
 		})
 	}
 	return item

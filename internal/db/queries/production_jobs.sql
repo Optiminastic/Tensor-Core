@@ -993,14 +993,32 @@ WHERE j.personalisation_status = 'awaiting_customer'
 -- the expiry sweep and the confirm both find it and release it. Holding at
 -- creation would strand an order that never gets a link.
 --
--- NEVER TOUCHES A JOB ALREADY COMMITTED. A job on a bed, or one past the
--- queue, is work in progress: pulling it back into a customer check would take
--- it out of batching under a plate that already counts it.
+-- A DRAFT BED IS NOT A COMMITMENT. This used to require batch_id IS NULL, on
+-- the reasoning that pulling a job back would take it out of batching under a
+-- plate that already counts it. That is true of a bed somebody has approved
+-- and false of a Draft, which the planner dissolves and rebuilds on every run
+-- - UnassignJobsFromBatches exists to do exactly this.
+--
+-- The cost of the stricter rule was the whole feature. On a floor that plans
+-- every few minutes, most orders are on a Draft before the link is sent, so
+-- the hold skipped them, so SaveCustomerPersonalisation - which writes only to
+-- an awaiting_customer job - refused every edit with "this link is no longer
+-- available". The customer got a live page, a running clock, editable fields,
+-- and a Save button that could not work. Measured on T3DPS-115768 and
+-- T3DPS-115801, both of which were on Draft beds.
+--
+-- A LOCKED OR DISPATCHED BED IS STILL UNTOUCHABLE. That plate is on its way to
+-- a printer or already on one, and the order genuinely cannot change. The
+-- customer's page says so rather than offering a field - see publicItem.
 UPDATE production_jobs
 SET personalisation_status = 'awaiting_customer',
+    -- Withdrawn from the Draft as it is held, so the next plan builds a bed
+    -- without it rather than one that counts a job nobody has confirmed.
+    batch_id               = NULL,
     updated_at             = now()
 WHERE order_id = sqlc.arg('order_id')
-  AND batch_id IS NULL
+  AND (batch_id IS NULL
+       OR batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval'))
   AND status IN ('pending', 'queued')
   AND personalisation_status IN ('pending', 'validated', 'not_required')
   AND jsonb_array_length(coalesce(personalisation_properties, '[]'::jsonb)) > 0;
