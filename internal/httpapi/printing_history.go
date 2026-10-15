@@ -113,7 +113,17 @@ func (s *Server) listPrintingHistory(c *gin.Context) {
 	// never has to decide what to hide. The shop reads this to see what came
 	// off the beds lately; an archive going back to the first plate ever run is
 	// weight on a tailnet link for rows nobody scrolls to.
-	items, err := s.bambu.ListArchives(ctx, time.Now().Add(-historyWindow), limit)
+	numbered, paged, ok := parseOffsetPage(c)
+	if !ok {
+		return
+	}
+	// A click within the History tab may reuse the last read; a first load or
+	// a refresh always asks BambuBuddy (source_cache.go).
+	items, err := s.sources.archive.get(ctx, "archive|"+strconv.Itoa(limit),
+		pagingWithin(paged, wantsCounts(c)),
+		func(ctx context.Context) ([]bambubuddy.Archive, error) {
+			return s.bambu.ListArchives(ctx, time.Now().Add(-historyWindow), limit)
+		})
 	if err != nil {
 		obs.FromContext(ctx).Error("could not read the BambuBuddy archive", "error", err)
 		var reason bambubuddy.ReasonError
@@ -143,9 +153,7 @@ func (s *Server) listPrintingHistory(c *gin.Context) {
 		return historyStamp(out[i]) > historyStamp(out[j])
 	})
 	// ?page=N is the History tab's page of the archive window.
-	if numbered, paged, ok := parseOffsetPage(c); !ok {
-		return
-	} else if paged {
+	if paged {
 		c.JSON(http.StatusOK, slicePage(out, numbered))
 		return
 	}

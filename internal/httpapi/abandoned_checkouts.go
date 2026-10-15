@@ -9,6 +9,7 @@ package httpapi
 // then the columns will be known rather than guessed.
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,6 +58,11 @@ func (s *Server) listAbandonedCheckouts(c *gin.Context) {
 		return
 	}
 
+	numbered, paged, ok := parseOffsetPage(c)
+	if !ok {
+		return
+	}
+	days := defaultAbandonedWindowDays
 	since := time.Now().AddDate(0, 0, -defaultAbandonedWindowDays)
 	if raw := c.Query("days"); raw != "" {
 		days, convErr := strconv.Atoi(raw)
@@ -68,7 +74,13 @@ func (s *Server) listAbandonedCheckouts(c *gin.Context) {
 		since = time.Now().AddDate(0, 0, -days)
 	}
 
-	items, err := s.shopify.ListAbandonedCheckouts(c.Request.Context(), shop, token, 0, since)
+	// A click within the table may be answered from the last read of Shopify;
+	// a first load or a refresh always reads it (source_cache.go).
+	items, err := s.sources.abandoned.get(c.Request.Context(),
+		slug+"|"+strconv.Itoa(days), pagingWithin(paged, wantsCounts(c)),
+		func(ctx context.Context) ([]shopify.AbandonedCheckout, error) {
+			return s.shopify.ListAbandonedCheckouts(ctx, shop, token, 0, since)
+		})
 	if err != nil {
 		// Shopify's own sentence, not a generic failure. Its refusals name the
 		// scope or field that was wrong, and that is what the person reading
@@ -84,9 +96,7 @@ func (s *Server) listAbandonedCheckouts(c *gin.Context) {
 	}
 	// ?page=N is the Abandoned Checkout table's page (external_pages.go):
 	// Shopify is read whole, filtered and sorted here, and fifteen rows sent.
-	if numbered, paged, ok := parseOffsetPage(c); !ok {
-		return
-	} else if paged {
+	if paged {
 		pageAbandonedCheckouts(c, items, shop, numbered)
 		return
 	}
