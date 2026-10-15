@@ -29,6 +29,12 @@ services:
     image: tensor-api
     env_file: [env/local.env]
     ports: ["8001:8001"]
+    environment:
+      # OFF, pinned here rather than left to env/local.env. The API runs the
+      # whole pipeline itself when RUN_PRODUCTION_WORKERS is not false, so it
+      # can mint a customer's link and send it exactly as the worker can. See
+      # the note on the worker below.
+      PERSONALISATION_CHECK_ENABLED: "false"
     restart: unless-stopped
 
   productionworker:
@@ -47,6 +53,24 @@ services:
       OPENSCAD_BIN: /usr/local/bin/openscad
       # Same story: a Windows path on the host, the baked-in copy in here.
       OPENSCAD_ASSET_DIR: /opt/tensor/scadassets
+      # THE PERSONALISATION CHECK IS OFF, and pinned here for the same reason
+      # the win-back worker's two switches are: it is consent, not
+      # configuration, and this is the service that would act on it. Turning
+      # it on mints a public link per order and sends it to the number on the
+      # order - a real customer's phone, not a test one, unless
+      # PERSONALISATION_TEST_RECIPIENT is also set.
+      #
+      # Off, every rule still runs and the log says whose order it WOULD have
+      # asked about, which is how the rules get checked against a real store
+      # before a stranger's phone buzzes. Nothing is minted, nothing is sent
+      # and no job is held.
+      #
+      # Before turning it on: set PERSONALISATION_TEST_RECIPIENT so every
+      # message is redirected to one phone, narrow PERSONALISATION_ONLY to a
+      # single order number, and set FRONTEND_URL - without that last one the
+      # sender logs "no public address is configured" and sends nothing at
+      # all, silently.
+      PERSONALISATION_CHECK_ENABLED: "false"
     restart: unless-stopped
     deploy:
       resources:
