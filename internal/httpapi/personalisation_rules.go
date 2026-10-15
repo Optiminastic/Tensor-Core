@@ -111,7 +111,7 @@ func personalisationBodyParams(order gen.Order) []string {
 		number = "your order"
 	}
 
-	return []string{name, number, spokenCount(personalisedItemCount(order))}
+	return []string{name, number, spokenItemCount(personalisedItemCount(order))}
 }
 
 // personalisedItemCount counts the units the customer can actually change.
@@ -134,12 +134,27 @@ func personalisedItemCount(order gen.Order) int {
 	return total
 }
 
-// spokenCount renders a count for a message, never as "0".
-func spokenCount(n int) string {
+// spokenItemCount renders the count as the phrase the message reads out.
+//
+// THE NOUN COMES WITH THE NUMBER rather than being written into the template,
+// because the template cannot agree with itself about the plural. A template
+// reading "your {{3}} personalised items" says "your 1 personalised items" to
+// every single-item order - which is most of them - and "item(s)" is the
+// usual way out of that, which reads like a form rather than a message. The
+// parameter carries "1 personalised item" or "3 personalised items" and the
+// template simply emphasises it.
+//
+// Never "0": a message telling somebody there is nothing to check would not
+// have been sent at all, so a count that arrives as zero is a bug upstream
+// and one item is the safe thing to say.
+func spokenItemCount(n int) string {
 	if n < 1 {
 		n = 1
 	}
-	return strconv.Itoa(n)
+	if n == 1 {
+		return "1 personalised item"
+	}
+	return strconv.Itoa(n) + " personalised items"
 }
 
 // timestamptzAt is db.Timestamptz for a value rather than a pointer, so a

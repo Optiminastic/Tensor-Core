@@ -138,10 +138,25 @@ func TestEveryPersonalisationParameterIsNonEmpty(t *testing.T) {
 	named := orderWith(personalised(2))
 	named.CustomerName = strPtr("Rishi Patel")
 	got := personalisationBodyParams(named)
-	want := []string{"Rishi Patel", "#66897853350101", "2"}
+	want := []string{"Rishi Patel", "#66897853350101", "2 personalised items"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("parameter %d = %q, want %q", i+1, got[i], want[i])
+		}
+	}
+}
+
+func TestTheItemCountReadsAsASentence(t *testing.T) {
+	// The template emphasises this parameter and adds no noun of its own, so
+	// the plural has to be right here. "your 1 personalised items" is what a
+	// count on its own produces for the commonest order there is.
+	for n, want := range map[int]string{
+		0: "1 personalised item", // never said at all, but never said as "0"
+		1: "1 personalised item",
+		2: "2 personalised items",
+	} {
+		if got := spokenItemCount(n); got != want {
+			t.Errorf("spokenItemCount(%d) = %q, want %q", n, got, want)
 		}
 	}
 }

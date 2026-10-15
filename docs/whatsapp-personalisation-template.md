@@ -37,7 +37,7 @@ and the `ButtonParams` at `personalisation_worker.go:322`.
 | --- | --- | --- | --- |
 | Body | `{{1}}` | Customer name, or `there` when the order has none | `Priya` |
 | Body | `{{2}}` | Order number, or `your order` | `#1043` |
-| Body | `{{3}}` | How many personalised **units** are on the order | `2` |
+| Body | `{{3}}` | The item count AS A PHRASE, units not lines | `2 personalised items` |
 | Button | `{{1}}` | The path only: `p/<token>` | `p/8f3c...` |
 
 None of them may ever be blank — Meta refuses an empty parameter and names
@@ -52,34 +52,46 @@ does not already say.
 ### Body
 
 ```
-Hi {{1}}, thanks for your order {{2}}.
+Hi {{1}}! Thank you for your order *{{2}}*. 😊
 
-Before we start printing, please check the spelling and colours on your {{3}} personalised item(s). You have 30 minutes to make changes — after that your order goes straight to production.
+Before we begin printing, please review the spelling and colours of your *{{3}}*.
+
+⏳ You have *30 minutes* to make any changes. After that, your order will move straight into production.
 ```
 
 Notes on the wording, each of which is load-bearing:
 
 - **The thirty minutes is stated.** The page shows a live countdown, but the
   customer decides whether to open the link at all from this message.
-- **"goes straight to production"** says what happens on silence. Doing nothing
-  is a valid choice and the message must not imply the order is stuck.
+- **"move straight into production"** says what happens on silence. Doing
+  nothing is a valid choice and the message must not imply the order is stuck.
 - **No discount, no offer, no second product.** Anything of that kind makes this
   MARKETING, with the delivery consequence above.
-- `{{3}}` is a count of **units**, not lines: three of the same plank is three
-  things to check, and "1 item" about three planks reads as though two were
-  lost.
+- **`{{3}} CARRIES ITS OWN NOUN** - "2 personalised items", not "2". The
+  template emphasises the parameter and adds no noun after it, because a
+  template that did could not agree with itself about the plural: "your 1
+  personalised items" is what a bare count produces for the commonest order
+  there is, and "item(s)" reads like a form. `spokenItemCount` builds the
+  phrase (`internal/httpapi/personalisation_rules.go`).
+- The count is of **units**, not lines: three of the same plank is three things
+  to check, and "1 item" about three planks reads as though two were lost.
+- `*asterisks*` are WhatsApp's own bold. They are part of the body text and
+  are not a parameter.
 
 ### Footer
 
 ```
-Tensor3D — reply STOP to opt out of order updates
+The 3D Printing Store
 ```
+
+No opt-out line. It reads as a marketing convention, and this message is one
+the customer needs in order to get the thing they bought right.
 
 ### Buttons: two, both Call-to-action → Visit website
 
 Meta allows two URL buttons on one template, and this one uses both.
 
-**1. `Check my order` — Dynamic.** `https://<FRONTEND_URL host>/{{1}}`,
+**1. `Check My Order` — Dynamic.** `https://<FRONTEND_URL host>/{{1}}`,
 sample `p/abc123`.
 
 **2. `Explore More` — Static.** `https://the3dprintingstore.in`
