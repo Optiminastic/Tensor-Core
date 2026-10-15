@@ -20,7 +20,7 @@ func TestIntegrationSKUPipelinesTablePages(t *testing.T) {
 	store := setupStore(t)
 	seedAll(t, store)
 	ctx := context.Background()
-	if _, err := store.Pool.Exec(ctx, `TRUNCATE sku_slicer_pipelines`); err != nil {
+	if _, err := store.Pool.Exec(ctx, `TRUNCATE sku_slicer_pipelines, products CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	minter := newTokenMinter(t)
