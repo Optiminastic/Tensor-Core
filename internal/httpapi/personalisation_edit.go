@@ -388,6 +388,14 @@ func applyCustomerEdit(
 		if utf8.RuneCountInString(value) > rules.maxRunes {
 			return nil, false, errFieldTooLong(p.Name, rules.maxRunes)
 		}
+		// Letters and spaces on anything that holds a name. The page strips
+		// the rest as it is typed, so a customer never reaches this - but the
+		// page is a convenience and this is the rule. See
+		// personalisation_name.go for why it is scoped to name fields and why
+		// spaces are allowed.
+		if isNameField(p.Name) && !validName(value) {
+			return nil, false, errNotALetter(p.Name)
+		}
 		if value != p.Value {
 			changed = true
 		}
