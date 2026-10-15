@@ -56,15 +56,17 @@ Hi {{1}}! Thank you for your order *{{2}}*. 😊
 
 Before we begin printing, please review the spelling and colours of your *{{3}}*.
 
-⏳ You have *30 minutes* to make any changes. After that, your order will move straight into production.
+⏳ You have *30 minutes* to make any changes. After that, your order will move straight into printing.
 ```
 
 Notes on the wording, each of which is load-bearing:
 
 - **The thirty minutes is stated.** The page shows a live countdown, but the
   customer decides whether to open the link at all from this message.
-- **"move straight into production"** says what happens on silence. Doing
-  nothing is a valid choice and the message must not imply the order is stuck.
+- **"move straight into printing"** says what happens on silence. Doing
+  nothing is a valid choice and the message must not imply the order is
+  stuck. "Printing" rather than "production": the customer bought a printed
+  object and has no reason to know the shop's word for its own queue.
 - **No discount, no offer, no second product.** Anything of that kind makes this
   MARKETING, with the delivery consequence above.
 - **`{{3}} CARRIES ITS OWN NOUN** - "2 personalised items", not "2". The
@@ -125,10 +127,22 @@ as promotional, and a re-categorisation to MARKETING brings the silent
 non-delivery above. If this template comes back MARKETING, the `Explore More`
 button is the first thing to remove — not the thing to argue about.
 
+## One edit per 24 hours
+
+An ACTIVE template can be edited once in any 24-hour period; Meta refuses the
+second with `error_subcode 2388124`, "You can only edit an active template once
+in 24 hours". So a wording change that arrives after that day's edit has two
+options, and for anything that has already messaged a customer the answer is to
+wait: a second template under a new name means two approved templates saying
+nearly the same thing, and the one nobody deploys is the one that drifts.
+
+Before it has ever sent, a new name is the cheaper answer - which is how
+`personalisation_check` came to be superseded by this one and can be deleted.
+
 ## Wiring it up once approved
 
 ```sh
-PERSONALISATION_TEMPLATE_NAME=personalisation_check   # the approved name
+PERSONALISATION_TEMPLATE_NAME=order_personalisation_check   # the approved name
 WHATSAPP_TEMPLATE_LANGUAGE=en                         # must match exactly; "en" and "en_US" are different templates
 FRONTEND_URL=https://<the public address>             # without it the sender logs
                                                       # "no public address is configured" and sends nothing
