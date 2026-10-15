@@ -41,6 +41,9 @@ func (s *Server) registerPersonalisationPublic(r *gin.Engine) {
 
 	g.GET("", s.publicPersonalisation)
 	g.GET("/items/:jobID/model", s.publicPersonalisationModel)
+	// The same item drawn as a picture - what the page actually shows. See
+	// personalisation_picture.go for why it is not drawn in the browser.
+	g.GET("/items/:jobID/picture.png", s.publicPersonalisationPicture)
 	g.PATCH("/items/:jobID", s.publicPersonalisationEdit)
 	// One item, for a page waiting on its own re-render. Cheaper than
 	// re-reading the whole order every few seconds, and it is the only thing
@@ -331,45 +334,66 @@ func (s *Server) publicPersonalisationItem(c *gin.Context) {
 // --- the model ----------------------------------------------------------------
 
 func (s *Server) publicPersonalisationModel(c *gin.Context) {
-	ctx := c.Request.Context()
-	link, ok := s.openLink(c)
+	model, job, row, ok := s.previewModelFor(c)
 	if !ok {
 		return
 	}
-	job, ok := s.jobOnLink(c, link)
+	_ = job
+	// Inline, not an attachment: the browser hands these bytes to a 3D viewer
+	// rather than to the downloads folder.
+	c.Header("Content-Disposition", "inline")
+	c.Header("Cache-Control", "private, max-age=60")
+	c.Data(http.StatusOK, row.ContentType, model)
+}
+
+// previewModelFor loads the exact bytes a customer should be shown for one
+// item: their model, with the hearts composed in.
+//
+// Shared by the 3MF route and the picture route so the two can never disagree
+// about what the customer is approving. Every refusal has already been
+// written to the response when this returns false.
+func (s *Server) previewModelFor(
+	c *gin.Context,
+) (model []byte, job gen.ProductionJob, row gen.FileAsset, ok bool) {
+	ctx := c.Request.Context()
+	link, ok := s.openLink(c)
 	if !ok {
-		return
+		return nil, job, row, false
+	}
+	job, ok = s.jobOnLink(c, link)
+	if !ok {
+		return nil, job, row, false
 	}
 	if job.PrintFileID == nil {
 		// Still rendering. 404 rather than an error: the page polls, and this
 		// is the ordinary first answer.
 		detail(c, http.StatusNotFound, "This preview is still being built.")
-		return
+		return nil, job, row, false
 	}
 	if !s.filesReady(c) {
-		return
+		return nil, job, row, false
 	}
 
 	row, err := s.store.Q.GetFileAsset(ctx, *job.PrintFileID)
 	if err != nil {
 		detail(c, http.StatusNotFound, "This preview is still being built.")
-		return
+		return nil, job, row, false
 	}
 	obj, err := s.storage.Get(ctx, row.StorageKey)
 	if err != nil {
 		if storage.IsNotFound(err) {
 			detail(c, http.StatusNotFound, "This preview is still being built.")
-			return
+			return nil, job, row, false
 		}
 		detail(c, http.StatusInternalServerError, "Could not read the preview.")
-		return
+		return nil, job, row, false
 	}
 	defer func() { _ = obj.Body.Close() }()
 
-	model, err := io.ReadAll(io.LimitReader(obj.Body, maxRecolourBytes))
+	raw, err := io.ReadAll(io.LimitReader(obj.Body, maxRecolourBytes))
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the preview.")
-		return
+		return nil, job, row, false
 	}
 
 	// THE HEART GOES IN HERE AND NOWHERE ELSE.
@@ -383,20 +407,15 @@ func (s *Server) publicPersonalisationModel(c *gin.Context) {
 	// Read rather than streamed for the same reason recolourModel reads: the
 	// bytes have to be understood, not forwarded. Bounded by the same limit.
 	hearts := heartsForPreview(job, row.RenderParams)
-	withHearts := heartedPreview(model, hearts)
-	if hearts > 0 && len(withHearts) == len(model) {
+	withHearts := heartedPreview(raw, hearts)
+	if hearts > 0 && len(withHearts) == len(raw) {
 		// Not fatal - the preview is still a true picture of what prints - but
 		// it is the whole reason this product reserves that margin, so a plank
 		// that quietly lost its heart should be findable.
 		obs.FromContext(ctx).Warn("personalisation: the preview kept no heart",
 			"job", job.ID, "hearts", hearts, "content_type", row.ContentType)
 	}
-
-	// Inline, not an attachment: the browser hands these bytes to a 3D viewer
-	// rather than to the downloads folder.
-	c.Header("Content-Disposition", "inline")
-	c.Header("Cache-Control", "private, max-age=60")
-	c.Data(http.StatusOK, row.ContentType, withHearts)
+	return withHearts, job, row, true
 }
 
 // --- confirming ----------------------------------------------------------------
