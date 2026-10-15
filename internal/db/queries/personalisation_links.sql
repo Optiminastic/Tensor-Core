@@ -184,3 +184,27 @@ WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[])
 SELECT order_id, status, expires_at
 FROM personalisation_links
 WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[]);
+
+-- name: ReleaseStalePersonalisationClaims :many
+-- Gives back an order whose link was claimed and never sent.
+--
+-- ClaimPersonalisationLink writes the row BEFORE the message goes out, so a
+-- crash in between leaves it at 'pending' for ever: the expiry sweep walks
+-- only 'sent' and 'opened', and the unique index on order_id means nothing
+-- can ever claim that order again. The customer is never asked, the jobs are
+-- never held, and no log line is ever written - the order simply prints.
+-- Measured on T3DPS-115684, pending since 2026-10-13 and still blocking.
+--
+-- DELETED rather than marked failed. A 'failed' row is the record of a
+-- customer we tried and could not reach, which is worth keeping; this is a
+-- claim that came to nothing, and keeping it would go on blocking the order
+-- it is meant to free. Same reasoning, and the same statement, as
+-- ReleasePersonalisationLink's transient case.
+--
+-- Guarded on a null message_id as that one is, so a row that did send can
+-- never be swept away by this however its status was left.
+DELETE FROM personalisation_links
+WHERE status = 'pending'
+  AND message_id IS NULL
+  AND expires_at <= now()
+RETURNING order_id, brand_slug;

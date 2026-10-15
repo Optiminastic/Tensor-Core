@@ -506,6 +506,56 @@ func (q *Queries) ReleasePersonalisationLink(ctx context.Context, id uuid.UUID) 
 	return err
 }
 
+const releaseStalePersonalisationClaims = `-- name: ReleaseStalePersonalisationClaims :many
+DELETE FROM personalisation_links
+WHERE status = 'pending'
+  AND message_id IS NULL
+  AND expires_at <= now()
+RETURNING order_id, brand_slug
+`
+
+type ReleaseStalePersonalisationClaimsRow struct {
+	OrderID   uuid.UUID
+	BrandSlug string
+}
+
+// Gives back an order whose link was claimed and never sent.
+//
+// ClaimPersonalisationLink writes the row BEFORE the message goes out, so a
+// crash in between leaves it at 'pending' for ever: the expiry sweep walks
+// only 'sent' and 'opened', and the unique index on order_id means nothing
+// can ever claim that order again. The customer is never asked, the jobs are
+// never held, and no log line is ever written - the order simply prints.
+// Measured on T3DPS-115684, pending since 2026-10-13 and still blocking.
+//
+// DELETED rather than marked failed. A 'failed' row is the record of a
+// customer we tried and could not reach, which is worth keeping; this is a
+// claim that came to nothing, and keeping it would go on blocking the order
+// it is meant to free. Same reasoning, and the same statement, as
+// ReleasePersonalisationLink's transient case.
+//
+// Guarded on a null message_id as that one is, so a row that did send can
+// never be swept away by this however its status was left.
+func (q *Queries) ReleaseStalePersonalisationClaims(ctx context.Context) ([]ReleaseStalePersonalisationClaimsRow, error) {
+	rows, err := q.db.Query(ctx, releaseStalePersonalisationClaims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReleaseStalePersonalisationClaimsRow{}
+	for rows.Next() {
+		var i ReleaseStalePersonalisationClaimsRow
+		if err := rows.Scan(&i.OrderID, &i.BrandSlug); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resetPersonalisationWatermark = `-- name: ResetPersonalisationWatermark :exec
 INSERT INTO personalisation_watermarks (brand_slug, watch_from)
 VALUES ($1, now())

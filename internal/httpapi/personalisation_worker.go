@@ -465,6 +465,24 @@ func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
 		w.logger.Info("personalisation window closed, the order proceeds as placed",
 			"brand", link.BrandSlug, "order", link.OrderID)
 	}
+	// A claim that was written and never sent. The loop above cannot see it -
+	// it walks sent and opened links - and the unique index on order_id means
+	// the order can never be asked again while the row sits there. Freeing it
+	// lets the next render or sync ask properly.
+	if stale, err := w.server.store.Q.ReleaseStalePersonalisationClaims(ctx); err != nil {
+		w.logger.Error("personalisation: could not free stale claims", "error", err)
+	} else {
+		for _, claim := range stale {
+			w.logger.Warn("personalisation: freed an order whose link was claimed and never sent",
+				"brand", claim.BrandSlug, "order", claim.OrderID)
+			// Whatever hold that claim left behind goes with it. Ordinarily
+			// there is none - the crash happened before the send - but a
+			// job left at awaiting_customer for a link nobody will ever
+			// receive is the worst of the two outcomes.
+			w.release(ctx, claim.OrderID, "system (link never sent)")
+		}
+	}
+
 	// The backstop, run on the same tick. A job held for a link that never
 	// arrived is invisible to the loop above, because that walks links.
 	if freed, err := w.server.store.Q.ReleaseStrandedPersonalisationHolds(ctx,
