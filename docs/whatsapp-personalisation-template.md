@@ -75,22 +75,43 @@ Notes on the wording, each of which is load-bearing:
 Tensor3D — reply STOP to opt out of order updates
 ```
 
-### Button: one, Call-to-action → Visit website → Dynamic
+### Buttons: two, both Call-to-action → Visit website
 
-- **Text**: `Check my order`
-- **URL type**: Dynamic
-- **URL**: `https://<FRONTEND_URL host>/{{1}}`
-- **Sample**: `p/abc123`
+Meta allows two URL buttons on one template, and this one uses both.
 
-Dynamic, and the **variable is the whole path after the host** — Tensor sends
-`p/<token>`, not the bare token, so the base URL must end at the host with no
-`/p/` of its own. Get this wrong in either direction and every link 404s while
-the send reports success.
+**1. `Check my order` — Dynamic.** `https://<FRONTEND_URL host>/{{1}}`,
+sample `p/abc123`.
 
-The host must match `FRONTEND_URL` for the environment that sends. A template
+**2. `Explore More` — Static.** `https://the3dprintingstore.in`
+
+**THE ORDER IS NOT COSMETIC.** `SendTemplate` emits one button component per
+entry in `ButtonParams`, indexed by position from zero
+(`internal/integrations/whatsapp/client.go:207-216`), and Tensor sends exactly
+one — the personalisation path. It therefore lands on **button 0**. Swap the
+two in WhatsApp Manager and the customer's token is appended to the shop's
+homepage while the button that should carry it goes nowhere. The static button
+takes no parameter and so needs no component, which is the only reason one
+parameter and two buttons agree at all.
+
+On the dynamic one, the **variable is the whole path after the host** — Tensor
+sends `p/<token>`, not the bare token, so the base URL must end at the host
+with no `/p/` of its own. Get this wrong in either direction and every link
+404s while the send reports success.
+
+Its host must match `FRONTEND_URL` for the environment that sends. A template
 approved against the production domain cannot be used to test against
 `localhost`; for local testing, read the link out of the
-`personalisation_links` row instead of clicking the button.
+`personalisation_links` row instead of tapping the button.
+
+Both URLs are `https`. The shop serves TLS, so `http` buys a redirect hop on a
+link the customer has thirty minutes to use, and some validators refuse it
+outright.
+
+**The second button is the one that can cost the category.** A browse-the-shop
+call to action inside a transactional message is what Meta's classifier reads
+as promotional, and a re-categorisation to MARKETING brings the silent
+non-delivery above. If this template comes back MARKETING, the `Explore More`
+button is the first thing to remove — not the thing to argue about.
 
 ## Wiring it up once approved
 
