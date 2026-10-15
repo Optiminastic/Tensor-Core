@@ -191,12 +191,35 @@ type shopifyCustomer struct {
 	Phone     string `json:"phone"`
 }
 
+// customerName is who this order is for.
+//
+// The same gap as customerPhone, measured the same way and on the same rows:
+// Shopify fills the customer record only for a shopper with an account, so 20
+// orders of 1,269 carry a customer name and 1,249 carry one on the delivery
+// address. Reading only the first left the orders table showing a dash for
+// almost every customer, and would have opened the personalisation message
+// with "Hi there" for 98% of the people who received it.
+//
+// The delivery name is the right fallback rather than a guess: it is who the
+// parcel is addressed to, which on a gift is arguably the better answer than
+// the account holder anyway.
 func (p shopifyOrderPayload) customerName() *string {
-	if p.Customer == nil {
-		return nil
+	if p.Customer != nil {
+		if name := strings.TrimSpace(p.Customer.FirstName + " " + p.Customer.LastName); name != "" {
+			return &name
+		}
 	}
-	name := strings.TrimSpace(p.Customer.FirstName + " " + p.Customer.LastName)
-	return nonEmptyPtr(name)
+	if p.ShippingAddress != nil {
+		if name := strings.TrimSpace(p.ShippingAddress.Name); name != "" {
+			return &name
+		}
+	}
+	if p.BillingAddress != nil {
+		if name := strings.TrimSpace(p.BillingAddress.Name); name != "" {
+			return &name
+		}
+	}
+	return nil
 }
 
 func (p shopifyOrderPayload) customerID() *int64 {

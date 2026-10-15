@@ -83,6 +83,7 @@ ON CONFLICT (shopify_order_id) DO UPDATE SET
     -- until Shopify grants access, and a null must never flatten a number an
     -- earlier sync captured.
     customer_phone     = COALESCE(EXCLUDED.customer_phone, orders.customer_phone),
+    customer_name      = COALESCE(EXCLUDED.customer_name, orders.customer_name),
     -- Address columns are only ever overwritten with something. Protected
     -- customer data arrives null until Shopify grants access, and letting a
     -- null flatten an address a previous sync captured would lose it.

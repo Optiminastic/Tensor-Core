@@ -73,3 +73,52 @@ func TestTheOrderPhoneIsFoundWhereverShopifyPutIt(t *testing.T) {
 		})
 	}
 }
+
+// The same gap, on the name: 20 orders of 1,269 carry a customer name and
+// 1,249 carry one on the delivery address. Without the fallback the orders
+// table shows a dash for almost every customer and the personalisation
+// message opens "Hi there".
+func TestTheCustomerNameFallsBackToTheDeliveryName(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload shopifyOrderPayload
+		want    string
+	}{{
+		name: "the account has it",
+		payload: shopifyOrderPayload{
+			Customer:        &shopifyCustomer{FirstName: "Rishi", LastName: "Patel"},
+			ShippingAddress: &shopify.OrderAddress{Name: "Someone Else"},
+		},
+		want: "Rishi Patel",
+	}, {
+		name: "only the parcel has it - the common case",
+		payload: shopifyOrderPayload{
+			Customer:        &shopifyCustomer{},
+			ShippingAddress: &shopify.OrderAddress{Name: "Priya Sharma"},
+		},
+		want: "Priya Sharma",
+	}, {
+		name:    "billing is the last resort",
+		payload: shopifyOrderPayload{BillingAddress: &shopify.OrderAddress{Name: "Asha Rao"}},
+		want:    "Asha Rao",
+	}, {
+		name:    "no name at all is null",
+		payload: shopifyOrderPayload{Customer: &shopifyCustomer{}},
+		want:    "",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.payload.customerName()
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("name = %q, want none", *got)
+				}
+				return
+			}
+			if got == nil || *got != tc.want {
+				t.Fatalf("name = %v, want %q", got, tc.want)
+			}
+		})
+	}
+}
