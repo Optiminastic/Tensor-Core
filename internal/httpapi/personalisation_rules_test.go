@@ -141,7 +141,10 @@ func TestEveryPersonalisationParameterIsNonEmpty(t *testing.T) {
 	named := orderWith(personalised(2))
 	named.CustomerName = strPtr("Rishi Patel")
 	got := personalisationBodyParams(named)
-	want := []string{"Rishi Patel", "#66897853350101", "2 personalised items"}
+	// Two, and in this order. The count is the thing that matters most: Meta
+	// refuses a send whose parameters do not match the approved body, and
+	// names neither the field nor the count when it does.
+	want := []string{"Rishi Patel", "2 personalised items"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("parameter %d = %q, want %q", i+1, got[i], want[i])

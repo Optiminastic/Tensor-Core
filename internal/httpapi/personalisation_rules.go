@@ -137,7 +137,7 @@ func orderPlacedAt(order gen.Order) time.Time {
 }
 
 // personalisationBodyParams is what the approved template says, in its order:
-// the customer's name, their order number, and how many items are on it.
+// the customer's name, and how many items are on it.
 //
 // EVERY ONE HAS A NON-EMPTY FALLBACK. Meta refuses an empty template
 // parameter outright and refuses the whole message with it, and a missing
@@ -149,12 +149,15 @@ func personalisationBodyParams(order gen.Order) []string {
 		name = "there"
 	}
 
-	number := oneLine(order.OrderNumber)
-	if number == "" {
-		number = "your order"
-	}
-
-	return []string{name, number, spokenItemCount(personalisedItemCount(order))}
+	// TWO, NOT THREE. The order number came out of the copy: a customer
+	// opening a message about their own order does not need to be told its
+	// reference, and the link they are about to tap carries them to it.
+	//
+	// THE COUNT MUST MATCH THE TEMPLATE EXACTLY. Meta refuses a send whose
+	// parameters do not line up with the approved body, and the refusal names
+	// neither the field nor the count - so this list and the template are one
+	// change, made together, and the template is the one that moves first.
+	return []string{name, spokenItemCount(personalisedItemCount(order))}
 }
 
 // personalisedItemCount counts the units the customer can actually change.

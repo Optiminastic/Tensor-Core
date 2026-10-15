@@ -36,8 +36,7 @@ and the `ButtonParams` at `personalisation_worker.go:322`.
 | Where | Placeholder | Tensor sends | Example |
 | --- | --- | --- | --- |
 | Body | `{{1}}` | Customer name, or `there` when the order has none | `Priya` |
-| Body | `{{2}}` | Order number, or `your order` | `#1043` |
-| Body | `{{3}}` | The item count AS A PHRASE, units not lines | `2 personalised items` |
+| Body | `{{2}}` | The item count AS A PHRASE, units not lines | `2 personalised items` |
 | Button | `{{1}}` | The path only: `p/<token>` | `p/8f3c...` |
 
 None of them may ever be blank — Meta refuses an empty parameter and names
@@ -52,15 +51,21 @@ does not already say.
 ### Body
 
 ```
-Hi {{1}}! Thank you for your order *{{2}}*. 😊
+Hi {{1}}! Thank you for your order. 😊
 
-Before we begin printing, please review the spelling and colours of your *{{3}}*.
+Before we begin printing, please review the spelling and colours of your *{{2}}*.
 
 ⏳ You have *30 minutes* to make any changes. After that, your order will move straight into printing.
 ```
 
 Notes on the wording, each of which is load-bearing:
 
+- **NO ORDER NUMBER.** A customer opening a message about their own order does
+  not need to be told its reference, and the link they are about to tap takes
+  them to it. It was `{{2}}` and its removal renumbered everything after it,
+  which is why the parameter list and the template are one change: Meta
+  refuses a send whose parameters do not match the approved body, and names
+  neither the field nor the count when it does.
 - **The thirty minutes is stated.** The page shows a live countdown, but the
   customer decides whether to open the link at all from this message.
 - **"move straight into printing"** says what happens on silence. Doing
