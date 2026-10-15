@@ -221,8 +221,53 @@ func Start(
 		"order_sync_minutes", cfg.OrderSyncIntervalMinutes)
 	tickerCtx, stopTickers := context.WithCancel(context.WithoutCancel(ctx))
 	startWindowSweep(tickerCtx, client, logger)
+	markPersonalisationStart(ctx, store, cfg, logger)
 
 	return &Runner{client: client, stopTickers: stopTickers}, nil
+}
+
+// markPersonalisationStart writes down that the shop began asking NOW.
+//
+// The watermark is what makes the personalisation check mean "every order from
+// here on", and it is laid down the first time an order is weighed against it.
+// That is one order too late. The rule refuses anything placed at or before
+// the mark, so the very first order to arrive after the switch was flipped
+// would create the mark during its own evaluation and then be refused by it -
+// the customer never asked, and the log saying "this order was placed before
+// the shop began asking" about an order from thirty seconds ago.
+//
+// Writing it at startup pins it to the moment somebody turned the feature on,
+// which is what they meant by turning it on. Every order placed after that is
+// asked about, including the first.
+//
+// Only when the check is enabled, and only ever written once per brand -
+// EnsurePersonalisationWatermark never moves a mark that exists, so a restart
+// cannot push the line forward and quietly skip the orders that arrived while
+// the service was down.
+func markPersonalisationStart(
+	ctx context.Context, store *db.Store, cfg config.Settings, logger *slog.Logger,
+) {
+	if !cfg.PersonalisationCheckEnabled {
+		return
+	}
+	slugs, err := store.Q.ListConnectedShopifyBrandSlugs(ctx)
+	if err != nil {
+		logger.Warn("personalisation: could not read the connected brands, so the "+
+			"watermark will be set by the first order instead", "error", err)
+		return
+	}
+	for _, slug := range slugs {
+		mark, err := store.Q.EnsurePersonalisationWatermark(ctx, slug)
+		if err != nil {
+			logger.Warn("personalisation: could not mark when this brand began asking",
+				"brand", slug, "error", err)
+			continue
+		}
+		if mark.WatchFrom.Valid {
+			logger.Info("personalisation: asking about orders placed after this",
+				"brand", slug, "since", mark.WatchFrom.Time.UTC())
+		}
+	}
 }
 
 // windowSweepInterval is how often a closed window is noticed. A customer's
