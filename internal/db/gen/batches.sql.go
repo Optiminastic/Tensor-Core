@@ -691,17 +691,20 @@ func (q *Queries) ListBatchIdentityForIDs(ctx context.Context, ids []uuid.UUID) 
 }
 
 const listBatchStatusesForIDs = `-- name: ListBatchStatusesForIDs :many
-SELECT id, status FROM batches WHERE id = ANY($1::uuid[])
+SELECT id, status, batch_number FROM batches WHERE id = ANY($1::uuid[])
 `
 
 type ListBatchStatusesForIDsRow struct {
-	ID     uuid.UUID
-	Status string
+	ID          uuid.UUID
+	Status      string
+	BatchNumber string
 }
 
 // Cheap status-only companion to a batched list-of-jobs response - the
 // pipeline_stage RESERVED/BATCHED/PRINTING signal, without a per-row
 // GetBatchByID call for every job on a list endpoint.
+// The number too, so a paged job table can label each row's batch without
+// fetching every batch in the system to build a lookup.
 func (q *Queries) ListBatchStatusesForIDs(ctx context.Context, ids []uuid.UUID) ([]ListBatchStatusesForIDsRow, error) {
 	rows, err := q.db.Query(ctx, listBatchStatusesForIDs, ids)
 	if err != nil {
@@ -711,7 +714,7 @@ func (q *Queries) ListBatchStatusesForIDs(ctx context.Context, ids []uuid.UUID) 
 	items := []ListBatchStatusesForIDsRow{}
 	for rows.Next() {
 		var i ListBatchStatusesForIDsRow
-		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+		if err := rows.Scan(&i.ID, &i.Status, &i.BatchNumber); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

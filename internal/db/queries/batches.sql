@@ -23,7 +23,9 @@ SELECT * FROM batches WHERE id = $1;
 -- Cheap status-only companion to a batched list-of-jobs response - the
 -- pipeline_stage RESERVED/BATCHED/PRINTING signal, without a per-row
 -- GetBatchByID call for every job on a list endpoint.
-SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
+-- The number too, so a paged job table can label each row's batch without
+-- fetching every batch in the system to build a lookup.
+SELECT id, status, batch_number FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 
 -- name: ListBatchIdentityForIDs :many
 -- Status AND number for a set of beds, for a list that has to NAME the bed a
