@@ -21,11 +21,14 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -71,6 +74,7 @@ func (s *Server) listDesignJobs(c *gin.Context) {
 	}
 
 	out := s.productionJobsDTO(ctx, mine)
+	s.stampOpenWindows(ctx, mine, out)
 	// What the customer changed, computed in the same pass. The query carries
 	// the two jsonb columns in full precisely so this needs no second request
 	// per job - and it is the question the designer opened the page to answer,
@@ -155,4 +159,52 @@ func isChargeLine(productName string) bool {
 		}
 	}
 	return false
+}
+
+// stampOpenWindows tells each row when its customer stops being able to change
+// it.
+//
+// One query for every job on screen rather than one per job: the handler
+// already avoids that N+1 for the diff and this would reintroduce it. An order
+// with no open window is absent from the answer, which leaves the field null -
+// read by the page as "settled, go ahead".
+func (s *Server) stampOpenWindows(
+	ctx context.Context, jobs []gen.ProductionJob, out []productionJobResponse,
+) {
+	orderIDs := make([]uuid.UUID, 0, len(jobs))
+	seen := make(map[uuid.UUID]bool, len(jobs))
+	for _, j := range jobs {
+		if j.OrderID == nil || seen[*j.OrderID] {
+			continue
+		}
+		seen[*j.OrderID] = true
+		orderIDs = append(orderIDs, *j.OrderID)
+	}
+	if len(orderIDs) == 0 {
+		return
+	}
+
+	rows, err := s.store.Q.ListOpenPersonalisationWindows(ctx, orderIDs)
+	if err != nil {
+		// Not fatal: the queue is still the queue, and a missing countdown
+		// costs a designer context rather than correctness.
+		obs.FromContext(ctx).Warn("could not read the open personalisation windows",
+			"error", err)
+		return
+	}
+	endsAt := make(map[uuid.UUID]string, len(rows))
+	for _, r := range rows {
+		if r.ExpiresAt.Valid {
+			endsAt[r.OrderID] = r.ExpiresAt.Time.UTC().Format(time.RFC3339)
+		}
+	}
+
+	for i := range out {
+		if jobs[i].OrderID == nil {
+			continue
+		}
+		if when, ok := endsAt[*jobs[i].OrderID]; ok {
+			out[i].PersonalisationWindowEndsAt = &when
+		}
+	}
 }

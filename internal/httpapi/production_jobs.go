@@ -23,6 +23,11 @@ import (
 // productionJobResponse is the API shape of a production job. machine_* are resolved via the
 // job's batch and stay null until the batching phase.
 type productionJobResponse struct {
+	// PersonalisationWindowEndsAt is when this job's customer stops being able
+	// to change it, sent only by the design queue. Null once the window has
+	// closed, which is the designer's signal that the values are settled and
+	// the piece can be drawn.
+	PersonalisationWindowEndsAt *string `json:"personalisation_window_ends_at,omitempty"`
 	// PersonalisationChanges is what the customer altered after the order was
 	// placed, sent only by the design queue - the one screen whose whole
 	// purpose is answering it. Omitted everywhere else, where the boolean

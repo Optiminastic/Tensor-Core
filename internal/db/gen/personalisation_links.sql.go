@@ -346,6 +346,46 @@ func (q *Queries) ListExpiredPersonalisationLinks(ctx context.Context, rowLimit 
 	return items, nil
 }
 
+const listOpenPersonalisationWindows = `-- name: ListOpenPersonalisationWindows :many
+SELECT order_id, expires_at
+FROM personalisation_links
+WHERE order_id = ANY($1::uuid[])
+  AND status IN ('sent', 'opened')
+  AND expires_at > now()
+`
+
+type ListOpenPersonalisationWindowsRow struct {
+	OrderID   uuid.UUID
+	ExpiresAt pgtype.Timestamptz
+}
+
+// When each of these orders' windows closes, for the orders that still have
+// one open.
+//
+// Bulk, because the design queue asks about every job on screen at once and
+// one query per row is the N+1 the rest of that handler was built to avoid.
+// An order with no open window is simply absent, which the caller reads as
+// "nothing is holding this one up".
+func (q *Queries) ListOpenPersonalisationWindows(ctx context.Context, orderIds []uuid.UUID) ([]ListOpenPersonalisationWindowsRow, error) {
+	rows, err := q.db.Query(ctx, listOpenPersonalisationWindows, orderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOpenPersonalisationWindowsRow{}
+	for rows.Next() {
+		var i ListOpenPersonalisationWindowsRow
+		if err := rows.Scan(&i.OrderID, &i.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPersonalisationLinks = `-- name: ListPersonalisationLinks :many
 SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
 WHERE brand_slug = $1

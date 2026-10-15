@@ -156,3 +156,17 @@ SELECT * FROM personalisation_links
 WHERE order_id = sqlc.arg('order_id')
   AND status IN ('sent', 'opened')
   AND expires_at > now();
+
+-- name: ListOpenPersonalisationWindows :many
+-- When each of these orders' windows closes, for the orders that still have
+-- one open.
+--
+-- Bulk, because the design queue asks about every job on screen at once and
+-- one query per row is the N+1 the rest of that handler was built to avoid.
+-- An order with no open window is simply absent, which the caller reads as
+-- "nothing is holding this one up".
+SELECT order_id, expires_at
+FROM personalisation_links
+WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[])
+  AND status IN ('sent', 'opened')
+  AND expires_at > now();

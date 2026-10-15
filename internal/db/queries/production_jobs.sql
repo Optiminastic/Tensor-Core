@@ -1055,13 +1055,16 @@ WHERE id = sqlc.arg('id')
 -- The designer's queue: jobs whose customer's window is over and that still
 -- need a 3MF from a person.
 --
--- THE WINDOW GATE IS personalisation_status <> 'awaiting_customer', and it is
--- the whole ordering this page rests on. While a customer holds a live link
--- they can still change a name or a colour, so anything a designer modelled
--- from could still move; the job appears here the moment any of the three
--- close paths releases it, and not before. A job that never had a window -
--- the feature off, no phone - is validated or not_required from creation and
--- so is visible straight away, which is right.
+-- A JOB WHOSE CUSTOMER STILL HOLDS THE LINK IS LISTED, not hidden. It used to
+-- be excluded until the window closed, on the reasoning that anything a
+-- designer modelled from could still move - which is true, and is a reason to
+-- SAY SO rather than to make the work invisible until a timer somebody cannot
+-- see runs out. The designer sees it coming, with the countdown and what the
+-- customer has changed so far, and the upload waits for the window rather than
+-- the whole job doing so.
+--
+-- personalisation_status is carried on the row, so the caller can tell the two
+-- apart; the window's own deadline comes from the order's open link.
 --
 -- Two kinds of work, and the caller tells them apart by which predicate
 -- matched: no file at all, or a file the customer has since outdated.
@@ -1102,7 +1105,6 @@ SELECT id, job_number, order_id, batch_id, description, quantity, status, assemb
 FROM production_jobs
 WHERE status = 'queued'
   AND quantity > 0
-  AND personalisation_status <> 'awaiting_customer'
   AND (print_file_id IS NULL OR issue_reason = 'design_file_stale')
 ORDER BY COALESCE(due_date, created_at) ASC, job_number ASC;
 
