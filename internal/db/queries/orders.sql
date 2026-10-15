@@ -75,6 +75,14 @@ ON CONFLICT (shopify_order_id) DO UPDATE SET
     total_received     = EXCLUDED.total_received,
     discount_title     = EXCLUDED.discount_title,
     shipping_title     = EXCLUDED.shipping_title,
+    -- The contact number, by the same rule and for a sharper reason: the
+    -- importer used to read only customer.phone, so 1,249 of 1,269 orders in
+    -- this table have none. Refreshing it here is what lets pressing Sync
+    -- repair them, rather than the fix only ever helping orders that have not
+    -- arrived yet. COALESCE because protected customer data arrives null
+    -- until Shopify grants access, and a null must never flatten a number an
+    -- earlier sync captured.
+    customer_phone     = COALESCE(EXCLUDED.customer_phone, orders.customer_phone),
     -- Address columns are only ever overwritten with something. Protected
     -- customer data arrives null until Shopify grants access, and letting a
     -- null flatten an address a previous sync captured would lose it.

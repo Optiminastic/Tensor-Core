@@ -214,11 +214,87 @@ func (p shopifyOrderPayload) customerEmail() *string {
 	return nonEmptyPtr(p.Customer.Email)
 }
 
+// customerPhone is the number this order can actually be reached on.
+//
+// NOT customer.phone ALONE, which is what this read for its whole life and is
+// why the personalisation check would have messaged almost nobody. Shopify
+// fills the customer record's phone only when the shopper has an account with
+// one on it; the number they type at checkout goes on the ORDER and on the
+// delivery address. Measured on this store: 20 of 1,269 orders carry
+// customer.phone and 1,249 carry a shipping-address phone. Reading only the
+// first means 98% of orders answer "no usable phone number", the window never
+// opens for them, and nothing anywhere says why.
+//
+// So every place Shopify puts a number is tried, and the first that is a
+// usable Indian mobile wins - not merely the first that is non-empty, because
+// a field can hold a landline, a placeholder or somebody's postcode, and
+// stopping at it would discard a good number sitting in the next one.
+//
+// If none of them normalise, the first stated value is still recorded. The
+// column is the store's answer to "what number is on this order", and an
+// operator reading a bad one can see it is bad; a null tells them nothing.
 func (p shopifyOrderPayload) customerPhone() *string {
-	if p.Customer == nil {
-		return nil
+	candidates := make([]string, 0, 4)
+	if p.Customer != nil {
+		candidates = append(candidates, p.Customer.Phone)
 	}
-	return nonEmptyPtr(p.Customer.Phone)
+	candidates = append(candidates, p.Phone)
+	if p.ShippingAddress != nil {
+		candidates = append(candidates, p.ShippingAddress.Phone)
+	}
+	if p.BillingAddress != nil {
+		candidates = append(candidates, p.BillingAddress.Phone)
+	}
+
+	stated := ""
+	for _, candidate := range candidates {
+		value := strings.TrimSpace(candidate)
+		if value == "" {
+			continue
+		}
+		if stated == "" {
+			stated = value
+		}
+		if looksLikeIndianMobile(value) {
+			usable := value
+			return &usable
+		}
+	}
+	return nonEmptyPtr(stated)
+}
+
+// looksLikeIndianMobile reports whether a number could receive a WhatsApp
+// message.
+//
+// NOT normaliseIndianMobile, which despite its name is a formatter rather
+// than a check: it accepts any ten digits, so "0141 2345678" - a Jaipur
+// landline - comes back as a perfectly well-formed +911412345678 that no
+// message will ever reach. That is the right behaviour where it is used,
+// because the voice path can dial a landline. It is the wrong behaviour for
+// choosing between the three or four numbers an order carries.
+//
+// So this is local and deliberately narrow: ten digits after the country
+// code, beginning 6, 7, 8 or 9, which is the whole of India's mobile range.
+// It decides PREFERENCE only - a number that fails it is still recorded when
+// the order has nothing better.
+func looksLikeIndianMobile(raw string) bool {
+	var digits strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	d := digits.String()
+	switch {
+	case len(d) == 12 && strings.HasPrefix(d, "91"):
+		d = d[2:]
+	case len(d) == 11 && strings.HasPrefix(d, "0"):
+		d = d[1:]
+	}
+	if len(d) != 10 {
+		return false
+	}
+	return d[0] >= '6' && d[0] <= '9'
 }
 
 type shopifyLineItem struct {
