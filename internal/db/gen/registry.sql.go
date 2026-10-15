@@ -142,6 +142,28 @@ func (q *Queries) CountSKUPipelinesTable(ctx context.Context, search *string) (i
 	return count, err
 }
 
+const countVariantsForProduct = `-- name: CountVariantsForProduct :one
+SELECT count(*) AS variant_count,
+       coalesce(sum((SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id)), 0)::bigint AS part_count
+FROM product_variants v
+WHERE v.product_id = $1
+`
+
+type CountVariantsForProductRow struct {
+	VariantCount int64
+	PartCount    int64
+}
+
+// How many variants one product has, and how many parts they hold between
+// them - the figures the product card and its delete dialog state, without
+// reading the variants themselves.
+func (q *Queries) CountVariantsForProduct(ctx context.Context, productID uuid.UUID) (CountVariantsForProductRow, error) {
+	row := q.db.QueryRow(ctx, countVariantsForProduct, productID)
+	var i CountVariantsForProductRow
+	err := row.Scan(&i.VariantCount, &i.PartCount)
+	return i, err
+}
+
 const deleteOptionValue = `-- name: DeleteOptionValue :exec
 DELETE FROM product_option_values WHERE id = $1
 `
@@ -784,6 +806,55 @@ func (q *Queries) ListBomForProduct(ctx context.Context, productID uuid.UUID) ([
 	items := []ListBomForProductRow{}
 	for rows.Next() {
 		var i ListBomForProductRow
+		if err := rows.Scan(
+			&i.VariantID,
+			&i.Quantity,
+			&i.ItemID,
+			&i.ItemName,
+			&i.ItemCode,
+			&i.Unit,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBomForVariants = `-- name: ListBomForVariants :many
+SELECT b.variant_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM variant_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.variant_id = ANY($1::uuid[])
+ORDER BY lower(i.name)
+`
+
+type ListBomForVariantsRow struct {
+	VariantID uuid.UUID
+	Quantity  pgtype.Numeric
+	ItemID    uuid.UUID
+	ItemName  string
+	ItemCode  *string
+	Unit      string
+	UnitPrice pgtype.Numeric
+}
+
+// The bill-of-materials lines of just these variants - one page's worth -
+// with ListBomForProduct's columns.
+func (q *Queries) ListBomForVariants(ctx context.Context, variantIds []uuid.UUID) ([]ListBomForVariantsRow, error) {
+	rows, err := q.db.Query(ctx, listBomForVariants, variantIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBomForVariantsRow{}
+	for rows.Next() {
+		var i ListBomForVariantsRow
 		if err := rows.Scan(
 			&i.VariantID,
 			&i.Quantity,
@@ -1499,6 +1570,70 @@ func (q *Queries) ListVariantsForProduct(ctx context.Context, productID uuid.UUI
 	items := []ListVariantsForProductRow{}
 	for rows.Next() {
 		var i ListVariantsForProductRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Sku,
+			&i.Name,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.OptionCodes,
+			&i.PartCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVariantsForProductPage = `-- name: ListVariantsForProductPage :many
+SELECT v.id, v.product_id, v.sku, v.name, v.status, v.created_at, v.updated_at,
+       (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
+          FROM product_variant_options pvo
+          JOIN product_option_values ov ON ov.id = pvo.option_value_id
+          JOIN product_options o ON o.id = ov.option_id
+         WHERE pvo.variant_id = v.id) AS option_codes,
+       (SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id) AS part_count
+FROM product_variants v
+WHERE v.product_id = $1
+ORDER BY lower(v.name), v.id
+LIMIT $3 OFFSET $2
+`
+
+type ListVariantsForProductPageParams struct {
+	ProductID  uuid.UUID
+	PageOffset int32
+	PageLimit  int32
+}
+
+type ListVariantsForProductPageRow struct {
+	ID          uuid.UUID
+	ProductID   uuid.UUID
+	Sku         *string
+	Name        string
+	Status      string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+	OptionCodes []byte
+	PartCount   int64
+}
+
+// One page of a product's variants: ListVariantsForProduct's columns and order,
+// cut by LIMIT/OFFSET in Postgres.
+func (q *Queries) ListVariantsForProductPage(ctx context.Context, arg ListVariantsForProductPageParams) ([]ListVariantsForProductPageRow, error) {
+	rows, err := q.db.Query(ctx, listVariantsForProductPage, arg.ProductID, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVariantsForProductPageRow{}
+	for rows.Next() {
+		var i ListVariantsForProductPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ProductID,

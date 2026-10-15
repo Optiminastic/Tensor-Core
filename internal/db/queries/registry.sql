@@ -594,3 +594,37 @@ SELECT p.sku, p.display_sku, p.product_code, p.product_name,
 FROM page p
 LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = p.sku
 ORDER BY p.sku, sp.machine_family;
+
+-- name: CountVariantsForProduct :one
+-- How many variants one product has, and how many parts they hold between
+-- them - the figures the product card and its delete dialog state, without
+-- reading the variants themselves.
+SELECT count(*) AS variant_count,
+       coalesce(sum((SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id)), 0)::bigint AS part_count
+FROM product_variants v
+WHERE v.product_id = sqlc.arg('product_id');
+
+-- name: ListVariantsForProductPage :many
+-- One page of a product's variants: ListVariantsForProduct's columns and order,
+-- cut by LIMIT/OFFSET in Postgres.
+SELECT v.*,
+       (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
+          FROM product_variant_options pvo
+          JOIN product_option_values ov ON ov.id = pvo.option_value_id
+          JOIN product_options o ON o.id = ov.option_id
+         WHERE pvo.variant_id = v.id) AS option_codes,
+       (SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id) AS part_count
+FROM product_variants v
+WHERE v.product_id = sqlc.arg('product_id')
+ORDER BY lower(v.name), v.id
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: ListBomForVariants :many
+-- The bill-of-materials lines of just these variants - one page's worth -
+-- with ListBomForProduct's columns.
+SELECT b.variant_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM variant_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.variant_id = ANY(sqlc.arg('variant_ids')::uuid[])
+ORDER BY lower(i.name);
