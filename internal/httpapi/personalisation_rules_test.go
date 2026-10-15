@@ -7,8 +7,11 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
@@ -271,3 +274,38 @@ func TestAnOrderIsPersonalisedWhenTheCustomerTypedSomething(t *testing.T) {
 		})
 	}
 }
+
+// The watermark answers "when did this shop begin asking", and the whole
+// value of the personalisation check resting on it is that it means ONLY
+// ORDERS FROM NOW ON. That breaks in two ways, and both are tested here.
+//
+// The first: a dry run must not lay the mark down. Eligibility is evaluated
+// with the switch off so a trial exercises every rule, and the mark is never
+// moved once written - so a trial on 13 October would have the feature reach
+// back two days when it was finally turned on. 26 orders on this store, some
+// already posted.
+//
+// The second: an absent mark must not read as permission.
+func TestAnAbsentWatermarkMeansNowNotTheBeginningOfTime(t *testing.T) {
+	before := time.Now()
+
+	// No row yet - the ordinary state before a shop has ever switched this on.
+	got := watchFromOrNow(pgtype.Timestamptz{}, errNoRows)
+	if got.Before(before) {
+		t.Errorf("a missing watermark gave %v; a zero instant would make every "+
+			"order the shop has ever taken eligible at once", got)
+	}
+
+	// A row with no instant is no better an answer than no row.
+	if got := watchFromOrNow(pgtype.Timestamptz{Valid: false}, nil); got.Before(before) {
+		t.Errorf("an empty watermark gave %v, want now or later", got)
+	}
+
+	// A real mark is used as it stands.
+	stamped := time.Date(2026, 10, 13, 12, 39, 0, 0, time.UTC)
+	if got := watchFromOrNow(pgtype.Timestamptz{Time: stamped, Valid: true}, nil); !got.Equal(stamped) {
+		t.Errorf("watch_from = %v, want %v", got, stamped)
+	}
+}
+
+var errNoRows = errors.New("no rows in result set")

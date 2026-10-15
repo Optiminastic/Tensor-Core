@@ -266,6 +266,30 @@ func (q *Queries) GetPersonalisationLinkByTokenHash(ctx context.Context, tokenHa
 	return i, err
 }
 
+const getPersonalisationWatermark = `-- name: GetPersonalisationWatermark :one
+SELECT brand_slug, watch_from, created_at FROM personalisation_watermarks
+WHERE brand_slug = $1
+`
+
+// When this brand started asking, WITHOUT starting it.
+//
+// The companion to EnsurePersonalisationWatermark, and the difference is the
+// whole point: eligibility is evaluated even while the check is switched off,
+// so that a dry run exercises every rule and says whose order it would have
+// asked about. Ensure would lay the mark down during that dry run, and the
+// mark is never moved - so the day the shop actually switched the feature on,
+// it would reach back to whenever somebody first ran it with the switch off.
+//
+// Measured on this store: a dry run on 13 October stamped the mark, and
+// turning the check on two days later would have messaged the customers of 26
+// orders placed since - about orders a day or two old, some already shipped.
+func (q *Queries) GetPersonalisationWatermark(ctx context.Context, brandSlug string) (PersonalisationWatermark, error) {
+	row := q.db.QueryRow(ctx, getPersonalisationWatermark, brandSlug)
+	var i PersonalisationWatermark
+	err := row.Scan(&i.BrandSlug, &i.WatchFrom, &i.CreatedAt)
+	return i, err
+}
+
 const listConnectedShopifyBrandSlugs = `-- name: ListConnectedShopifyBrandSlugs :many
 SELECT brand_slug FROM brand_connections
 WHERE provider = 'shopify' AND status = 'connected'

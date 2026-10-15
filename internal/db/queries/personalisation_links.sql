@@ -92,6 +92,22 @@ WHERE brand_slug = sqlc.arg('brand_slug')
 ORDER BY created_at DESC
 LIMIT sqlc.arg('row_limit');
 
+-- name: GetPersonalisationWatermark :one
+-- When this brand started asking, WITHOUT starting it.
+--
+-- The companion to EnsurePersonalisationWatermark, and the difference is the
+-- whole point: eligibility is evaluated even while the check is switched off,
+-- so that a dry run exercises every rule and says whose order it would have
+-- asked about. Ensure would lay the mark down during that dry run, and the
+-- mark is never moved - so the day the shop actually switched the feature on,
+-- it would reach back to whenever somebody first ran it with the switch off.
+--
+-- Measured on this store: a dry run on 13 October stamped the mark, and
+-- turning the check on two days later would have messaged the customers of 26
+-- orders placed since - about orders a day or two old, some already shipped.
+SELECT * FROM personalisation_watermarks
+WHERE brand_slug = sqlc.arg('brand_slug');
+
 -- name: EnsurePersonalisationWatermark :one
 -- Returns when this brand started asking customers, setting it to now on the
 -- first ever pass.

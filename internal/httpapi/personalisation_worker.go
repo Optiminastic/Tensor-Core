@@ -234,16 +234,16 @@ func (s *Server) personalisationEligible(
 	// 3. The backlog. Every sync re-imports a month of orders, so without a
 	//    watermark switching this on would message everyone who has bought
 	//    anything since August - all at once, about orders long since
-	//    delivered.
+	//    delivered. The rule is: ONLY ORDERS PLACED AFTER THE SHOP BEGAN
+	//    ASKING.
 	if len(only) == 0 {
-		mark, err := s.store.Q.EnsurePersonalisationWatermark(ctx, slug)
-		if err != nil {
+		watchFrom, ok := s.personalisationWatchFrom(ctx, slug)
+		if !ok {
 			// Fail closed. Not knowing when watching began is not a licence
 			// to message a month of customers.
 			return "", "the watermark could not be read"
 		}
-		if placed := orderPlacedAt(order); mark.WatchFrom.Valid &&
-			!placed.After(mark.WatchFrom.Time) {
+		if placed := orderPlacedAt(order); !placed.After(watchFrom) {
 			return "", "this order was placed before the shop began asking"
 		}
 	}
@@ -834,4 +834,55 @@ func (s *Server) replateBedsLeftBy(ctx context.Context, held []*uuid.UUID) {
 		seen[*bed] = true
 		s.rebuildBatchAfterRemoval(ctx, *bed)
 	}
+}
+
+// personalisationWatchFrom is the instant this brand began asking customers.
+//
+// IT IS ONLY LAID DOWN WHILE THE CHECK IS ON, and that distinction is the
+// difference between "every order from now on" and "every order since
+// somebody first tried this out".
+//
+// Eligibility is deliberately evaluated with the switch off, so a dry run
+// exercises every rule and logs whose order it WOULD have asked about. The
+// watermark used to be created by that pass, and it is never moved once it
+// exists - so a dry run on 13 October set the mark there, and switching the
+// check on two days later would have reached back and messaged the customers
+// of the 26 orders placed in between, about orders already in production or
+// posted.
+//
+// With the check off this only reads. When no mark exists yet, the answer is
+// NOW: nothing placed before this moment would be asked about, which is the
+// honest thing for a dry run to report and exactly what the first live pass
+// will then write down.
+func (s *Server) personalisationWatchFrom(
+	ctx context.Context, slug string,
+) (time.Time, bool) {
+	if !s.cfg.PersonalisationCheckEnabled {
+		mark, err := s.store.Q.GetPersonalisationWatermark(ctx, slug)
+		return watchFromOrNow(mark.WatchFrom, err), true
+	}
+
+	mark, err := s.store.Q.EnsurePersonalisationWatermark(ctx, slug)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if !mark.WatchFrom.Valid {
+		// A row with no instant is not something to interpret generously.
+		return time.Time{}, false
+	}
+	return mark.WatchFrom.Time, true
+}
+
+// watchFromOrNow reads a watermark that may not be there yet.
+//
+// AN ABSENT MARK MEANS NOW, never "the beginning of time". The rule it feeds
+// refuses an order placed at or before the mark, so a zero instant would make
+// every order the shop has ever taken eligible at once - which is the exact
+// outcome the watermark exists to prevent, arrived at by treating its absence
+// as permission.
+func watchFromOrNow(mark pgtype.Timestamptz, err error) time.Time {
+	if err != nil || !mark.Valid {
+		return time.Now()
+	}
+	return mark.Time
 }
