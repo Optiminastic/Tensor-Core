@@ -105,11 +105,18 @@ func TestATooLongNameIsRefusedInTheFormNotInTheRender(t *testing.T) {
 
 func TestLengthIsCountedInCharactersNotBytes(t *testing.T) {
 	// "आरव" is three characters and nine bytes. Counting bytes would refuse
-	// names that fit perfectly well.
-	updated, changed, err := applyCustomerEdit(props("Left Name", "A"),
-		map[string]string{"Left Name": "आरवकुमार"}, plankRules())
+	// values that fit perfectly well.
+	//
+	// Asserted on a FREE-TEXT field rather than a name, because a name is now
+	// English letters only - the font on the machine has no glyph for another
+	// script, so a Devanagari name would come out a row of hollow boxes. The
+	// rune-counting this proves still matters: every other field a customer
+	// can edit takes whatever they type.
+	open := fieldRules{open: true, maxRunes: maxFreeTextRunes}
+	updated, changed, err := applyCustomerEdit(props("Sub Text", "A"),
+		map[string]string{"Sub Text": "आरवकुमार"}, open)
 	if err != nil {
-		t.Fatalf("a short Devanagari name was refused: %v", err)
+		t.Fatalf("a short Devanagari value was refused: %v", err)
 	}
 	if !changed || updated[0].Value != "आरवकुमार" {
 		t.Errorf("value = %q", updated[0].Value)
