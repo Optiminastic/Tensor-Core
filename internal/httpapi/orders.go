@@ -232,6 +232,15 @@ func (s *Server) registerOrders(r *gin.Engine) {
 }
 
 func (s *Server) listOrders(c *gin.Context) {
+	// ?page=N is the Orders table's numbered page - filters, search and page
+	// all applied in Postgres (orders_table.go). Without it, the lists below
+	// answer exactly as they always have.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listOrdersTable(c, numbered, orderSource(c))
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return
