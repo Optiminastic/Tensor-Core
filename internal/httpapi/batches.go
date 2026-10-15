@@ -202,6 +202,14 @@ func (s *Server) registerBatches(r *gin.Engine) {
 }
 
 func (s *Server) listBatches(c *gin.Context) {
+	// ?page=N is a batch table's numbered page (batches_table.go), filtered
+	// and cut in Postgres; without it the list answers as it always has.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listBatchesTable(c, numbered)
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return

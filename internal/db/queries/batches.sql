@@ -716,3 +716,85 @@ UPDATE batches SET
     bambu_slice_job_id = NULL,
     updated_at         = now()
 WHERE id = sqlc.arg('id');
+
+-- name: CountBatchesTable :one
+-- How many batches a table's filters select - the Batches page or Machine
+-- Management's Queued list. Paired with ListBatchesTable; null means "any".
+SELECT count(*) FROM batches b
+WHERE (
+    sqlc.narg('search')::text IS NULL
+    OR b.batch_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+    )
+)
+AND (sqlc.narg('created_from')::timestamptz IS NULL OR b.created_at >= sqlc.narg('created_from'))
+AND (sqlc.narg('created_to')::timestamptz IS NULL OR b.created_at <= sqlc.narg('created_to'))
+-- The Batches tabs: completed, or everything not completed.
+AND (
+    sqlc.narg('finished')::boolean IS NULL
+    OR (b.status = 'completed') = sqlc.narg('finished')::boolean
+)
+-- The Material select.
+AND (sqlc.narg('shortage')::boolean IS NULL OR b.material_shortage = sqlc.narg('shortage')::boolean)
+-- Machine Management's Queued list: only these statuses.
+AND (sqlc.narg('statuses')::text[] IS NULL OR b.status = ANY(sqlc.narg('statuses')::text[]));
+
+-- name: ListBatchesTable :many
+-- One page of batches, cut by LIMIT/OFFSET in Postgres, in either table's
+-- order:
+--   Batches (queue_order false): priority beds first, then newest number first
+--     - ListBatches' order with the table's priority-first re-sort.
+--   Queued (queue_order true): by stage (drafts, locked, printing), then
+--     priority, then OLDEST number first - first come, first served; a number
+--     with no digits goes last rather than jumping the queue.
+SELECT b.* FROM batches b
+WHERE (
+    sqlc.narg('search')::text IS NULL
+    OR b.batch_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+            OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+    )
+)
+AND (sqlc.narg('created_from')::timestamptz IS NULL OR b.created_at >= sqlc.narg('created_from'))
+AND (sqlc.narg('created_to')::timestamptz IS NULL OR b.created_at <= sqlc.narg('created_to'))
+-- The Batches tabs: completed, or everything not completed.
+AND (
+    sqlc.narg('finished')::boolean IS NULL
+    OR (b.status = 'completed') = sqlc.narg('finished')::boolean
+)
+-- The Material select.
+AND (sqlc.narg('shortage')::boolean IS NULL OR b.material_shortage = sqlc.narg('shortage')::boolean)
+-- Machine Management's Queued list: only these statuses.
+AND (sqlc.narg('statuses')::text[] IS NULL OR b.status = ANY(sqlc.narg('statuses')::text[]))
+ORDER BY
+    CASE WHEN sqlc.arg('queue_order')::boolean THEN
+        CASE b.status WHEN 'pending_approval' THEN 0 WHEN 'open' THEN 1 WHEN 'in_progress' THEN 2 ELSE 9 END
+    ELSE 0 END,
+    EXISTS (SELECT 1 FROM production_jobs pj WHERE pj.batch_id = b.id AND pj.priority < 0) DESC,
+    CASE WHEN sqlc.arg('queue_order')::boolean THEN NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint END ASC NULLS LAST,
+    CASE WHEN NOT sqlc.arg('queue_order')::boolean THEN NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint END DESC NULLS LAST,
+    b.created_at DESC, b.id DESC
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: CountBatchesByTab :one
+-- The badges, over every batch: Pending, Completed, and the Queued list.
+SELECT
+    count(*) FILTER (WHERE b.status <> 'completed') AS pending,
+    count(*) FILTER (WHERE b.status = 'completed') AS completed,
+    count(*) FILTER (WHERE b.status IN ('pending_approval', 'open', 'in_progress')) AS queued
+FROM batches b;

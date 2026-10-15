@@ -268,6 +268,82 @@ func (q *Queries) ClearBatchSliceJob(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const countBatchesByTab = `-- name: CountBatchesByTab :one
+SELECT
+    count(*) FILTER (WHERE b.status <> 'completed') AS pending,
+    count(*) FILTER (WHERE b.status = 'completed') AS completed,
+    count(*) FILTER (WHERE b.status IN ('pending_approval', 'open', 'in_progress')) AS queued
+FROM batches b
+`
+
+type CountBatchesByTabRow struct {
+	Pending   int64
+	Completed int64
+	Queued    int64
+}
+
+// The badges, over every batch: Pending, Completed, and the Queued list.
+func (q *Queries) CountBatchesByTab(ctx context.Context) (CountBatchesByTabRow, error) {
+	row := q.db.QueryRow(ctx, countBatchesByTab)
+	var i CountBatchesByTabRow
+	err := row.Scan(&i.Pending, &i.Completed, &i.Queued)
+	return i, err
+}
+
+const countBatchesTable = `-- name: CountBatchesTable :one
+SELECT count(*) FROM batches b
+WHERE (
+    $1::text IS NULL
+    OR b.batch_number ILIKE '%' || $1::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || $1::text || '%'
+            OR o.order_number ILIKE '%' || $1::text || '%'
+            OR j.personalisation_name ILIKE '%' || $1::text || '%'
+          )
+    )
+)
+AND ($2::timestamptz IS NULL OR b.created_at >= $2)
+AND ($3::timestamptz IS NULL OR b.created_at <= $3)
+AND (
+    $4::boolean IS NULL
+    OR (b.status = 'completed') = $4::boolean
+)
+AND ($5::boolean IS NULL OR b.material_shortage = $5::boolean)
+AND ($6::text[] IS NULL OR b.status = ANY($6::text[]))
+`
+
+type CountBatchesTableParams struct {
+	Search      *string
+	CreatedFrom pgtype.Timestamptz
+	CreatedTo   pgtype.Timestamptz
+	Finished    *bool
+	Shortage    *bool
+	Statuses    []string
+}
+
+// How many batches a table's filters select - the Batches page or Machine
+// Management's Queued list. Paired with ListBatchesTable; null means "any".
+// The Batches tabs: completed, or everything not completed.
+// The Material select.
+// Machine Management's Queued list: only these statuses.
+func (q *Queries) CountBatchesTable(ctx context.Context, arg CountBatchesTableParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countBatchesTable,
+		arg.Search,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.Finished,
+		arg.Shortage,
+		arg.Statuses,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countBedsInFlightPerFleetMachine = `-- name: CountBedsInFlightPerFleetMachine :many
 SELECT fleet_machine_id, count(*) AS beds
 FROM batches
@@ -1112,6 +1188,135 @@ ORDER BY print_finished_at ASC NULLS LAST
 // on, and its planks would never reach Assembly.
 func (q *Queries) ListBatchesResolvedButNotClosed(ctx context.Context) ([]Batch, error) {
 	rows, err := q.db.Query(ctx, listBatchesResolvedButNotClosed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Batch{}
+	for rows.Next() {
+		var i Batch
+		if err := rows.Scan(
+			&i.ID,
+			&i.BatchNumber,
+			&i.MachineID,
+			&i.Status,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.MaterialShortage,
+			&i.MergedFileID,
+			&i.PreviewFileID,
+			&i.UnitsPerBed,
+			&i.MachineFamily,
+			&i.TotalPrintTimeMinutes,
+			&i.EffectiveTimePerUnitMinutes,
+			&i.TotalFilamentGrams,
+			&i.BedUtilizationPercent,
+			&i.PackingStrategy,
+			&i.FilamentReserved,
+			&i.Manual,
+			&i.PlateSlicedAt,
+			&i.PlateSliceError,
+			&i.PrintError,
+			&i.PrintErrorAt,
+			&i.QueueItemID,
+			&i.TotalLayers,
+			&i.SupportGrams,
+			&i.PurgeGrams,
+			&i.ColourChanges,
+			&i.FilamentByColour,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PipelineRunID,
+			&i.BambuSliceJobID,
+			&i.FleetMachineID,
+			&i.ArchiveID,
+			&i.PrintOutcome,
+			&i.PrintStartedAt,
+			&i.PrintFinishedAt,
+			&i.ActualPrintTimeMinutes,
+			&i.ActualFilamentGrams,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBatchesTable = `-- name: ListBatchesTable :many
+SELECT b.id, b.batch_number, b.machine_id, b.status, b.approved_by, b.approved_at, b.material_shortage, b.merged_file_id, b.preview_file_id, b.units_per_bed, b.machine_family, b.total_print_time_minutes, b.effective_time_per_unit_minutes, b.total_filament_grams, b.bed_utilization_percent, b.packing_strategy, b.filament_reserved, b.manual, b.plate_sliced_at, b.plate_slice_error, b.print_error, b.print_error_at, b.queue_item_id, b.total_layers, b.support_grams, b.purge_grams, b.colour_changes, b.filament_by_colour, b.created_at, b.updated_at, b.pipeline_run_id, b.bambu_slice_job_id, b.fleet_machine_id, b.archive_id, b.print_outcome, b.print_started_at, b.print_finished_at, b.actual_print_time_minutes, b.actual_filament_grams FROM batches b
+WHERE (
+    $1::text IS NULL
+    OR b.batch_number ILIKE '%' || $1::text || '%'
+    OR EXISTS (
+        SELECT 1 FROM production_jobs j
+        LEFT JOIN orders o ON o.id = j.order_id
+        WHERE j.batch_id = b.id
+          AND (
+            j.job_number ILIKE '%' || $1::text || '%'
+            OR o.order_number ILIKE '%' || $1::text || '%'
+            OR j.personalisation_name ILIKE '%' || $1::text || '%'
+          )
+    )
+)
+AND ($2::timestamptz IS NULL OR b.created_at >= $2)
+AND ($3::timestamptz IS NULL OR b.created_at <= $3)
+AND (
+    $4::boolean IS NULL
+    OR (b.status = 'completed') = $4::boolean
+)
+AND ($5::boolean IS NULL OR b.material_shortage = $5::boolean)
+AND ($6::text[] IS NULL OR b.status = ANY($6::text[]))
+ORDER BY
+    CASE WHEN $7::boolean THEN
+        CASE b.status WHEN 'pending_approval' THEN 0 WHEN 'open' THEN 1 WHEN 'in_progress' THEN 2 ELSE 9 END
+    ELSE 0 END,
+    EXISTS (SELECT 1 FROM production_jobs pj WHERE pj.batch_id = b.id AND pj.priority < 0) DESC,
+    CASE WHEN $7::boolean THEN NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint END ASC NULLS LAST,
+    CASE WHEN NOT $7::boolean THEN NULLIF(regexp_replace(b.batch_number, '\D', '', 'g'), '')::bigint END DESC NULLS LAST,
+    b.created_at DESC, b.id DESC
+LIMIT $9 OFFSET $8
+`
+
+type ListBatchesTableParams struct {
+	Search      *string
+	CreatedFrom pgtype.Timestamptz
+	CreatedTo   pgtype.Timestamptz
+	Finished    *bool
+	Shortage    *bool
+	Statuses    []string
+	QueueOrder  bool
+	PageOffset  int32
+	PageLimit   int32
+}
+
+// One page of batches, cut by LIMIT/OFFSET in Postgres, in either table's
+// order:
+//
+//	Batches (queue_order false): priority beds first, then newest number first
+//	  - ListBatches' order with the table's priority-first re-sort.
+//	Queued (queue_order true): by stage (drafts, locked, printing), then
+//	  priority, then OLDEST number first - first come, first served; a number
+//	  with no digits goes last rather than jumping the queue.
+//
+// The Batches tabs: completed, or everything not completed.
+// The Material select.
+// Machine Management's Queued list: only these statuses.
+func (q *Queries) ListBatchesTable(ctx context.Context, arg ListBatchesTableParams) ([]Batch, error) {
+	rows, err := q.db.Query(ctx, listBatchesTable,
+		arg.Search,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.Finished,
+		arg.Shortage,
+		arg.Statuses,
+		arg.QueueOrder,
+		arg.PageOffset,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
