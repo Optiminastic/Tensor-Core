@@ -369,9 +369,10 @@ func (w *PersonalisationLinkWorker) ask(
 		// ability to correct the items nobody renders.
 		w.logger.Warn("personalisation: could not hold the rest of the order",
 			"brand", slug, "order", order.OrderNumber, "error", err)
-	} else if held > 0 {
+	} else if len(held) > 0 {
 		w.logger.Info("personalisation: holding the order's unrendered items too",
-			"brand", slug, "order", order.OrderNumber, "jobs", held)
+			"brand", slug, "order", order.OrderNumber, "jobs", len(held))
+		w.server.replateBedsLeftBy(ctx, held)
 	}
 
 	// The customer's number is NOT logged. The order number finds them.
@@ -719,11 +720,12 @@ func (s *Server) openPersonalisationWindow(ctx context.Context, order gen.Order)
 		log.Error("personalisation: could not hold the order for its customer",
 			"brand", slug, "order", order.OrderNumber, "error", err)
 	}
-	if held == 0 {
+	if len(held) == 0 {
 		// Nothing on this order is personalised, so there is nothing to check
 		// and no link worth sending.
 		return
 	}
+	s.replateBedsLeftBy(ctx, held)
 
 	if err := s.enqueuePersonalisationLinkForOrder(ctx, order.ID); err != nil {
 		// The jobs are held and nothing will ask about them. Release now
@@ -808,5 +810,28 @@ func (s *Server) flagStaleDesignFiles(ctx context.Context, orderID uuid.UUID) {
 			log.Info("personalisation: the design file no longer matches the order",
 				"job", j.JobNumber, "order", orderID)
 		}
+	}
+}
+
+// replateBedsLeftBy rebuilds every bed a hold just took a job off.
+//
+// Withdrawing a job from an approved bed without this leaves the bed's merged
+// plate still containing it: the machine would print an item whose customer is
+// at that moment being asked whether it is right. A Draft would be dissolved
+// by the next plan anyway, but an approved bed is nobody's to dissolve, so its
+// plate is rebuilt from what is actually on it.
+//
+// rebuildBatchAfterRemoval rather than RebuildBatchPlate, because the job
+// taken off may have been the only one: that path withdraws the old plate from
+// the printer queue first and closes a bed it has emptied, where
+// RebuildBatchPlate would simply fail on a bed with no jobs.
+func (s *Server) replateBedsLeftBy(ctx context.Context, held []*uuid.UUID) {
+	seen := make(map[uuid.UUID]bool, len(held))
+	for _, bed := range held {
+		if bed == nil || seen[*bed] {
+			continue
+		}
+		seen[*bed] = true
+		s.rebuildBatchAfterRemoval(ctx, *bed)
 	}
 }

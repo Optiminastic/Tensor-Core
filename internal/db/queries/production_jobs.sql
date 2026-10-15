@@ -977,7 +977,7 @@ WHERE j.personalisation_status = 'awaiting_customer'
       SELECT 1 FROM personalisation_links l WHERE l.order_id = j.order_id
   );
 
--- name: HoldOrderPersonalisationForCustomer :execrows
+-- name: HoldOrderPersonalisationForCustomer :many
 -- Holds the REST of an order's personalised jobs while the customer's window
 -- is open.
 --
@@ -993,35 +993,55 @@ WHERE j.personalisation_status = 'awaiting_customer'
 -- the expiry sweep and the confirm both find it and release it. Holding at
 -- creation would strand an order that never gets a link.
 --
--- A DRAFT BED IS NOT A COMMITMENT. This used to require batch_id IS NULL, on
--- the reasoning that pulling a job back would take it out of batching under a
--- plate that already counts it. That is true of a bed somebody has approved
--- and false of a Draft, which the planner dissolves and rebuilds on every run
--- - UnassignJobsFromBatches exists to do exactly this.
+-- A BED THAT HAS NOT STARTED IS NOT A COMMITMENT. This used to require
+-- batch_id IS NULL, on the reasoning that pulling a job back would disturb a
+-- plate that already counts it. True of a bed on a machine; false of one that
+-- is merely planned or approved.
 --
 -- The cost of the stricter rule was the whole feature. On a floor that plans
--- every few minutes, most orders are on a Draft before the link is sent, so
--- the hold skipped them, so SaveCustomerPersonalisation - which writes only to
--- an awaiting_customer job - refused every edit with "this link is no longer
--- available". The customer got a live page, a running clock, editable fields,
+-- every few minutes, most orders are on a bed before the link is sent, so the
+-- hold skipped them, so SaveCustomerPersonalisation - which writes only to an
+-- awaiting_customer job - refused every edit with "this link is no longer
+-- available". The customer got a live page, a running clock, editable fields
 -- and a Save button that could not work. Measured on T3DPS-115768 and
--- T3DPS-115801, both of which were on Draft beds.
+-- T3DPS-115801.
 --
--- A LOCKED OR DISPATCHED BED IS STILL UNTOUCHABLE. That plate is on its way to
--- a printer or already on one, and the order genuinely cannot change. The
--- customer's page says so rather than offering a field - see publicItem.
-UPDATE production_jobs
-SET personalisation_status = 'awaiting_customer',
-    -- Withdrawn from the Draft as it is held, so the next plan builds a bed
-    -- without it rather than one that counts a job nobody has confirmed.
-    batch_id               = NULL,
-    updated_at             = now()
-WHERE order_id = sqlc.arg('order_id')
-  AND (batch_id IS NULL
-       OR batch_id IN (SELECT id FROM batches WHERE status = 'pending_approval'))
-  AND status IN ('pending', 'queued')
-  AND personalisation_status IN ('pending', 'validated', 'not_required')
-  AND jsonb_array_length(coalesce(personalisation_properties, '[]'::jsonb)) > 0;
+-- pending_approval is a Draft the planner dissolves on its next run anyway.
+-- open is approved but not started: its plate can still be rebuilt, which is
+-- what the caller does with the beds this returns.
+--
+-- in_progress AND completed ARE UNTOUCHABLE. That plate is on a printer or
+-- already made, and the order genuinely cannot change now. The customer's
+-- page says so rather than offering a field - see publicItem.
+WITH target AS (
+    SELECT pj.id, pj.batch_id
+    FROM production_jobs pj
+    WHERE pj.order_id = sqlc.arg('order_id')
+      AND (pj.batch_id IS NULL
+           OR pj.batch_id IN (SELECT b.id FROM batches b
+                               WHERE b.status IN ('pending_approval', 'open')))
+      AND pj.status IN ('pending', 'queued')
+      AND pj.personalisation_status IN ('pending', 'validated', 'not_required')
+      AND jsonb_array_length(coalesce(pj.personalisation_properties, '[]'::jsonb)) > 0
+), held AS (
+    UPDATE production_jobs j
+    SET personalisation_status = 'awaiting_customer',
+        -- Withdrawn as it is held, so no bed counts a job whose customer has
+        -- not finished with it.
+        batch_id               = NULL,
+        updated_at             = now()
+    FROM target t
+    WHERE j.id = t.id
+    RETURNING t.batch_id AS freed_batch_id
+)
+-- ONE ROW PER HELD JOB, carrying the bed it came off if it was on one.
+--
+-- Both facts are needed and they are not the same: the number of rows is how
+-- many items the customer can now correct, which is what decides whether a
+-- link is worth sending at all, while the non-null beds are the plates the
+-- caller has to rebuild. Returning only the beds would report "nothing held"
+-- for the ordinary case of an order that was not batched yet.
+SELECT freed_batch_id FROM held;
 
 -- name: ClearJobModelRenderHold :exec
 -- Releases a job whose render is not coming after all.
