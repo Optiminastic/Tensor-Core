@@ -191,18 +191,26 @@ func (q *Queries) GetOpenPersonalisationLinkForOrder(ctx context.Context, orderI
 }
 
 const getOrderBrandSlug = `-- name: GetOrderBrandSlug :one
-SELECT c.brand_slug
+SELECT COALESCE(o.brand_slug, c.brand_slug)::text AS brand_slug
 FROM orders o
-JOIN brand_connections c ON c.id = o.shop_connection_id
+LEFT JOIN brand_connections c ON c.id = o.shop_connection_id
 WHERE o.id = $1
 `
 
 // Which brand an order belongs to.
 //
-// Through the connection it was imported on, because that is the only link an
-// order has to a brand - orders carry no brand_slug of their own, and the
-// customer's check needs one to resolve that brand's WhatsApp credentials and
-// its watermark.
+// FROM THE ORDER, with the old join kept only as a fallback for rows imported
+// before orders carried a brand (migration 0103).
+//
+// The join alone was wrong twice over. orders.shop_connection_id references
+// shopify_connections, while this joined brand_connections on it - two
+// different tables, so a match was coincidence - and the routine sync passes
+// no connection id at all, so the column is null on every order it imports.
+// With one brand connected the caller's fallback hid both: there was only one
+// shop, so it must be that one. The day a second brand was connected every
+// new order became unattributable, and the personalisation check went with
+// it, because a brand is how it finds the WhatsApp credentials and the
+// watermark.
 func (q *Queries) GetOrderBrandSlug(ctx context.Context, orderID uuid.UUID) (string, error) {
 	row := q.db.QueryRow(ctx, getOrderBrandSlug, orderID)
 	var brand_slug string

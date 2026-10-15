@@ -347,6 +347,7 @@ type MaterialProfile struct {
 type Order struct {
 	ID                  uuid.UUID
 	ShopConnectionID    *uuid.UUID
+	BrandSlug           *string
 	ShopifyOrderID      int64
 	OrderNumber         string
 	CustomerName        *string

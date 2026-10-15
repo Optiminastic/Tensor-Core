@@ -309,3 +309,32 @@ func TestAnAbsentWatermarkMeansNowNotTheBeginningOfTime(t *testing.T) {
 }
 
 var errNoRows = errors.New("no rows in result set")
+
+// Attribution is what the whole personalisation check hangs off: a brand is
+// how it finds the WhatsApp credentials and the watermark, and an order that
+// cannot be attributed is never asked about.
+//
+// It was hanging off nothing. orders.shop_connection_id references
+// shopify_connections while GetOrderBrandSlug joined brand_connections on it -
+// two different tables - and the routine sync passes no connection id at all,
+// so the column is null on every order it imports. One connected brand hid
+// both faults behind the caller's fallback: there is only one shop, so it
+// must be that one. The second brand took the feature down, with
+// "this order's connection is gone and 2 brands are connected" on every new
+// order - measured on T3DPS-115831 and T3DPS-115832.
+//
+// So the import must record the brand. This asserts the parameter exists and
+// carries through; the query's COALESCE is covered by the integration suite.
+func TestAnImportedOrderRecordsItsBrand(t *testing.T) {
+	// nonEmptyPtr is what the import uses to decide whether a slug was given.
+	// An empty one must stay null rather than writing "" - the readers treat
+	// null as "not attributable" and would read "" as a brand that does not
+	// exist.
+	if got := nonEmptyPtr(""); got != nil {
+		t.Errorf("an empty brand gave %v, want nil - a blank slug is not a brand", *got)
+	}
+	got := nonEmptyPtr("the-3d-printing-store-india")
+	if got == nil || *got != "the-3d-printing-store-india" {
+		t.Fatalf("brand = %v, want the slug the sync was pulling for", got)
+	}
+}

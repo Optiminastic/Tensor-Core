@@ -62,7 +62,7 @@ func TestShopifyOrderDetailSurvivesImport(t *testing.T) {
 	s := &Server{store: store}
 
 	order, err := s.importShopifyOrder(
-		context.Background(), nil, toOrderPayload(dualNamePlankOrder()), "pending")
+		context.Background(), nil, "a-brand", toOrderPayload(dualNamePlankOrder()), "pending")
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}

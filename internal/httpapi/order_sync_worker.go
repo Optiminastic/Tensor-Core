@@ -88,7 +88,7 @@ func (w *OrderSyncWorker) syncBrand(ctx context.Context, slug string, attempt in
 	}
 
 	w.logger.Info("shopify order sync start", "brand", slug, "shop", shop, "attempt", attempt)
-	imported, err := w.server.SyncOrdersForBrand(ctx, shop, token)
+	imported, err := w.server.SyncOrdersForBrand(ctx, slug, shop, token)
 	if err != nil {
 		return fmt.Errorf("sync orders for %s: %w", slug, err)
 	}
@@ -117,7 +117,8 @@ func (w *OrderSyncWorker) syncAll(ctx context.Context, attempt int) error {
 		if conn.ExternalAccountID == nil || conn.AccessToken == nil {
 			continue
 		}
-		n, err := w.server.SyncOrdersForBrand(ctx, *conn.ExternalAccountID, *conn.AccessToken)
+		n, err := w.server.SyncOrdersForBrand(ctx,
+			conn.BrandSlug, *conn.ExternalAccountID, *conn.AccessToken)
 		if err != nil {
 			w.logger.Error("shopify order sync failed for a brand",
 				"brand", conn.BrandSlug, "shop", *conn.ExternalAccountID, "error", err)

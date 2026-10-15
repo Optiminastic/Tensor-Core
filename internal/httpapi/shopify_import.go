@@ -30,9 +30,12 @@ import (
 // no webhook path - orders arrive when someone asks for them, never on
 // Shopify's schedule. connID is nullable: a sync sourced from a brand's
 // already-connected brand_connections row (see connections.go's
-// syncShopifyOrders) has no shopify_connections row to reference.
+// syncShopifyOrders) has no shopify_connections row to reference - which is
+// exactly why brandSlug is passed separately and is the thing that actually
+// attributes the order.
 func (s *Server) importShopifyOrder(
-	ctx context.Context, connID *uuid.UUID, payload shopifyOrderPayload, fallbackStatus string,
+	ctx context.Context, connID *uuid.UUID, brandSlug string,
+	payload shopifyOrderPayload, fallbackStatus string,
 ) (gen.Order, error) {
 	items := mapShopifyLineItems(payload.LineItems)
 	lineItemsJSON, err := json.Marshal(items)
@@ -44,8 +47,15 @@ func (s *Server) importShopifyOrder(
 	err = s.store.InTxWith(ctx, func(q *gen.Queries, tx pgx.Tx) error {
 		var err error
 		order, err = q.UpsertPaidOrder(ctx, gen.UpsertPaidOrderParams{
-			ID: uuid.New(), ShopConnectionID: connID, ShopifyOrderID: payload.ID,
-			OrderNumber: payload.Name, CustomerName: payload.customerName(),
+			ID: uuid.New(), ShopConnectionID: connID,
+			// WHICH BRAND THIS IS, recorded on the order itself. The
+			// connection id above cannot answer it: it references
+			// shopify_connections while a brand lives on brand_connections,
+			// and a sync driven from a brand's own connection passes none at
+			// all. See migration 0103.
+			BrandSlug:      nonEmptyPtr(brandSlug),
+			ShopifyOrderID: payload.ID,
+			OrderNumber:    payload.Name, CustomerName: payload.customerName(),
 			ShopifyCustomerID: payload.customerID(), CustomerEmail: payload.customerEmail(),
 			CustomerPhone:   payload.customerPhone(),
 			FinancialStatus: defaultStr(payload.FinancialStatus, fallbackStatus),

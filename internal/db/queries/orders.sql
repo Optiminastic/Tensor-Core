@@ -6,11 +6,12 @@
 
 -- name: InsertOrder :one
 INSERT INTO orders (
-    id, shop_connection_id, shopify_order_id, order_number, customer_name,
+    id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name,
     shopify_customer_id, customer_email, customer_phone,
     financial_status, total_price, currency, line_items, status, source
 ) VALUES (
-    sqlc.arg('id'), sqlc.narg('shop_connection_id'), sqlc.arg('shopify_order_id'),
+    sqlc.arg('id'), sqlc.narg('shop_connection_id'), sqlc.narg('brand_slug'),
+    sqlc.arg('shopify_order_id'),
     sqlc.arg('order_number'), sqlc.narg('customer_name'),
     sqlc.narg('shopify_customer_id'), sqlc.narg('customer_email'), sqlc.narg('customer_phone'),
     sqlc.arg('financial_status'), sqlc.arg('total_price')::float8, sqlc.arg('currency'),
@@ -23,7 +24,7 @@ RETURNING *;
 -- replay only refreshes the mutable financial fields. source defaults to
 -- 'shopify_webhook', so a webhook-imported order is never mistaken for seed data.
 INSERT INTO orders (
-    id, shop_connection_id, shopify_order_id, order_number, customer_name,
+    id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name,
     shopify_customer_id, customer_email, customer_phone,
     financial_status, total_price, currency, line_items, status,
     placed_at, note, attributes, tags, fulfillment_status, source_name,
@@ -31,7 +32,8 @@ INSERT INTO orders (
     subtotal_price, total_discounts, total_shipping, total_received,
     discount_title, shipping_title, shipping_address, billing_address
 ) VALUES (
-    sqlc.arg('id'), sqlc.narg('shop_connection_id'), sqlc.arg('shopify_order_id'),
+    sqlc.arg('id'), sqlc.narg('shop_connection_id'), sqlc.narg('brand_slug'),
+    sqlc.arg('shopify_order_id'),
     sqlc.arg('order_number'), sqlc.narg('customer_name'),
     sqlc.narg('shopify_customer_id'), sqlc.narg('customer_email'), sqlc.narg('customer_phone'),
     sqlc.arg('financial_status'), sqlc.arg('total_price')::float8, sqlc.arg('currency'),
@@ -82,6 +84,11 @@ ON CONFLICT (shopify_order_id) DO UPDATE SET
     -- arrived yet. COALESCE because protected customer data arrives null
     -- until Shopify grants access, and a null must never flatten a number an
     -- earlier sync captured.
+    -- Which brand this came from, refreshed for the reason the contact
+    -- details are: an order imported before this column existed carries no
+    -- brand, and pressing Sync is what repairs it. COALESCE so a sync that
+    -- cannot say which brand it is pulling for never erases one that could.
+    brand_slug         = COALESCE(EXCLUDED.brand_slug, orders.brand_slug),
     customer_phone     = COALESCE(EXCLUDED.customer_phone, orders.customer_phone),
     customer_name      = COALESCE(EXCLUDED.customer_name, orders.customer_name),
     -- Address columns are only ever overwritten with something. Protected

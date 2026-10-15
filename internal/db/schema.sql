@@ -287,6 +287,11 @@ CREATE INDEX ix_file_assets_uploaded_by ON file_assets (uploaded_by);
 CREATE TABLE orders (
     id                  uuid PRIMARY KEY,
     shop_connection_id  uuid,
+    -- Which brand this order belongs to. See migration 0103: the connection
+    -- id above cannot answer that - it references shopify_connections while
+    -- the brand lives on brand_connections, and the routine sync leaves it
+    -- null regardless.
+    brand_slug          text,
     shopify_order_id    bigint NOT NULL,
     order_number        varchar(64) NOT NULL,
     customer_name       varchar(255),

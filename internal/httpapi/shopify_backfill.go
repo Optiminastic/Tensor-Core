@@ -33,14 +33,16 @@ var shopifyImportSince = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
 // connID is nullable). A per-order import failure is logged and skipped
 // rather than aborting the whole sync; only a failure to even list orders
 // from Shopify is returned to the caller.
-func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.UUID, shop, token string) (int, error) {
+func (s *Server) fetchAndImportShopifyOrders(
+	ctx context.Context, connID *uuid.UUID, brandSlug, shop, token string,
+) (int, error) {
 	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0, shopifyImportSince)
 	if err != nil {
 		return 0, err
 	}
 	imported := 0
 	for _, o := range orders {
-		if _, err := s.importShopifyOrder(ctx, connID, toOrderPayload(o), "pending"); err != nil {
+		if _, err := s.importShopifyOrder(ctx, connID, brandSlug, toOrderPayload(o), "pending"); err != nil {
 			obs.FromContext(ctx).Warn("shopify order sync: import failed",
 				"shop", shop, "shopify_order_id", o.ID, "error", err)
 			continue
@@ -57,8 +59,10 @@ func (s *Server) fetchAndImportShopifyOrders(ctx context.Context, connID *uuid.U
 // Best-effort - the store is already fully connected once its webhooks are
 // registered, so a failure here is logged and swallowed rather than failing
 // the OAuth callback; future orders keep flowing in regardless.
-func (s *Server) backfillShopifyOrders(ctx context.Context, connID *uuid.UUID, shop, token string) {
-	imported, err := s.fetchAndImportShopifyOrders(ctx, connID, shop, token)
+func (s *Server) backfillShopifyOrders(
+	ctx context.Context, connID *uuid.UUID, brandSlug, shop, token string,
+) {
+	imported, err := s.fetchAndImportShopifyOrders(ctx, connID, brandSlug, shop, token)
 	if err != nil {
 		obs.FromContext(ctx).Warn("shopify order backfill: could not list orders", "shop", shop, "error", err)
 		return
@@ -112,6 +116,11 @@ func toOrderPayload(o shopify.OrderSummary) shopifyOrderPayload {
 // Exported so a maintenance command can run exactly what the Sync button runs.
 // A backfill driven by a different code path is a backfill that proves nothing
 // about the button, which is the only way orders normally arrive.
-func (s *Server) SyncOrdersForBrand(ctx context.Context, shop, token string) (int, error) {
-	return s.fetchAndImportShopifyOrders(ctx, nil, shop, token)
+func (s *Server) SyncOrdersForBrand(
+	ctx context.Context, brandSlug, shop, token string,
+) (int, error) {
+	// brandSlug, not a connection id. This path runs from a brand's own
+	// brand_connections row and has no shopify_connections row to point at,
+	// so the slug is the only thing that can attribute the orders it imports.
+	return s.fetchAndImportShopifyOrders(ctx, nil, brandSlug, shop, token)
 }

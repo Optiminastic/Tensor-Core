@@ -83,11 +83,11 @@ func TestIntegrationImportShopifyOrder(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, err := srv.importShopifyOrder(ctx, &connID, payload, "pending"); err != nil {
+	if _, err := srv.importShopifyOrder(ctx, &connID, "a-brand", payload, "pending"); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	// A second sync re-sees the same order: upsert on shopify_order_id, no duplicate.
-	if _, err := srv.importShopifyOrder(ctx, &connID, payload, "pending"); err != nil {
+	if _, err := srv.importShopifyOrder(ctx, &connID, "a-brand", payload, "pending"); err != nil {
 		t.Fatalf("re-import: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestIntegrationImportShopifyOrderViaBrandConnection(t *testing.T) {
 		ID: 55502, Name: "#1043", FinancialStatus: "paid", TotalPrice: "260.00", Currency: "INR",
 		LineItems: []shopifyLineItem{{ProductID: &productID, Name: "Keychain", Quantity: 1}},
 	}
-	if _, err := srv.importShopifyOrder(context.Background(), nil, payload, "pending"); err != nil {
+	if _, err := srv.importShopifyOrder(context.Background(), nil, "a-brand", payload, "pending"); err != nil {
 		t.Fatalf("import via brand connection: %v", err)
 	}
 }

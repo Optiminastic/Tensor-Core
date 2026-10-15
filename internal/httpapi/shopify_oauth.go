@@ -146,7 +146,11 @@ func (s *Server) shopifyCallback(c *gin.Context) {
 	}
 	// Best-effort first pull so the store isn't empty on arrival. Every later
 	// import is an explicit "Sync from Shopify".
-	s.backfillShopifyOrders(ctx, &conn.ID, shop, token)
+	// The brand goes with it. This is the one path that HAS a
+	// shopify_connections row, and it still records the slug - a connection
+	// id is replaced the next time somebody reconnects the shop, and the
+	// orders it imported would be orphaned again.
+	s.backfillShopifyOrders(ctx, &conn.ID, brand, shop, token)
 	c.Redirect(http.StatusFound, s.shopifyIntegrationsURL(brand, "connected"))
 }
 
