@@ -170,3 +170,17 @@ FROM personalisation_links
 WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[])
   AND status IN ('sent', 'opened')
   AND expires_at > now();
+
+-- name: ListPersonalisationLinkStatesForOrders :many
+-- Where each of these orders stands in its personalisation window.
+--
+-- The ROW, not a verdict: whether a window counts as open is decided in Go,
+-- beside the one definition GetOpenPersonalisationLinkForOrder already uses,
+-- rather than restated here where the two could drift. An order with no link
+-- row is simply absent, which the caller reads as "never asked".
+--
+-- Bulk, because the orders page asks about a whole page of orders at once and
+-- one query per row is an N+1 on the busiest list in the product.
+SELECT order_id, status, expires_at
+FROM personalisation_links
+WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[]);

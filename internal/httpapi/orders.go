@@ -61,6 +61,14 @@ type orderResponse struct {
 	// freely and several read almost alike, but DNP-BLU, PDNP-BLU and
 	// DNPWL-BLU do not.
 	Skus []string `json:"skus"`
+	// Personalisation is where the customer's thirty minutes stand: "open",
+	// "done", "not_sent", or empty when this order was never asked. See
+	// order_personalisation.go, which also explains why the link itself is
+	// not here.
+	Personalisation string `json:"personalisation"`
+	// PersonalisationWindowEndsAt is set only while the window is open, so a
+	// row can count down without asking a second time.
+	PersonalisationWindowEndsAt *string `json:"personalisation_window_ends_at,omitempty"`
 	// ItemCount is the units on the order, summed across its lines.
 	//
 	// Carried on the LIST response, unlike line_items itself: the orders table
@@ -229,6 +237,10 @@ func (s *Server) registerOrders(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.OrderRead.Key()), s.listOrders)
 	g.GET("/:id", s.guards.RequirePermission(auth.OrderRead.Key()), s.getOrder)
+	// The live customer link for one order, fetched only when somebody opens
+	// it - see order_personalisation.go.
+	g.GET("/:id/personalisation-link",
+		s.guards.RequirePermission(auth.OrderRead.Key()), s.orderPersonalisationLink)
 }
 
 func (s *Server) listOrders(c *gin.Context) {
@@ -264,6 +276,7 @@ func (s *Server) listOrders(c *gin.Context) {
 				out = append(out, orderDTO(o))
 			}
 		}
+		s.stampPersonalisationWindows(ctx, out)
 		c.JSON(http.StatusOK, out)
 		return
 	}
@@ -278,6 +291,7 @@ func (s *Server) listOrders(c *gin.Context) {
 		for _, o := range rows {
 			out = append(out, orderDTO(o))
 		}
+		s.stampPersonalisationWindows(ctx, out)
 		c.JSON(http.StatusOK, out)
 		return
 	}
@@ -292,6 +306,7 @@ func (s *Server) listOrders(c *gin.Context) {
 		for _, o := range rows {
 			out = append(out, orderDTO(o))
 		}
+		s.stampPersonalisationWindows(ctx, out)
 		c.JSON(http.StatusOK, out)
 		return
 	}
@@ -312,6 +327,7 @@ func (s *Server) listOrders(c *gin.Context) {
 		last := rows[n-1]
 		setNextCursor(c, n, page.limit, db.Time(last.ImportedAt), last.ID)
 	}
+	s.stampPersonalisationWindows(ctx, out)
 	c.JSON(http.StatusOK, out)
 }
 

@@ -386,6 +386,47 @@ func (q *Queries) ListOpenPersonalisationWindows(ctx context.Context, orderIds [
 	return items, nil
 }
 
+const listPersonalisationLinkStatesForOrders = `-- name: ListPersonalisationLinkStatesForOrders :many
+SELECT order_id, status, expires_at
+FROM personalisation_links
+WHERE order_id = ANY($1::uuid[])
+`
+
+type ListPersonalisationLinkStatesForOrdersRow struct {
+	OrderID   uuid.UUID
+	Status    string
+	ExpiresAt pgtype.Timestamptz
+}
+
+// Where each of these orders stands in its personalisation window.
+//
+// The ROW, not a verdict: whether a window counts as open is decided in Go,
+// beside the one definition GetOpenPersonalisationLinkForOrder already uses,
+// rather than restated here where the two could drift. An order with no link
+// row is simply absent, which the caller reads as "never asked".
+//
+// Bulk, because the orders page asks about a whole page of orders at once and
+// one query per row is an N+1 on the busiest list in the product.
+func (q *Queries) ListPersonalisationLinkStatesForOrders(ctx context.Context, orderIds []uuid.UUID) ([]ListPersonalisationLinkStatesForOrdersRow, error) {
+	rows, err := q.db.Query(ctx, listPersonalisationLinkStatesForOrders, orderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPersonalisationLinkStatesForOrdersRow{}
+	for rows.Next() {
+		var i ListPersonalisationLinkStatesForOrdersRow
+		if err := rows.Scan(&i.OrderID, &i.Status, &i.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPersonalisationLinks = `-- name: ListPersonalisationLinks :many
 SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
 WHERE brand_slug = $1

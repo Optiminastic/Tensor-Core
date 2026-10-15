@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -145,23 +144,10 @@ func (s *Server) personalisationLink(c *gin.Context) {
 		return
 	}
 
-	link, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID)
-	if err != nil || link.TokenSealed == nil || s.secrets == nil {
-		c.JSON(http.StatusOK, personalisationLinkResponse{})
-		return
-	}
-	token, err := s.secrets.Open(*link.TokenSealed)
-	if err != nil || strings.TrimSpace(token) == "" {
-		// A sealed value that will not open is reported as nothing rather than
-		// as an error: the key has changed, which is an operator's problem and
-		// not something the floor can act on mid-shift.
-		c.JSON(http.StatusOK, personalisationLinkResponse{})
-		return
-	}
-
-	out := personalisationLinkResponse{URL: personalisationLinkURL(s.cfg.FrontendURL, token)}
-	if link.ExpiresAt.Valid {
-		out.ExpiresAt = link.ExpiresAt.Time.UTC().Format(time.RFC3339)
-	}
-	c.JSON(http.StatusOK, out)
+	// openLinkForOrder is shared with the orders page, which asks the same
+	// question of the same row. Every "no" - a closed window, no encryption
+	// key, a key that has since changed - comes back as the same empty
+	// answer, because to the person holding the mouse they are all simply
+	// no link.
+	c.JSON(http.StatusOK, s.openLinkForOrder(ctx, *job.OrderID))
 }
