@@ -210,3 +210,64 @@ func TestAnUnreadableTestRecipientDoesNotSilentlyFallThrough(t *testing.T) {
 		t.Errorf("to = %q, want nothing sent at all", to)
 	}
 }
+
+// The importer decides PersonalisationRequired by matching each property's
+// label against a hard-coded list of spellings, which the Dual Name Plank
+// happens to use and nothing else does. On the live store that left
+// T3DPS-115684 (a Soulmate Combo asking "STEP 2 - First Name-" and "Name On
+// 3D Rose") and T3DPS-115768 (a DUOSNAP asking "TOP NAME" and "BOTTOM NAME")
+// reading as "nothing on this order is personalised" - so neither customer
+// was ever asked to check the names going onto their gift.
+func TestAnOrderIsPersonalisedWhenTheCustomerTypedSomething(t *testing.T) {
+	line := func(props ...production.LineProp) production.LineItem {
+		return production.LineItem{Quantity: 1, Properties: props}
+	}
+	prop := func(name, value string) production.LineProp {
+		return production.LineProp{Name: name, Value: value}
+	}
+
+	cases := []struct {
+		name string
+		item production.LineItem
+		want bool
+	}{{
+		name: "the importer recognised the label",
+		item: production.LineItem{Quantity: 1, PersonalisationRequired: true},
+		want: true,
+	}, {
+		name: "a label the importer does not know - the DUOSNAP",
+		item: line(prop("TOP NAME", "RAHUL"), prop("BOTTOM NAME", "PRIYA")),
+		want: true,
+	}, {
+		name: "a label the importer does not know - the Soulmate Combo",
+		item: line(prop("STEP 2 - First Name-", "ASHA"), prop("Name On 3D Rose", "ASHA")),
+		want: true,
+	}, {
+		name: "Shopify's own bookkeeping is not personalisation",
+		item: line(prop("_has_gpo", "1534715"), prop("_gpo_addon_price", "40")),
+		want: false,
+	}, {
+		name: "an unanswered question is not personalisation",
+		item: line(prop("TOP NAME", "   ")),
+		want: false,
+	}, {
+		// The page will not show it, so there is nothing to ask about - and
+		// asking a customer to check their own phone number is not the point
+		// of the message.
+		name: "a contact detail alone is not personalisation",
+		item: line(prop("Whatsapp Number", "9799931864")),
+		want: false,
+	}, {
+		name: "plain stock",
+		item: line(),
+		want: false,
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lineIsPersonalised(tc.item); got != tc.want {
+				t.Errorf("lineIsPersonalised = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

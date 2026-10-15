@@ -14,8 +14,16 @@
 // Refuses an order that already has jobs unless -again is given, because the
 // ordinary mistake is to re-run it on an order halfway through production.
 //
+// -link asks instead for the customer's window to be considered, which is
+// what the render worker asks for the moment a model lands. The order's jobs
+// already exist in that case; what has not happened is anybody asking the
+// customer. The worker still applies every rule - the allow-list, the
+// watermark, the phone, the test recipient - so this opens no window the
+// pipeline would not have opened itself.
+//
 //	go run ./cmd/kickorder -order T3DPS-114666
 //	go run ./cmd/kickorder -order T3DPS-114666,T3DPS-115735 -dry-run
+//	go run ./cmd/kickorder -order T3DPS-115735 -link
 package main
 
 import (
@@ -38,6 +46,8 @@ func main() {
 	orders := flag.String("order", "", "order numbers, comma-separated (e.g. T3DPS-114666)")
 	dryRun := flag.Bool("dry-run", false, "report what would be queued without queueing it")
 	again := flag.Bool("again", false, "allow an order that already has production jobs")
+	link := flag.Bool("link", false,
+		"ask for the customer's personalisation window instead of creating jobs")
 	flag.Parse()
 
 	names := split(*orders)
@@ -104,7 +114,9 @@ func main() {
 		if !o.hasPhone {
 			log.Printf("%s: no phone on the order, so no link will be sent", o.number)
 		}
-		if o.jobs > 0 && !*again {
+		// -link works ON an order that already has jobs, so the guard does
+		// not apply to it.
+		if o.jobs > 0 && !*again && !*link {
 			log.Printf("%s: already has %d jobs, skipping (pass -again to force)", o.number, o.jobs)
 			continue
 		}
@@ -123,6 +135,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("build river client: %v", err)
 	}
+	if *link {
+		sender := production.NewPersonalisationLinkEnqueuer(client)
+		sent := 0
+		for _, o := range queue {
+			err := sender.Enqueue(ctx, production.SendPersonalisationLinkArgs{OrderID: o.id})
+			if err != nil {
+				log.Printf("%s: %v", o.number, err)
+				continue
+			}
+			fmt.Printf("asked for %s window\n", o.number)
+			sent++
+		}
+		fmt.Printf("asked for %d of %d windows\n", sent, len(names))
+		return
+	}
+
 	enqueuer := production.NewJobCreationEnqueuer(client)
 
 	queued := 0

@@ -53,9 +53,52 @@ func normaliseOrderNumber(s string) string {
 // neither is promised to run first. The line items are already here.
 func orderNeedsPersonalisation(order gen.Order) bool {
 	for _, li := range orderLineItems(order) {
-		if li.PersonalisationRequired {
+		if lineIsPersonalised(li) {
 			return true
 		}
+	}
+	return false
+}
+
+// lineIsPersonalised reports whether the customer typed anything on this line
+// that they could have got wrong.
+//
+// NOT PersonalisationRequired ALONE, and that flag is why this function
+// exists. The importer sets it by matching each property's label against a
+// hard-coded list of spellings - "step 4 first name", "engraving_text",
+// "custom_name" - which the Dual Name Plank happens to use and nothing else
+// does. A Soulmate Combo asks "STEP 2 - First Name-" and "Name On 3D Rose";
+// a DUOSNAP asks "TOP NAME" and "BOTTOM NAME". None of those match, so the
+// flag is false, so the order reads as "nothing on this order is
+// personalised" and its customer is never asked to check the names that will
+// be printed on their gift.
+//
+// Measured on the live store: T3DPS-115684 and T3DPS-115768 both carry names
+// the customer typed and both were refused for having nothing personalised.
+// A whitelist of labels cannot keep up with a storefront that renames its own
+// questions, and the failure is silent - the order simply goes to print.
+//
+// So the question is asked of the data instead: does this line carry a
+// property a person filled in? That is the same test the customer's own page
+// makes when it decides what to show them (see publicItem), which is the
+// point - if the page would offer a field to check, the customer should be
+// asked to check it.
+//
+// The flag is still honoured first. It carries lines whose personalisation
+// arrived as a structured field rather than as a property, and dropping it
+// would narrow the rule while widening it.
+func lineIsPersonalised(li production.LineItem) bool {
+	if li.PersonalisationRequired {
+		return true
+	}
+	for _, p := range li.Properties {
+		// Shopify's own bookkeeping, an empty answer, and a contact detail
+		// are each things the page will not show - so none of them is
+		// something to ask a customer to check.
+		if p.Hidden() || strings.TrimSpace(p.Value) == "" || contactProperty(p.Name) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -122,7 +165,11 @@ func personalisationBodyParams(order gen.Order) []string {
 func personalisedItemCount(order gen.Order) int {
 	total := 0
 	for _, li := range orderLineItems(order) {
-		if !li.PersonalisationRequired {
+		// The same test that decided to send the message at all. Counting on
+		// the raw flag here would tell a customer with three personalised
+		// items that they have one - spokenItemCount clamps zero up to one -
+		// which is worse than not counting at all.
+		if !lineIsPersonalised(li) {
 			continue
 		}
 		if li.Quantity > 0 {
