@@ -166,3 +166,28 @@ func idList(set map[uuid.UUID]bool) []uuid.UUID {
 	}
 	return out
 }
+
+// readyOrderResponse is an order the Dispatch tab can book a shipment for.
+type readyOrderResponse struct {
+	ID           string  `json:"id"`
+	OrderNumber  string  `json:"order_number"`
+	CustomerName *string `json:"customer_name"`
+	JobCount     int32   `json:"job_count"`
+}
+
+// listOrdersReadyToDispatch answers ?ready_to_dispatch=true: every order whose
+// jobs are all packed and that has no shipment booked, in one grouped query.
+func (s *Server) listOrdersReadyToDispatch(c *gin.Context, source *string) {
+	rows, err := s.store.Q.ListOrdersReadyToDispatch(c.Request.Context(), source)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list orders ready to dispatch.")
+		return
+	}
+	out := make([]readyOrderResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, readyOrderResponse{
+			ID: r.ID.String(), OrderNumber: r.OrderNumber, CustomerName: r.CustomerName, JobCount: r.JobCount,
+		})
+	}
+	c.JSON(http.StatusOK, out)
+}

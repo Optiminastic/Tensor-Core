@@ -241,6 +241,10 @@ func (s *Server) listOrders(c *gin.Context) {
 		s.listOrdersTable(c, numbered, orderSource(c))
 		return
 	}
+	if c.Query("ready_to_dispatch") == "true" {
+		s.listOrdersReadyToDispatch(c, orderSource(c))
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return

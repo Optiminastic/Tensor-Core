@@ -279,3 +279,18 @@ SELECT
     count(*) FILTER (WHERE lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') AS done
 FROM orders o
 WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));
+
+-- name: ListOrdersReadyToDispatch :many
+-- Orders whose every job is packed and that have no shipment booked: what the
+-- Dispatch tab offers to book. One grouped query, replacing a browser join of
+-- every live order, every job and every dispatch.
+--
+-- An order with no jobs is never ready - there is nothing packed to send.
+SELECT o.id, o.order_number, o.customer_name, count(j.id)::int AS job_count
+FROM orders o
+JOIN production_jobs j ON j.order_id = o.id
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'))
+  AND NOT EXISTS (SELECT 1 FROM dispatch_orders d WHERE d.order_id = o.id)
+GROUP BY o.id
+HAVING bool_and(j.packaging_status = 'packaged')
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC;

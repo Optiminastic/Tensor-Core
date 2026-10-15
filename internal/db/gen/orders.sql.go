@@ -534,6 +534,54 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 	return items, nil
 }
 
+const listOrdersReadyToDispatch = `-- name: ListOrdersReadyToDispatch :many
+SELECT o.id, o.order_number, o.customer_name, count(j.id)::int AS job_count
+FROM orders o
+JOIN production_jobs j ON j.order_id = o.id
+WHERE ($1::text IS NULL OR o.source = $1)
+  AND NOT EXISTS (SELECT 1 FROM dispatch_orders d WHERE d.order_id = o.id)
+GROUP BY o.id
+HAVING bool_and(j.packaging_status = 'packaged')
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC
+`
+
+type ListOrdersReadyToDispatchRow struct {
+	ID           uuid.UUID
+	OrderNumber  string
+	CustomerName *string
+	JobCount     int32
+}
+
+// Orders whose every job is packed and that have no shipment booked: what the
+// Dispatch tab offers to book. One grouped query, replacing a browser join of
+// every live order, every job and every dispatch.
+//
+// An order with no jobs is never ready - there is nothing packed to send.
+func (q *Queries) ListOrdersReadyToDispatch(ctx context.Context, source *string) ([]ListOrdersReadyToDispatchRow, error) {
+	rows, err := q.db.Query(ctx, listOrdersReadyToDispatch, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrdersReadyToDispatchRow{}
+	for rows.Next() {
+		var i ListOrdersReadyToDispatchRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderNumber,
+			&i.CustomerName,
+			&i.JobCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOrdersTable = `-- name: ListOrdersTable :many
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders o
 WHERE ($1::text IS NULL OR o.source = $1)
