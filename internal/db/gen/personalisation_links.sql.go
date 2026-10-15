@@ -21,7 +21,7 @@ INSERT INTO personalisation_links (
     'pending', $7
 )
 ON CONFLICT (order_id) DO NOTHING
-RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
+RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at
 `
 
 type ClaimPersonalisationLinkParams struct {
@@ -70,9 +70,28 @@ func (q *Queries) ClaimPersonalisationLink(ctx context.Context, arg ClaimPersona
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const clearPersonalisationSkip = `-- name: ClearPersonalisationSkip :exec
+UPDATE orders
+SET personalisation_skip_reason = NULL,
+    personalisation_skipped_at  = NULL
+WHERE id = $1 AND personalisation_skip_reason IS NOT NULL
+`
+
+// Forgets the reason, because the order has just been claimed for a link.
+//
+// Guarded on the column already holding something so the common path - an
+// order that was never refused - writes no row at all.
+func (q *Queries) ClearPersonalisationSkip(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearPersonalisationSkip, id)
+	return err
 }
 
 const confirmPersonalisationLink = `-- name: ConfirmPersonalisationLink :exec
@@ -119,7 +138,7 @@ func (q *Queries) ExpirePersonalisationLink(ctx context.Context, id uuid.UUID) e
 }
 
 const getOpenPersonalisationLinkForJob = `-- name: GetOpenPersonalisationLinkForJob :one
-SELECT l.id, l.brand_slug, l.order_id, l.token_hash, l.token_sealed, l.phone, l.status, l.issued_at, l.expires_at, l.sent_at, l.opened_at, l.confirmed_at, l.message_id, l.detail, l.created_at FROM personalisation_links l
+SELECT l.id, l.brand_slug, l.order_id, l.token_hash, l.token_sealed, l.phone, l.status, l.issued_at, l.expires_at, l.sent_at, l.opened_at, l.confirmed_at, l.message_id, l.detail, l.template_name, l.message_body, l.button_count, l.created_at FROM personalisation_links l
 JOIN production_jobs j ON j.order_id = l.order_id
 WHERE j.id = $1
   AND l.status IN ('sent', 'opened')
@@ -151,13 +170,16 @@ func (q *Queries) GetOpenPersonalisationLinkForJob(ctx context.Context, jobID uu
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getOpenPersonalisationLinkForOrder = `-- name: GetOpenPersonalisationLinkForOrder :one
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links
 WHERE order_id = $1
   AND status IN ('sent', 'opened')
   AND expires_at > now()
@@ -185,6 +207,9 @@ func (q *Queries) GetOpenPersonalisationLinkForOrder(ctx context.Context, orderI
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -219,7 +244,7 @@ func (q *Queries) GetOrderBrandSlug(ctx context.Context, orderID uuid.UUID) (str
 }
 
 const getPersonalisationLinkByOrder = `-- name: GetPersonalisationLinkByOrder :one
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE order_id = $1
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links WHERE order_id = $1
 `
 
 func (q *Queries) GetPersonalisationLinkByOrder(ctx context.Context, orderID uuid.UUID) (PersonalisationLink, error) {
@@ -240,13 +265,16 @@ func (q *Queries) GetPersonalisationLinkByOrder(ctx context.Context, orderID uui
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getPersonalisationLinkByTokenHash = `-- name: GetPersonalisationLinkByTokenHash :one
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links WHERE token_hash = $1
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links WHERE token_hash = $1
 `
 
 // The public page's own read. Expiry is judged in Go, not here, so that an
@@ -269,13 +297,16 @@ func (q *Queries) GetPersonalisationLinkByTokenHash(ctx context.Context, tokenHa
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getPersonalisationLinkRowForOrder = `-- name: GetPersonalisationLinkRowForOrder :one
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links
 WHERE order_id = $1
 `
 
@@ -304,6 +335,9 @@ func (q *Queries) GetPersonalisationLinkRowForOrder(ctx context.Context, orderID
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -365,7 +399,7 @@ func (q *Queries) ListConnectedShopifyBrandSlugs(ctx context.Context) ([]string,
 }
 
 const listExpiredPersonalisationLinks = `-- name: ListExpiredPersonalisationLinks :many
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links
 WHERE status IN ('sent', 'opened')
   AND expires_at <= now()
 ORDER BY expires_at
@@ -401,6 +435,9 @@ func (q *Queries) ListExpiredPersonalisationLinks(ctx context.Context, rowLimit 
 			&i.ConfirmedAt,
 			&i.MessageID,
 			&i.Detail,
+			&i.TemplateName,
+			&i.MessageBody,
+			&i.ButtonCount,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -454,15 +491,22 @@ func (q *Queries) ListOpenPersonalisationWindows(ctx context.Context, orderIds [
 }
 
 const listPersonalisationLinkStatesForOrders = `-- name: ListPersonalisationLinkStatesForOrders :many
-SELECT order_id, status, expires_at
-FROM personalisation_links
-WHERE order_id = ANY($1::uuid[])
+SELECT o.id                          AS order_id,
+       coalesce(l.status, '')::text  AS status,
+       l.expires_at,
+       o.personalisation_skip_reason AS skip_reason,
+       o.personalisation_skipped_at  AS skipped_at
+FROM orders o
+LEFT JOIN personalisation_links l ON l.order_id = o.id
+WHERE o.id = ANY($1::uuid[])
 `
 
 type ListPersonalisationLinkStatesForOrdersRow struct {
-	OrderID   uuid.UUID
-	Status    string
-	ExpiresAt pgtype.Timestamptz
+	OrderID    uuid.UUID
+	Status     string
+	ExpiresAt  pgtype.Timestamptz
+	SkipReason *string
+	SkippedAt  pgtype.Timestamptz
 }
 
 // Where each of these orders stands in its personalisation window.
@@ -474,6 +518,12 @@ type ListPersonalisationLinkStatesForOrdersRow struct {
 //
 // Bulk, because the orders page asks about a whole page of orders at once and
 // one query per row is an N+1 on the busiest list in the product.
+//
+// A LEFT JOIN FROM orders, not a select from links, so an order with no link
+// still comes back - carrying the reason nobody was asked. Before this, such
+// an order was simply absent and the column drew a dash that meant six
+// different things at once (see migration 0105). An empty status is what
+// "there is no link row" looks like, and the caller reads it as such.
 func (q *Queries) ListPersonalisationLinkStatesForOrders(ctx context.Context, orderIds []uuid.UUID) ([]ListPersonalisationLinkStatesForOrdersRow, error) {
 	rows, err := q.db.Query(ctx, listPersonalisationLinkStatesForOrders, orderIds)
 	if err != nil {
@@ -483,7 +533,13 @@ func (q *Queries) ListPersonalisationLinkStatesForOrders(ctx context.Context, or
 	items := []ListPersonalisationLinkStatesForOrdersRow{}
 	for rows.Next() {
 		var i ListPersonalisationLinkStatesForOrdersRow
-		if err := rows.Scan(&i.OrderID, &i.Status, &i.ExpiresAt); err != nil {
+		if err := rows.Scan(
+			&i.OrderID,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.SkipReason,
+			&i.SkippedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -495,7 +551,7 @@ func (q *Queries) ListPersonalisationLinkStatesForOrders(ctx context.Context, or
 }
 
 const listPersonalisationLinks = `-- name: ListPersonalisationLinks :many
-SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at FROM personalisation_links
 WHERE brand_slug = $1
 ORDER BY created_at DESC
 LIMIT $2
@@ -531,6 +587,9 @@ func (q *Queries) ListPersonalisationLinks(ctx context.Context, arg ListPersonal
 			&i.ConfirmedAt,
 			&i.MessageID,
 			&i.Detail,
+			&i.TemplateName,
+			&i.MessageBody,
+			&i.ButtonCount,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -554,6 +613,29 @@ WHERE id = $1
 // look" is answered by the first time they did; a refresh is not a new visit.
 func (q *Queries) MarkPersonalisationLinkOpened(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markPersonalisationLinkOpened, id)
+	return err
+}
+
+const recordPersonalisationSkip = `-- name: RecordPersonalisationSkip :exec
+UPDATE orders
+SET personalisation_skip_reason = $1,
+    personalisation_skipped_at  = now()
+WHERE id = $2
+`
+
+type RecordPersonalisationSkipParams struct {
+	Reason *string
+	ID     uuid.UUID
+}
+
+// Writes down why this order's customer was not asked.
+//
+// Every refusal in the sender names its rule; this is where that name is kept
+// once the log line has rotated away. updated_at is deliberately NOT touched:
+// the order itself did not change, and the orders list sorts and pages on
+// these timestamps.
+func (q *Queries) RecordPersonalisationSkip(ctx context.Context, arg RecordPersonalisationSkipParams) error {
+	_, err := q.db.Exec(ctx, recordPersonalisationSkip, arg.Reason, arg.ID)
 	return err
 }
 
@@ -640,16 +722,22 @@ UPDATE personalisation_links
 SET status     = $1::varchar,
     sent_at    = CASE WHEN $1::varchar = 'sent' THEN now() ELSE sent_at END,
     message_id = coalesce($2, message_id),
-    detail     = $3
-WHERE id = $4
-RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at
+    detail     = $3,
+    template_name = coalesce($4, template_name),
+    message_body  = coalesce($5, message_body),
+    button_count  = coalesce($6, button_count)
+WHERE id = $7
+RETURNING id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, template_name, message_body, button_count, created_at
 `
 
 type SettlePersonalisationLinkParams struct {
-	Status    string
-	MessageID *string
-	Detail    *string
-	ID        uuid.UUID
+	Status       string
+	MessageID    *string
+	Detail       *string
+	TemplateName *string
+	MessageBody  *string
+	ButtonCount  *int16
+	ID           uuid.UUID
 }
 
 // Records how the send went.
@@ -661,11 +749,18 @@ type SettlePersonalisationLinkParams struct {
 // the Go compiles, and every settle fails at the database. A link would then
 // stay 'pending' forever, which reads as a send that never happened - the job
 // is never held, and the floor's copy button finds nothing.
+//
+// The template and the body are coalesced rather than assigned, so settling a
+// refusal cannot blank a message that did go out - and so a caller with
+// nothing to freeze passes nothing.
 func (q *Queries) SettlePersonalisationLink(ctx context.Context, arg SettlePersonalisationLinkParams) (PersonalisationLink, error) {
 	row := q.db.QueryRow(ctx, settlePersonalisationLink,
 		arg.Status,
 		arg.MessageID,
 		arg.Detail,
+		arg.TemplateName,
+		arg.MessageBody,
+		arg.ButtonCount,
 		arg.ID,
 	)
 	var i PersonalisationLink
@@ -684,6 +779,9 @@ func (q *Queries) SettlePersonalisationLink(ctx context.Context, arg SettlePerso
 		&i.ConfirmedAt,
 		&i.MessageID,
 		&i.Detail,
+		&i.TemplateName,
+		&i.MessageBody,
+		&i.ButtonCount,
 		&i.CreatedAt,
 	)
 	return i, err

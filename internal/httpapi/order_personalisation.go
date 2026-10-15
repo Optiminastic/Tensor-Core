@@ -86,6 +86,11 @@ func (s *Server) stampPersonalisationWindows(ctx context.Context, out []orderRes
 			when := r.ExpiresAt.Time.UTC().Format(time.RFC3339)
 			out[i].PersonalisationWindowEndsAt = &when
 		}
+		// Only beside a dash. An order that WAS asked carries its own answer
+		// in the pill, and a stale reason beside it would contradict it.
+		if out[i].Personalisation == "" && r.SkipReason != nil {
+			out[i].PersonalisationSkipReason = r.SkipReason
+		}
 	}
 }
 
@@ -100,6 +105,12 @@ func (s *Server) stampPersonalisationWindows(ctx context.Context, out []orderRes
 // there is no link in anybody's hand yet.
 func windowStateOf(r gen.ListPersonalisationLinkStatesForOrdersRow) string {
 	switch strings.TrimSpace(r.Status) {
+	case "":
+		// No link row at all. The query is a LEFT JOIN from orders, so every
+		// order asked about comes back whether or not anybody messaged it -
+		// and an order nobody messaged must not fall through to the default
+		// below and read as a window that closed.
+		return ""
 	case "sent", "opened":
 		if r.ExpiresAt.Valid && r.ExpiresAt.Time.After(time.Now()) {
 			return personalisationWindowOpen

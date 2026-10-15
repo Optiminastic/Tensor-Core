@@ -330,6 +330,11 @@ CREATE TABLE orders (
     shipping_title      text,
     shipping_address    jsonb,
     billing_address     jsonb,
+    -- Why this order's customer was never asked to check their
+    -- personalisation - see migration 0105. Null while a link is live, and on
+    -- any order the sender has not reached a verdict on yet.
+    personalisation_skip_reason text,
+    personalisation_skipped_at  timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
@@ -1218,6 +1223,13 @@ CREATE TABLE IF NOT EXISTS personalisation_links (
     confirmed_at timestamptz,
     message_id   varchar(160),
     detail       varchar(500),
+    -- What was actually sent, frozen at send time - see migration 0104. The
+    -- name because the reader's own configuration is not evidence of which
+    -- template this send used; the body because the copy lives at Meta and is
+    -- edited there.
+    template_name varchar(160),
+    message_body  text,
+    button_count  smallint,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 

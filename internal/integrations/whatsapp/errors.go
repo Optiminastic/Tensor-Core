@@ -67,6 +67,18 @@ func (e *Error) Retryable() bool {
 	switch e.Code {
 	case 130429, 80007, 131056: // throughput, account rate limit, pair rate limit
 		return true
+	case 131000:
+		// "Something went wrong" - Meta's own catch-all, and its own advice
+		// is to try again. Treating it as permanent burned the one chance an
+		// order gets: the link was settled 'failed' and the jobs released, so
+		// the customer was never asked and never would be. Seen for a run of
+		// hours against a single recipient on 15 Oct 2026 - plain text and
+		// templates alike, while the account stayed GREEN and other
+		// recipients went through, which is what a transient refusal looks
+		// like and not what a broken template looks like.
+		//
+		// Safe to retry: 131000 is a refusal, so nothing was delivered.
+		return true
 	}
 	return e.Status == http.StatusInternalServerError ||
 		e.Status == http.StatusBadGateway ||
@@ -114,6 +126,9 @@ func reason(code int) string {
 	case 131056:
 		return "Too many messages to this same number too quickly; Meta is throttling " +
 			"the pair."
+	case 131000:
+		return "Meta refused the message without saying why - its own advice is to " +
+			"try again. Usually clears on its own."
 	case 100:
 		return "Meta rejected the request's shape. The usual cause is the button " +
 			"component: index must be the string “0” and sub_type “url”."

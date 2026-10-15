@@ -345,42 +345,44 @@ type MaterialProfile struct {
 }
 
 type Order struct {
-	ID                  uuid.UUID
-	ShopConnectionID    *uuid.UUID
-	BrandSlug           *string
-	ShopifyOrderID      int64
-	OrderNumber         string
-	CustomerName        *string
-	ShopifyCustomerID   *int64
-	CustomerEmail       *string
-	CustomerPhone       *string
-	FinancialStatus     string
-	TotalPrice          pgtype.Numeric
-	Currency            string
-	LineItems           []byte
-	Status              string
-	Source              string
-	ImportedAt          pgtype.Timestamptz
-	JobCreationError    *string
-	JobCreationFailedAt pgtype.Timestamptz
-	PlacedAt            pgtype.Timestamptz
-	Note                *string
-	Attributes          []byte
-	Tags                []byte
-	FulfillmentStatus   *string
-	DeliveryStatus      *string
-	ReturnStatus        *string
-	SourceName          *string
-	SubtotalPrice       pgtype.Numeric
-	TotalDiscounts      pgtype.Numeric
-	TotalShipping       pgtype.Numeric
-	TotalReceived       pgtype.Numeric
-	DiscountTitle       *string
-	ShippingTitle       *string
-	ShippingAddress     []byte
-	BillingAddress      []byte
-	CreatedAt           pgtype.Timestamptz
-	UpdatedAt           pgtype.Timestamptz
+	ID                        uuid.UUID
+	ShopConnectionID          *uuid.UUID
+	BrandSlug                 *string
+	ShopifyOrderID            int64
+	OrderNumber               string
+	CustomerName              *string
+	ShopifyCustomerID         *int64
+	CustomerEmail             *string
+	CustomerPhone             *string
+	FinancialStatus           string
+	TotalPrice                pgtype.Numeric
+	Currency                  string
+	LineItems                 []byte
+	Status                    string
+	Source                    string
+	ImportedAt                pgtype.Timestamptz
+	JobCreationError          *string
+	JobCreationFailedAt       pgtype.Timestamptz
+	PlacedAt                  pgtype.Timestamptz
+	Note                      *string
+	Attributes                []byte
+	Tags                      []byte
+	FulfillmentStatus         *string
+	DeliveryStatus            *string
+	ReturnStatus              *string
+	SourceName                *string
+	SubtotalPrice             pgtype.Numeric
+	TotalDiscounts            pgtype.Numeric
+	TotalShipping             pgtype.Numeric
+	TotalReceived             pgtype.Numeric
+	DiscountTitle             *string
+	ShippingTitle             *string
+	ShippingAddress           []byte
+	BillingAddress            []byte
+	PersonalisationSkipReason *string
+	PersonalisationSkippedAt  pgtype.Timestamptz
+	CreatedAt                 pgtype.Timestamptz
+	UpdatedAt                 pgtype.Timestamptz
 }
 
 type OrderLineItem struct {
@@ -405,21 +407,24 @@ type Permission struct {
 }
 
 type PersonalisationLink struct {
-	ID          uuid.UUID
-	BrandSlug   string
-	OrderID     uuid.UUID
-	TokenHash   string
-	TokenSealed *string
-	Phone       string
-	Status      string
-	IssuedAt    pgtype.Timestamptz
-	ExpiresAt   pgtype.Timestamptz
-	SentAt      pgtype.Timestamptz
-	OpenedAt    pgtype.Timestamptz
-	ConfirmedAt pgtype.Timestamptz
-	MessageID   *string
-	Detail      *string
-	CreatedAt   pgtype.Timestamptz
+	ID           uuid.UUID
+	BrandSlug    string
+	OrderID      uuid.UUID
+	TokenHash    string
+	TokenSealed  *string
+	Phone        string
+	Status       string
+	IssuedAt     pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+	SentAt       pgtype.Timestamptz
+	OpenedAt     pgtype.Timestamptz
+	ConfirmedAt  pgtype.Timestamptz
+	MessageID    *string
+	Detail       *string
+	TemplateName *string
+	MessageBody  *string
+	ButtonCount  *int16
+	CreatedAt    pgtype.Timestamptz
 }
 
 type PersonalisationWatermark struct {

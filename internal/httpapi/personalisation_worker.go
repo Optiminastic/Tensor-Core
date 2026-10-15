@@ -134,6 +134,7 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 	if err != nil {
 		w.logger.Info("personalisation: not asking",
 			"order", order.OrderNumber, "reason", err.Error())
+		w.noteSkip(ctx, order.ID, err.Error())
 		return nil
 	}
 
@@ -141,6 +142,7 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 	if reason != "" {
 		w.logger.Info("personalisation: not asking",
 			"brand", slug, "order", order.OrderNumber, "reason", reason)
+		w.noteSkip(ctx, order.ID, reason)
 		// Anything the renderer held for a link that is not coming has to go
 		// to the floor now. Without this an order refused here waits for an
 		// expiry sweep that will never see it, because the sweep walks links
@@ -158,6 +160,12 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		if err == nil {
 			w.logger.Info("personalisation: waiting for the rest of the models",
 				"brand", slug, "order", order.OrderNumber, "pending", pending)
+			// Recorded like a refusal although it is not one: this is a
+			// waiting state that CAN strand, and while it lasts the orders
+			// page draws the same dash as a rule that said no. Cleared the
+			// moment the last model lands and the link is claimed.
+			w.noteSkip(ctx, order.ID, fmt.Sprintf(
+				"still waiting for %d of this order's models to finish rendering", pending))
 		}
 		return nil
 	}
@@ -168,6 +176,8 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 	if !w.server.cfg.PersonalisationCheckEnabled {
 		w.logger.Info("personalisation: WOULD ask (this check is disabled)",
 			"brand", slug, "order", order.OrderNumber)
+		w.noteSkip(ctx, order.ID,
+			"the personalisation check was switched off when this order came in")
 		return nil
 	}
 
@@ -176,6 +186,7 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 		w.logger.Info("personalisation: not asking",
 			"brand", slug, "order", order.OrderNumber,
 			"reason", "WhatsApp is not connected for this brand")
+		w.noteSkip(ctx, order.ID, "WhatsApp is not connected for this brand")
 		w.releaseUnasked(ctx, order.ID, "system (not asked)")
 		return nil
 	}
@@ -192,6 +203,9 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 			// a stranger.
 			w.logger.Error("personalisation: PERSONALISATION_TEST_RECIPIENT is not a usable number, so nothing was sent",
 				"brand", slug, "order", order.OrderNumber)
+			w.noteSkip(ctx, order.ID,
+				"PERSONALISATION_TEST_RECIPIENT is set but is not a usable number, "+
+					"so nothing was sent - and emphatically not to the customer")
 			w.releaseUnasked(ctx, order.ID, "system (test recipient unusable)")
 			return nil
 		}
@@ -269,6 +283,8 @@ func (w *PersonalisationLinkWorker) ask(
 	if url == "" {
 		w.logger.Error("personalisation: no public address is configured, so the link would go nowhere",
 			"brand", slug, "order", order.OrderNumber)
+		w.noteSkip(ctx, order.ID,
+			"no public address is configured for this service, so the link would go nowhere")
 		return nil
 	}
 
@@ -314,6 +330,14 @@ func (w *PersonalisationLinkWorker) ask(
 			"brand", slug, "order", order.OrderNumber)
 		return nil
 	}
+	// The order has a live claim, so whatever reason it last carried for not
+	// being asked is now false. Cleared here rather than after the send: the
+	// claim is the moment the two states become mutually exclusive, and a row
+	// that said both at once would be read as the more alarming one.
+	if err := w.server.store.Q.ClearPersonalisationSkip(ctx, order.ID); err != nil {
+		w.logger.Warn("personalisation: could not clear this order's skip reason",
+			"order", order.OrderNumber, "error", err)
+	}
 
 	result, sendErr := messenger.SendTemplate(ctx, whatsapp.TemplateMessage{
 		To:   phone,
@@ -340,6 +364,11 @@ func (w *PersonalisationLinkWorker) ask(
 			return nil
 		}
 		_ = w.server.store.Q.ReleasePersonalisationLink(ctx, claim.ID)
+		// The claim is given back, so until the retry lands this order reads
+		// as one nobody asked. Say which it is: a retry in progress and a
+		// rule that said no look identical on the orders page otherwise.
+		w.noteSkip(ctx, order.ID, "WhatsApp refused the message and Tensor is "+
+			"trying again: "+sendErr.Error())
 		return fmt.Errorf("send the personalisation link: %w", sendErr)
 	}
 
@@ -349,7 +378,7 @@ func (w *PersonalisationLinkWorker) ask(
 		// reading this log later needs to know this one went to a tester.
 		detail = "sent to the test recipient, not the customer"
 	}
-	w.settle(ctx, claim.ID, "sent", result.MessageID, detail)
+	w.settleSent(ctx, claim.ID, result.MessageID, detail, w.frozen(ctx, order, messenger))
 
 	// THE REST OF THE ORDER IS HELD TOO, now that there is a live link.
 	//
@@ -382,8 +411,74 @@ func (w *PersonalisationLinkWorker) ask(
 	return nil
 }
 
+// frozenMessage is what was said, captured at the moment it was said.
+type frozenMessage struct {
+	template, body string
+	buttons        int
+}
+
+// frozen reads the approved copy and fills it with this order's own values.
+//
+// THE SAME PARAMETERS THE SEND JUST USED, from the same row, so the stored
+// body cannot disagree with the message. The template read is cached per
+// process, so this costs a round trip once rather than once per order.
+//
+// Best effort, and deliberately after the send: a customer who has the
+// message must not be told again because Tensor could not write down what it
+// said. An empty result leaves both columns null and the tab falls back to
+// rebuilding the message on read.
+func (w *PersonalisationLinkWorker) frozen(
+	ctx context.Context, order gen.Order, messenger *whatsapp.Client,
+) frozenMessage {
+	name := strings.TrimSpace(w.server.cfg.PersonalisationTemplate)
+	out := frozenMessage{template: name}
+	tpl, err := messenger.Template(ctx, name, "")
+	if err != nil {
+		w.logger.Warn("personalisation: the message was sent but its copy could not be read",
+			"order", order.OrderNumber, "template", name, "error", err)
+		return out
+	}
+	// tpl.Name rather than the configured one: if the name was blank and the
+	// client fell back to its default, what we record has to be the template
+	// that was actually read, not the one we meant to ask for.
+	out.template = tpl.Name
+	out.body = whatsapp.Fill(tpl.Body, personalisationBodyParams(order))
+	out.buttons = len(tpl.ButtonURLs)
+	return out
+}
+
+// noteSkip writes down why this order's customer was not asked.
+//
+// Every refusal in send() names its rule to the log, and the log goes with
+// the container. This is the same sentence kept where the orders page can
+// show it - see migration 0105. Best effort: a refusal that cannot be
+// recorded is still a refusal, and failing the job over it would only arrive
+// at the same refusal again.
+func (w *PersonalisationLinkWorker) noteSkip(
+	ctx context.Context, orderID uuid.UUID, reason string,
+) {
+	if err := w.server.store.Q.RecordPersonalisationSkip(ctx,
+		gen.RecordPersonalisationSkipParams{Reason: &reason, ID: orderID}); err != nil {
+		w.logger.Warn("personalisation: could not record why this order was skipped",
+			"order", orderID, "reason", reason, "error", err)
+	}
+}
+
+// settleSent records a send, with the words it sent.
+func (w *PersonalisationLinkWorker) settleSent(
+	ctx context.Context, id uuid.UUID, messageID, detail string, said frozenMessage,
+) {
+	w.settleWith(ctx, id, "sent", messageID, detail, said)
+}
+
 func (w *PersonalisationLinkWorker) settle(
 	ctx context.Context, id uuid.UUID, status, messageID, detail string,
+) {
+	w.settleWith(ctx, id, status, messageID, detail, frozenMessage{})
+}
+
+func (w *PersonalisationLinkWorker) settleWith(
+	ctx context.Context, id uuid.UUID, status, messageID, detail string, said frozenMessage,
 ) {
 	params := gen.SettlePersonalisationLinkParams{ID: id, Status: status}
 	if messageID != "" {
@@ -391,6 +486,16 @@ func (w *PersonalisationLinkWorker) settle(
 	}
 	if detail != "" {
 		params.Detail = &detail
+	}
+	if said.template != "" {
+		params.TemplateName = &said.template
+	}
+	if said.body != "" {
+		params.MessageBody = &said.body
+	}
+	if said.buttons > 0 {
+		n := int16(said.buttons)
+		params.ButtonCount = &n
 	}
 	if _, err := w.server.store.Q.SettlePersonalisationLink(ctx, params); err != nil {
 		w.logger.Error("personalisation: could not record the outcome",

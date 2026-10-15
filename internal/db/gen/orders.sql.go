@@ -134,7 +134,7 @@ func (q *Queries) CountOrdersTable(ctx context.Context, arg CountOrdersTablePara
 }
 
 const getOrderByID = `-- name: GetOrderByID :one
-SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders WHERE id = $1
+SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at FROM orders WHERE id = $1
 `
 
 func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error) {
@@ -175,6 +175,8 @@ func (q *Queries) GetOrderByID(ctx context.Context, id uuid.UUID) (Order, error)
 		&i.ShippingTitle,
 		&i.ShippingAddress,
 		&i.BillingAddress,
+		&i.PersonalisationSkipReason,
+		&i.PersonalisationSkippedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -195,7 +197,7 @@ INSERT INTO orders (
     $10, $11::float8, $12,
     $13, $14, $15
 )
-RETURNING id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at
+RETURNING id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at
 `
 
 type InsertOrderParams struct {
@@ -275,6 +277,8 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.ShippingTitle,
 		&i.ShippingAddress,
 		&i.BillingAddress,
+		&i.PersonalisationSkipReason,
+		&i.PersonalisationSkippedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -357,7 +361,7 @@ func (q *Queries) ListOrderNumbersForIDs(ctx context.Context, ids []uuid.UUID) (
 }
 
 const listOrders = `-- name: ListOrders :many
-SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
+SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at FROM orders
 WHERE ($1::text IS NULL OR source = $1)
 AND (
     $2::text IS NULL
@@ -428,6 +432,8 @@ func (q *Queries) ListOrders(ctx context.Context, arg ListOrdersParams) ([]Order
 			&i.ShippingTitle,
 			&i.ShippingAddress,
 			&i.BillingAddress,
+			&i.PersonalisationSkipReason,
+			&i.PersonalisationSkippedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -442,7 +448,7 @@ func (q *Queries) ListOrders(ctx context.Context, arg ListOrdersParams) ([]Order
 }
 
 const listOrdersPage = `-- name: ListOrdersPage :many
-SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders
+SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at FROM orders
 WHERE (
     $1::timestamptz IS NULL
     OR (imported_at, id) < ($1::timestamptz, $2::uuid)
@@ -528,6 +534,8 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 			&i.ShippingTitle,
 			&i.ShippingAddress,
 			&i.BillingAddress,
+			&i.PersonalisationSkipReason,
+			&i.PersonalisationSkippedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -590,7 +598,7 @@ func (q *Queries) ListOrdersReadyToDispatch(ctx context.Context, source *string)
 }
 
 const listOrdersTable = `-- name: ListOrdersTable :many
-SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders o
+SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at FROM orders o
 WHERE ($1::text IS NULL OR o.source = $1)
 AND (
     $2::text IS NULL
@@ -691,6 +699,8 @@ func (q *Queries) ListOrdersTable(ctx context.Context, arg ListOrdersTableParams
 			&i.ShippingTitle,
 			&i.ShippingAddress,
 			&i.BillingAddress,
+			&i.PersonalisationSkipReason,
+			&i.PersonalisationSkippedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -705,7 +715,7 @@ func (q *Queries) ListOrdersTable(ctx context.Context, arg ListOrdersTableParams
 }
 
 const listOrdersWithoutJobs = `-- name: ListOrdersWithoutJobs :many
-SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders o
+SELECT id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at FROM orders o
 WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
   AND ($1::text IS NULL OR source = $1)
 ORDER BY imported_at DESC, id DESC
@@ -760,6 +770,8 @@ func (q *Queries) ListOrdersWithoutJobs(ctx context.Context, source *string) ([]
 			&i.ShippingTitle,
 			&i.ShippingAddress,
 			&i.BillingAddress,
+			&i.PersonalisationSkipReason,
+			&i.PersonalisationSkippedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -902,7 +914,7 @@ ON CONFLICT (shopify_order_id) DO UPDATE SET
     shipping_address   = COALESCE(EXCLUDED.shipping_address, orders.shipping_address),
     billing_address    = COALESCE(EXCLUDED.billing_address, orders.billing_address),
     updated_at       = now()
-RETURNING id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at
+RETURNING id, shop_connection_id, brand_slug, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, personalisation_skip_reason, personalisation_skipped_at, created_at, updated_at
 `
 
 type UpsertPaidOrderParams struct {
@@ -1010,6 +1022,8 @@ func (q *Queries) UpsertPaidOrder(ctx context.Context, arg UpsertPaidOrderParams
 		&i.ShippingTitle,
 		&i.ShippingAddress,
 		&i.BillingAddress,
+		&i.PersonalisationSkipReason,
+		&i.PersonalisationSkippedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

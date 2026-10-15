@@ -29,11 +29,18 @@ RETURNING *;
 -- the Go compiles, and every settle fails at the database. A link would then
 -- stay 'pending' forever, which reads as a send that never happened - the job
 -- is never held, and the floor's copy button finds nothing.
+--
+-- The template and the body are coalesced rather than assigned, so settling a
+-- refusal cannot blank a message that did go out - and so a caller with
+-- nothing to freeze passes nothing.
 UPDATE personalisation_links
 SET status     = sqlc.arg('status')::varchar,
     sent_at    = CASE WHEN sqlc.arg('status')::varchar = 'sent' THEN now() ELSE sent_at END,
     message_id = coalesce(sqlc.narg('message_id'), message_id),
-    detail     = sqlc.narg('detail')
+    detail     = sqlc.narg('detail'),
+    template_name = coalesce(sqlc.narg('template_name'), template_name),
+    message_body  = coalesce(sqlc.narg('message_body'), message_body),
+    button_count  = coalesce(sqlc.narg('button_count'), button_count)
 WHERE id = sqlc.arg('id')
 RETURNING *;
 
@@ -205,9 +212,20 @@ WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[])
 --
 -- Bulk, because the orders page asks about a whole page of orders at once and
 -- one query per row is an N+1 on the busiest list in the product.
-SELECT order_id, status, expires_at
-FROM personalisation_links
-WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[]);
+--
+-- A LEFT JOIN FROM orders, not a select from links, so an order with no link
+-- still comes back - carrying the reason nobody was asked. Before this, such
+-- an order was simply absent and the column drew a dash that meant six
+-- different things at once (see migration 0105). An empty status is what
+-- "there is no link row" looks like, and the caller reads it as such.
+SELECT o.id                          AS order_id,
+       coalesce(l.status, '')::text  AS status,
+       l.expires_at,
+       o.personalisation_skip_reason AS skip_reason,
+       o.personalisation_skipped_at  AS skipped_at
+FROM orders o
+LEFT JOIN personalisation_links l ON l.order_id = o.id
+WHERE o.id = ANY(sqlc.arg('order_ids')::uuid[]);
 
 -- name: ReleaseStalePersonalisationClaims :many
 -- Gives back an order whose link was claimed and never sent.
@@ -243,3 +261,25 @@ RETURNING order_id, brand_slug;
 -- row is exactly what that reader wants.
 SELECT * FROM personalisation_links
 WHERE order_id = sqlc.arg('order_id');
+
+-- name: RecordPersonalisationSkip :exec
+-- Writes down why this order's customer was not asked.
+--
+-- Every refusal in the sender names its rule; this is where that name is kept
+-- once the log line has rotated away. updated_at is deliberately NOT touched:
+-- the order itself did not change, and the orders list sorts and pages on
+-- these timestamps.
+UPDATE orders
+SET personalisation_skip_reason = sqlc.arg('reason'),
+    personalisation_skipped_at  = now()
+WHERE id = sqlc.arg('id');
+
+-- name: ClearPersonalisationSkip :exec
+-- Forgets the reason, because the order has just been claimed for a link.
+--
+-- Guarded on the column already holding something so the common path - an
+-- order that was never refused - writes no row at all.
+UPDATE orders
+SET personalisation_skip_reason = NULL,
+    personalisation_skipped_at  = NULL
+WHERE id = sqlc.arg('id') AND personalisation_skip_reason IS NOT NULL;
