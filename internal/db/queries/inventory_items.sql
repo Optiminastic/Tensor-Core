@@ -76,3 +76,28 @@ DELETE FROM inventory_items WHERE id = @id;
 -- name: GetInventoryItemByCode :one
 -- One part by its stable handle, for resolving a bill of materials.
 SELECT * FROM inventory_items WHERE lower(code) = lower(sqlc.arg('code')::text);
+
+-- name: CountInventoryItemsTable :one
+-- How many items the parts tables' search selects - by name or code.
+SELECT count(*) FROM inventory_items
+WHERE sqlc.narg('search')::text IS NULL
+   OR name ILIKE '%' || sqlc.narg('search')::text || '%'
+   OR coalesce(code, '') ILIKE '%' || sqlc.narg('search')::text || '%';
+
+-- name: ListInventoryItemsTable :many
+-- One page of items, alphabetically as ListInventoryItems, cut by LIMIT/OFFSET.
+SELECT * FROM inventory_items
+WHERE sqlc.narg('search')::text IS NULL
+   OR name ILIKE '%' || sqlc.narg('search')::text || '%'
+   OR coalesce(code, '') ILIKE '%' || sqlc.narg('search')::text || '%'
+ORDER BY lower(name), id
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: SummariseInventoryItems :one
+-- What the parts tables say about the whole shelf, whatever the page: how
+-- many items, how many have no code, and what the stock is worth (unpriced
+-- items count as nothing, as the Inventory page always counted them).
+SELECT count(*) AS items,
+       count(*) FILTER (WHERE coalesce(code, '') = '') AS without_code,
+       coalesce(sum(unit_price * quantity) FILTER (WHERE unit_price IS NOT NULL), 0)::float8 AS total_value
+FROM inventory_items;

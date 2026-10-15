@@ -11,6 +11,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const countColourMapNames = `-- name: CountColourMapNames :one
+SELECT count(DISTINCT colour_name) FROM colour_map
+`
+
+// How many colours the map names - the Colour map table pages by colour, so
+// a colour's alternatives never split across pages.
+func (q *Queries) CountColourMapNames(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countColourMapNames)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteColourMapEntry = `-- name: DeleteColourMapEntry :execrows
 DELETE FROM colour_map WHERE id = $1
 `
@@ -52,6 +65,53 @@ ORDER BY lower(trim(colour_name)), is_primary DESC, hex
 
 func (q *Queries) ListColourMap(ctx context.Context) ([]ColourMap, error) {
 	rows, err := q.db.Query(ctx, listColourMap)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ColourMap{}
+	for rows.Next() {
+		var i ColourMap
+		if err := rows.Scan(
+			&i.ID,
+			&i.ColourName,
+			&i.Hex,
+			&i.IsPrimary,
+			&i.Note,
+			&i.ConfirmedBy,
+			&i.ConfirmedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listColourMapTable = `-- name: ListColourMapTable :many
+WITH names AS (
+    SELECT DISTINCT colour_name FROM colour_map
+    ORDER BY colour_name
+    LIMIT $2 OFFSET $1
+)
+SELECT cm.id, cm.colour_name, cm.hex, cm.is_primary, cm.note, cm.confirmed_by, cm.confirmed_at, cm.created_at, cm.updated_at FROM colour_map cm
+JOIN names n ON n.colour_name = cm.colour_name
+ORDER BY cm.colour_name, cm.is_primary DESC, cm.hex
+`
+
+type ListColourMapTableParams struct {
+	PageOffset int32
+	PageLimit  int32
+}
+
+// One page of colours (LIMIT/OFFSET over names), with every entry under them.
+func (q *Queries) ListColourMapTable(ctx context.Context, arg ListColourMapTableParams) ([]ColourMap, error) {
+	rows, err := q.db.Query(ctx, listColourMapTable, arg.PageOffset, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}

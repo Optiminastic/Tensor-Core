@@ -80,3 +80,46 @@ SELECT colour_hex FROM filament_inventory
 WHERE colour_hex IS NOT NULL
   AND lower(trim(colour)) = lower(trim(sqlc.arg('colour')::text))
 LIMIT 1;
+
+-- name: CountFilamentTable :one
+-- How many spools the Filament table's filters select. Null means "any":
+--   low       true = Low tab (below its reorder level), false = In stock
+--   material  the Material select
+--   search    material or colour
+--   updated_from / updated_to  the period, inclusive
+SELECT count(*) FROM filament_inventory f
+WHERE (sqlc.narg('low')::boolean IS NULL OR (f.grams_available < f.reorder_level_grams) = sqlc.narg('low')::boolean)
+  AND (sqlc.narg('material')::text IS NULL OR f.material = sqlc.narg('material'))
+  AND (
+    sqlc.narg('search')::text IS NULL
+    OR f.material ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR coalesce(f.colour, '') ILIKE '%' || sqlc.narg('search')::text || '%'
+  )
+  AND (sqlc.narg('updated_from')::timestamptz IS NULL OR f.updated_at >= sqlc.narg('updated_from'))
+  AND (sqlc.narg('updated_to')::timestamptz IS NULL OR f.updated_at <= sqlc.narg('updated_to'));
+
+-- name: ListFilamentTable :many
+-- One page of spools, in ListFilament's order, cut by LIMIT/OFFSET.
+SELECT * FROM filament_inventory f
+WHERE (sqlc.narg('low')::boolean IS NULL OR (f.grams_available < f.reorder_level_grams) = sqlc.narg('low')::boolean)
+  AND (sqlc.narg('material')::text IS NULL OR f.material = sqlc.narg('material'))
+  AND (
+    sqlc.narg('search')::text IS NULL
+    OR f.material ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR coalesce(f.colour, '') ILIKE '%' || sqlc.narg('search')::text || '%'
+  )
+  AND (sqlc.narg('updated_from')::timestamptz IS NULL OR f.updated_at >= sqlc.narg('updated_from'))
+  AND (sqlc.narg('updated_to')::timestamptz IS NULL OR f.updated_at <= sqlc.narg('updated_to'))
+ORDER BY f.material, f.colour NULLS FIRST, f.id
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: CountFilamentByTab :one
+-- The Filament badges over every spool: All, In stock, Low.
+SELECT count(*) AS all_spools,
+       count(*) FILTER (WHERE grams_available >= reorder_level_grams) AS in_stock,
+       count(*) FILTER (WHERE grams_available < reorder_level_grams) AS low
+FROM filament_inventory;
+
+-- name: ListFilamentMaterials :many
+-- Every material on the shelf, for the Material select's options.
+SELECT DISTINCT material FROM filament_inventory ORDER BY material;

@@ -33,6 +33,67 @@ func (q *Queries) AdjustFilamentStock(ctx context.Context, arg AdjustFilamentSto
 	return err
 }
 
+const countFilamentByTab = `-- name: CountFilamentByTab :one
+SELECT count(*) AS all_spools,
+       count(*) FILTER (WHERE grams_available >= reorder_level_grams) AS in_stock,
+       count(*) FILTER (WHERE grams_available < reorder_level_grams) AS low
+FROM filament_inventory
+`
+
+type CountFilamentByTabRow struct {
+	AllSpools int64
+	InStock   int64
+	Low       int64
+}
+
+// The Filament badges over every spool: All, In stock, Low.
+func (q *Queries) CountFilamentByTab(ctx context.Context) (CountFilamentByTabRow, error) {
+	row := q.db.QueryRow(ctx, countFilamentByTab)
+	var i CountFilamentByTabRow
+	err := row.Scan(&i.AllSpools, &i.InStock, &i.Low)
+	return i, err
+}
+
+const countFilamentTable = `-- name: CountFilamentTable :one
+SELECT count(*) FROM filament_inventory f
+WHERE ($1::boolean IS NULL OR (f.grams_available < f.reorder_level_grams) = $1::boolean)
+  AND ($2::text IS NULL OR f.material = $2)
+  AND (
+    $3::text IS NULL
+    OR f.material ILIKE '%' || $3::text || '%'
+    OR coalesce(f.colour, '') ILIKE '%' || $3::text || '%'
+  )
+  AND ($4::timestamptz IS NULL OR f.updated_at >= $4)
+  AND ($5::timestamptz IS NULL OR f.updated_at <= $5)
+`
+
+type CountFilamentTableParams struct {
+	Low         *bool
+	Material    *string
+	Search      *string
+	UpdatedFrom pgtype.Timestamptz
+	UpdatedTo   pgtype.Timestamptz
+}
+
+// How many spools the Filament table's filters select. Null means "any":
+//
+//	low       true = Low tab (below its reorder level), false = In stock
+//	material  the Material select
+//	search    material or colour
+//	updated_from / updated_to  the period, inclusive
+func (q *Queries) CountFilamentTable(ctx context.Context, arg CountFilamentTableParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countFilamentTable,
+		arg.Low,
+		arg.Material,
+		arg.Search,
+		arg.UpdatedFrom,
+		arg.UpdatedTo,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteFilamentNotIn = `-- name: DeleteFilamentNotIn :exec
 DELETE FROM filament_inventory
 WHERE (material || chr(31) || COALESCE(colour, '')) <> ALL ($1::text[])
@@ -203,6 +264,31 @@ func (q *Queries) ListFilamentKeys(ctx context.Context) ([]ListFilamentKeysRow, 
 	return items, nil
 }
 
+const listFilamentMaterials = `-- name: ListFilamentMaterials :many
+SELECT DISTINCT material FROM filament_inventory ORDER BY material
+`
+
+// Every material on the shelf, for the Material select's options.
+func (q *Queries) ListFilamentMaterials(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listFilamentMaterials)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var material string
+		if err := rows.Scan(&material); err != nil {
+			return nil, err
+		}
+		items = append(items, material)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFilamentPage = `-- name: ListFilamentPage :many
 SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
 WHERE (
@@ -221,6 +307,69 @@ type ListFilamentPageParams struct {
 
 func (q *Queries) ListFilamentPage(ctx context.Context, arg ListFilamentPageParams) ([]FilamentInventory, error) {
 	rows, err := q.db.Query(ctx, listFilamentPage, arg.CursorCreatedAt, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []FilamentInventory{}
+	for rows.Next() {
+		var i FilamentInventory
+		if err := rows.Scan(
+			&i.ID,
+			&i.Material,
+			&i.Colour,
+			&i.ColourHex,
+			&i.GramsAvailable,
+			&i.ReorderLevelGrams,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFilamentTable = `-- name: ListFilamentTable :many
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory f
+WHERE ($1::boolean IS NULL OR (f.grams_available < f.reorder_level_grams) = $1::boolean)
+  AND ($2::text IS NULL OR f.material = $2)
+  AND (
+    $3::text IS NULL
+    OR f.material ILIKE '%' || $3::text || '%'
+    OR coalesce(f.colour, '') ILIKE '%' || $3::text || '%'
+  )
+  AND ($4::timestamptz IS NULL OR f.updated_at >= $4)
+  AND ($5::timestamptz IS NULL OR f.updated_at <= $5)
+ORDER BY f.material, f.colour NULLS FIRST, f.id
+LIMIT $7 OFFSET $6
+`
+
+type ListFilamentTableParams struct {
+	Low         *bool
+	Material    *string
+	Search      *string
+	UpdatedFrom pgtype.Timestamptz
+	UpdatedTo   pgtype.Timestamptz
+	PageOffset  int32
+	PageLimit   int32
+}
+
+// One page of spools, in ListFilament's order, cut by LIMIT/OFFSET.
+func (q *Queries) ListFilamentTable(ctx context.Context, arg ListFilamentTableParams) ([]FilamentInventory, error) {
+	rows, err := q.db.Query(ctx, listFilamentTable,
+		arg.Low,
+		arg.Material,
+		arg.Search,
+		arg.UpdatedFrom,
+		arg.UpdatedTo,
+		arg.PageOffset,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

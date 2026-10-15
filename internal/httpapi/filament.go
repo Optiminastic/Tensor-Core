@@ -49,6 +49,12 @@ func (s *Server) registerFilament(r *gin.Engine) {
 }
 
 func (s *Server) listFilament(c *gin.Context) {
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listFilamentTable(c, numbered)
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return
@@ -153,4 +159,69 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// filamentPage is one page of spools with the Material select's options.
+type filamentPage struct {
+	pageEnvelope[filamentResponse]
+	Materials []string `json:"materials,omitempty"`
+}
+
+// listFilamentTable answers ?page=N for the Inventory page's Filament table:
+// the stock tab (tab=in_stock|low), the material select, search and the
+// period, all in Postgres before LIMIT/OFFSET.
+func (s *Server) listFilamentTable(c *gin.Context, p offsetPage) {
+	window, ok := parseTimeRange(c)
+	if !ok {
+		return
+	}
+	f := gen.CountFilamentTableParams{
+		Material: nilIfEmpty(c.Query("material")), Search: searchParam(c),
+		UpdatedFrom: window.From, UpdatedTo: window.To,
+	}
+	yes, no := true, false
+	switch c.Query("tab") {
+	case "":
+	case "low":
+		f.Low = &yes
+	case "in_stock":
+		f.Low = &no
+	default:
+		detail(c, http.StatusUnprocessableEntity, "'tab' must be in_stock or low.")
+		return
+	}
+	ctx := c.Request.Context()
+	total, err := s.store.Q.CountFilamentTable(ctx, f)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list filament inventory.")
+		return
+	}
+	p = p.within(total)
+	rows, err := s.store.Q.ListFilamentTable(ctx, gen.ListFilamentTableParams{
+		Low: f.Low, Material: f.Material, Search: f.Search,
+		UpdatedFrom: f.UpdatedFrom, UpdatedTo: f.UpdatedTo,
+		PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list filament inventory.")
+		return
+	}
+	items := make([]filamentResponse, 0, len(rows))
+	for _, r := range rows {
+		items = append(items, filamentDTO(r))
+	}
+	out := filamentPage{pageEnvelope: newPageEnvelope(items, total, p)}
+	if wantsCounts(c) {
+		counts, err := s.store.Q.CountFilamentByTab(ctx)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not count filament inventory.")
+			return
+		}
+		out.Counts = map[string]int64{"": counts.AllSpools, "in_stock": counts.InStock, "low": counts.Low}
+		if out.Materials, err = s.store.Q.ListFilamentMaterials(ctx); err != nil {
+			detail(c, http.StatusInternalServerError, "Could not list filament materials.")
+			return
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }
