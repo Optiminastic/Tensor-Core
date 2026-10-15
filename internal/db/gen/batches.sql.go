@@ -1544,7 +1544,9 @@ func (q *Queries) ListDraftBatchJobIDs(ctx context.Context) ([]ListDraftBatchJob
 }
 
 const listJobNumbersForBatches = `-- name: ListJobNumbersForBatches :many
-SELECT j.batch_id, j.job_number, j.colour, j.priority, o.order_number
+SELECT j.batch_id, j.job_number,
+       COALESCE(NULLIF(TRIM(j.personalisation_colour), ''), j.colour) AS colour,
+       j.priority, o.order_number
 FROM production_jobs j
 LEFT JOIN orders o ON o.id = j.order_id
 WHERE j.batch_id = ANY($1::uuid[])
@@ -1579,6 +1581,16 @@ type ListJobNumbersForBatchesRow struct {
 // along because the Batches table's Priority tab is answered per bed - a bed is
 // priority when any plank on it is - and asking per batch would be one query
 // per row on the page.
+// THE COLOUR THAT WILL PRINT, not the one that was ordered. j.colour is the
+// Shopify variant's colour, written at import and never touched again - so a
+// customer who changes their colour on the personalisation link leaves it
+// saying what they first picked. The bed then showed a BLACK chip over a
+// plate whose lettering had been re-rendered GREEN, which is not a cosmetic
+// disagreement: that chip is what tells somebody which spool to load.
+//
+// personalisation_colour is the customer's own choice and wins where it
+// exists. It is also what the planner groups on, through production_jobs
+// .colours, so this makes the chip agree with the bed it describes.
 func (q *Queries) ListJobNumbersForBatches(ctx context.Context, batchIds []uuid.UUID) ([]ListJobNumbersForBatchesRow, error) {
 	rows, err := q.db.Query(ctx, listJobNumbersForBatches, batchIds)
 	if err != nil {
