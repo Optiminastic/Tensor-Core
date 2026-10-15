@@ -99,6 +99,49 @@ func (q *Queries) ClearVariantOptions(ctx context.Context, variantID uuid.UUID) 
 	return err
 }
 
+const countSKUPipelinesTable = `-- name: CountSKUPipelinesTable :one
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT sku, display_sku, product_code, product_name FROM skus s
+    WHERE $1::text IS NULL
+       OR s.display_sku ILIKE '%' || $1::text || '%'
+       OR s.product_name ILIKE '%' || $1::text || '%'
+       OR s.product_code ILIKE '%' || $1::text || '%'
+)
+SELECT count(*) FROM matching
+`
+
+// How many SKUs the SKU Pipelines panel's search selects - the same union of
+// variants, jobs and mappings ListSKUPipelines reads, one row per SKU.
+func (q *Queries) CountSKUPipelinesTable(ctx context.Context, search *string) (int64, error) {
+	row := q.db.QueryRow(ctx, countSKUPipelinesTable, search)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteOptionValue = `-- name: DeleteOptionValue :exec
 DELETE FROM product_option_values WHERE id = $1
 `
@@ -1166,6 +1209,94 @@ func (q *Queries) ListSKUPipelines(ctx context.Context) ([]ListSKUPipelinesRow, 
 	items := []ListSKUPipelinesRow{}
 	for rows.Next() {
 		var i ListSKUPipelinesRow
+		if err := rows.Scan(
+			&i.Sku,
+			&i.DisplaySku,
+			&i.ProductCode,
+			&i.ProductName,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSKUPipelinesTable = `-- name: ListSKUPipelinesTable :many
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT sku, display_sku, product_code, product_name FROM skus s
+    WHERE $1::text IS NULL
+       OR s.display_sku ILIKE '%' || $1::text || '%'
+       OR s.product_name ILIKE '%' || $1::text || '%'
+       OR s.product_code ILIKE '%' || $1::text || '%'
+),
+page AS (
+    SELECT sku, display_sku, product_code, product_name FROM matching ORDER BY sku
+    LIMIT $3 OFFSET $2
+)
+SELECT p.sku, p.display_sku, p.product_code, p.product_name,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM page p
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = p.sku
+ORDER BY p.sku, sp.machine_family
+`
+
+type ListSKUPipelinesTableParams struct {
+	Search     *string
+	PageOffset int32
+	PageLimit  int32
+}
+
+type ListSKUPipelinesTableRow struct {
+	Sku           string
+	DisplaySku    string
+	ProductCode   string
+	ProductName   string
+	MachineFamily *string
+	PipelineID    *int32
+	PipelineName  *string
+}
+
+// One page of SKUs - cut by LIMIT/OFFSET over SKUs, not over mapping rows, so
+// a SKU's three families are never split across pages - with their mappings.
+func (q *Queries) ListSKUPipelinesTable(ctx context.Context, arg ListSKUPipelinesTableParams) ([]ListSKUPipelinesTableRow, error) {
+	rows, err := q.db.Query(ctx, listSKUPipelinesTable, arg.Search, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSKUPipelinesTableRow{}
+	for rows.Next() {
+		var i ListSKUPipelinesTableRow
 		if err := rows.Scan(
 			&i.Sku,
 			&i.DisplaySku,
