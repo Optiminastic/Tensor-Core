@@ -30,6 +30,17 @@ func (q *Queries) AdjustFleetMachineWaste(ctx context.Context, arg AdjustFleetMa
 	return err
 }
 
+const countFleetMachines = `-- name: CountFleetMachines :one
+SELECT count(*) FROM machines
+`
+
+func (q *Queries) CountFleetMachines(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countFleetMachines)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteFleetMachinesNotIn = `-- name: DeleteFleetMachinesNotIn :exec
 DELETE FROM machines
 WHERE machine_id <> ALL($1::text[])
@@ -271,6 +282,65 @@ SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, cur
 // queries (ListMachineOps, GetMachineOps, ...) in the generated Queries struct.
 func (q *Queries) ListFleetMachines(ctx context.Context) ([]Machine, error) {
 	rows, err := q.db.Query(ctx, listFleetMachines)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Machine{}
+	for rows.Next() {
+		var i Machine
+		if err := rows.Scan(
+			&i.ID,
+			&i.MachineID,
+			&i.Name,
+			&i.ImageUrl,
+			&i.Status,
+			&i.Filaments,
+			&i.CurrentBatchID,
+			&i.CurrentLayer,
+			&i.TotalLayers,
+			&i.BatchTotalTimeMinutes,
+			&i.PrintStartedAt,
+			&i.TotalWasteGrams,
+			&i.MachineProfileID,
+			&i.StatusReason,
+			&i.RemainingMinutes,
+			&i.RemainingObservedAt,
+			&i.Model,
+			&i.Location,
+			&i.IpAddress,
+			&i.NozzleCount,
+			&i.FixedNozzleColour,
+			&i.FixedNozzleIndex,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFleetMachinesTable = `-- name: ListFleetMachinesTable :many
+SELECT id, machine_id, name, image_url, status, filaments, current_batch_id, current_layer, total_layers, batch_total_time_minutes, print_started_at, total_waste_grams, machine_profile_id, status_reason, remaining_minutes, remaining_observed_at, model, location, ip_address, nozzle_count, fixed_nozzle_colour, fixed_nozzle_index, created_at, updated_at FROM machines
+ORDER BY (status = 'error') DESC, machine_id
+LIMIT $2 OFFSET $1
+`
+
+type ListFleetMachinesTableParams struct {
+	PageOffset int32
+	PageLimit  int32
+}
+
+// One page of the fleet: errored machines first (the table's stable
+// partition), then ListFleetMachines' order, cut by LIMIT/OFFSET - so the
+// per-machine live-filament work runs for this page's machines only.
+func (q *Queries) ListFleetMachinesTable(ctx context.Context, arg ListFleetMachinesTableParams) ([]Machine, error) {
+	rows, err := q.db.Query(ctx, listFleetMachinesTable, arg.PageOffset, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}

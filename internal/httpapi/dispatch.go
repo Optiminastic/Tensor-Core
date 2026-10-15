@@ -27,6 +27,9 @@ type dispatchResponse struct {
 	DispatchedAt   *time.Time `json:"dispatched_at"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+	// OrderNumber is the store's number for the order, on the paged table only:
+	// it used to be looked up in a map built from every live order.
+	OrderNumber *string `json:"order_number,omitempty"`
 }
 
 func dispatchDTO(d gen.DispatchOrder) dispatchResponse {
@@ -47,6 +50,14 @@ func (s *Server) registerDispatch(r *gin.Engine) {
 }
 
 func (s *Server) listDispatch(c *gin.Context) {
+	// ?page=N is the Dispatch table's numbered page, cut in Postgres; without
+	// it the list answers as it always has.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listDispatchTable(c, numbered)
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return
@@ -166,4 +177,44 @@ func (s *Server) markDispatched(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, dispatchDTO(d))
+}
+
+// listDispatchTable is one page of shipments, each labelled with its order's
+// number from one batched lookup for the page.
+func (s *Server) listDispatchTable(c *gin.Context, p offsetPage) {
+	ctx := c.Request.Context()
+	total, err := s.store.Q.CountDispatch(ctx)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list dispatch orders.")
+		return
+	}
+	p = p.within(total)
+	rows, err := s.store.Q.ListDispatchTable(ctx, gen.ListDispatchTableParams{
+		PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list dispatch orders.")
+		return
+	}
+	orderIDs := make([]uuid.UUID, 0, len(rows))
+	for _, d := range rows {
+		orderIDs = append(orderIDs, d.OrderID)
+	}
+	numbers := map[uuid.UUID]string{}
+	if len(orderIDs) > 0 {
+		if found, err := s.store.Q.ListOrderNumbersForIDs(ctx, orderIDs); err == nil {
+			for _, o := range found {
+				numbers[o.ID] = o.OrderNumber
+			}
+		}
+	}
+	out := make([]dispatchResponse, 0, len(rows))
+	for _, d := range rows {
+		dto := dispatchDTO(d)
+		if number, ok := numbers[d.OrderID]; ok {
+			dto.OrderNumber = &number
+		}
+		out = append(out, dto)
+	}
+	c.JSON(http.StatusOK, newPageEnvelope(out, total, p))
 }

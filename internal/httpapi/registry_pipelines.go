@@ -99,6 +99,12 @@ func (s *Server) pipelineOptions(ctx context.Context) ([]pipelineOption, error) 
 // somebody opens this page to fix, and omitting those rows would hide exactly
 // the work to be done.
 func (s *Server) listSKUPipelines(c *gin.Context) {
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listSKUPipelinesTable(c, numbered)
+		return
+	}
 	ctx := c.Request.Context()
 	rows, err := s.store.Q.ListSKUPipelines(ctx)
 	if err != nil {
@@ -110,6 +116,14 @@ func (s *Server) listSKUPipelines(c *gin.Context) {
 	// unreachable - the mappings are Tensor's, and only the names and the
 	// "missing" flag come from over there.
 	options, _ := s.pipelineOptions(ctx)
+	c.JSON(http.StatusOK, skuPipelinesResponse{
+		SKUs: foldSKUPipelines(rows, options), Pipelines: options, Families: machineFamilies(),
+	})
+}
+
+// foldSKUPipelines turns one-row-per-mapping into one row per SKU, marking a
+// mapping whose pipeline BambuBuddy no longer lists.
+func foldSKUPipelines(rows []gen.ListSKUPipelinesRow, options []pipelineOption) []skuPipelineRow {
 	known := make(map[int]bool, len(options))
 	for _, o := range options {
 		known[o.ID] = true
@@ -136,9 +150,43 @@ func (s *Server) listSKUPipelines(c *gin.Context) {
 			Missing:    len(known) > 0 && !known[int(*r.PipelineID)],
 		}
 	}
+	return out
+}
 
-	c.JSON(http.StatusOK, skuPipelinesResponse{
-		SKUs: out, Pipelines: options, Families: machineFamilies(),
+// skuPipelinesPage is one page of SKUs, with the pipelines and families the
+// panel's dropdowns and columns are drawn from.
+type skuPipelinesPage struct {
+	pageEnvelope[skuPipelineRow]
+	Pipelines []pipelineOption `json:"pipelines"`
+	Families  []string         `json:"families"`
+}
+
+// listSKUPipelinesTable answers ?page=N: one page of SKUs, counted and cut in
+// Postgres over SKUs, searched by sku, product name and product code.
+func (s *Server) listSKUPipelinesTable(c *gin.Context, p offsetPage) {
+	ctx := c.Request.Context()
+	search := searchParam(c)
+	total, err := s.store.Q.CountSKUPipelinesTable(ctx, search)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the SKU list.")
+		return
+	}
+	p = p.within(total)
+	page, err := s.store.Q.ListSKUPipelinesTable(ctx, gen.ListSKUPipelinesTableParams{
+		Search: search, PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the SKU list.")
+		return
+	}
+	rows := make([]gen.ListSKUPipelinesRow, len(page))
+	for i, r := range page {
+		rows[i] = gen.ListSKUPipelinesRow(r)
+	}
+	options, _ := s.pipelineOptions(ctx)
+	c.JSON(http.StatusOK, skuPipelinesPage{
+		pageEnvelope: newPageEnvelope(foldSKUPipelines(rows, options), total, p),
+		Pipelines:    options, Families: machineFamilies(),
 	})
 }
 

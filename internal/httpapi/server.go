@@ -98,6 +98,9 @@ type Server struct {
 	// 703 parcels on every load and every filter chip, and Delhivery answered
 	// 429. See shipment_cache.go.
 	shipmentCache *shipmentCache
+	// sources caches the outside reads the paged tables cut themselves,
+	// for clicks within a table only - see source_cache.go.
+	sources sourceCaches
 	// renderer turns an order's personalisation text into a printable model.
 	// Nil when OpenSCAD is not installed, in which case a personalised job
 	// stays held with its reason rather than the service failing to start -
@@ -152,6 +155,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 			AgentPhoneNumber: cfg.SarvamAgentPhoneNumber,
 		}),
 		shipmentCache: newShipmentCache(shipmentCacheTTL, shipmentErrorTTL),
+		sources:       newSourceCaches(sourceCacheTTL),
 	}
 }
 

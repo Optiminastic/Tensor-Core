@@ -1155,3 +1155,192 @@ ORDER BY COALESCE(due_date, created_at) ASC, job_number ASC;
 UPDATE production_jobs
 SET part_role = coalesce(sqlc.narg('part_role'), part_role), updated_at = now()
 WHERE id = sqlc.arg('id');
+
+-- name: CountProductionJobsTable :one
+-- How many jobs a table's filters select (the Production Jobs page, or one
+-- packaging-station queue). Paired with ListProductionJobsTable. Every filter
+-- is optional, null meaning "any".
+SELECT count(*) FROM production_jobs j
+WHERE (
+    sqlc.narg('search')::text IS NULL
+    OR j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.description ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.sku ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+)
+AND (sqlc.narg('created_from')::timestamptz IS NULL OR j.created_at >= sqlc.narg('created_from'))
+AND (sqlc.narg('created_to')::timestamptz IS NULL OR j.created_at <= sqlc.narg('created_to'))
+-- The table's status column, derived exactly as the frontend's toQueueStatus
+-- derives it: failed wins, then held, then the run state.
+AND (
+    sqlc.narg('queue_status')::text IS NULL
+    OR (CASE
+        WHEN j.status = 'failed' THEN 'failed'
+        WHEN j.held THEN 'on_hold'
+        WHEN j.status = 'in_production' THEN 'in_progress'
+        WHEN j.status = 'completed' THEN 'completed'
+        ELSE 'queued'
+    END) = sqlc.narg('queue_status')::text
+)
+-- Non-DNP: the job's (sku, product name) is one Go's IsGeneratedProduct says
+-- Tensor does not make. Go classifies the handful of distinct pairs and sends
+-- the non-generated ones as keys - sku, chr(31), product name - which SQL only
+-- matches; the rule itself is never restated here.
+AND (
+    sqlc.narg('non_generated_only')::boolean IS NULL
+    OR (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY(sqlc.arg('ng_keys')::text[])
+)
+-- The personalisation select, as toPersonalisation folds the statuses.
+AND (
+    sqlc.narg('personalisation')::text IS NULL
+    OR (CASE
+        WHEN j.personalisation_status = 'not_required' THEN 'not_required'
+        WHEN j.personalisation_status = 'validated' THEN 'completed'
+        ELSE 'required'
+    END) = sqlc.narg('personalisation')::text
+)
+-- The packaging select, as toPackaging folds it.
+AND (
+    sqlc.narg('packaging')::text IS NULL
+    OR (CASE WHEN j.packaging_status = 'packaged' THEN 'packed' ELSE 'pending' END)
+       = sqlc.narg('packaging')::text
+)
+-- A packaging-page station queue, each exactly the filter that page applied
+-- to the whole job list in the browser.
+AND (
+    sqlc.narg('station')::text IS NULL
+    OR (sqlc.narg('station')::text = 'assembly' AND j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    ))
+    OR (sqlc.narg('station')::text = 'finishing' AND j.status = 'completed'
+        AND j.finishing_status = 'pending' AND j.assembly_status <> 'pending')
+    OR (sqlc.narg('station')::text = 'qc' AND j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending')
+    OR (sqlc.narg('station')::text = 'packaging' AND j.qc_status = 'passed'
+        AND j.packaging_status = 'pending')
+);
+
+-- name: ListProductionJobsTable :many
+-- One page of jobs: CountProductionJobsTable's filters, in ListProductionJobs'
+-- order (the customer's order date, newest first), cut by LIMIT/OFFSET in
+-- Postgres. The column list is ListProductionJobs' exactly, so the rows convert
+-- to gen.ProductionJob and share its DTO.
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       nozzle_profile, filament_grams_required, print_file_id,
+       estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+       personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+       photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+       personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+       personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+       colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+       quality_mm, machine_family, variant_title,
+       '[]'::jsonb AS personalisation_properties,
+       -- Blanked exactly as ListProductionJobs blanks it, and for the same
+       -- reason: the column tells a list only WHETHER something changed, and
+       -- carrying the whole before-snapshot on every row of a page would be
+       -- bytes no list screen reads. Null stays null so "nothing changed"
+       -- survives the trip; anything else becomes an empty object.
+       CASE WHEN personalisation_original IS NULL THEN NULL
+            ELSE '{}'::jsonb END AS personalisation_original, part_role,
+       model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+       support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id,
+       model_render_queued_at
+FROM production_jobs j
+WHERE (
+    sqlc.narg('search')::text IS NULL
+    OR j.job_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.description ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.personalisation_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.sku ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR j.product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+)
+AND (sqlc.narg('created_from')::timestamptz IS NULL OR j.created_at >= sqlc.narg('created_from'))
+AND (sqlc.narg('created_to')::timestamptz IS NULL OR j.created_at <= sqlc.narg('created_to'))
+-- The table's status column, derived exactly as the frontend's toQueueStatus
+-- derives it: failed wins, then held, then the run state.
+AND (
+    sqlc.narg('queue_status')::text IS NULL
+    OR (CASE
+        WHEN j.status = 'failed' THEN 'failed'
+        WHEN j.held THEN 'on_hold'
+        WHEN j.status = 'in_production' THEN 'in_progress'
+        WHEN j.status = 'completed' THEN 'completed'
+        ELSE 'queued'
+    END) = sqlc.narg('queue_status')::text
+)
+-- Non-DNP: the job's (sku, product name) is one Go's IsGeneratedProduct says
+-- Tensor does not make. Go classifies the handful of distinct pairs and sends
+-- the non-generated ones as keys - sku, chr(31), product name - which SQL only
+-- matches; the rule itself is never restated here.
+AND (
+    sqlc.narg('non_generated_only')::boolean IS NULL
+    OR (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY(sqlc.arg('ng_keys')::text[])
+)
+-- The personalisation select, as toPersonalisation folds the statuses.
+AND (
+    sqlc.narg('personalisation')::text IS NULL
+    OR (CASE
+        WHEN j.personalisation_status = 'not_required' THEN 'not_required'
+        WHEN j.personalisation_status = 'validated' THEN 'completed'
+        ELSE 'required'
+    END) = sqlc.narg('personalisation')::text
+)
+-- The packaging select, as toPackaging folds it.
+AND (
+    sqlc.narg('packaging')::text IS NULL
+    OR (CASE WHEN j.packaging_status = 'packaged' THEN 'packed' ELSE 'pending' END)
+       = sqlc.narg('packaging')::text
+)
+-- A packaging-page station queue, each exactly the filter that page applied
+-- to the whole job list in the browser.
+AND (
+    sqlc.narg('station')::text IS NULL
+    OR (sqlc.narg('station')::text = 'assembly' AND j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    ))
+    OR (sqlc.narg('station')::text = 'finishing' AND j.status = 'completed'
+        AND j.finishing_status = 'pending' AND j.assembly_status <> 'pending')
+    OR (sqlc.narg('station')::text = 'qc' AND j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending')
+    OR (sqlc.narg('station')::text = 'packaging' AND j.qc_status = 'passed'
+        AND j.packaging_status = 'pending')
+)
+ORDER BY COALESCE(
+    (SELECT o.placed_at FROM orders o WHERE o.id = j.order_id),
+    j.created_at
+) DESC, j.created_at DESC, j.id DESC
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: CountProductionJobsByTab :one
+-- Every badge both job tables draw, in one pass over the whole table: the
+-- Production Jobs tabs (All, Non-DNP, Completed) and the four packaging-station
+-- queues. Never the search - badges count everything.
+SELECT
+    count(*) AS all_jobs,
+    count(*) FILTER (WHERE (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY(sqlc.arg('ng_keys')::text[])) AS non_dnp,
+    count(*) FILTER (WHERE j.status = 'completed' AND NOT j.held) AS completed,
+    count(*) FILTER (WHERE j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    )) AS assembly,
+    count(*) FILTER (WHERE j.status = 'completed' AND j.finishing_status = 'pending'
+        AND j.assembly_status <> 'pending') AS finishing,
+    count(*) FILTER (WHERE j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending') AS qc,
+    count(*) FILTER (WHERE j.qc_status = 'passed' AND j.packaging_status = 'pending') AS packaging
+FROM production_jobs j;
+
+-- name: ListJobProductKeys :many
+-- The distinct (sku, product name) pairs across every job - a few dozen, not a
+-- row per job - for Go to classify with IsGeneratedProduct.
+SELECT DISTINCT coalesce(sku, '')::text AS sku, coalesce(product_name, '')::text AS product_name
+FROM production_jobs;

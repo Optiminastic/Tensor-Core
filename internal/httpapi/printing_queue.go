@@ -83,7 +83,14 @@ func (s *Server) listPrintingQueue(c *gin.Context) {
 		return
 	}
 
-	items, err := s.bambu.ListQueue(ctx)
+	numbered, paged, ok := parseOffsetPage(c)
+	if !ok {
+		return
+	}
+	// A click within the Queued tab may reuse the last read of BambuBuddy; a
+	// first load or a refresh always goes down the tunnel (source_cache.go).
+	items, err := s.sources.queue.get(ctx, "queue", pagingWithin(paged, wantsCounts(c)),
+		s.bambu.ListQueue)
 	if err != nil {
 		obs.FromContext(ctx).Error("could not read the BambuBuddy queue", "error", err)
 		var reason bambubuddy.ReasonError
@@ -113,6 +120,16 @@ func (s *Server) listPrintingQueue(c *gin.Context) {
 		}
 		return out[i].Position < out[j].Position
 	})
+	// ?page=N is the Queued tab's page of what is still to run - the filter
+	// the tab used to apply to the whole queue in the browser - with the live
+	// count for its badge.
+	if paged {
+		live := liveQueueOnly(out)
+		page := slicePage(live, numbered)
+		page.Counts = map[string]int64{"live": int64(len(live))}
+		c.JSON(http.StatusOK, page)
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 

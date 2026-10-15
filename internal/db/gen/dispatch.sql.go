@@ -12,6 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countDispatch = `-- name: CountDispatch :one
+SELECT count(*) FROM dispatch_orders
+`
+
+func (q *Queries) CountDispatch(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countDispatch)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getDispatchByID = `-- name: GetDispatchByID :one
 SELECT id, order_id, carrier, tracking_number, status, dispatched_at, created_at, updated_at FROM dispatch_orders WHERE id = $1
 `
@@ -121,6 +132,47 @@ type ListDispatchPageParams struct {
 
 func (q *Queries) ListDispatchPage(ctx context.Context, arg ListDispatchPageParams) ([]DispatchOrder, error) {
 	rows, err := q.db.Query(ctx, listDispatchPage, arg.CursorCreatedAt, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DispatchOrder{}
+	for rows.Next() {
+		var i DispatchOrder
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderID,
+			&i.Carrier,
+			&i.TrackingNumber,
+			&i.Status,
+			&i.DispatchedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDispatchTable = `-- name: ListDispatchTable :many
+SELECT id, order_id, carrier, tracking_number, status, dispatched_at, created_at, updated_at FROM dispatch_orders
+ORDER BY created_at DESC, id DESC
+LIMIT $2 OFFSET $1
+`
+
+type ListDispatchTableParams struct {
+	PageOffset int32
+	PageLimit  int32
+}
+
+// One page of the Dispatch table, in ListDispatch's order, cut by LIMIT/OFFSET.
+func (q *Queries) ListDispatchTable(ctx context.Context, arg ListDispatchTableParams) ([]DispatchOrder, error) {
+	rows, err := q.db.Query(ctx, listDispatchTable, arg.PageOffset, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}

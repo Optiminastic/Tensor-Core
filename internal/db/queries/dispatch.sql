@@ -30,3 +30,12 @@ RETURNING *;
 -- dispatch_orders row created) - the pipeline_stage DISPATCHED signal.
 SELECT DISTINCT order_id FROM dispatch_orders
 WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[]) AND status = 'dispatched';
+
+-- name: CountDispatch :one
+SELECT count(*) FROM dispatch_orders;
+
+-- name: ListDispatchTable :many
+-- One page of the Dispatch table, in ListDispatch's order, cut by LIMIT/OFFSET.
+SELECT * FROM dispatch_orders
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');

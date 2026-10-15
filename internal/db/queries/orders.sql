@@ -208,3 +208,98 @@ SELECT id, order_number FROM orders WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 SELECT line_items FROM orders
 ORDER BY placed_at DESC NULLS LAST, imported_at DESC
 LIMIT sqlc.arg('limit_count');
+
+-- name: CountOrdersTable :one
+-- How many orders the Orders table's current filters select. Paired with
+-- ListOrdersTable, which takes the same filters and returns one page of them.
+--
+-- Every filter is optional, null meaning "any":
+--   fulfilled     true = Done tab, false = Unfulfilled tab
+--   without_jobs  true = No jobs tab
+--   only_ids      the Non-DNP tab's orders, resolved in Go by
+--                 IsGeneratedProduct - a rule SQL cannot restate
+--   financial_in / financial_not_in  a payment-status tab
+--   imported_from / imported_to      the period control, inclusive
+SELECT count(*) FROM orders o
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'))
+AND (
+    sqlc.narg('search')::text IS NULL
+    OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.customer_email ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.line_items::text ILIKE '%' || sqlc.narg('search')::text || '%'
+)
+AND (sqlc.narg('imported_from')::timestamptz IS NULL OR o.imported_at >= sqlc.narg('imported_from'))
+AND (sqlc.narg('imported_to')::timestamptz IS NULL OR o.imported_at <= sqlc.narg('imported_to'))
+AND (
+    sqlc.narg('fulfilled')::boolean IS NULL
+    OR (lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') = sqlc.narg('fulfilled')::boolean
+)
+AND (
+    sqlc.narg('without_jobs')::boolean IS NULL
+    OR NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+)
+AND (sqlc.narg('only_ids')::uuid[] IS NULL OR o.id = ANY(sqlc.narg('only_ids')::uuid[]))
+AND (sqlc.narg('financial_in')::text[] IS NULL OR o.financial_status = ANY(sqlc.narg('financial_in')::text[]))
+AND (
+    sqlc.narg('financial_not_in')::text[] IS NULL
+    OR NOT (o.financial_status = ANY(sqlc.narg('financial_not_in')::text[]))
+);
+
+-- name: ListOrdersTable :many
+-- One page of the Orders table: the filters of CountOrdersTable, in ListOrders'
+-- order (the customer's date, newest first), cut by LIMIT/OFFSET in Postgres.
+SELECT * FROM orders o
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'))
+AND (
+    sqlc.narg('search')::text IS NULL
+    OR o.order_number ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.customer_name ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.customer_email ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR o.line_items::text ILIKE '%' || sqlc.narg('search')::text || '%'
+)
+AND (sqlc.narg('imported_from')::timestamptz IS NULL OR o.imported_at >= sqlc.narg('imported_from'))
+AND (sqlc.narg('imported_to')::timestamptz IS NULL OR o.imported_at <= sqlc.narg('imported_to'))
+AND (
+    sqlc.narg('fulfilled')::boolean IS NULL
+    OR (lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') = sqlc.narg('fulfilled')::boolean
+)
+AND (
+    sqlc.narg('without_jobs')::boolean IS NULL
+    OR NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+)
+AND (sqlc.narg('only_ids')::uuid[] IS NULL OR o.id = ANY(sqlc.narg('only_ids')::uuid[]))
+AND (sqlc.narg('financial_in')::text[] IS NULL OR o.financial_status = ANY(sqlc.narg('financial_in')::text[]))
+AND (
+    sqlc.narg('financial_not_in')::text[] IS NULL
+    OR NOT (o.financial_status = ANY(sqlc.narg('financial_not_in')::text[]))
+)
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: CountOrdersByTab :one
+-- The Orders tab badges in one pass: every tab's count over the whole list (by
+-- source), never the search - the badges have always counted everything.
+SELECT
+    count(*) AS all_orders,
+    count(*) FILTER (WHERE lower(btrim(coalesce(o.fulfillment_status, ''))) <> 'fulfilled') AS unfulfilled,
+    count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)) AS no_jobs,
+    count(*) FILTER (WHERE o.id = ANY(sqlc.arg('non_dnp_ids')::uuid[])) AS non_dnp,
+    count(*) FILTER (WHERE lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') AS done
+FROM orders o
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));
+
+-- name: ListOrdersReadyToDispatch :many
+-- Orders whose every job is packed and that have no shipment booked: what the
+-- Dispatch tab offers to book. One grouped query, replacing a browser join of
+-- every live order, every job and every dispatch.
+--
+-- An order with no jobs is never ready - there is nothing packed to send.
+SELECT o.id, o.order_number, o.customer_name, count(j.id)::int AS job_count
+FROM orders o
+JOIN production_jobs j ON j.order_id = o.id
+WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'))
+  AND NOT EXISTS (SELECT 1 FROM dispatch_orders d WHERE d.order_id = o.id)
+GROUP BY o.id
+HAVING bool_and(j.packaging_status = 'packaged')
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC;

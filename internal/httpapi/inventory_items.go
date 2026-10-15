@@ -104,6 +104,12 @@ func (s *Server) registerInventoryItems(r *gin.Engine) {
 }
 
 func (s *Server) listInventoryItems(c *gin.Context) {
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listInventoryItemsTable(c, numbered)
+		return
+	}
 	rows, err := s.store.Q.ListInventoryItems(c.Request.Context())
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list inventory items.")
@@ -269,4 +275,55 @@ func (s *Server) deleteInventoryItem(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// inventoryItemsPage is one page of parts with what the tables say about the
+// whole shelf. TotalValue is null for a caller who may not see costs.
+type inventoryItemsPage struct {
+	pageEnvelope[inventoryItemResponse]
+	TotalValue *float64 `json:"total_value"`
+}
+
+// listInventoryItemsTable answers ?page=N for the Inventory page's items and
+// the registry's Components: searched by name or code and cut in Postgres,
+// with the counts and the stock value summed over everything.
+func (s *Server) listInventoryItemsTable(c *gin.Context, p offsetPage) {
+	ctx := c.Request.Context()
+	search := searchParam(c)
+	total, err := s.store.Q.CountInventoryItemsTable(ctx, search)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list inventory items.")
+		return
+	}
+	p = p.within(total)
+	rows, err := s.store.Q.ListInventoryItemsTable(ctx, gen.ListInventoryItemsTableParams{
+		Search: search, PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list inventory items.")
+		return
+	}
+	showCosts := costsVisibleTo(c)
+	items := make([]inventoryItemResponse, 0, len(rows))
+	for _, i := range rows {
+		item := toInventoryItemResponse(i)
+		if !showCosts {
+			// The same rule as the whole list: quantity and code, never price.
+			item.UnitPrice = nil
+		}
+		items = append(items, item)
+	}
+	out := inventoryItemsPage{pageEnvelope: newPageEnvelope(items, total, p)}
+	if wantsCounts(c) {
+		summary, err := s.store.Q.SummariseInventoryItems(ctx)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not count inventory items.")
+			return
+		}
+		out.Counts = map[string]int64{"": summary.Items, "without_code": summary.WithoutCode}
+		if showCosts {
+			out.TotalValue = &summary.TotalValue
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }

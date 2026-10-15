@@ -11,6 +11,21 @@ import (
 	"github.com/google/uuid"
 )
 
+const countInventoryItemsTable = `-- name: CountInventoryItemsTable :one
+SELECT count(*) FROM inventory_items
+WHERE $1::text IS NULL
+   OR name ILIKE '%' || $1::text || '%'
+   OR coalesce(code, '') ILIKE '%' || $1::text || '%'
+`
+
+// How many items the parts tables' search selects - by name or code.
+func (q *Queries) CountInventoryItemsTable(ctx context.Context, search *string) (int64, error) {
+	row := q.db.QueryRow(ctx, countInventoryItemsTable, search)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteInventoryItem = `-- name: DeleteInventoryItem :execrows
 DELETE FROM inventory_items WHERE id = $1
 `
@@ -86,6 +101,74 @@ func (q *Queries) ListInventoryItems(ctx context.Context) ([]InventoryItem, erro
 		return nil, err
 	}
 	return items, nil
+}
+
+const listInventoryItemsTable = `-- name: ListInventoryItemsTable :many
+SELECT id, name, quantity, unit, unit_price, code, created_at, updated_at FROM inventory_items
+WHERE $1::text IS NULL
+   OR name ILIKE '%' || $1::text || '%'
+   OR coalesce(code, '') ILIKE '%' || $1::text || '%'
+ORDER BY lower(name), id
+LIMIT $3 OFFSET $2
+`
+
+type ListInventoryItemsTableParams struct {
+	Search     *string
+	PageOffset int32
+	PageLimit  int32
+}
+
+// One page of items, alphabetically as ListInventoryItems, cut by LIMIT/OFFSET.
+func (q *Queries) ListInventoryItemsTable(ctx context.Context, arg ListInventoryItemsTableParams) ([]InventoryItem, error) {
+	rows, err := q.db.Query(ctx, listInventoryItemsTable, arg.Search, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []InventoryItem{}
+	for rows.Next() {
+		var i InventoryItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Quantity,
+			&i.Unit,
+			&i.UnitPrice,
+			&i.Code,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const summariseInventoryItems = `-- name: SummariseInventoryItems :one
+SELECT count(*) AS items,
+       count(*) FILTER (WHERE coalesce(code, '') = '') AS without_code,
+       coalesce(sum(unit_price * quantity) FILTER (WHERE unit_price IS NOT NULL), 0)::float8 AS total_value
+FROM inventory_items
+`
+
+type SummariseInventoryItemsRow struct {
+	Items       int64
+	WithoutCode int64
+	TotalValue  float64
+}
+
+// What the parts tables say about the whole shelf, whatever the page: how
+// many items, how many have no code, and what the stock is worth (unpriced
+// items count as nothing, as the Inventory page always counted them).
+func (q *Queries) SummariseInventoryItems(ctx context.Context) (SummariseInventoryItemsRow, error) {
+	row := q.db.QueryRow(ctx, summariseInventoryItems)
+	var i SummariseInventoryItemsRow
+	err := row.Scan(&i.Items, &i.WithoutCode, &i.TotalValue)
+	return i, err
 }
 
 const updateInventoryItem = `-- name: UpdateInventoryItem :one

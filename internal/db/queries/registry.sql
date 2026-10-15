@@ -516,3 +516,115 @@ UPDATE design_colour_parts
 SET colour_hex = sqlc.narg('colour_hex')
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: CountSKUPipelinesTable :one
+-- How many SKUs the SKU Pipelines panel's search selects - the same union of
+-- variants, jobs and mappings ListSKUPipelines reads, one row per SKU.
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT * FROM skus s
+    WHERE sqlc.narg('search')::text IS NULL
+       OR s.display_sku ILIKE '%' || sqlc.narg('search')::text || '%'
+       OR s.product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+       OR s.product_code ILIKE '%' || sqlc.narg('search')::text || '%'
+)
+SELECT count(*) FROM matching;
+
+-- name: ListSKUPipelinesTable :many
+-- One page of SKUs - cut by LIMIT/OFFSET over SKUs, not over mapping rows, so
+-- a SKU's three families are never split across pages - with their mappings.
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT * FROM skus s
+    WHERE sqlc.narg('search')::text IS NULL
+       OR s.display_sku ILIKE '%' || sqlc.narg('search')::text || '%'
+       OR s.product_name ILIKE '%' || sqlc.narg('search')::text || '%'
+       OR s.product_code ILIKE '%' || sqlc.narg('search')::text || '%'
+),
+page AS (
+    SELECT * FROM matching ORDER BY sku
+    LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset')
+)
+SELECT p.sku, p.display_sku, p.product_code, p.product_name,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM page p
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = p.sku
+ORDER BY p.sku, sp.machine_family;
+
+-- name: CountVariantsForProduct :one
+-- How many variants one product has, and how many parts they hold between
+-- them - the figures the product card and its delete dialog state, without
+-- reading the variants themselves.
+SELECT count(*) AS variant_count,
+       coalesce(sum((SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id)), 0)::bigint AS part_count
+FROM product_variants v
+WHERE v.product_id = sqlc.arg('product_id');
+
+-- name: ListVariantsForProductPage :many
+-- One page of a product's variants: ListVariantsForProduct's columns and order,
+-- cut by LIMIT/OFFSET in Postgres.
+SELECT v.*,
+       (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
+          FROM product_variant_options pvo
+          JOIN product_option_values ov ON ov.id = pvo.option_value_id
+          JOIN product_options o ON o.id = ov.option_id
+         WHERE pvo.variant_id = v.id) AS option_codes,
+       (SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id) AS part_count
+FROM product_variants v
+WHERE v.product_id = sqlc.arg('product_id')
+ORDER BY lower(v.name), v.id
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: ListBomForVariants :many
+-- The bill-of-materials lines of just these variants - one page's worth -
+-- with ListBomForProduct's columns.
+SELECT b.variant_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM variant_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.variant_id = ANY(sqlc.arg('variant_ids')::uuid[])
+ORDER BY lower(i.name);

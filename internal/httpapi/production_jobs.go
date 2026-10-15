@@ -44,11 +44,12 @@ type productionJobResponse struct {
 	// Sent so a list does not have to read it out of the job number, which
 	// holds only for jobs numbered after their order.
 	OrderNumber *string `json:"order_number"`
-	BatchID     *string `json:"batch_id"`
-	// BatchNumber is the bed's own name, for a row that has to send somebody
-	// to go and look at it - a design file that went stale after its bed was
-	// locked cannot be withdrawn, only replaced.
+	// BatchNumber is the bed's own number, e.g. B-0412, or null when the job
+	// is on no bed. Two readers wanted it: a paged table labels a row without
+	// fetching every batch to look it up, and a designer whose stale design
+	// file sits on a locked bed cannot withdraw it - only go and look at it.
 	BatchNumber           *string  `json:"batch_number"`
+	BatchID               *string  `json:"batch_id"`
 	Description           string   `json:"description"`
 	Quantity              int32    `json:"quantity"`
 	Status                string   `json:"status"`
@@ -428,6 +429,9 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
 		dto := productionJobDTO(j, batchStatus, dispatched, colourGates)
 		if j.BatchID != nil {
+			// Non-empty as well as present: an empty number would draw an
+			// empty chip on the row, which reads as a bed with no name
+			// rather than as a job with no bed.
 			if number, ok := batchNumberByID[*j.BatchID]; ok && number != "" {
 				dto.BatchNumber = &number
 			}
@@ -511,6 +515,15 @@ func filterByPipelineStage(jobs []productionJobResponse, stage string) []product
 }
 
 func (s *Server) listProductionJobs(c *gin.Context) {
+	// ?page=N is a job table's numbered page (jobs_table.go): the Production
+	// Jobs page or a packaging-station queue, filtered and cut in Postgres.
+	// Without it, everything below answers exactly as before.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listJobsTable(c, numbered)
+		return
+	}
 	page, ok := parsePageParams(c)
 	if !ok {
 		return

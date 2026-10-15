@@ -130,14 +130,20 @@ func (s *Server) listCallLogs(c *gin.Context) {
 	// number - so without this filter a message could supply the checkout
 	// details for a call, and the two channels would blur together on a
 	// page that exists to tell them apart.
-	voiceOnly := channelVoice
-	records, err := s.store.Q.ListCheckoutCalls(ctx, gen.ListCheckoutCallsParams{
-		BrandSlug: slug, Channel: &voiceOnly, RowLimit: 500,
-	})
-	if err != nil {
+	//
+	// Both CALLS, though: the first and the follow-up. Without the follow-up's
+	// rows its attempt falls back to the phone match and borrows the first
+	// call's row - the right checkout, but by luck rather than by id.
+	var records []gen.AbandonedCheckoutCall
+	for _, channel := range []string{channelVoice, channelVoiceFollowUp} {
+		rows, err := s.store.Q.ListCheckoutCalls(ctx, gen.ListCheckoutCallsParams{
+			BrandSlug: slug, Channel: &channel, RowLimit: 500,
+		})
 		// A call log is still worth reading without the mapping: Sarvam's half
 		// is the half that says what happened.
-		records = nil
+		if err == nil {
+			records = append(records, rows...)
+		}
 	}
 
 	byAttempt := make(map[string]int, len(records))

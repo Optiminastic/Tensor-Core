@@ -26,6 +26,113 @@ func (q *Queries) ClearOrderJobCreationFailure(ctx context.Context, id uuid.UUID
 	return err
 }
 
+const countOrdersByTab = `-- name: CountOrdersByTab :one
+SELECT
+    count(*) AS all_orders,
+    count(*) FILTER (WHERE lower(btrim(coalesce(o.fulfillment_status, ''))) <> 'fulfilled') AS unfulfilled,
+    count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)) AS no_jobs,
+    count(*) FILTER (WHERE o.id = ANY($1::uuid[])) AS non_dnp,
+    count(*) FILTER (WHERE lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') AS done
+FROM orders o
+WHERE ($2::text IS NULL OR o.source = $2)
+`
+
+type CountOrdersByTabParams struct {
+	NonDnpIds []uuid.UUID
+	Source    *string
+}
+
+type CountOrdersByTabRow struct {
+	AllOrders   int64
+	Unfulfilled int64
+	NoJobs      int64
+	NonDnp      int64
+	Done        int64
+}
+
+// The Orders tab badges in one pass: every tab's count over the whole list (by
+// source), never the search - the badges have always counted everything.
+func (q *Queries) CountOrdersByTab(ctx context.Context, arg CountOrdersByTabParams) (CountOrdersByTabRow, error) {
+	row := q.db.QueryRow(ctx, countOrdersByTab, arg.NonDnpIds, arg.Source)
+	var i CountOrdersByTabRow
+	err := row.Scan(
+		&i.AllOrders,
+		&i.Unfulfilled,
+		&i.NoJobs,
+		&i.NonDnp,
+		&i.Done,
+	)
+	return i, err
+}
+
+const countOrdersTable = `-- name: CountOrdersTable :one
+SELECT count(*) FROM orders o
+WHERE ($1::text IS NULL OR o.source = $1)
+AND (
+    $2::text IS NULL
+    OR o.order_number ILIKE '%' || $2::text || '%'
+    OR o.customer_name ILIKE '%' || $2::text || '%'
+    OR o.customer_email ILIKE '%' || $2::text || '%'
+    OR o.line_items::text ILIKE '%' || $2::text || '%'
+)
+AND ($3::timestamptz IS NULL OR o.imported_at >= $3)
+AND ($4::timestamptz IS NULL OR o.imported_at <= $4)
+AND (
+    $5::boolean IS NULL
+    OR (lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') = $5::boolean
+)
+AND (
+    $6::boolean IS NULL
+    OR NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+)
+AND ($7::uuid[] IS NULL OR o.id = ANY($7::uuid[]))
+AND ($8::text[] IS NULL OR o.financial_status = ANY($8::text[]))
+AND (
+    $9::text[] IS NULL
+    OR NOT (o.financial_status = ANY($9::text[]))
+)
+`
+
+type CountOrdersTableParams struct {
+	Source         *string
+	Search         *string
+	ImportedFrom   pgtype.Timestamptz
+	ImportedTo     pgtype.Timestamptz
+	Fulfilled      *bool
+	WithoutJobs    *bool
+	OnlyIds        []uuid.UUID
+	FinancialIn    []string
+	FinancialNotIn []string
+}
+
+// How many orders the Orders table's current filters select. Paired with
+// ListOrdersTable, which takes the same filters and returns one page of them.
+//
+// Every filter is optional, null meaning "any":
+//
+//	fulfilled     true = Done tab, false = Unfulfilled tab
+//	without_jobs  true = No jobs tab
+//	only_ids      the Non-DNP tab's orders, resolved in Go by
+//	              IsGeneratedProduct - a rule SQL cannot restate
+//	financial_in / financial_not_in  a payment-status tab
+//	imported_from / imported_to      the period control, inclusive
+func (q *Queries) CountOrdersTable(ctx context.Context, arg CountOrdersTableParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countOrdersTable,
+		arg.Source,
+		arg.Search,
+		arg.ImportedFrom,
+		arg.ImportedTo,
+		arg.Fulfilled,
+		arg.WithoutJobs,
+		arg.OnlyIds,
+		arg.FinancialIn,
+		arg.FinancialNotIn,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getOrderByID = `-- name: GetOrderByID :one
 SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders WHERE id = $1
 `
@@ -371,6 +478,168 @@ func (q *Queries) ListOrdersPage(ctx context.Context, arg ListOrdersPageParams) 
 		arg.CursorID,
 		arg.Source,
 		arg.Search,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Order{}
+	for rows.Next() {
+		var i Order
+		if err := rows.Scan(
+			&i.ID,
+			&i.ShopConnectionID,
+			&i.ShopifyOrderID,
+			&i.OrderNumber,
+			&i.CustomerName,
+			&i.ShopifyCustomerID,
+			&i.CustomerEmail,
+			&i.CustomerPhone,
+			&i.FinancialStatus,
+			&i.TotalPrice,
+			&i.Currency,
+			&i.LineItems,
+			&i.Status,
+			&i.Source,
+			&i.ImportedAt,
+			&i.JobCreationError,
+			&i.JobCreationFailedAt,
+			&i.PlacedAt,
+			&i.Note,
+			&i.Attributes,
+			&i.Tags,
+			&i.FulfillmentStatus,
+			&i.DeliveryStatus,
+			&i.ReturnStatus,
+			&i.SourceName,
+			&i.SubtotalPrice,
+			&i.TotalDiscounts,
+			&i.TotalShipping,
+			&i.TotalReceived,
+			&i.DiscountTitle,
+			&i.ShippingTitle,
+			&i.ShippingAddress,
+			&i.BillingAddress,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrdersReadyToDispatch = `-- name: ListOrdersReadyToDispatch :many
+SELECT o.id, o.order_number, o.customer_name, count(j.id)::int AS job_count
+FROM orders o
+JOIN production_jobs j ON j.order_id = o.id
+WHERE ($1::text IS NULL OR o.source = $1)
+  AND NOT EXISTS (SELECT 1 FROM dispatch_orders d WHERE d.order_id = o.id)
+GROUP BY o.id
+HAVING bool_and(j.packaging_status = 'packaged')
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC
+`
+
+type ListOrdersReadyToDispatchRow struct {
+	ID           uuid.UUID
+	OrderNumber  string
+	CustomerName *string
+	JobCount     int32
+}
+
+// Orders whose every job is packed and that have no shipment booked: what the
+// Dispatch tab offers to book. One grouped query, replacing a browser join of
+// every live order, every job and every dispatch.
+//
+// An order with no jobs is never ready - there is nothing packed to send.
+func (q *Queries) ListOrdersReadyToDispatch(ctx context.Context, source *string) ([]ListOrdersReadyToDispatchRow, error) {
+	rows, err := q.db.Query(ctx, listOrdersReadyToDispatch, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrdersReadyToDispatchRow{}
+	for rows.Next() {
+		var i ListOrdersReadyToDispatchRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderNumber,
+			&i.CustomerName,
+			&i.JobCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrdersTable = `-- name: ListOrdersTable :many
+SELECT id, shop_connection_id, shopify_order_id, order_number, customer_name, shopify_customer_id, customer_email, customer_phone, financial_status, total_price, currency, line_items, status, source, imported_at, job_creation_error, job_creation_failed_at, placed_at, note, attributes, tags, fulfillment_status, delivery_status, return_status, source_name, subtotal_price, total_discounts, total_shipping, total_received, discount_title, shipping_title, shipping_address, billing_address, created_at, updated_at FROM orders o
+WHERE ($1::text IS NULL OR o.source = $1)
+AND (
+    $2::text IS NULL
+    OR o.order_number ILIKE '%' || $2::text || '%'
+    OR o.customer_name ILIKE '%' || $2::text || '%'
+    OR o.customer_email ILIKE '%' || $2::text || '%'
+    OR o.line_items::text ILIKE '%' || $2::text || '%'
+)
+AND ($3::timestamptz IS NULL OR o.imported_at >= $3)
+AND ($4::timestamptz IS NULL OR o.imported_at <= $4)
+AND (
+    $5::boolean IS NULL
+    OR (lower(btrim(coalesce(o.fulfillment_status, ''))) = 'fulfilled') = $5::boolean
+)
+AND (
+    $6::boolean IS NULL
+    OR NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.order_id = o.id)
+)
+AND ($7::uuid[] IS NULL OR o.id = ANY($7::uuid[]))
+AND ($8::text[] IS NULL OR o.financial_status = ANY($8::text[]))
+AND (
+    $9::text[] IS NULL
+    OR NOT (o.financial_status = ANY($9::text[]))
+)
+ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC
+LIMIT $11 OFFSET $10
+`
+
+type ListOrdersTableParams struct {
+	Source         *string
+	Search         *string
+	ImportedFrom   pgtype.Timestamptz
+	ImportedTo     pgtype.Timestamptz
+	Fulfilled      *bool
+	WithoutJobs    *bool
+	OnlyIds        []uuid.UUID
+	FinancialIn    []string
+	FinancialNotIn []string
+	PageOffset     int32
+	PageLimit      int32
+}
+
+// One page of the Orders table: the filters of CountOrdersTable, in ListOrders'
+// order (the customer's date, newest first), cut by LIMIT/OFFSET in Postgres.
+func (q *Queries) ListOrdersTable(ctx context.Context, arg ListOrdersTableParams) ([]Order, error) {
+	rows, err := q.db.Query(ctx, listOrdersTable,
+		arg.Source,
+		arg.Search,
+		arg.ImportedFrom,
+		arg.ImportedTo,
+		arg.Fulfilled,
+		arg.WithoutJobs,
+		arg.OnlyIds,
+		arg.FinancialIn,
+		arg.FinancialNotIn,
+		arg.PageOffset,
 		arg.PageLimit,
 	)
 	if err != nil {

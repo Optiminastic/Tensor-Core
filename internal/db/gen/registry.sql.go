@@ -99,6 +99,71 @@ func (q *Queries) ClearVariantOptions(ctx context.Context, variantID uuid.UUID) 
 	return err
 }
 
+const countSKUPipelinesTable = `-- name: CountSKUPipelinesTable :one
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT sku, display_sku, product_code, product_name FROM skus s
+    WHERE $1::text IS NULL
+       OR s.display_sku ILIKE '%' || $1::text || '%'
+       OR s.product_name ILIKE '%' || $1::text || '%'
+       OR s.product_code ILIKE '%' || $1::text || '%'
+)
+SELECT count(*) FROM matching
+`
+
+// How many SKUs the SKU Pipelines panel's search selects - the same union of
+// variants, jobs and mappings ListSKUPipelines reads, one row per SKU.
+func (q *Queries) CountSKUPipelinesTable(ctx context.Context, search *string) (int64, error) {
+	row := q.db.QueryRow(ctx, countSKUPipelinesTable, search)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countVariantsForProduct = `-- name: CountVariantsForProduct :one
+SELECT count(*) AS variant_count,
+       coalesce(sum((SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id)), 0)::bigint AS part_count
+FROM product_variants v
+WHERE v.product_id = $1
+`
+
+type CountVariantsForProductRow struct {
+	VariantCount int64
+	PartCount    int64
+}
+
+// How many variants one product has, and how many parts they hold between
+// them - the figures the product card and its delete dialog state, without
+// reading the variants themselves.
+func (q *Queries) CountVariantsForProduct(ctx context.Context, productID uuid.UUID) (CountVariantsForProductRow, error) {
+	row := q.db.QueryRow(ctx, countVariantsForProduct, productID)
+	var i CountVariantsForProductRow
+	err := row.Scan(&i.VariantCount, &i.PartCount)
+	return i, err
+}
+
 const deleteOptionValue = `-- name: DeleteOptionValue :exec
 DELETE FROM product_option_values WHERE id = $1
 `
@@ -760,6 +825,55 @@ func (q *Queries) ListBomForProduct(ctx context.Context, productID uuid.UUID) ([
 	return items, nil
 }
 
+const listBomForVariants = `-- name: ListBomForVariants :many
+SELECT b.variant_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM variant_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.variant_id = ANY($1::uuid[])
+ORDER BY lower(i.name)
+`
+
+type ListBomForVariantsRow struct {
+	VariantID uuid.UUID
+	Quantity  pgtype.Numeric
+	ItemID    uuid.UUID
+	ItemName  string
+	ItemCode  *string
+	Unit      string
+	UnitPrice pgtype.Numeric
+}
+
+// The bill-of-materials lines of just these variants - one page's worth -
+// with ListBomForProduct's columns.
+func (q *Queries) ListBomForVariants(ctx context.Context, variantIds []uuid.UUID) ([]ListBomForVariantsRow, error) {
+	rows, err := q.db.Query(ctx, listBomForVariants, variantIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBomForVariantsRow{}
+	for rows.Next() {
+		var i ListBomForVariantsRow
+		if err := rows.Scan(
+			&i.VariantID,
+			&i.Quantity,
+			&i.ItemID,
+			&i.ItemName,
+			&i.ItemCode,
+			&i.Unit,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDesignColourParts = `-- name: ListDesignColourParts :many
 SELECT id, product_id, role, part_name, colour_hex, position, created_at FROM design_colour_parts
 WHERE product_id = $1
@@ -1185,6 +1299,94 @@ func (q *Queries) ListSKUPipelines(ctx context.Context) ([]ListSKUPipelinesRow, 
 	return items, nil
 }
 
+const listSKUPipelinesTable = `-- name: ListSKUPipelinesTable :many
+WITH known AS (
+    SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
+           p.name AS product_name
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.sku IS NOT NULL AND v.status <> 'retired' AND p.status <> 'retired'
+    UNION
+    SELECT lower(j.sku)::text, j.sku, ''::varchar, coalesce(j.product_name, '')::varchar
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+    UNION
+    SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
+    FROM sku_slicer_pipelines sp
+),
+skus AS (
+    SELECT k.sku,
+           max(k.display)::text      AS display_sku,
+           max(k.product_code)::text AS product_code,
+           max(k.product_name)::text AS product_name
+    FROM known k
+    GROUP BY k.sku
+),
+matching AS (
+    -- The panel's search box, over the same three values it searched.
+    SELECT sku, display_sku, product_code, product_name FROM skus s
+    WHERE $1::text IS NULL
+       OR s.display_sku ILIKE '%' || $1::text || '%'
+       OR s.product_name ILIKE '%' || $1::text || '%'
+       OR s.product_code ILIKE '%' || $1::text || '%'
+),
+page AS (
+    SELECT sku, display_sku, product_code, product_name FROM matching ORDER BY sku
+    LIMIT $3 OFFSET $2
+)
+SELECT p.sku, p.display_sku, p.product_code, p.product_name,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM page p
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = p.sku
+ORDER BY p.sku, sp.machine_family
+`
+
+type ListSKUPipelinesTableParams struct {
+	Search     *string
+	PageOffset int32
+	PageLimit  int32
+}
+
+type ListSKUPipelinesTableRow struct {
+	Sku           string
+	DisplaySku    string
+	ProductCode   string
+	ProductName   string
+	MachineFamily *string
+	PipelineID    *int32
+	PipelineName  *string
+}
+
+// One page of SKUs - cut by LIMIT/OFFSET over SKUs, not over mapping rows, so
+// a SKU's three families are never split across pages - with their mappings.
+func (q *Queries) ListSKUPipelinesTable(ctx context.Context, arg ListSKUPipelinesTableParams) ([]ListSKUPipelinesTableRow, error) {
+	rows, err := q.db.Query(ctx, listSKUPipelinesTable, arg.Search, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSKUPipelinesTableRow{}
+	for rows.Next() {
+		var i ListSKUPipelinesTableRow
+		if err := rows.Scan(
+			&i.Sku,
+			&i.DisplaySku,
+			&i.ProductCode,
+			&i.ProductName,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSellableVariants = `-- name: ListSellableVariants :many
 SELECT v.id, v.sku, v.name AS variant_name, v.status,
        p.name AS product_name, p.code AS product_code
@@ -1368,6 +1570,70 @@ func (q *Queries) ListVariantsForProduct(ctx context.Context, productID uuid.UUI
 	items := []ListVariantsForProductRow{}
 	for rows.Next() {
 		var i ListVariantsForProductRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Sku,
+			&i.Name,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.OptionCodes,
+			&i.PartCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVariantsForProductPage = `-- name: ListVariantsForProductPage :many
+SELECT v.id, v.product_id, v.sku, v.name, v.status, v.created_at, v.updated_at,
+       (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
+          FROM product_variant_options pvo
+          JOIN product_option_values ov ON ov.id = pvo.option_value_id
+          JOIN product_options o ON o.id = ov.option_id
+         WHERE pvo.variant_id = v.id) AS option_codes,
+       (SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id) AS part_count
+FROM product_variants v
+WHERE v.product_id = $1
+ORDER BY lower(v.name), v.id
+LIMIT $3 OFFSET $2
+`
+
+type ListVariantsForProductPageParams struct {
+	ProductID  uuid.UUID
+	PageOffset int32
+	PageLimit  int32
+}
+
+type ListVariantsForProductPageRow struct {
+	ID          uuid.UUID
+	ProductID   uuid.UUID
+	Sku         *string
+	Name        string
+	Status      string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+	OptionCodes []byte
+	PartCount   int64
+}
+
+// One page of a product's variants: ListVariantsForProduct's columns and order,
+// cut by LIMIT/OFFSET in Postgres.
+func (q *Queries) ListVariantsForProductPage(ctx context.Context, arg ListVariantsForProductPageParams) ([]ListVariantsForProductPageRow, error) {
+	rows, err := q.db.Query(ctx, listVariantsForProductPage, arg.ProductID, arg.PageOffset, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVariantsForProductPageRow{}
+	for rows.Next() {
+		var i ListVariantsForProductPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ProductID,

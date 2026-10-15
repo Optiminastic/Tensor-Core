@@ -64,3 +64,19 @@ WHERE lower(trim(colour_map.colour_name)) = (
 
 -- name: DeleteColourMapEntry :execrows
 DELETE FROM colour_map WHERE id = sqlc.arg('id');
+
+-- name: CountColourMapNames :one
+-- How many colours the map names - the Colour map table pages by colour, so
+-- a colour's alternatives never split across pages.
+SELECT count(DISTINCT colour_name) FROM colour_map;
+
+-- name: ListColourMapTable :many
+-- One page of colours (LIMIT/OFFSET over names), with every entry under them.
+WITH names AS (
+    SELECT DISTINCT colour_name FROM colour_map
+    ORDER BY colour_name
+    LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset')
+)
+SELECT cm.* FROM colour_map cm
+JOIN names n ON n.colour_name = cm.colour_name
+ORDER BY cm.colour_name, cm.is_primary DESC, cm.hex;

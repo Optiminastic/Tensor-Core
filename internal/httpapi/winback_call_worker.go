@@ -1,9 +1,18 @@
 package httpapi
 
-// The scheduler that rings a customer a few minutes after they walk away.
+// The scheduler that rings a customer as soon as they walk away.
 //
-// It sweeps every connected store's abandoned checkouts, picks the ones that
-// have gone quiet long enough, and places one call each. The sweep is
+// It sweeps every connected store's abandoned checkouts and reaches each new
+// one at most three times:
+//
+//	T+0   the first call (agent version 8) and the WhatsApp message, which
+//	      carries a ten per cent code that lasts thirty minutes
+//	T+20  a second call (agent version 9) if the basket is still unpaid -
+//	      timed to land with ten minutes left on that code
+//
+// T is the first sweep that sees the checkout. The follow-up is timed from
+// the first call rather than from the checkout, because the code's clock
+// starts when it is sent. The sweep is
 // deliberately dull: the interesting decisions are all about who NOT to call,
 // and each of them is a separate, named rule below.
 //
@@ -24,6 +33,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/config"
@@ -101,7 +111,16 @@ type candidate struct {
 const (
 	channelVoice    = "voice"
 	channelWhatsApp = "whatsapp"
+	// channelVoiceFollowUp is the second call. A channel of its own in the
+	// ledger, so it has its own claim - one follow-up per person, ever - and
+	// the first call's row is never touched by it.
+	channelVoiceFollowUp = "voice_followup"
 )
+
+// twoCallFlowMark keys the two-call flow's own start in winback_watermarks,
+// beside the brand's original mark. A row rather than a migration, so it is
+// set by the worker that runs the flow, at the moment it first runs it.
+const twoCallFlowMark = "#two-call"
 
 // winbackChannel is one way of reaching a customer in this sweep.
 type winbackChannel struct {
@@ -110,6 +129,9 @@ type winbackChannel struct {
 	// rule and logs who it WOULD have reached, contacting nobody.
 	Enabled   bool
 	MaxPerRun int
+	// AgentVersion is the Sarvam agent revision a call on this channel runs.
+	// Unused by WhatsApp.
+	AgentVersion int
 }
 
 // winbackChannels decides which channels this sweep will run.
@@ -127,13 +149,21 @@ func winbackChannels(cfg config.Settings, voice, whatsapp bool) []winbackChannel
 	if voice {
 		out = append(out, winbackChannel{
 			Name: channelVoice, Enabled: cfg.WinbackCallsEnabled,
-			MaxPerRun: cfg.WinbackCallMaxPerRun,
+			MaxPerRun: cfg.WinbackCallMaxPerRun, AgentVersion: cfg.WinbackCallAgentVersion,
 		})
 	}
 	if whatsapp {
 		out = append(out, winbackChannel{
 			Name: channelWhatsApp, Enabled: cfg.WinbackWhatsAppEnabled,
 			MaxPerRun: cfg.WinbackWhatsAppMaxPerRun,
+		})
+	}
+	// The follow-up rides the calling switch: it is a phone call, and the
+	// consent to ring people is one decision, not two.
+	if voice {
+		out = append(out, winbackChannel{
+			Name: channelVoiceFollowUp, Enabled: cfg.WinbackCallsEnabled,
+			MaxPerRun: cfg.WinbackCallMaxPerRun, AgentVersion: cfg.WinbackFollowUpAgentVersion,
 		})
 	}
 	return out
@@ -190,6 +220,23 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	if err != nil {
 		return fmt.Errorf("read the watch mark for %s: %w", slug, err)
 	}
+	// When the TWO-CALL flow started for this brand: set on the first sweep
+	// this version of the worker makes, and kept from then on. A checkout
+	// from before it belongs to the old flow - it was rung, or deliberately
+	// not, under the old rules - and must not be picked up by the new one.
+	// Without this, the deploy itself would ring every open cart of the last
+	// day that the old flow had not reached.
+	//
+	// Fails CLOSED: no mark, no sweep. A sweep that cannot tell old carts
+	// from new is one that may ring the old ones.
+	flow, err := w.server.store.Q.EnsureWinbackWatermark(ctx, slug+twoCallFlowMark)
+	if err != nil {
+		return fmt.Errorf("read the two-call flow's start for %s: %w", slug, err)
+	}
+	watchFrom := mark.WatchFrom.Time
+	if flow.WatchFrom.Time.After(watchFrom) {
+		watchFrom = flow.WatchFrom.Time
+	}
 
 	// Read from the LATER of the watch mark and the age limit. Before the mark
 	// there is nothing to contact, and a worker watching for a month should
@@ -199,14 +246,12 @@ func (w *WinbackCallWorker) sweepBrand(ctx context.Context, slug string) error {
 	// by design - it names one checkout deliberately - and narrowing the fetch
 	// here would mean the named checkout never arrives to be allowed, so the
 	// testing gate would silently do nothing. Found exactly that way.
-	watchFrom := mark.WatchFrom.Time
 	since := time.Now().Add(-time.Duration(cfg.WinbackCallMaxAgeHours) * time.Hour)
 	if len(cfg.WinbackCallOnly) == 0 && watchFrom.After(since) {
 		since = watchFrom
 	}
-	// ONE Shopify read for every channel. Both fire at the same T+10 off the
-	// same list, so a second fetch would be a second page to answer the same
-	// question.
+	// ONE Shopify read for every channel. They all work off the same list, so
+	// a second fetch would be a second page to answer the same question.
 	checkouts, err := w.server.shopify.ListAbandonedCheckouts(ctx, shop, token, 0, since)
 	if err != nil {
 		return fmt.Errorf("list abandoned checkouts for %s: %w", slug, err)
@@ -241,6 +286,16 @@ func (w *WinbackCallWorker) runChannel(
 	// "Already done" is PER CHANNEL now: a customer who was rung is still due
 	// a message.
 	ready := w.eligible(checkouts, doneFor(contacts, ch.Name), watchFrom)
+	if ch.Name == channelVoiceFollowUp {
+		ready = dueForFollowUp(ready, checkouts, contacts, followUpWindow{
+			Now:   time.Now(),
+			After: time.Duration(w.server.cfg.WinbackFollowUpDelayMinutes) * time.Minute,
+			// Past the code's expiry the follow-up has nothing to say: its
+			// whole script is "ten minutes left". This is also what keeps a
+			// deploy, or an outage, from ringing a backlog of old first calls.
+			Before: winbackCodeValidFor,
+		})
+	}
 	if len(ready) == 0 {
 		w.logger.Info("win-back: nothing due",
 			"brand", slug, "channel", ch.Name, "checkouts", len(checkouts))
@@ -273,8 +328,8 @@ func (w *WinbackCallWorker) runChannel(
 		}
 		var ok bool
 		switch ch.Name {
-		case channelVoice:
-			ok = w.call(ctx, slug, c, voice)
+		case channelVoice, channelVoiceFollowUp:
+			ok = w.call(ctx, slug, c, voice, ch)
 		case channelWhatsApp:
 			ok = w.message(ctx, slug, c, messenger, shop, token, linkHost)
 		}
@@ -322,8 +377,9 @@ func (w *WinbackCallWorker) eligible(
 		if checkout.CompletedAt != nil {
 			continue
 		}
-		// Too soon. Ringing at four minutes catches somebody still typing
-		// their card number.
+		// Too soon. Zero by default - the shop wants the first call the
+		// moment the checkout appears - but kept as a rule, so a delay is a
+		// config change rather than a code change.
 		if now.Sub(checkout.CreatedAt) < delay {
 			continue
 		}
@@ -353,37 +409,89 @@ func (w *WinbackCallWorker) eligible(
 	return out
 }
 
+// followUpWindow is when, relative to the first call, a second one is due.
+type followUpWindow struct {
+	Now time.Time
+	// After is the earliest a follow-up may go; Before is the point past
+	// which there is no reason left to send one.
+	After, Before time.Duration
+}
+
+// dueForFollowUp keeps the candidates whose first call went out inside the
+// window and who have not paid since.
+//
+// Pure, so the rule is testable without a database or a clock.
+func dueForFollowUp(
+	ready []candidate, checkouts []shopify.AbandonedCheckout,
+	contacts []gen.ListWinbackContactsRow, win followUpWindow,
+) []candidate {
+	// When each number's first call was placed. Only a PLACED call counts: a
+	// claim that never settled means nobody was rung, and the follow-up's
+	// script assumes they were.
+	firstCall := make(map[string]time.Time, len(contacts))
+	for _, row := range contacts {
+		if row.Channel == channelVoice && row.Status == "placed" && row.LastAttemptAt.Valid {
+			firstCall[row.Phone] = row.LastAttemptAt.Time
+		}
+	}
+
+	out := make([]candidate, 0, len(ready))
+	for _, c := range ready {
+		at, called := firstCall[c.phone]
+		if !called {
+			continue
+		}
+		since := win.Now.Sub(at)
+		if since < win.After || since >= win.Before {
+			continue
+		}
+		// eligible() already drops this basket if it was paid for. This is
+		// the other way to have bought: the same person starting a fresh
+		// checkout and completing that one, which leaves the abandoned one
+		// open in Shopify's list for ever.
+		if paidSince(checkouts, c) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// paidSince reports whether this person completed a checkout started no
+// earlier than the abandoned one.
+func paidSince(checkouts []shopify.AbandonedCheckout, c candidate) bool {
+	for _, other := range checkouts {
+		if other.CompletedAt == nil || other.CreatedAt.Before(c.checkout.CreatedAt) {
+			continue
+		}
+		if normaliseIndianMobile(other.Phone) == c.phone {
+			return true
+		}
+	}
+	return false
+}
+
 // call claims the number, places the call, and records what happened.
 //
 // Returns whether a call actually reached Sarvam.
 func (w *WinbackCallWorker) call(
-	ctx context.Context, slug string, c candidate, client *sarvam.Client,
+	ctx context.Context, slug string, c candidate, client *sarvam.Client, ch winbackChannel,
 ) bool {
 	// CLAIMED BEFORE DIALLING. A row written afterwards leaves a window in
 	// which this process can die with the customer's phone ringing and nothing
 	// recorded - and the next sweep rings them again. Claiming first means a
 	// crash costs a missed call, which is recoverable, rather than a repeated
 	// one, which is not.
-	claim, err := w.server.store.Q.ClaimWinbackContact(ctx, gen.ClaimWinbackContactParams{
-		ID: uuid.New(), BrandSlug: slug,
-		CheckoutID: c.checkout.ID, CheckoutName: c.checkout.Name,
-		CustomerName: c.checkout.CustomerName, Phone: c.phone,
-		Channel: channelVoice,
-	})
+	claim, err := w.claimFor(ctx, slug, c, ch.Name)
 	if err != nil {
-		// No row: another replica claimed this number between our read and
-		// our write. Exactly what the unique index is for - but LOGGED, not
-		// silent, because until 0098 the index and the read asked different
-		// questions and a legitimate candidate vanished here on every sweep
-		// with nothing to show for it.
-		w.logger.Info("win-back: already claimed on this channel",
-			"brand", slug, "channel", channelVoice, "checkout", c.checkout.Name)
+		w.claimRefused(slug, ch.Name, c, err)
 		return false
 	}
 
 	result, callErr := client.Call(ctx, sarvam.CallRequest{
 		CustomerNumber: c.phone,
 		Variables:      w.server.agentVariables(requestFor(c)),
+		AgentVersion:   ch.AgentVersion,
 	})
 	if callErr != nil {
 		// Nothing rang, so the number goes back. Otherwise one refusal - no
@@ -391,7 +499,7 @@ func (w *WinbackCallWorker) call(
 		// call that never happened.
 		_ = w.server.store.Q.ReleaseWinbackContact(ctx, claim.ID)
 		w.logger.Error("win-back call refused",
-			"brand", slug, "checkout", c.checkout.Name, "error", callErr)
+			"brand", slug, "channel", ch.Name, "checkout", c.checkout.Name, "error", callErr)
 		return false
 	}
 
@@ -409,7 +517,8 @@ func (w *WinbackCallWorker) call(
 	// The customer's number is NOT logged. It is personal data and the
 	// checkout name is enough to find them.
 	w.logger.Info("win-back call placed",
-		"brand", slug, "checkout", c.checkout.Name, "attempt", attempt)
+		"brand", slug, "channel", ch.Name, "agent_version", ch.AgentVersion,
+		"checkout", c.checkout.Name, "attempt", attempt)
 	return true
 }
 
@@ -444,8 +553,7 @@ func (w *WinbackCallWorker) message(
 	// unexplained, every single sweep.
 	claim, claimErr := w.claimFor(ctx, slug, c, channelWhatsApp)
 	if claimErr != nil {
-		w.logger.Info("win-back: already claimed on this channel",
-			"brand", slug, "channel", channelWhatsApp, "checkout", c.checkout.Name)
+		w.claimRefused(slug, channelWhatsApp, c, claimErr)
 		return false
 	}
 
@@ -529,11 +637,12 @@ func (w *WinbackCallWorker) message(
 
 // winbackCodeValidFor is how long a win-back code lasts.
 //
-// One hour, and the message says so. The urgency is the point of the offer -
+// Thirty minutes. The follow-up call is timed against it: twenty minutes in,
+// with ten left. The urgency is the point of the offer -
 // a code with no end is a permanent discount on the shop's own margin - and
 // the clock starts HERE, when the code is created immediately before the
 // message that carries it, not when a config value was last edited.
-const winbackCodeValidFor = time.Hour
+const winbackCodeValidFor = 30 * time.Minute
 
 // winbackCodeAttempts is how many names to try before giving up.
 //
@@ -575,6 +684,24 @@ func (w *WinbackCallWorker) mintWinbackCode(
 		return "", err
 	}
 	return "", fmt.Errorf("every candidate code was taken: %w", lastErr)
+}
+
+// claimRefused says why a claim came back empty-handed.
+//
+// No row is the expected case: another replica claimed this number between
+// our read and our write, which is exactly what the unique index is for.
+// ANYTHING ELSE is the database refusing the write, and it used to be logged
+// as the same "already claimed" line - so when production ran this code
+// against a schema one migration behind, every customer for a day was
+// silently skipped with a log that looked like routine deduplication.
+func (w *WinbackCallWorker) claimRefused(slug, channel string, c candidate, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		w.logger.Info("win-back: already claimed on this channel",
+			"brand", slug, "channel", channel, "checkout", c.checkout.Name)
+		return
+	}
+	w.logger.Error("win-back: could not record the contact, so nothing was sent",
+		"brand", slug, "channel", channel, "checkout", c.checkout.Name, "error", err)
 }
 
 // claimFor takes the right to contact this person on this channel.

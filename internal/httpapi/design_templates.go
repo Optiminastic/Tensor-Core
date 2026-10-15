@@ -133,6 +133,13 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 	for _, t := range uploaded {
 		out = append(out, t)
 	}
+	// ?page=N is the Designs tab's page: the merge is Go's, so it is cut here.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		c.JSON(http.StatusOK, slicePage(out, numbered))
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 

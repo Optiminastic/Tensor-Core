@@ -344,6 +344,150 @@ func (q *Queries) CountJobsNotPackagedForOrder(ctx context.Context, orderID *uui
 	return count, err
 }
 
+const countProductionJobsByTab = `-- name: CountProductionJobsByTab :one
+SELECT
+    count(*) AS all_jobs,
+    count(*) FILTER (WHERE (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY($1::text[])) AS non_dnp,
+    count(*) FILTER (WHERE j.status = 'completed' AND NOT j.held) AS completed,
+    count(*) FILTER (WHERE j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    )) AS assembly,
+    count(*) FILTER (WHERE j.status = 'completed' AND j.finishing_status = 'pending'
+        AND j.assembly_status <> 'pending') AS finishing,
+    count(*) FILTER (WHERE j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending') AS qc,
+    count(*) FILTER (WHERE j.qc_status = 'passed' AND j.packaging_status = 'pending') AS packaging
+FROM production_jobs j
+`
+
+type CountProductionJobsByTabRow struct {
+	AllJobs   int64
+	NonDnp    int64
+	Completed int64
+	Assembly  int64
+	Finishing int64
+	Qc        int64
+	Packaging int64
+}
+
+// Every badge both job tables draw, in one pass over the whole table: the
+// Production Jobs tabs (All, Non-DNP, Completed) and the four packaging-station
+// queues. Never the search - badges count everything.
+func (q *Queries) CountProductionJobsByTab(ctx context.Context, ngKeys []string) (CountProductionJobsByTabRow, error) {
+	row := q.db.QueryRow(ctx, countProductionJobsByTab, ngKeys)
+	var i CountProductionJobsByTabRow
+	err := row.Scan(
+		&i.AllJobs,
+		&i.NonDnp,
+		&i.Completed,
+		&i.Assembly,
+		&i.Finishing,
+		&i.Qc,
+		&i.Packaging,
+	)
+	return i, err
+}
+
+const countProductionJobsTable = `-- name: CountProductionJobsTable :one
+SELECT count(*) FROM production_jobs j
+WHERE (
+    $1::text IS NULL
+    OR j.job_number ILIKE '%' || $1::text || '%'
+    OR j.description ILIKE '%' || $1::text || '%'
+    OR j.personalisation_name ILIKE '%' || $1::text || '%'
+    OR j.sku ILIKE '%' || $1::text || '%'
+    OR j.customer_name ILIKE '%' || $1::text || '%'
+    OR j.product_name ILIKE '%' || $1::text || '%'
+)
+AND ($2::timestamptz IS NULL OR j.created_at >= $2)
+AND ($3::timestamptz IS NULL OR j.created_at <= $3)
+AND (
+    $4::text IS NULL
+    OR (CASE
+        WHEN j.status = 'failed' THEN 'failed'
+        WHEN j.held THEN 'on_hold'
+        WHEN j.status = 'in_production' THEN 'in_progress'
+        WHEN j.status = 'completed' THEN 'completed'
+        ELSE 'queued'
+    END) = $4::text
+)
+AND (
+    $5::boolean IS NULL
+    OR (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY($6::text[])
+)
+AND (
+    $7::text IS NULL
+    OR (CASE
+        WHEN j.personalisation_status = 'not_required' THEN 'not_required'
+        WHEN j.personalisation_status = 'validated' THEN 'completed'
+        ELSE 'required'
+    END) = $7::text
+)
+AND (
+    $8::text IS NULL
+    OR (CASE WHEN j.packaging_status = 'packaged' THEN 'packed' ELSE 'pending' END)
+       = $8::text
+)
+AND (
+    $9::text IS NULL
+    OR ($9::text = 'assembly' AND j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    ))
+    OR ($9::text = 'finishing' AND j.status = 'completed'
+        AND j.finishing_status = 'pending' AND j.assembly_status <> 'pending')
+    OR ($9::text = 'qc' AND j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending')
+    OR ($9::text = 'packaging' AND j.qc_status = 'passed'
+        AND j.packaging_status = 'pending')
+)
+`
+
+type CountProductionJobsTableParams struct {
+	Search           *string
+	CreatedFrom      pgtype.Timestamptz
+	CreatedTo        pgtype.Timestamptz
+	QueueStatus      *string
+	NonGeneratedOnly *bool
+	NgKeys           []string
+	Personalisation  *string
+	Packaging        *string
+	Station          *string
+}
+
+// How many jobs a table's filters select (the Production Jobs page, or one
+// packaging-station queue). Paired with ListProductionJobsTable. Every filter
+// is optional, null meaning "any".
+// The table's status column, derived exactly as the frontend's toQueueStatus
+// derives it: failed wins, then held, then the run state.
+// Non-DNP: the job's (sku, product name) is one Go's IsGeneratedProduct says
+// Tensor does not make. Go classifies the handful of distinct pairs and sends
+// the non-generated ones as keys - sku, chr(31), product name - which SQL only
+// matches; the rule itself is never restated here.
+// The personalisation select, as toPersonalisation folds the statuses.
+// The packaging select, as toPackaging folds it.
+// A packaging-page station queue, each exactly the filter that page applied
+// to the whole job list in the browser.
+func (q *Queries) CountProductionJobsTable(ctx context.Context, arg CountProductionJobsTableParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countProductionJobsTable,
+		arg.Search,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.QueueStatus,
+		arg.NonGeneratedOnly,
+		arg.NgKeys,
+		arg.Personalisation,
+		arg.Packaging,
+		arg.Station,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUnfinishedJobsOnBatch = `-- name: CountUnfinishedJobsOnBatch :one
 SELECT count(*) FROM production_jobs
 WHERE batch_id = $1 AND status NOT IN ('completed', 'failed')
@@ -1279,6 +1423,38 @@ func (q *Queries) ListExcludedQueuedJobs(ctx context.Context) ([]ListExcludedQue
 	return items, nil
 }
 
+const listJobProductKeys = `-- name: ListJobProductKeys :many
+SELECT DISTINCT coalesce(sku, '')::text AS sku, coalesce(product_name, '')::text AS product_name
+FROM production_jobs
+`
+
+type ListJobProductKeysRow struct {
+	Sku         string
+	ProductName string
+}
+
+// The distinct (sku, product name) pairs across every job - a few dozen, not a
+// row per job - for Go to classify with IsGeneratedProduct.
+func (q *Queries) ListJobProductKeys(ctx context.Context) ([]ListJobProductKeysRow, error) {
+	rows, err := q.db.Query(ctx, listJobProductKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJobProductKeysRow{}
+	for rows.Next() {
+		var i ListJobProductKeysRow
+		if err := rows.Scan(&i.Sku, &i.ProductName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJobsForBatch = `-- name: ListJobsForBatch :many
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, personalisation_original, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at FROM production_jobs WHERE batch_id = $1 ORDER BY created_at ASC, id ASC
 `
@@ -2017,6 +2193,286 @@ func (q *Queries) ListProductionJobsPage(ctx context.Context, arg ListProduction
 	items := []ListProductionJobsPageRow{}
 	for rows.Next() {
 		var i ListProductionJobsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.OrderID,
+			&i.BatchID,
+			&i.Description,
+			&i.Quantity,
+			&i.Status,
+			&i.AssemblyStatus,
+			&i.FinishingStatus,
+			&i.QcStatus,
+			&i.PackagingStatus,
+			&i.ShopifyOrderID,
+			&i.Sku,
+			&i.ProductName,
+			&i.Material,
+			&i.Colour,
+			&i.NozzleProfile,
+			&i.FilamentGramsRequired,
+			&i.PrintFileID,
+			&i.EstimatedPrintTimeMinutes,
+			&i.DueDate,
+			&i.Priority,
+			&i.PersonalisationName,
+			&i.PersonalisationFont,
+			&i.PersonalisationColour,
+			&i.PersonalisationVariant,
+			&i.PersonalisationStatus,
+			&i.NameConfirmed,
+			&i.PhotoConfirmed,
+			&i.FontConfirmed,
+			&i.ColourConfirmed,
+			&i.VariantConfirmed,
+			&i.CustomerApprovalReceived,
+			&i.PersonalisationNotes,
+			&i.PersonalisationPhotoFileID,
+			&i.PersonalisationValidatedBy,
+			&i.PersonalisationValidatedAt,
+			&i.ReprintOfJobID,
+			&i.SplitOfJobID,
+			&i.ShopifyCustomerID,
+			&i.CustomerName,
+			&i.Held,
+			&i.Colours,
+			&i.SupportUsed,
+			&i.InfillPct,
+			&i.LeftNozzleMm,
+			&i.RightNozzleMm,
+			&i.FlowPct,
+			&i.QualityMm,
+			&i.MachineFamily,
+			&i.VariantTitle,
+			&i.PersonalisationProperties,
+			&i.PersonalisationOriginal,
+			&i.PartRole,
+			&i.ModelError,
+			&i.ModelErrorAt,
+			&i.IssueReason,
+			&i.BboxXMm,
+			&i.BboxYMm,
+			&i.BboxZMm,
+			&i.SupportWeightG,
+			&i.PurgeWeightG,
+			&i.ColourCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BulkOrderID,
+			&i.ModelRenderQueuedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProductionJobsTable = `-- name: ListProductionJobsTable :many
+SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
+       finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,
+       nozzle_profile, filament_grams_required, print_file_id,
+       estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font,
+       personalisation_colour, personalisation_variant, personalisation_status, name_confirmed,
+       photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received,
+       personalisation_notes, personalisation_photo_file_id, personalisation_validated_by,
+       personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held,
+       colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct,
+       quality_mm, machine_family, variant_title,
+       '[]'::jsonb AS personalisation_properties,
+       -- Blanked exactly as ListProductionJobs blanks it, and for the same
+       -- reason: the column tells a list only WHETHER something changed, and
+       -- carrying the whole before-snapshot on every row of a page would be
+       -- bytes no list screen reads. Null stays null so "nothing changed"
+       -- survives the trip; anything else becomes an empty object.
+       CASE WHEN personalisation_original IS NULL THEN NULL
+            ELSE '{}'::jsonb END AS personalisation_original, part_role,
+       model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm,
+       support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id,
+       model_render_queued_at
+FROM production_jobs j
+WHERE (
+    $1::text IS NULL
+    OR j.job_number ILIKE '%' || $1::text || '%'
+    OR j.description ILIKE '%' || $1::text || '%'
+    OR j.personalisation_name ILIKE '%' || $1::text || '%'
+    OR j.sku ILIKE '%' || $1::text || '%'
+    OR j.customer_name ILIKE '%' || $1::text || '%'
+    OR j.product_name ILIKE '%' || $1::text || '%'
+)
+AND ($2::timestamptz IS NULL OR j.created_at >= $2)
+AND ($3::timestamptz IS NULL OR j.created_at <= $3)
+AND (
+    $4::text IS NULL
+    OR (CASE
+        WHEN j.status = 'failed' THEN 'failed'
+        WHEN j.held THEN 'on_hold'
+        WHEN j.status = 'in_production' THEN 'in_progress'
+        WHEN j.status = 'completed' THEN 'completed'
+        ELSE 'queued'
+    END) = $4::text
+)
+AND (
+    $5::boolean IS NULL
+    OR (coalesce(j.sku, '') || chr(31) || coalesce(j.product_name, ''))
+        = ANY($6::text[])
+)
+AND (
+    $7::text IS NULL
+    OR (CASE
+        WHEN j.personalisation_status = 'not_required' THEN 'not_required'
+        WHEN j.personalisation_status = 'validated' THEN 'completed'
+        ELSE 'required'
+    END) = $7::text
+)
+AND (
+    $8::text IS NULL
+    OR (CASE WHEN j.packaging_status = 'packaged' THEN 'packed' ELSE 'pending' END)
+       = $8::text
+)
+AND (
+    $9::text IS NULL
+    OR ($9::text = 'assembly' AND j.assembly_status = 'pending' AND (
+        j.status = 'completed'
+        OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed')
+    ))
+    OR ($9::text = 'finishing' AND j.status = 'completed'
+        AND j.finishing_status = 'pending' AND j.assembly_status <> 'pending')
+    OR ($9::text = 'qc' AND j.status = 'completed' AND j.qc_status = 'pending'
+        AND j.assembly_status <> 'pending' AND j.finishing_status <> 'pending')
+    OR ($9::text = 'packaging' AND j.qc_status = 'passed'
+        AND j.packaging_status = 'pending')
+)
+ORDER BY COALESCE(
+    (SELECT o.placed_at FROM orders o WHERE o.id = j.order_id),
+    j.created_at
+) DESC, j.created_at DESC, j.id DESC
+LIMIT $11 OFFSET $10
+`
+
+type ListProductionJobsTableParams struct {
+	Search           *string
+	CreatedFrom      pgtype.Timestamptz
+	CreatedTo        pgtype.Timestamptz
+	QueueStatus      *string
+	NonGeneratedOnly *bool
+	NgKeys           []string
+	Personalisation  *string
+	Packaging        *string
+	Station          *string
+	PageOffset       int32
+	PageLimit        int32
+}
+
+type ListProductionJobsTableRow struct {
+	ID                         uuid.UUID
+	JobNumber                  string
+	OrderID                    *uuid.UUID
+	BatchID                    *uuid.UUID
+	Description                string
+	Quantity                   int32
+	Status                     string
+	AssemblyStatus             string
+	FinishingStatus            string
+	QcStatus                   string
+	PackagingStatus            string
+	ShopifyOrderID             *int64
+	Sku                        *string
+	ProductName                *string
+	Material                   *string
+	Colour                     *string
+	NozzleProfile              *string
+	FilamentGramsRequired      pgtype.Numeric
+	PrintFileID                *uuid.UUID
+	EstimatedPrintTimeMinutes  *int32
+	DueDate                    pgtype.Timestamptz
+	Priority                   int32
+	PersonalisationName        *string
+	PersonalisationFont        *string
+	PersonalisationColour      *string
+	PersonalisationVariant     *string
+	PersonalisationStatus      string
+	NameConfirmed              bool
+	PhotoConfirmed             bool
+	FontConfirmed              bool
+	ColourConfirmed            bool
+	VariantConfirmed           bool
+	CustomerApprovalReceived   bool
+	PersonalisationNotes       *string
+	PersonalisationPhotoFileID *uuid.UUID
+	PersonalisationValidatedBy *string
+	PersonalisationValidatedAt pgtype.Timestamptz
+	ReprintOfJobID             *uuid.UUID
+	SplitOfJobID               *uuid.UUID
+	ShopifyCustomerID          *int64
+	CustomerName               *string
+	Held                       bool
+	Colours                    []byte
+	SupportUsed                *bool
+	InfillPct                  pgtype.Numeric
+	LeftNozzleMm               pgtype.Numeric
+	RightNozzleMm              pgtype.Numeric
+	FlowPct                    pgtype.Numeric
+	QualityMm                  pgtype.Numeric
+	MachineFamily              *string
+	VariantTitle               *string
+	PersonalisationProperties  []byte
+	PersonalisationOriginal    []byte
+	PartRole                   string
+	ModelError                 *string
+	ModelErrorAt               pgtype.Timestamptz
+	IssueReason                *string
+	BboxXMm                    pgtype.Numeric
+	BboxYMm                    pgtype.Numeric
+	BboxZMm                    pgtype.Numeric
+	SupportWeightG             pgtype.Numeric
+	PurgeWeightG               pgtype.Numeric
+	ColourCount                *int32
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	BulkOrderID                *uuid.UUID
+	ModelRenderQueuedAt        pgtype.Timestamptz
+}
+
+// One page of jobs: CountProductionJobsTable's filters, in ListProductionJobs'
+// order (the customer's order date, newest first), cut by LIMIT/OFFSET in
+// Postgres. The column list is ListProductionJobs' exactly, so the rows convert
+// to gen.ProductionJob and share its DTO.
+// The table's status column, derived exactly as the frontend's toQueueStatus
+// derives it: failed wins, then held, then the run state.
+// Non-DNP: the job's (sku, product name) is one Go's IsGeneratedProduct says
+// Tensor does not make. Go classifies the handful of distinct pairs and sends
+// the non-generated ones as keys - sku, chr(31), product name - which SQL only
+// matches; the rule itself is never restated here.
+// The personalisation select, as toPersonalisation folds the statuses.
+// The packaging select, as toPackaging folds it.
+// A packaging-page station queue, each exactly the filter that page applied
+// to the whole job list in the browser.
+func (q *Queries) ListProductionJobsTable(ctx context.Context, arg ListProductionJobsTableParams) ([]ListProductionJobsTableRow, error) {
+	rows, err := q.db.Query(ctx, listProductionJobsTable,
+		arg.Search,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.QueueStatus,
+		arg.NonGeneratedOnly,
+		arg.NgKeys,
+		arg.Personalisation,
+		arg.Packaging,
+		arg.Station,
+		arg.PageOffset,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductionJobsTableRow{}
+	for rows.Next() {
+		var i ListProductionJobsTableRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.JobNumber,

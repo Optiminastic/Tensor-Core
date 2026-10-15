@@ -176,3 +176,33 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// A call can name its own agent version - the win-back follow-up runs a
+// different script from the first call - and zero keeps the client's.
+func TestACallCanRunItsOwnAgentVersion(t *testing.T) {
+	var seen []float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AppConfig struct {
+				AppVersion float64 `json:"app_version"`
+			} `json:"app_config"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		seen = append(seen, body.AppConfig.AppVersion)
+		_, _ = w.Write([]byte(`{"attempt_id":"att-1"}`))
+	}))
+	defer server.Close()
+
+	client := New(testConfig(server.URL))
+	for _, version := range []int{9, 0} {
+		if _, err := client.Call(context.Background(), CallRequest{
+			CustomerNumber: "+919000000001", AgentVersion: version,
+		}); err != nil {
+			t.Fatalf("call: %v", err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != 9 || seen[1] != 2 {
+		t.Errorf("versions sent = %v, want [9 2]", seen)
+	}
+}

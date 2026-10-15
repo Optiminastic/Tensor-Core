@@ -199,3 +199,14 @@ UPDATE machines
 SET fixed_nozzle_colour = sqlc.narg('fixed_nozzle_colour'), updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: CountFleetMachines :one
+SELECT count(*) FROM machines;
+
+-- name: ListFleetMachinesTable :many
+-- One page of the fleet: errored machines first (the table's stable
+-- partition), then ListFleetMachines' order, cut by LIMIT/OFFSET - so the
+-- per-machine live-filament work runs for this page's machines only.
+SELECT * FROM machines
+ORDER BY (status = 'error') DESC, machine_id
+LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');

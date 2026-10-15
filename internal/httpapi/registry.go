@@ -112,6 +112,10 @@ type productDetailResponse struct {
 	// nothing on its own - "dnp_two_heart" is only legible next to the product
 	// whose two-heart variant renders from it.
 	Designs []templateResponse `json:"designs"`
+	// VariantPartCount is the parts across every variant, sent only when the
+	// variants themselves are left out (?variants=none), so the delete dialog
+	// can still say what it would remove.
+	VariantPartCount *int64 `json:"variant_part_count,omitempty"`
 }
 
 func (s *Server) registerRegistry(r *gin.Engine) {
@@ -130,6 +134,7 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	g.GET("/products", read, s.listRegistryProducts)
 	g.POST("/products", manage, s.createRegistryProduct)
 	g.GET("/products/:code", read, s.getRegistryProduct)
+	g.GET("/products/:code/variants", read, s.listRegistryVariantsTable)
 	g.PATCH("/products/:code", manage, s.updateRegistryProduct)
 	g.DELETE("/products/:code", manage, s.deleteRegistryProduct)
 	g.GET("/variants/:id/bom", read, s.getVariantBom)
@@ -188,16 +193,30 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the product's options.")
 		return
 	}
-	variants, err := s.store.Q.ListVariantsForProduct(ctx, product.ID)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not load the product's variants.")
-		return
-	}
-
-	boms, err := s.store.Q.ListBomForProduct(ctx, product.ID)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not load the bills of materials.")
-		return
+	// ?variants=none leaves the variant list out - the registry page pages it
+	// through /products/:code/variants - and says how many there are instead.
+	withoutVariants := c.Query("variants") == "none"
+	var (
+		variants []gen.ListVariantsForProductRow
+		boms     []gen.ListBomForProductRow
+		tally    *gen.CountVariantsForProductRow
+	)
+	if withoutVariants {
+		counted, err := s.store.Q.CountVariantsForProduct(ctx, product.ID)
+		if err != nil {
+			detail(c, http.StatusInternalServerError, "Could not count the product's variants.")
+			return
+		}
+		tally = &counted
+	} else {
+		if variants, err = s.store.Q.ListVariantsForProduct(ctx, product.ID); err != nil {
+			detail(c, http.StatusInternalServerError, "Could not load the product's variants.")
+			return
+		}
+		if boms, err = s.store.Q.ListBomForProduct(ctx, product.ID); err != nil {
+			detail(c, http.StatusInternalServerError, "Could not load the bills of materials.")
+			return
+		}
 	}
 	designs, err := s.store.Q.ListDesignsForProduct(ctx, product.ID)
 	if err != nil {
@@ -206,44 +225,6 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 	}
 
 	showCosts := costsVisibleTo(c)
-	partsByVariant := map[uuid.UUID][]bomLineResponse{}
-	// Null once ANY part on the variant has no price, rather than summing what
-	// is known: a partial total is indistinguishable from a complete one on
-	// screen, and this figure exists to be trusted.
-	costKnown := map[uuid.UUID]bool{}
-	costByVariant := map[uuid.UUID]float64{}
-	for _, b := range boms {
-		qty := db.NumFloat(b.Quantity)
-		line := bomLineResponse{
-			ItemID: b.ItemID.String(), ItemCode: b.ItemCode,
-			ItemName: b.ItemName, Unit: b.Unit, Quantity: qty,
-		}
-		if _, seen := costKnown[b.VariantID]; !seen {
-			costKnown[b.VariantID] = true
-		}
-		if price := db.NumFloatPtr(b.UnitPrice); price != nil {
-			line.UnitPrice = price
-			cost := *price * qty
-			line.LineCost = &cost
-			costByVariant[b.VariantID] += cost
-		} else {
-			costKnown[b.VariantID] = false
-		}
-		partsByVariant[b.VariantID] = append(partsByVariant[b.VariantID], line)
-	}
-
-	designByVariant := map[uuid.UUID]variantDesignResponse{}
-	for _, d := range designs {
-		if d.Role != "body" {
-			continue
-		}
-		out := variantDesignResponse{Role: d.Role, TemplateKey: d.TemplateKey, Version: d.Version}
-		if d.DesignID != nil {
-			id := d.DesignID.String()
-			out.DesignID = &id
-		}
-		designByVariant[d.VariantID] = out
-	}
 
 	byOption := map[uuid.UUID][]optionValueResponse{}
 	for _, v := range values {
@@ -290,31 +271,10 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 			ID: o.ID.String(), Code: o.Code, Label: o.Label, Values: values,
 		})
 	}
-	for _, v := range variants {
-		parts := partsByVariant[v.ID]
-		if parts == nil {
-			parts = []bomLineResponse{}
-		}
-		row := variantResponse{
-			ID: v.ID.String(), SKU: v.Sku, Name: v.Name, Status: v.Status,
-			Options: string(v.OptionCodes), PartCount: v.PartCount,
-			Parts: parts,
-		}
-		if d, ok := designByVariant[v.ID]; ok {
-			row.Design = &d
-		}
-		if known, seen := costKnown[v.ID]; seen && known {
-			cost := costByVariant[v.ID]
-			row.PartsCost = &cost
-		}
-		// Withheld from a caller without config:read. The parts, quantities and
-		// units all stay - that is what the registry is for - but the money
-		// does not leave the API, so the separation does not depend on the page.
-		if !showCosts {
-			stripBomCosts(row.Parts)
-			row.PartsCost = nil
-		}
-		out.Variants = append(out.Variants, row)
+	out.Variants = variantRows(variants, boms, designs, showCosts)
+	if tally != nil {
+		out.VariantCount = tally.VariantCount
+		out.VariantPartCount = &tally.PartCount
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -554,4 +514,138 @@ func stripBomCosts(lines []bomLineResponse) {
 		lines[i].UnitPrice = nil
 		lines[i].LineCost = nil
 	}
+}
+
+// variantRows shapes a product's variants with their parts, what one kit
+// costs, and the design their body prints from. Shared by the product detail
+// and the paged variant table, so both say the same thing about a variant.
+func variantRows(
+	variants []gen.ListVariantsForProductRow, boms []gen.ListBomForProductRow,
+	designs []gen.ListDesignsForProductRow, showCosts bool,
+) []variantResponse {
+	partsByVariant := map[uuid.UUID][]bomLineResponse{}
+	// Null once ANY part on the variant has no price, rather than summing what
+	// is known: a partial total is indistinguishable from a complete one on
+	// screen, and this figure exists to be trusted.
+	costKnown := map[uuid.UUID]bool{}
+	costByVariant := map[uuid.UUID]float64{}
+	for _, b := range boms {
+		qty := db.NumFloat(b.Quantity)
+		line := bomLineResponse{
+			ItemID: b.ItemID.String(), ItemCode: b.ItemCode,
+			ItemName: b.ItemName, Unit: b.Unit, Quantity: qty,
+		}
+		if _, seen := costKnown[b.VariantID]; !seen {
+			costKnown[b.VariantID] = true
+		}
+		if price := db.NumFloatPtr(b.UnitPrice); price != nil {
+			line.UnitPrice = price
+			cost := *price * qty
+			line.LineCost = &cost
+			costByVariant[b.VariantID] += cost
+		} else {
+			costKnown[b.VariantID] = false
+		}
+		partsByVariant[b.VariantID] = append(partsByVariant[b.VariantID], line)
+	}
+
+	designByVariant := map[uuid.UUID]variantDesignResponse{}
+	for _, d := range designs {
+		if d.Role != "body" {
+			continue
+		}
+		out := variantDesignResponse{Role: d.Role, TemplateKey: d.TemplateKey, Version: d.Version}
+		if d.DesignID != nil {
+			id := d.DesignID.String()
+			out.DesignID = &id
+		}
+		designByVariant[d.VariantID] = out
+	}
+
+	rows := make([]variantResponse, 0, len(variants))
+	for _, v := range variants {
+		parts := partsByVariant[v.ID]
+		if parts == nil {
+			parts = []bomLineResponse{}
+		}
+		row := variantResponse{
+			ID: v.ID.String(), SKU: v.Sku, Name: v.Name, Status: v.Status,
+			Options: string(v.OptionCodes), PartCount: v.PartCount,
+			Parts: parts,
+		}
+		if d, ok := designByVariant[v.ID]; ok {
+			row.Design = &d
+		}
+		if known, seen := costKnown[v.ID]; seen && known {
+			cost := costByVariant[v.ID]
+			row.PartsCost = &cost
+		}
+		// Withheld from a caller without config:read. The parts, quantities and
+		// units all stay - that is what the registry is for - but the money
+		// does not leave the API, so the separation does not depend on the page.
+		if !showCosts {
+			stripBomCosts(row.Parts)
+			row.PartsCost = nil
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// listRegistryVariantsTable is one page of a product's variants:
+// GET /registry/products/:code/variants?page=N. Counted and cut by
+// LIMIT/OFFSET in Postgres, with only that page's parts read.
+func (s *Server) listRegistryVariantsTable(c *gin.Context) {
+	p, paged, ok := parseOffsetPage(c)
+	if !ok {
+		return
+	}
+	if !paged {
+		p = offsetPage{Page: 1, Size: defaultTablePageSize}
+	}
+	ctx := c.Request.Context()
+	product, err := s.store.Q.GetProductByCode(ctx, strings.TrimSpace(c.Param("code")))
+	if isNoRows(err) {
+		detail(c, http.StatusNotFound, "That product is not in the registry.")
+		return
+	}
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the product.")
+		return
+	}
+	tally, err := s.store.Q.CountVariantsForProduct(ctx, product.ID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not count the product's variants.")
+		return
+	}
+	p = p.within(tally.VariantCount)
+	page, err := s.store.Q.ListVariantsForProductPage(ctx, gen.ListVariantsForProductPageParams{
+		ProductID: product.ID, PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the product's variants.")
+		return
+	}
+	variants := make([]gen.ListVariantsForProductRow, len(page))
+	ids := make([]uuid.UUID, len(page))
+	for i, v := range page {
+		variants[i] = gen.ListVariantsForProductRow(v)
+		ids[i] = v.ID
+	}
+	pageBoms, err := s.store.Q.ListBomForVariants(ctx, ids)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the bills of materials.")
+		return
+	}
+	boms := make([]gen.ListBomForProductRow, len(pageBoms))
+	for i, b := range pageBoms {
+		boms[i] = gen.ListBomForProductRow(b)
+	}
+	designs, err := s.store.Q.ListDesignsForProduct(ctx, product.ID)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the variants' designs.")
+		return
+	}
+	c.JSON(http.StatusOK, newPageEnvelope(
+		variantRows(variants, boms, designs, costsVisibleTo(c)), tally.VariantCount, p))
 }

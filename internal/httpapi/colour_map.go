@@ -111,6 +111,12 @@ func (s *Server) registerColourMap(g *gin.RouterGroup) {
 }
 
 func (s *Server) listColourMap(c *gin.Context) {
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listColourMapTable(c, numbered)
+		return
+	}
 	rows, err := s.store.Q.ListColourMap(c.Request.Context())
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not read the colour map.")
@@ -414,4 +420,29 @@ func nearestColourName(hex string, candidates map[string]string) string {
 		}
 	}
 	return best
+}
+
+// listColourMapTable answers ?page=N: a page of COLOURS, cut by LIMIT/OFFSET
+// over names in Postgres, with every entry filed under them. total and the
+// page size count colours, not entries.
+func (s *Server) listColourMapTable(c *gin.Context, p offsetPage) {
+	ctx := c.Request.Context()
+	total, err := s.store.Q.CountColourMapNames(ctx)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the colour map.")
+		return
+	}
+	p = p.within(total)
+	rows, err := s.store.Q.ListColourMapTable(ctx, gen.ListColourMapTableParams{
+		PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read the colour map.")
+		return
+	}
+	out := make([]colourMapEntryResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toColourMapEntry(r))
+	}
+	c.JSON(http.StatusOK, newPageEnvelope(out, total, p))
 }

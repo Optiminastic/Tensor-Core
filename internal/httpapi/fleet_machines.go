@@ -193,6 +193,12 @@ func (s *Server) registerFleetMachines(r *gin.Engine) {
 }
 
 func (s *Server) listFleetMachines(c *gin.Context) {
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		s.listFleetMachinesTable(c, numbered)
+		return
+	}
 	ctx := c.Request.Context()
 	rows, err := s.store.Q.ListFleetMachines(ctx)
 	if err != nil {
@@ -332,4 +338,29 @@ func (s *Server) setFixedNozzleColour(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, s.fleetMachineDTO(ctx, updated))
+}
+
+// listFleetMachinesTable answers ?page=N for the Machines tab: errored
+// machines first, cut in Postgres, so each machine's live filament - several
+// queries apiece - is worked out for this page alone.
+func (s *Server) listFleetMachinesTable(c *gin.Context, p offsetPage) {
+	ctx := c.Request.Context()
+	total, err := s.store.Q.CountFleetMachines(ctx)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list machines.")
+		return
+	}
+	p = p.within(total)
+	rows, err := s.store.Q.ListFleetMachinesTable(ctx, gen.ListFleetMachinesTableParams{
+		PageLimit: p.Size, PageOffset: p.Offset(),
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not list machines.")
+		return
+	}
+	out := make([]fleetMachineResponse, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, s.fleetMachineDTO(ctx, m))
+	}
+	c.JSON(http.StatusOK, newPageEnvelope(out, total, p))
 }
