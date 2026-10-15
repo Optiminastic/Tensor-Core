@@ -1352,8 +1352,8 @@ WHERE status = 'queued'
 ORDER BY COALESCE(due_date, created_at) ASC, job_number ASC
 `
 
-// The designer's queue: jobs whose customer's window is over and that still
-// need a 3MF from a person.
+// The designer's queue: jobs that still need a 3MF from a person, whether or
+// not their customer's thirty minutes are over.
 //
 // A JOB WHOSE CUSTOMER STILL HOLDS THE LINK IS LISTED, not hidden. It used to
 // be excluded until the window closed, on the reasoning that anything a

@@ -43,8 +43,12 @@ type productionJobResponse struct {
 	// OrderNumber is the store's own number for that order, e.g. T3DPS-115251.
 	// Sent so a list does not have to read it out of the job number, which
 	// holds only for jobs numbered after their order.
-	OrderNumber           *string  `json:"order_number"`
-	BatchID               *string  `json:"batch_id"`
+	OrderNumber *string `json:"order_number"`
+	BatchID     *string `json:"batch_id"`
+	// BatchNumber is the bed's own name, for a row that has to send somebody
+	// to go and look at it - a design file that went stale after its bed was
+	// locked cannot be withdrawn, only replaced.
+	BatchNumber           *string  `json:"batch_number"`
 	Description           string   `json:"description"`
 	Quantity              int32    `json:"quantity"`
 	Status                string   `json:"status"`
@@ -388,10 +392,12 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 	orderIDs := dedupeIDs(rows, func(j gen.ProductionJob) *uuid.UUID { return j.OrderID })
 
 	batchStatusByID := map[uuid.UUID]string{}
+	batchNumberByID := map[uuid.UUID]string{}
 	if len(batchIDs) > 0 {
 		if statuses, err := s.store.Q.ListBatchStatusesForIDs(ctx, batchIDs); err == nil {
 			for _, b := range statuses {
 				batchStatusByID[b.ID] = b.Status
+				batchNumberByID[b.ID] = b.BatchNumber
 			}
 		}
 	}
@@ -421,6 +427,11 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 		}
 		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
 		dto := productionJobDTO(j, batchStatus, dispatched, colourGates)
+		if j.BatchID != nil {
+			if number, ok := batchNumberByID[*j.BatchID]; ok && number != "" {
+				dto.BatchNumber = &number
+			}
+		}
 		if j.OrderID != nil {
 			if number, ok := orderNumberByID[*j.OrderID]; ok {
 				dto.OrderNumber = &number

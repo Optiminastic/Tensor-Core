@@ -20,10 +20,15 @@ RETURNING *;
 SELECT * FROM batches WHERE id = $1;
 
 -- name: ListBatchStatusesForIDs :many
--- Cheap status-only companion to a batched list-of-jobs response - the
--- pipeline_stage RESERVED/BATCHED/PRINTING signal, without a per-row
--- GetBatchByID call for every job on a list endpoint.
-SELECT id, status FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
+-- Cheap companion to a batched list-of-jobs response - the pipeline_stage
+-- RESERVED/BATCHED/PRINTING signal, without a per-row GetBatchByID call for
+-- every job on a list endpoint.
+--
+-- The bed's own number comes with it because a status alone cannot be acted
+-- on. A job whose design file went stale while its bed was already locked
+-- cannot be withdrawn from that bed; the designer's only move is to go and
+-- look at it, and "BATCH-0412" is what lets them.
+SELECT id, status, batch_number FROM batches WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 
 -- name: ListBatchIdentityForIDs :many
 -- Status AND number for a set of beds, for a list that has to NAME the bed a
