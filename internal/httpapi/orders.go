@@ -241,6 +241,10 @@ func (s *Server) registerOrders(r *gin.Engine) {
 	// it - see order_personalisation.go.
 	g.GET("/:id/personalisation-link",
 		s.guards.RequirePermission(auth.OrderRead.Key()), s.orderPersonalisationLink)
+	// What that customer was asked and what they changed, for the order
+	// drawer's Personalisation tab - see order_personalisation_detail.go.
+	g.GET("/:id/personalisation",
+		s.guards.RequirePermission(auth.OrderRead.Key()), s.orderPersonalisation)
 }
 
 func (s *Server) listOrders(c *gin.Context) {

@@ -232,3 +232,14 @@ WHERE status = 'pending'
   AND message_id IS NULL
   AND expires_at <= now()
 RETURNING order_id, brand_slug;
+
+-- name: GetPersonalisationLinkRowForOrder :one
+-- One order's link row, whatever became of it.
+--
+-- The companion to GetOpenPersonalisationLinkForOrder, which deliberately
+-- refuses a closed window because its caller is handing a working link to a
+-- customer. This one is for reading the RECORD: who was messaged, when, what
+-- Meta said, and whether the window has since closed. A confirmed or expired
+-- row is exactly what that reader wants.
+SELECT * FROM personalisation_links
+WHERE order_id = sqlc.arg('order_id');

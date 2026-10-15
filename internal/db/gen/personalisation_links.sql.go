@@ -274,6 +274,41 @@ func (q *Queries) GetPersonalisationLinkByTokenHash(ctx context.Context, tokenHa
 	return i, err
 }
 
+const getPersonalisationLinkRowForOrder = `-- name: GetPersonalisationLinkRowForOrder :one
+SELECT id, brand_slug, order_id, token_hash, token_sealed, phone, status, issued_at, expires_at, sent_at, opened_at, confirmed_at, message_id, detail, created_at FROM personalisation_links
+WHERE order_id = $1
+`
+
+// One order's link row, whatever became of it.
+//
+// The companion to GetOpenPersonalisationLinkForOrder, which deliberately
+// refuses a closed window because its caller is handing a working link to a
+// customer. This one is for reading the RECORD: who was messaged, when, what
+// Meta said, and whether the window has since closed. A confirmed or expired
+// row is exactly what that reader wants.
+func (q *Queries) GetPersonalisationLinkRowForOrder(ctx context.Context, orderID uuid.UUID) (PersonalisationLink, error) {
+	row := q.db.QueryRow(ctx, getPersonalisationLinkRowForOrder, orderID)
+	var i PersonalisationLink
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.OrderID,
+		&i.TokenHash,
+		&i.TokenSealed,
+		&i.Phone,
+		&i.Status,
+		&i.IssuedAt,
+		&i.ExpiresAt,
+		&i.SentAt,
+		&i.OpenedAt,
+		&i.ConfirmedAt,
+		&i.MessageID,
+		&i.Detail,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getPersonalisationWatermark = `-- name: GetPersonalisationWatermark :one
 SELECT brand_slug, watch_from, created_at FROM personalisation_watermarks
 WHERE brand_slug = $1
