@@ -82,5 +82,13 @@ func (s *Server) listAbandonedCheckouts(c *gin.Context) {
 	if items == nil {
 		items = []shopify.AbandonedCheckout{}
 	}
+	// ?page=N is the Abandoned Checkout table's page (external_pages.go):
+	// Shopify is read whole, filtered and sorted here, and fifteen rows sent.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		pageAbandonedCheckouts(c, items, shop, numbered)
+		return
+	}
 	c.JSON(http.StatusOK, abandonedCheckoutsResponse{Items: items, Shop: shop})
 }

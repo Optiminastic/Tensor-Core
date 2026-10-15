@@ -113,6 +113,18 @@ func (s *Server) listPrintingQueue(c *gin.Context) {
 		}
 		return out[i].Position < out[j].Position
 	})
+	// ?page=N is the Queued tab's page of what is still to run - the filter
+	// the tab used to apply to the whole queue in the browser - with the live
+	// count for its badge.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		live := liveQueueOnly(out)
+		page := slicePage(live, numbered)
+		page.Counts = map[string]int64{"live": int64(len(live))}
+		c.JSON(http.StatusOK, page)
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 

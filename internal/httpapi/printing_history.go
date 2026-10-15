@@ -142,6 +142,13 @@ func (s *Server) listPrintingHistory(c *gin.Context) {
 	sort.SliceStable(out, func(i, j int) bool {
 		return historyStamp(out[i]) > historyStamp(out[j])
 	})
+	// ?page=N is the History tab's page of the archive window.
+	if numbered, paged, ok := parseOffsetPage(c); !ok {
+		return
+	} else if paged {
+		c.JSON(http.StatusOK, slicePage(out, numbered))
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 

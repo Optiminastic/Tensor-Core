@@ -135,3 +135,15 @@ func parseTimeRange(c *gin.Context) (timeRange, bool) {
 	}
 	return out, true
 }
+
+// slicePage cuts a list that did not come from a query of ours - an outside
+// service's answer (Shopify, BambuBuddy), or one assembled in Go from several
+// places - to one page, so the browser is sent that page and not the list.
+// Database tables never come through here: they are cut by LIMIT/OFFSET.
+func slicePage[T any](items []T, p offsetPage) pageEnvelope[T] {
+	total := int64(len(items))
+	p = p.within(total)
+	start := min(int(p.Offset()), len(items))
+	end := min(start+int(p.Size), len(items))
+	return newPageEnvelope(items[start:end], total, p)
+}

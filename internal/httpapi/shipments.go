@@ -226,7 +226,12 @@ func (s *Server) listShipments(c *gin.Context) {
 		return
 	}
 
+	numbered, paged, ok := parseOffsetPage(c)
+	if !ok {
+		return
+	}
 	wanted := c.Query("reason")
+	needle := lowerSearch(c)
 	items := make([]shipmentRowResponse, 0, len(snapshot.Rows))
 	for _, row := range snapshot.Rows {
 		// Nothing is filtered out by default. A bucket asked for explicitly
@@ -234,7 +239,25 @@ func (s *Server) listShipments(c *gin.Context) {
 		if wanted != "" && wanted != row.Reason {
 			continue
 		}
+		// The page's search box, applied here on a paged request so only the
+		// matching page is sent; an unpaged request never searched.
+		if paged && !shipmentMatches(row, needle) {
+			continue
+		}
 		items = append(items, row)
+	}
+	if paged {
+		page := slicePage(items, numbered)
+		page.Counts = reasonCounts(snapshot.Counts)
+		c.JSON(http.StatusOK, shipmentsPage{
+			pageEnvelope: page,
+			shipmentsListMeta: shipmentsListMeta{
+				Shop: snapshot.Shop, Actionable: snapshot.Actionable,
+				Shipped: snapshot.Shipped, Tracked: snapshot.Tracked, OtherCarriers: snapshot.OtherCarriers,
+				WindowDays: days, GeneratedAt: snapshot.At.UTC().Format(time.RFC3339),
+			},
+		})
+		return
 	}
 
 	c.JSON(http.StatusOK, shipmentsListResponse{
