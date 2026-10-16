@@ -189,7 +189,10 @@ func (t *botTurn) sendConfirmation(
 	}
 	accepted := res.Status
 	body := fmt.Sprintf("[%s] %s: %s", template, conf.OrderNumber, conf.Summary)
-	if _, err := recordWhatsAppMessage(ctx, q, t.brand, conf.WaID, msgID, directionOut, "template", body, "", &accepted, time.Now(), ""); err != nil {
+	if _, err := recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+		Brand: t.brand, WaID: conf.WaID, MessageID: msgID, Direction: directionOut,
+		Kind: "template", Body: body, Status: &accepted, At: time.Now(),
+	}); err != nil {
 		return err
 	}
 	if status != bot.ConfirmationSent {

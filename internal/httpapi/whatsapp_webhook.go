@@ -146,7 +146,10 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 		var jobs []river.InsertManyParams
 
 		for _, m := range ch.Messages {
-			fresh, err := recordWhatsAppMessage(ctx, q, brand, m.From, m.ID, directionIn, m.Kind, inboundBody(m), "", nil, m.Timestamp, m.ProfileName)
+			fresh, err := recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+				Brand: brand, WaID: m.From, MessageID: m.ID, Direction: directionIn,
+				Kind: m.Kind, Body: inboundBody(m), At: m.Timestamp, ProfileName: m.ProfileName,
+			})
 			if err != nil {
 				return err
 			}
@@ -158,7 +161,10 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 			}
 		}
 		for _, e := range ch.Echoes {
-			fresh, err := recordWhatsAppMessage(ctx, q, brand, e.To, e.ID, directionEcho, e.Kind, e.Text, "", nil, e.Timestamp, "")
+			fresh, err := recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+				Brand: brand, WaID: e.To, MessageID: e.ID, Direction: directionEcho,
+				Kind: e.Kind, Body: e.Text, At: e.Timestamp,
+			})
 			if err != nil {
 				return err
 			}
@@ -182,36 +188,59 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 	})
 }
 
+// whatsappMessageRecord is one message to store.
+//
+// A struct rather than a positional argument list. It had reached eleven
+// parameters, seven of them strings in a row - brand, waID, messageID,
+// direction, kind, body, sentBy - so a transposed pair compiled cleanly and
+// filed the message under the wrong column.
+type whatsappMessageRecord struct {
+	Brand     string
+	WaID      string
+	MessageID string
+	Direction string
+	Kind      string
+	Body      string
+	// SentBy is the Better Auth user id for an inbox reply, empty for
+	// anything the bot or the customer sent.
+	SentBy string
+	// Status is Meta's acknowledgement for an outbound message, nil inbound.
+	Status      *string
+	At          time.Time
+	ProfileName string
+}
+
 // recordWhatsAppMessage stores one message and keeps the conversation's
 // chat-list fields current. It reports false for a message already stored.
-func recordWhatsAppMessage(
-	ctx context.Context, q *gen.Queries, brand, waID, messageID, direction, kind, body, sentBy string,
-	status *string, at time.Time, profileName string,
-) (bool, error) {
+func recordWhatsAppMessage(ctx context.Context, q *gen.Queries, m whatsappMessageRecord) (bool, error) {
+	at := m.At
 	if at.IsZero() {
 		at = time.Now()
 	}
 	stored := ""
-	if status != nil {
-		stored = *status
+	if m.Status != nil {
+		stored = *m.Status
 	}
 	var sender *string
-	if sentBy != "" {
-		sender = &sentBy
+	if m.SentBy != "" {
+		sender = &m.SentBy
 	}
 	rows, err := q.InsertWhatsAppMessage(ctx, gen.InsertWhatsAppMessageParams{
-		BrandSlug: brand, WaID: waID, WaMessageID: messageID, Direction: direction,
-		Kind: kind, Body: body, Status: stored, SentBy: sender, CreatedAt: db.Timestamptz(&at),
+		BrandSlug: m.Brand, WaID: m.WaID, WaMessageID: m.MessageID, Direction: m.Direction,
+		Kind: m.Kind, Body: m.Body, Status: stored, SentBy: sender, CreatedAt: db.Timestamptz(&at),
 	})
 	if err != nil || rows == 0 {
 		return false, err
 	}
-	if err := q.EnsureWhatsAppConversation(ctx, gen.EnsureWhatsAppConversationParams{BrandSlug: brand, WaID: waID}); err != nil {
+	if err := q.EnsureWhatsAppConversation(ctx, gen.EnsureWhatsAppConversationParams{
+		BrandSlug: m.Brand, WaID: m.WaID,
+	}); err != nil {
 		return false, err
 	}
 	return true, q.TouchWhatsAppConversation(ctx, gen.TouchWhatsAppConversationParams{
-		BrandSlug: brand, WaID: waID, At: db.Timestamptz(&at), FromCustomer: direction == directionIn,
-		Preview: preview(body, kind), ProfileName: profileName,
+		BrandSlug: m.Brand, WaID: m.WaID, At: db.Timestamptz(&at),
+		FromCustomer: m.Direction == directionIn,
+		Preview:      preview(m.Body, m.Kind), ProfileName: m.ProfileName,
 	})
 }
 

@@ -191,7 +191,10 @@ func (t *botTurn) recordSend(ctx context.Context, q *gen.Queries, res whatsapp.S
 		return river.JobCancel(err)
 	}
 	status := res.Status
-	_, err = recordWhatsAppMessage(ctx, q, t.brand, t.waID, res.MessageID, directionOut, kind, body, "", &status, time.Now(), "")
+	_, err = recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+		Brand: t.brand, WaID: t.waID, MessageID: res.MessageID, Direction: directionOut,
+		Kind: kind, Body: body, Status: &status, At: time.Now(),
+	})
 	return err
 }
 

@@ -150,8 +150,10 @@ func (s *Server) replyWhatsApp(c *gin.Context) {
 			return conv, nil
 		}
 		accepted := res.Status
-		if _, err := recordWhatsAppMessage(ctx, q, brand, waID, res.MessageID, directionOut, "text", text,
-			currentUserID(c), &accepted, time.Now(), ""); err != nil {
+		if _, err := recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+			Brand: brand, WaID: waID, MessageID: res.MessageID, Direction: directionOut,
+			Kind: "text", Body: text, SentBy: currentUserID(c), Status: &accepted, At: time.Now(),
+		}); err != nil {
 			return conv, err
 		}
 		sent, err = q.GetWhatsAppMessageByWAID(ctx, res.MessageID)
