@@ -9,7 +9,40 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countDamageReportsByStatus = `-- name: CountDamageReportsByStatus :many
+SELECT status, count(*)::int AS total
+FROM damage_reports WHERE brand_slug = $1
+GROUP BY status
+`
+
+type CountDamageReportsByStatusRow struct {
+	Status string
+	Total  int32
+}
+
+// The tab counts, over the whole brand rather than the page.
+func (q *Queries) CountDamageReportsByStatus(ctx context.Context, brandSlug string) ([]CountDamageReportsByStatusRow, error) {
+	rows, err := q.db.Query(ctx, countDamageReportsByStatus, brandSlug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountDamageReportsByStatusRow{}
+	for rows.Next() {
+		var i CountDamageReportsByStatusRow
+		if err := rows.Scan(&i.Status, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
 
 const findOrderByNumber = `-- name: FindOrderByNumber :one
 SELECT id, customer_name FROM orders WHERE order_number = $1 LIMIT 1
@@ -30,6 +63,40 @@ func (q *Queries) FindOrderByNumber(ctx context.Context, orderNumber string) (Fi
 	row := q.db.QueryRow(ctx, findOrderByNumber, orderNumber)
 	var i FindOrderByNumberRow
 	err := row.Scan(&i.ID, &i.CustomerName)
+	return i, err
+}
+
+const getDamageReport = `-- name: GetDamageReport :one
+SELECT id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at FROM damage_reports
+WHERE id = $1 AND brand_slug = $2
+`
+
+type GetDamageReportParams struct {
+	ID        uuid.UUID
+	BrandSlug string
+}
+
+func (q *Queries) GetDamageReport(ctx context.Context, arg GetDamageReportParams) (DamageReport, error) {
+	row := q.db.QueryRow(ctx, getDamageReport, arg.ID, arg.BrandSlug)
+	var i DamageReport
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WaID,
+		&i.ShopifyOrderGid,
+		&i.OrderNumber,
+		&i.OrderID,
+		&i.CustomerName,
+		&i.PhotoCount,
+		&i.Status,
+		&i.ResolutionNote,
+		&i.WaMessageID,
+		&i.ReportedAt,
+		&i.StatusChangedAt,
+		&i.StatusChangedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
 	return i, err
 }
 
@@ -122,4 +189,209 @@ func (q *Queries) LinkDamageReportPhotos(ctx context.Context, arg LinkDamageRepo
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const listDamageReportPhotos = `-- name: ListDamageReportPhotos :many
+SELECT m.id AS message_id, m.kind, m.body, m.media_status, m.media_mime_type,
+       m.media_error, m.created_at, p.position
+FROM damage_report_photos p
+JOIN whatsapp_messages m ON m.id = p.message_id
+WHERE p.report_id = $1
+ORDER BY p.position
+`
+
+type ListDamageReportPhotosRow struct {
+	MessageID     uuid.UUID
+	Kind          string
+	Body          string
+	MediaStatus   string
+	MediaMimeType string
+	MediaError    string
+	CreatedAt     pgtype.Timestamptz
+	Position      int32
+}
+
+// The photographs, in the order the customer sent them, each with where its
+// download got to. The body is the caption they typed alongside it.
+func (q *Queries) ListDamageReportPhotos(ctx context.Context, reportID uuid.UUID) ([]ListDamageReportPhotosRow, error) {
+	rows, err := q.db.Query(ctx, listDamageReportPhotos, reportID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDamageReportPhotosRow{}
+	for rows.Next() {
+		var i ListDamageReportPhotosRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.Kind,
+			&i.Body,
+			&i.MediaStatus,
+			&i.MediaMimeType,
+			&i.MediaError,
+			&i.CreatedAt,
+			&i.Position,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDamageReports = `-- name: ListDamageReports :many
+SELECT r.id, r.brand_slug, r.wa_id, r.shopify_order_gid, r.order_number, r.order_id, r.customer_name, r.photo_count, r.status, r.resolution_note, r.wa_message_id, r.reported_at, r.status_changed_at, r.status_changed_by, r.created_at, r.updated_at,
+       coalesce(c.linked, 0)::int   AS photos_linked,
+       coalesce(c.stored, 0)::int   AS photos_stored,
+       coalesce(c.failed, 0)::int   AS photos_failed,
+       coalesce(c.pending, 0)::int  AS photos_pending,
+       o.order_number IS NOT NULL   AS order_imported
+FROM damage_reports r
+LEFT JOIN orders o ON o.id = r.order_id
+LEFT JOIN LATERAL (
+    SELECT count(*) AS linked,
+           count(*) FILTER (WHERE m.media_status = 'stored')  AS stored,
+           count(*) FILTER (WHERE m.media_status = 'failed')  AS failed,
+           count(*) FILTER (WHERE m.media_status = 'pending') AS pending
+    FROM damage_report_photos p
+    JOIN whatsapp_messages m ON m.id = p.message_id
+    WHERE p.report_id = r.id
+) c ON true
+WHERE r.brand_slug = $1
+ORDER BY r.reported_at DESC
+LIMIT $2
+`
+
+type ListDamageReportsParams struct {
+	BrandSlug string
+	RowLimit  int32
+}
+
+type ListDamageReportsRow struct {
+	ID              uuid.UUID
+	BrandSlug       string
+	WaID            string
+	ShopifyOrderGid string
+	OrderNumber     string
+	OrderID         *uuid.UUID
+	CustomerName    string
+	PhotoCount      int32
+	Status          string
+	ResolutionNote  string
+	WaMessageID     string
+	ReportedAt      pgtype.Timestamptz
+	StatusChangedAt pgtype.Timestamptz
+	StatusChangedBy *string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+	PhotosLinked    int32
+	PhotosStored    int32
+	PhotosFailed    int32
+	PhotosPending   int32
+	OrderImported   interface{}
+}
+
+// The brand's damage reports, newest first, with how many of their
+// photographs actually arrived.
+//
+// THE PHOTO TALLY IS THE POINT. "Three photographs" and "three photographs,
+// none of which we hold" are different situations and the page has to tell
+// them apart, so the counts are computed here rather than inferred from
+// photo_count alone.
+func (q *Queries) ListDamageReports(ctx context.Context, arg ListDamageReportsParams) ([]ListDamageReportsRow, error) {
+	rows, err := q.db.Query(ctx, listDamageReports, arg.BrandSlug, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDamageReportsRow{}
+	for rows.Next() {
+		var i ListDamageReportsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BrandSlug,
+			&i.WaID,
+			&i.ShopifyOrderGid,
+			&i.OrderNumber,
+			&i.OrderID,
+			&i.CustomerName,
+			&i.PhotoCount,
+			&i.Status,
+			&i.ResolutionNote,
+			&i.WaMessageID,
+			&i.ReportedAt,
+			&i.StatusChangedAt,
+			&i.StatusChangedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.PhotosLinked,
+			&i.PhotosStored,
+			&i.PhotosFailed,
+			&i.PhotosPending,
+			&i.OrderImported,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateDamageReportStatus = `-- name: UpdateDamageReportStatus :one
+UPDATE damage_reports
+SET status            = coalesce($1, status),
+    resolution_note   = coalesce($2, resolution_note),
+    status_changed_at = now(),
+    status_changed_by = $3,
+    updated_at        = now()
+WHERE id = $4 AND brand_slug = $5
+RETURNING id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at
+`
+
+type UpdateDamageReportStatusParams struct {
+	Status          *string
+	ResolutionNote  *string
+	StatusChangedBy *string
+	ID              uuid.UUID
+	BrandSlug       string
+}
+
+// Moves a report along, records a resolution, or both.
+//
+// Each field is optional and coalesced, so sending only a note does not reset
+// the status and sending only a status does not wipe the note.
+func (q *Queries) UpdateDamageReportStatus(ctx context.Context, arg UpdateDamageReportStatusParams) (DamageReport, error) {
+	row := q.db.QueryRow(ctx, updateDamageReportStatus,
+		arg.Status,
+		arg.ResolutionNote,
+		arg.StatusChangedBy,
+		arg.ID,
+		arg.BrandSlug,
+	)
+	var i DamageReport
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WaID,
+		&i.ShopifyOrderGid,
+		&i.OrderNumber,
+		&i.OrderID,
+		&i.CustomerName,
+		&i.PhotoCount,
+		&i.Status,
+		&i.ResolutionNote,
+		&i.WaMessageID,
+		&i.ReportedAt,
+		&i.StatusChangedAt,
+		&i.StatusChangedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

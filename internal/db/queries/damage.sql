@@ -37,3 +37,66 @@ FROM unnest(sqlc.arg('wa_message_ids')::text[]) WITH ORDINALITY AS w(wamid, ord)
 JOIN whatsapp_messages m
   ON m.wa_message_id = w.wamid AND m.brand_slug = sqlc.arg('brand_slug')
 ON CONFLICT DO NOTHING;
+
+-- name: ListDamageReports :many
+-- The brand's damage reports, newest first, with how many of their
+-- photographs actually arrived.
+--
+-- THE PHOTO TALLY IS THE POINT. "Three photographs" and "three photographs,
+-- none of which we hold" are different situations and the page has to tell
+-- them apart, so the counts are computed here rather than inferred from
+-- photo_count alone.
+SELECT r.*,
+       coalesce(c.linked, 0)::int   AS photos_linked,
+       coalesce(c.stored, 0)::int   AS photos_stored,
+       coalesce(c.failed, 0)::int   AS photos_failed,
+       coalesce(c.pending, 0)::int  AS photos_pending,
+       o.order_number IS NOT NULL   AS order_imported
+FROM damage_reports r
+LEFT JOIN orders o ON o.id = r.order_id
+LEFT JOIN LATERAL (
+    SELECT count(*) AS linked,
+           count(*) FILTER (WHERE m.media_status = 'stored')  AS stored,
+           count(*) FILTER (WHERE m.media_status = 'failed')  AS failed,
+           count(*) FILTER (WHERE m.media_status = 'pending') AS pending
+    FROM damage_report_photos p
+    JOIN whatsapp_messages m ON m.id = p.message_id
+    WHERE p.report_id = r.id
+) c ON true
+WHERE r.brand_slug = sqlc.arg('brand_slug')
+ORDER BY r.reported_at DESC
+LIMIT sqlc.arg('row_limit');
+
+-- name: CountDamageReportsByStatus :many
+-- The tab counts, over the whole brand rather than the page.
+SELECT status, count(*)::int AS total
+FROM damage_reports WHERE brand_slug = sqlc.arg('brand_slug')
+GROUP BY status;
+
+-- name: GetDamageReport :one
+SELECT * FROM damage_reports
+WHERE id = sqlc.arg('id') AND brand_slug = sqlc.arg('brand_slug');
+
+-- name: ListDamageReportPhotos :many
+-- The photographs, in the order the customer sent them, each with where its
+-- download got to. The body is the caption they typed alongside it.
+SELECT m.id AS message_id, m.kind, m.body, m.media_status, m.media_mime_type,
+       m.media_error, m.created_at, p.position
+FROM damage_report_photos p
+JOIN whatsapp_messages m ON m.id = p.message_id
+WHERE p.report_id = sqlc.arg('report_id')
+ORDER BY p.position;
+
+-- name: UpdateDamageReportStatus :one
+-- Moves a report along, records a resolution, or both.
+--
+-- Each field is optional and coalesced, so sending only a note does not reset
+-- the status and sending only a status does not wipe the note.
+UPDATE damage_reports
+SET status            = coalesce(sqlc.narg('status'), status),
+    resolution_note   = coalesce(sqlc.narg('resolution_note'), resolution_note),
+    status_changed_at = now(),
+    status_changed_by = sqlc.arg('status_changed_by'),
+    updated_at        = now()
+WHERE id = sqlc.arg('id') AND brand_slug = sqlc.arg('brand_slug')
+RETURNING *;
