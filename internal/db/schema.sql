@@ -1337,3 +1337,37 @@ CREATE TABLE IF NOT EXISTS whatsapp_brand_state (
     confirmations_since timestamptz NOT NULL DEFAULT now()
 );
 
+-- 0108: damage reports. One row per completed WhatsApp damage flow. The order
+-- is Shopify's (resolved live by the bot), so the GID is NOT NULL while
+-- order_id may be null for an order Tensor has not imported. Photos link to
+-- the MESSAGE, not the file: the download is asynchronous, so at the moment
+-- the report is written there may be no file to point at yet.
+CREATE TABLE IF NOT EXISTS damage_reports (
+    id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_slug        varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id             varchar(32) NOT NULL,
+    shopify_order_gid varchar(64) NOT NULL,
+    order_number      varchar(64) NOT NULL,
+    order_id          uuid REFERENCES orders(id) ON DELETE SET NULL,
+    customer_name     varchar(255) NOT NULL DEFAULT '',
+    photo_count       integer NOT NULL DEFAULT 0,
+    status            varchar(16) NOT NULL DEFAULT 'new',
+    resolution_note   text NOT NULL DEFAULT '',
+    wa_message_id     varchar(128) NOT NULL UNIQUE,
+    reported_at       timestamptz NOT NULL DEFAULT now(),
+    status_changed_at timestamptz,
+    status_changed_by varchar(64),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_damage_reports_queue
+    ON damage_reports (brand_slug, status, reported_at DESC);
+CREATE INDEX IF NOT EXISTS ix_damage_reports_order
+    ON damage_reports (order_id) WHERE order_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS damage_report_photos (
+    report_id  uuid NOT NULL REFERENCES damage_reports(id) ON DELETE CASCADE,
+    message_id uuid NOT NULL REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
+    position   integer NOT NULL,
+    PRIMARY KEY (report_id, message_id)
+);

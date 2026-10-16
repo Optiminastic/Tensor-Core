@@ -87,7 +87,18 @@ ORDER BY created_at DESC
 LIMIT sqlc.arg(row_limit);
 
 -- name: PurgeWhatsAppMessages :execrows
-DELETE FROM whatsapp_messages WHERE created_at < $1;
+-- Drops old chat, EXCEPT anything a damage report was built from.
+--
+-- damage_report_photos cascades on message_id, so an unconditional purge
+-- would quietly strip a resolved report's photographs at a hundred and eighty
+-- days while leaving the file_asset rows and the S3 objects orphaned. A
+-- report is a record somebody may need long after the small talk around it
+-- has gone.
+DELETE FROM whatsapp_messages m
+WHERE m.created_at < $1
+  AND NOT EXISTS (
+      SELECT 1 FROM damage_report_photos p WHERE p.message_id = m.id
+  );
 
 -- name: StartWhatsAppConfirmations :one
 -- The floor for confirmations: set the first time the sweep sees them on.

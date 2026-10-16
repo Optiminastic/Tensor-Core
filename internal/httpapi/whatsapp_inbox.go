@@ -63,6 +63,12 @@ type whatsappMessageJSON struct {
 	ErrorCode *int32    `json:"error_code"`
 	SentBy    *string   `json:"sent_by"`
 	CreatedAt time.Time `json:"created_at"`
+	// MediaStatus is '' for a message with no attachment, then pending,
+	// stored or failed. The page needs all four: "downloading" and
+	// "unavailable" are opposite answers to "did their photo arrive?", and
+	// drawing them the same way says the wrong one.
+	MediaStatus string `json:"media_status"`
+	MimeType    string `json:"mime_type"`
 }
 
 func (s *Server) listWhatsAppConversations(c *gin.Context) {
@@ -220,6 +226,7 @@ func messageJSON(row gen.WhatsappMessage) whatsappMessageJSON {
 	return whatsappMessageJSON{
 		ID: row.ID.String(), Direction: row.Direction, Author: author, Kind: row.Kind,
 		Body: row.Body, Status: row.Status, ErrorCode: row.ErrorCode, SentBy: row.SentBy,
-		CreatedAt: row.CreatedAt.Time,
+		CreatedAt:   row.CreatedAt.Time,
+		MediaStatus: row.MediaStatus, MimeType: row.MediaMimeType,
 	}
 }

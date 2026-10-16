@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -247,28 +248,84 @@ func TestDamageFlow(t *testing.T) {
 		t.Fatalf("done without photos: %v", texts(actions))
 	}
 
-	c, actions = Step(c, MediaIn{Kind: "image"}, now)
+	c, actions = Step(c, MediaIn{Kind: "image", MessageID: "wamid.A"}, now)
 	if texts(actions)[0] != content.PhotoReceived {
 		t.Fatalf("first photo: %v", texts(actions))
 	}
-	c, actions = Step(c, MediaIn{Kind: "image"}, now)
+	c, actions = Step(c, MediaIn{Kind: "image", MessageID: "wamid.B"}, now)
 	if len(actions) != 0 {
 		t.Fatalf("second photo should be silent, got %v", texts(actions))
+	}
+	// An audio note is not a damage photograph, and must not be counted as
+	// one - the customer would then be told their photos were received.
+	c, _ = Step(c, MediaIn{Kind: "audio", MessageID: "wamid.C"}, now)
+	if c.Ctx.Photos != 2 || len(c.Ctx.PhotoMessages) != 2 {
+		t.Fatalf("audio counted as a photo: %d, %v", c.Ctx.Photos, c.Ctx.PhotoMessages)
 	}
 
 	c, actions = Step(c, TextIn{Text: "Done"}, now)
 	if c.State != StateHuman {
 		t.Fatalf("state after DONE = %s", c.State)
 	}
+	// RecordDamage FIRST. The two Shopify writes after it go through
+	// requireShop, which cancels the job when a brand has no connected store;
+	// Tensor's own record must be made before anything that can do that.
 	want := []Action{
+		RecordDamage{
+			OrderID: "gid://shopify/Order/1", OrderName: "T3DPS-115766",
+			Photos: 2, PhotoMessages: []string{"wamid.A", "wamid.B"},
+		},
 		TagOrder{OrderID: "gid://shopify/Order/1", Tag: content.TagDamageReported},
 		AppendNote{OrderID: "gid://shopify/Order/1", Note: "WhatsApp damage report: 2 photos. See the WhatsApp chat."},
 	}
-	if !reflect.DeepEqual(actions[:2], want) {
+	if !reflect.DeepEqual(actions[:3], want) {
 		t.Fatalf("damage actions %#v", actions)
 	}
 	if !strings.Contains(texts(actions)[0], "T3DPS-115766") {
 		t.Fatalf("damage reply %v", texts(actions))
+	}
+	// The scratchpad is wiped, and that is correct: the conversation has left
+	// the flow, and the durable record is the damage_reports row. Pinned so
+	// nobody later "fixes" the wipe to keep the order id around.
+	if !reflect.DeepEqual(c.Ctx, Context{}) {
+		t.Fatalf("context survived the handoff: %+v", c.Ctx)
+	}
+}
+
+// The wamid list is bounded; the count is not. A report of thirty photographs
+// still says thirty, and links the first twenty.
+func TestThePhotoListIsBounded(t *testing.T) {
+	c, _ := Step(idle(), ButtonIn{ID: content.OptionDamage}, now)
+	c, _ = Step(c, TextIn{Text: "115766"}, now)
+	c, _ = Step(c, LookupResult{Purpose: PurposeDamage, Outcome: OrderFound, Order: shipped()}, now)
+
+	for i := 0; i < maxDamagePhotos+10; i++ {
+		c, _ = Step(c, MediaIn{Kind: "image", MessageID: fmt.Sprintf("wamid.%d", i)}, now)
+	}
+	if c.Ctx.Photos != maxDamagePhotos+10 {
+		t.Errorf("counted %d photos, want every one of them", c.Ctx.Photos)
+	}
+	if len(c.Ctx.PhotoMessages) != maxDamagePhotos {
+		t.Errorf("linked %d messages, want the cap of %d", len(c.Ctx.PhotoMessages), maxDamagePhotos)
+	}
+}
+
+// A conversation that was already mid-flow when PhotoMessages shipped has a
+// count and no ids. It must still be able to finish.
+func TestAFlowFromBeforeThePhotoListStillFinishes(t *testing.T) {
+	c := in(StateAwaitDamagePhotos)
+	c.Ctx = Context{OrderID: "gid://shopify/Order/1", OrderName: "T3DPS-115766", Photos: 2}
+
+	c, actions := Step(c, TextIn{Text: "DONE"}, now)
+	rec, ok := actions[0].(RecordDamage)
+	if !ok {
+		t.Fatalf("first action %#v, want RecordDamage", actions[0])
+	}
+	if rec.Photos != 2 || len(rec.PhotoMessages) != 0 {
+		t.Errorf("record = %+v", rec)
+	}
+	if c.State != StateHuman {
+		t.Errorf("state = %s", c.State)
 	}
 }
 

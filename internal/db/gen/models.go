@@ -167,6 +167,31 @@ type CostAssumptionSet struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+type DamageReport struct {
+	ID              uuid.UUID
+	BrandSlug       string
+	WaID            string
+	ShopifyOrderGid string
+	OrderNumber     string
+	OrderID         *uuid.UUID
+	CustomerName    string
+	PhotoCount      int32
+	Status          string
+	ResolutionNote  string
+	WaMessageID     string
+	ReportedAt      pgtype.Timestamptz
+	StatusChangedAt pgtype.Timestamptz
+	StatusChangedBy *string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+type DamageReportPhoto struct {
+	ReportID  uuid.UUID
+	MessageID uuid.UUID
+	Position  int32
+}
+
 type Design struct {
 	ID          uuid.UUID
 	BrandSlug   string

@@ -28,6 +28,14 @@ type Context struct {
 	OrderName string `json:"order_name,omitempty"`
 	Photos    int    `json:"photos,omitempty"`
 	Misses    int    `json:"misses,omitempty"`
+	// PhotoMessages is the wamid of each photograph collected in this flow,
+	// in arrival order, so the report can name the exact messages it was
+	// built from.
+	//
+	// Photos stays a separate count on purpose: a conversation already
+	// mid-flow when this field shipped has a count and no ids, and still has
+	// to be able to finish.
+	PhotoMessages []string `json:"photo_messages,omitempty"`
 }
 
 type Conversation struct {
@@ -82,8 +90,10 @@ type TextIn struct{ Text string }
 // ButtonIn is a tapped reply button; ID is the button's id.
 type ButtonIn struct{ ID string }
 
-// MediaIn is a customer photo, video, document, audio or sticker.
-type MediaIn struct{ Kind string }
+// MediaIn is a customer photo, video, document, audio or sticker. MessageID
+// is Meta's wamid, carried so a flow can name the exact messages it collected
+// - the bytes themselves are fetched elsewhere and arrive later.
+type MediaIn struct{ Kind, MessageID string }
 
 // StaffEcho is a message staff sent from the WhatsApp Business app.
 type StaffEcho struct{}
@@ -142,9 +152,20 @@ type RecordConfirmation struct {
 	ChangeText string
 }
 
+// RecordDamage is Tensor's own record of a damage report, independent of the
+// tag and the note that go to Shopify.
+type RecordDamage struct {
+	// OrderID is the Shopify GID; OrderName is the order number as printed.
+	OrderID       string
+	OrderName     string
+	Photos        int
+	PhotoMessages []string
+}
+
 func (SendText) isAction()           {}
 func (SendMenu) isAction()           {}
 func (LookupOrder) isAction()        {}
 func (TagOrder) isAction()           {}
 func (AppendNote) isAction()         {}
 func (RecordConfirmation) isAction() {}
+func (RecordDamage) isAction()       {}

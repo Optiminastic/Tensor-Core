@@ -14,13 +14,16 @@ const (
 	// last human activity before the bot answers again.
 	HumanIdleTimeout = 12 * time.Hour
 	// MaxMisses is how many unusable replies a flow tolerates before handoff.
-	MaxMisses        = 2
-	minOrderDigits   = 5
-	maxOrderDigits   = 10
-	keywordTrimSet   = " !.?,"
-	kindImage        = "image"
-	kindVideo        = "video"
-	doneKeyword      = "done"
+	MaxMisses      = 2
+	minOrderDigits = 5
+	maxOrderDigits = 10
+	keywordTrimSet = " !.?,"
+	kindImage      = "image"
+	kindVideo      = "video"
+	doneKeyword    = "done"
+	// maxDamagePhotos bounds the wamid list kept on the conversation. The
+	// photo COUNT is not capped; only the list of ids this report links.
+	maxDamagePhotos  = 20
 	menuKeyword      = "menu"
 	startKeyword     = "start"
 	stopKeyword      = "stop"
@@ -174,6 +177,12 @@ func onLookup(c Conversation, r LookupResult, now time.Time) (Conversation, []Ac
 func onDamagePhotos(c Conversation, ev Event, word string, now time.Time) (Conversation, []Action) {
 	if m, ok := ev.(MediaIn); ok && (m.Kind == kindImage || m.Kind == kindVideo) {
 		c.Ctx.Photos++
+		// Bounded: the count is the customer's, the list is ours to store,
+		// and a jsonb column is not the place for an unbounded one. A report
+		// of more than twenty photographs still says how many arrived.
+		if m.MessageID != "" && len(c.Ctx.PhotoMessages) < maxDamagePhotos {
+			c.Ctx.PhotoMessages = append(c.Ctx.PhotoMessages, m.MessageID)
+		}
 		if c.Ctx.Photos == 1 {
 			return c, []Action{SendText{Text: content.PhotoReceived}}
 		}
@@ -187,8 +196,14 @@ func onDamagePhotos(c Conversation, ev Event, word string, now time.Time) (Conve
 	}
 
 	orderID, orderName, photos := c.Ctx.OrderID, c.Ctx.OrderName, c.Ctx.Photos
+	msgs := c.Ctx.PhotoMessages
 	c, reply := handoff(c, now, fmt.Sprintf(content.DamageReported, orderName))
+	// RECORDED FIRST, before the two Shopify writes. Those go through
+	// requireShop, which cancels the whole job when a brand has no connected
+	// store - and Tensor's own record of a damaged parcel must not be lost
+	// because Shopify happens to be disconnected or returning 500s.
 	return c, append([]Action{
+		RecordDamage{OrderID: orderID, OrderName: orderName, Photos: photos, PhotoMessages: msgs},
 		TagOrder{OrderID: orderID, Tag: content.TagDamageReported},
 		AppendNote{OrderID: orderID, Note: fmt.Sprintf(damageNoteFmt, photos)},
 	}, reply...)

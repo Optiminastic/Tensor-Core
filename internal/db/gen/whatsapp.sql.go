@@ -593,9 +593,20 @@ func (q *Queries) MarkOrderConfirmationSent(ctx context.Context, arg MarkOrderCo
 }
 
 const purgeWhatsAppMessages = `-- name: PurgeWhatsAppMessages :execrows
-DELETE FROM whatsapp_messages WHERE created_at < $1
+DELETE FROM whatsapp_messages m
+WHERE m.created_at < $1
+  AND NOT EXISTS (
+      SELECT 1 FROM damage_report_photos p WHERE p.message_id = m.id
+  )
 `
 
+// Drops old chat, EXCEPT anything a damage report was built from.
+//
+// damage_report_photos cascades on message_id, so an unconditional purge
+// would quietly strip a resolved report's photographs at a hundred and eighty
+// days while leaving the file_asset rows and the S3 objects orphaned. A
+// report is a record somebody may need long after the small talk around it
+// has gone.
 func (q *Queries) PurgeWhatsAppMessages(ctx context.Context, createdAt pgtype.Timestamptz) (int64, error) {
 	result, err := q.db.Exec(ctx, purgeWhatsAppMessages, createdAt)
 	if err != nil {
