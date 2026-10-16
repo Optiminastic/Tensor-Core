@@ -268,6 +268,15 @@ func textWebhook(phoneID, messageID, text string) string {
 		phoneID, waCustomer, waCustomer, messageID, time.Now().Unix(), text)
 }
 
+// imageWebhook is a customer photograph, with an optional caption.
+func imageWebhook(phoneID, messageID, mediaID, caption string) string {
+	return fmt.Sprintf(`{"entry":[{"changes":[{"field":"messages","value":{"metadata":{"phone_number_id":%q},
+"contacts":[{"wa_id":%q,"profile":{"name":"Asha"}}],
+"messages":[{"from":%q,"id":%q,"timestamp":"%d","type":"image",
+"image":{"id":%q,"mime_type":"image/jpeg","sha256":"abc","caption":%q}}]}}]}]}`,
+		phoneID, waCustomer, waCustomer, messageID, time.Now().Unix(), mediaID, caption)
+}
+
 func serve(h http.Handler, r *http.Request) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -582,5 +591,155 @@ func TestIntegrationWhatsAppTestNumbersOnly(t *testing.T) {
 	}
 	if c := h.confirmation(t, orderID); c.Status != string(bot.ConfirmationSkipped) {
 		t.Fatalf("status = %s", c.Status)
+	}
+}
+
+// The whole damage path: tap, order number, two photographs, DONE.
+//
+// What it pins, in order of how badly each has gone wrong before:
+//   - the media id survives the webhook, and a download job is queued per
+//     attachment - the parser used to drop it on the floor;
+//   - the caption is stored as the message body, so the customer's own words
+//     about the damage are not lost;
+//   - a damage_reports row is written at all, and the photographs are linked
+//     to it in arrival order;
+//   - replaying the closing message files ONE report, not two.
+func TestIntegrationWhatsAppDamageReport(t *testing.T) {
+	h := newWAHarness(t, nil)
+	orderID := paidOrder(t, h.store, "T3DPS-115766", 7001)
+	h.shop.order = `{"id":"gid://shopify/Order/9","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z",
+"shippingAddress":{"phone":"+91 98765 43210"},"lineItems":{"nodes":[]},"fulfillments":[]}`
+
+	h.tap(t, content.OptionDamage)
+	h.say(t, "115766")
+	if s := h.meta.last(t); s.Text != content.AskDamagePhotos {
+		t.Fatalf("after the order number = %q", s.Text)
+	}
+
+	// Through the webhook, not h.inbound, because the media id and the caption
+	// are what this is about and only the webhook parses them.
+	for _, w := range []struct{ id, media, caption string }{
+		{"wamid.img.1", "MEDIA-A", "the corner is snapped"},
+		{"wamid.img.2", "MEDIA-B", ""},
+	} {
+		if code := serve(h.router, signedWebhook(
+			imageWebhook(waPhoneID, w.id, w.media, w.caption))).Code; code != http.StatusOK {
+			t.Fatalf("image webhook = %d", code)
+		}
+		h.inbound(t, production.WhatsAppInboundArgs{
+			BrandSlug: waBrand, WaID: waCustomer, MessageID: w.id, MessageKind: "image",
+		})
+	}
+
+	// One download queued per attachment. Without this the report links two
+	// photographs whose bytes nothing will ever fetch.
+	if n := h.jobs(t, production.WhatsAppMediaArgs{}.Kind()); n != 2 {
+		t.Fatalf("queued %d media downloads, want 2", n)
+	}
+	var body, mediaID, mediaStatus string
+	if err := h.store.Pool.QueryRow(h.ctx,
+		`SELECT body, media_id, media_status FROM whatsapp_messages WHERE wa_message_id = 'wamid.img.1'`,
+	).Scan(&body, &mediaID, &mediaStatus); err != nil {
+		t.Fatal(err)
+	}
+	if body != "the corner is snapped" || mediaID != "MEDIA-A" || mediaStatus != mediaPending {
+		t.Fatalf("stored image = %q / %q / %q", body, mediaID, mediaStatus)
+	}
+
+	h.inbound(t, production.WhatsAppInboundArgs{
+		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
+	})
+
+	reports, err := h.store.Q.ListDamageReports(h.ctx, gen.ListDamageReportsParams{
+		BrandSlug: waBrand, RowLimit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("filed %d reports, want 1", len(reports))
+	}
+	r := reports[0]
+	if r.OrderNumber != "T3DPS-115766" || r.Status != damageNew || r.PhotoCount != 2 {
+		t.Errorf("report = %+v", r)
+	}
+	// Resolved against Tensor's own orders table, so the page can link to it.
+	if r.OrderID == nil || *r.OrderID != orderID {
+		t.Errorf("order_id = %v, want %v", r.OrderID, orderID)
+	}
+	if r.PhotosLinked != 2 || r.PhotosPending != 2 {
+		t.Errorf("photo tally = linked %d, pending %d", r.PhotosLinked, r.PhotosPending)
+	}
+
+	photos, err := h.store.Q.ListDamageReportPhotos(h.ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(photos) != 2 || photos[0].Body != "the corner is snapped" {
+		t.Fatalf("photos = %+v", photos)
+	}
+
+	// A replayed closing message must not file a second report.
+	h.inbound(t, production.WhatsAppInboundArgs{
+		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
+	})
+	again, _ := h.store.Q.ListDamageReports(h.ctx, gen.ListDamageReportsParams{
+		BrandSlug: waBrand, RowLimit: 10,
+	})
+	if len(again) != 1 {
+		t.Fatalf("a replay filed %d reports", len(again))
+	}
+}
+
+// The queue's own endpoints, and who may use them.
+func TestIntegrationDamageReportsAPI(t *testing.T) {
+	h := newWAHarness(t, nil)
+	paidOrder(t, h.store, "T3DPS-115766", 7002)
+	h.shop.order = `{"id":"gid://shopify/Order/9","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z",
+"shippingAddress":{"phone":"+91 98765 43210"},"lineItems":{"nodes":[]},"fulfillments":[]}`
+	h.tap(t, content.OptionDamage)
+	h.say(t, "115766")
+	h.inbound(t, production.WhatsAppInboundArgs{
+		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.p1", MessageKind: "image",
+	})
+	h.inbound(t, production.WhatsAppInboundArgs{
+		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
+	})
+
+	reader := h.minter.mint(t, []string{auth.WhatsAppRead.Key()})
+	writer := h.minter.mint(t, []string{auth.WhatsAppRead.Key(), auth.WhatsAppReply.Key()})
+	base := "/brands/" + waBrand + "/damage-reports"
+
+	rr := doJSON(h.router, http.MethodGet, base, reader, nil)
+	var list struct {
+		Items  []damageReportJSON `json:"items"`
+		Counts map[string]int32   `json:"counts"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &list)
+	if rr.Code != http.StatusOK || len(list.Items) != 1 {
+		t.Fatalf("list = %d %s", rr.Code, rr.Body.String())
+	}
+	if list.Counts[damageNew] != 1 || list.Counts[""] != 1 {
+		t.Errorf("counts = %v", list.Counts)
+	}
+
+	id := list.Items[0].ID
+	// whatsapp:read is enough to look; it is not enough to close one.
+	if rr := doJSON(h.router, http.MethodPatch, base+"/"+id, reader,
+		map[string]string{"status": damageResolved}); rr.Code != http.StatusForbidden {
+		t.Fatalf("patch without whatsapp:reply = %d", rr.Code)
+	}
+	if rr := doJSON(h.router, http.MethodPatch, base+"/"+id, writer,
+		map[string]string{"status": "exploded"}); rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("patch with a nonsense status = %d", rr.Code)
+	}
+
+	rr = doJSON(h.router, http.MethodPatch, base+"/"+id, writer,
+		map[string]string{"status": damageInReview, "resolution_note": "replacement posted"})
+	var updated damageReportJSON
+	_ = json.Unmarshal(rr.Body.Bytes(), &updated)
+	if rr.Code != http.StatusOK || updated.Status != damageInReview ||
+		updated.ResolutionNote != "replacement posted" || updated.StatusChangedAt == nil {
+		t.Fatalf("patch = %d %s", rr.Code, rr.Body.String())
 	}
 }
