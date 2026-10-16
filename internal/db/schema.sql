@@ -1288,8 +1288,19 @@ CREATE TABLE IF NOT EXISTS whatsapp_messages (
     status        varchar(16) NOT NULL DEFAULT '',
     error_code    integer,
     sent_by       varchar(64),
+    -- The attachment, if any - see migration 0107. media_status is
+    -- '' | pending | stored | failed; media_id is kept after the download
+    -- because it is the only handle that can fetch those bytes again.
+    media_id        varchar(256) NOT NULL DEFAULT '',
+    media_mime_type varchar(127) NOT NULL DEFAULT '',
+    media_sha256    varchar(64)  NOT NULL DEFAULT '',
+    media_status    varchar(16)  NOT NULL DEFAULT '',
+    media_error     text         NOT NULL DEFAULT '',
+    file_asset_id   uuid REFERENCES file_assets(id) ON DELETE SET NULL,
     created_at    timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_media_pending
+    ON whatsapp_messages (created_at) WHERE media_status = 'pending';
 CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_thread
     ON whatsapp_messages (brand_slug, wa_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_created_at

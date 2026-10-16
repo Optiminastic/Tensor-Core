@@ -825,17 +825,23 @@ type WhatsappConversation struct {
 }
 
 type WhatsappMessage struct {
-	ID          uuid.UUID
-	BrandSlug   string
-	WaID        string
-	WaMessageID string
-	Direction   string
-	Kind        string
-	Body        string
-	Status      string
-	ErrorCode   *int32
-	SentBy      *string
-	CreatedAt   pgtype.Timestamptz
+	ID            uuid.UUID
+	BrandSlug     string
+	WaID          string
+	WaMessageID   string
+	Direction     string
+	Kind          string
+	Body          string
+	Status        string
+	ErrorCode     *int32
+	SentBy        *string
+	MediaID       string
+	MediaMimeType string
+	MediaSha256   string
+	MediaStatus   string
+	MediaError    string
+	FileAssetID   *uuid.UUID
+	CreatedAt     pgtype.Timestamptz
 }
 
 type WinbackWatermark struct {

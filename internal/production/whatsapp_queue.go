@@ -38,6 +38,30 @@ func (WhatsAppInboundArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: WhatsAppInboundQueueName}
 }
 
+// WhatsAppMediaArgs is an attachment waiting to be fetched from Meta.
+//
+// ON THE SHARED QUEUE, NOT THE INBOUND ONE. The inbound queue runs a single
+// worker so a customer's messages stay in arrival order; a sixteen-megabyte
+// video downloading there would hold that worker and stall every other
+// customer's reply behind it. A download depends on nothing and is answered
+// out of order quite happily.
+//
+// Unique by args, so a webhook Meta retries cannot start a second download of
+// the same attachment.
+type WhatsAppMediaArgs struct {
+	BrandSlug string `json:"brand_slug"`
+	// MessageID is Meta's wamid, which is what the stored message is keyed on.
+	MessageID string `json:"message_id"`
+}
+
+func (WhatsAppMediaArgs) Kind() string { return "whatsapp_media" }
+func (WhatsAppMediaArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:      WhatsAppQueueName,
+		UniqueOpts: river.UniqueOpts{ByArgs: true},
+	}
+}
+
 // WhatsAppEchoArgs records that staff replied from the WhatsApp Business app,
 // which hands the conversation to a human.
 type WhatsAppEchoArgs struct {

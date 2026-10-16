@@ -48,7 +48,14 @@ func TestParseWebhookGroupsByNumber(t *testing.T) {
 		{ID: "wamid.text", From: "919876543210", Kind: KindText, Text: "hi", ProfileName: "Asha"},
 		{ID: "wamid.reply", From: "919876543210", Kind: KindButton, ButtonID: "track", ProfileName: "Asha"},
 		{ID: "wamid.tpl", From: "919876543210", Kind: KindButton, ButtonID: "confirm:gid://shopify/Order/7", ProfileName: "Asha"},
-		{ID: "wamid.img", From: "919876543210", Kind: "image", ProfileName: "Asha"},
+		// The media id is the whole point: a webhook carries no bytes, and
+		// without the id there is no second chance to fetch them.
+		{ID: "wamid.img", From: "919876543210", Kind: KindImage, ProfileName: "Asha",
+			MediaID: "MEDIA1", MediaMimeType: "image/jpeg", MediaSHA256: "abc123",
+			Caption: "the corner is snapped"},
+		// Only a document carries a filename, and no caption was sent.
+		{ID: "wamid.doc", From: "919876543210", Kind: KindDocument, ProfileName: "Asha",
+			MediaID: "MEDIA2", MediaMimeType: "application/pdf", Filename: "invoice.pdf"},
 	}
 	if len(ours.Messages) != len(want) {
 		t.Fatalf("messages = %+v", ours.Messages)

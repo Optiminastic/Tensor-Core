@@ -27,6 +27,24 @@ func (q *Queries) EnsureWhatsAppConversation(ctx context.Context, arg EnsureWhat
 	return err
 }
 
+const failWhatsAppMessageMedia = `-- name: FailWhatsAppMessageMedia :exec
+UPDATE whatsapp_messages
+SET media_status = 'failed', media_error = $1
+WHERE wa_message_id = $2 AND media_status = 'pending'
+`
+
+type FailWhatsAppMessageMediaParams struct {
+	MediaError  string
+	WaMessageID string
+}
+
+// It is never coming. Recorded rather than left pending for ever, so a screen
+// can say "unavailable" instead of "still downloading" until the heat death.
+func (q *Queries) FailWhatsAppMessageMedia(ctx context.Context, arg FailWhatsAppMessageMediaParams) error {
+	_, err := q.db.Exec(ctx, failWhatsAppMessageMedia, arg.MediaError, arg.WaMessageID)
+	return err
+}
+
 const findWhatsAppBrandsByPhoneNumberID = `-- name: FindWhatsAppBrandsByPhoneNumberID :many
 SELECT brand_slug FROM integration_settings
 WHERE provider = 'whatsapp' AND setting_key = 'phone_number_id' AND setting_value = $1
@@ -163,7 +181,7 @@ func (q *Queries) GetWhatsAppConversation(ctx context.Context, arg GetWhatsAppCo
 }
 
 const getWhatsAppMessageByWAID = `-- name: GetWhatsAppMessageByWAID :one
-SELECT id, brand_slug, wa_id, wa_message_id, direction, kind, body, status, error_code, sent_by, created_at FROM whatsapp_messages WHERE wa_message_id = $1
+SELECT id, brand_slug, wa_id, wa_message_id, direction, kind, body, status, error_code, sent_by, media_id, media_mime_type, media_sha256, media_status, media_error, file_asset_id, created_at FROM whatsapp_messages WHERE wa_message_id = $1
 `
 
 func (q *Queries) GetWhatsAppMessageByWAID(ctx context.Context, waMessageID string) (WhatsappMessage, error) {
@@ -180,7 +198,63 @@ func (q *Queries) GetWhatsAppMessageByWAID(ctx context.Context, waMessageID stri
 		&i.Status,
 		&i.ErrorCode,
 		&i.SentBy,
+		&i.MediaID,
+		&i.MediaMimeType,
+		&i.MediaSha256,
+		&i.MediaStatus,
+		&i.MediaError,
+		&i.FileAssetID,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getWhatsAppMessageMedia = `-- name: GetWhatsAppMessageMedia :one
+SELECT m.id, m.brand_slug, m.kind, m.media_status, m.media_mime_type, m.media_error,
+       f.storage_key, f.content_type, f.size_bytes, f.filename
+FROM whatsapp_messages m
+LEFT JOIN file_assets f ON f.id = m.file_asset_id
+WHERE m.id = $1 AND m.brand_slug = $2
+`
+
+type GetWhatsAppMessageMediaParams struct {
+	ID        uuid.UUID
+	BrandSlug string
+}
+
+type GetWhatsAppMessageMediaRow struct {
+	ID            uuid.UUID
+	BrandSlug     string
+	Kind          string
+	MediaStatus   string
+	MediaMimeType string
+	MediaError    string
+	StorageKey    *string
+	ContentType   *string
+	SizeBytes     *int64
+	Filename      *string
+}
+
+// One message's attachment, scoped to the brand whose conversation it is on.
+//
+// THE BRAND IS IN THE WHERE CLAUSE, not checked afterwards. This is what makes
+// the route safe to expose by message id: a file belonging to one brand's chat
+// cannot be fetched under another brand's slug, which the flat /files/:id
+// route cannot promise.
+func (q *Queries) GetWhatsAppMessageMedia(ctx context.Context, arg GetWhatsAppMessageMediaParams) (GetWhatsAppMessageMediaRow, error) {
+	row := q.db.QueryRow(ctx, getWhatsAppMessageMedia, arg.ID, arg.BrandSlug)
+	var i GetWhatsAppMessageMediaRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.Kind,
+		&i.MediaStatus,
+		&i.MediaMimeType,
+		&i.MediaError,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.SizeBytes,
+		&i.Filename,
 	)
 	return i, err
 }
@@ -220,23 +294,36 @@ func (q *Queries) InsertOrderConfirmation(ctx context.Context, arg InsertOrderCo
 }
 
 const insertWhatsAppMessage = `-- name: InsertWhatsAppMessage :execrows
-INSERT INTO whatsapp_messages (brand_slug, wa_id, wa_message_id, direction, kind, body, status, sent_by, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO whatsapp_messages (
+    brand_slug, wa_id, wa_message_id, direction, kind, body, status, sent_by, created_at,
+    media_id, media_mime_type, media_sha256, media_status
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+    $10, $11,
+    $12, $13)
 ON CONFLICT (wa_message_id) DO NOTHING
 `
 
 type InsertWhatsAppMessageParams struct {
-	BrandSlug   string
-	WaID        string
-	WaMessageID string
-	Direction   string
-	Kind        string
-	Body        string
-	Status      string
-	SentBy      *string
-	CreatedAt   pgtype.Timestamptz
+	BrandSlug     string
+	WaID          string
+	WaMessageID   string
+	Direction     string
+	Kind          string
+	Body          string
+	Status        string
+	SentBy        *string
+	CreatedAt     pgtype.Timestamptz
+	MediaID       string
+	MediaMimeType string
+	MediaSha256   string
+	MediaStatus   string
 }
 
+// media_status is set by the caller: 'pending' when there is an id to fetch,
+// ” otherwise. Nothing else ever writes it to 'pending', so the download
+// worker's set of work is exactly the messages that arrived with an
+// attachment.
 func (q *Queries) InsertWhatsAppMessage(ctx context.Context, arg InsertWhatsAppMessageParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertWhatsAppMessage,
 		arg.BrandSlug,
@@ -248,6 +335,10 @@ func (q *Queries) InsertWhatsAppMessage(ctx context.Context, arg InsertWhatsAppM
 		arg.Status,
 		arg.SentBy,
 		arg.CreatedAt,
+		arg.MediaID,
+		arg.MediaMimeType,
+		arg.MediaSha256,
+		arg.MediaStatus,
 	)
 	if err != nil {
 		return 0, err
@@ -404,7 +495,7 @@ func (q *Queries) ListWhatsAppConversations(ctx context.Context, arg ListWhatsAp
 }
 
 const listWhatsAppMessages = `-- name: ListWhatsAppMessages :many
-SELECT id, brand_slug, wa_id, wa_message_id, direction, kind, body, status, error_code, sent_by, created_at FROM whatsapp_messages
+SELECT id, brand_slug, wa_id, wa_message_id, direction, kind, body, status, error_code, sent_by, media_id, media_mime_type, media_sha256, media_status, media_error, file_asset_id, created_at FROM whatsapp_messages
 WHERE brand_slug = $1 AND wa_id = $2
 ORDER BY created_at DESC
 LIMIT $3
@@ -436,6 +527,12 @@ func (q *Queries) ListWhatsAppMessages(ctx context.Context, arg ListWhatsAppMess
 			&i.Status,
 			&i.ErrorCode,
 			&i.SentBy,
+			&i.MediaID,
+			&i.MediaMimeType,
+			&i.MediaSha256,
+			&i.MediaStatus,
+			&i.MediaError,
+			&i.FileAssetID,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -536,6 +633,30 @@ func (q *Queries) SaveWhatsAppConversation(ctx context.Context, arg SaveWhatsApp
 		arg.HumanSince,
 		arg.OptedOut,
 	)
+	return err
+}
+
+const setWhatsAppMessageMedia = `-- name: SetWhatsAppMessageMedia :exec
+UPDATE whatsapp_messages
+SET file_asset_id   = $1,
+    media_mime_type = coalesce(nullif($2::text, ''), media_mime_type),
+    media_status    = 'stored',
+    media_error     = ''
+WHERE wa_message_id = $3 AND media_status = 'pending'
+`
+
+type SetWhatsAppMessageMediaParams struct {
+	FileAssetID   *uuid.UUID
+	MediaMimeType string
+	WaMessageID   string
+}
+
+// The download landed: point the message at the stored file.
+//
+// Guarded on 'pending' so a replayed job cannot overwrite a file that is
+// already there with a second copy of the same bytes.
+func (q *Queries) SetWhatsAppMessageMedia(ctx context.Context, arg SetWhatsAppMessageMediaParams) error {
+	_, err := q.db.Exec(ctx, setWhatsAppMessageMedia, arg.FileAssetID, arg.MediaMimeType, arg.WaMessageID)
 	return err
 }
 

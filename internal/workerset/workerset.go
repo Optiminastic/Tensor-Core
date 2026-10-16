@@ -155,6 +155,7 @@ func Start(
 	// whichever process runs the job, so there is no per-process switch to get
 	// out of step - unlike the win-back sweep above.
 	river.AddWorker(workers, httpapi.NewWhatsAppInboundWorker(server, logger))
+	river.AddWorker(workers, httpapi.NewWhatsAppMediaWorker(server, logger))
 	river.AddWorker(workers, httpapi.NewWhatsAppEchoWorker(server))
 	river.AddWorker(workers, httpapi.NewWhatsAppFailedWorker(server, logger))
 	river.AddWorker(workers, httpapi.NewWhatsAppConfirmSweepWorker(server, logger))

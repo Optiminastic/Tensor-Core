@@ -16,7 +16,9 @@
             {"from": "919876543210", "id": "wamid.tpl", "timestamp": "1760335202", "type": "button",
              "button": {"payload": "confirm:gid://shopify/Order/7", "text": "Correct"}},
             {"from": "919876543210", "id": "wamid.img", "timestamp": "1760335203", "type": "image",
-             "image": {"id": "MEDIA1", "mime_type": "image/jpeg"}}
+             "image": {"id": "MEDIA1", "mime_type": "image/jpeg", "sha256": "abc123", "caption": "the corner is snapped"}},
+            {"from": "919876543210", "id": "wamid.doc", "timestamp": "1760335204", "type": "document",
+             "document": {"id": "MEDIA2", "mime_type": "application/pdf", "filename": "invoice.pdf"}}
           ]
         }
       },

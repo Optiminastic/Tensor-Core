@@ -29,9 +29,18 @@ const (
 )
 
 // Inbound message kinds. Media keep Meta's own type name (image, video, ...).
+//
+// These are the strings the bot's own kindImage/kindVideo compare against
+// (internal/whatsappbot/bot/step.go), so they are Meta's spelling and not
+// ours.
 const (
 	KindText        = "text"
 	KindButton      = "button"
+	KindImage       = "image"
+	KindVideo       = "video"
+	KindDocument    = "document"
+	KindAudio       = "audio"
+	KindSticker     = "sticker"
 	typeInteractive = "interactive"
 )
 
@@ -48,6 +57,23 @@ type Inbound struct {
 	Kind        string
 	Text        string
 	ButtonID    string
+
+	// MediaID is Meta's handle for an attachment, set for every media kind.
+	//
+	// IT IS A HANDLE, NOT THE BYTES, and it is the only way to ever get them:
+	// a webhook carries no url. Downloading is two further calls, and the one
+	// in the middle hands back a url that lapses in five minutes - so this id
+	// is what gets stored, and the download is redone from it on every retry.
+	// The id itself lasts seven days from the webhook.
+	MediaID       string
+	MediaMimeType string
+	MediaSHA256   string
+	// Caption is what the customer typed alongside the attachment. Carried
+	// because a damage photo captioned "the corner is snapped" says more than
+	// the photograph, and it used to be dropped on the floor.
+	Caption string
+	// Filename is the customer's own name for a document, empty otherwise.
+	Filename string
 }
 
 // Echo is a message staff sent from the WhatsApp Business app.
@@ -182,6 +208,41 @@ type rawMessage struct {
 			ID string `json:"id"`
 		} `json:"list_reply"`
 	} `json:"interactive"`
+	// Meta keys the attachment by its own type name but gives every one of
+	// them the same shape, so one struct covers all five.
+	Image    rawMedia `json:"image"`
+	Video    rawMedia `json:"video"`
+	Document rawMedia `json:"document"`
+	Audio    rawMedia `json:"audio"`
+	Sticker  rawMedia `json:"sticker"`
+}
+
+// rawMedia is Meta's attachment object. Audio and sticker carry no caption
+// and only a document carries a filename; the zero values are correct.
+type rawMedia struct {
+	ID       string `json:"id"`
+	MimeType string `json:"mime_type"`
+	SHA256   string `json:"sha256"`
+	Caption  string `json:"caption"`
+	Filename string `json:"filename"`
+}
+
+// media picks the attachment this message's type names, or the zero value
+// when it has none.
+func (m rawMessage) media() rawMedia {
+	switch m.Type {
+	case KindImage:
+		return m.Image
+	case KindVideo:
+		return m.Video
+	case KindDocument:
+		return m.Document
+	case KindAudio:
+		return m.Audio
+	case KindSticker:
+		return m.Sticker
+	}
+	return rawMedia{}
 }
 
 func (m rawMessage) toInbound() Inbound {
@@ -197,6 +258,12 @@ func (m rawMessage) toInbound() Inbound {
 		if in.ButtonID == "" {
 			in.ButtonID = m.Interactive.ListReply.ID
 		}
+	default:
+		// Kind is deliberately left as Meta's own type name: the bot decides
+		// what counts as a damage photo by comparing against it.
+		md := m.media()
+		in.MediaID, in.MediaMimeType, in.MediaSHA256 = md.ID, md.MimeType, md.SHA256
+		in.Caption, in.Filename = md.Caption, md.Filename
 	}
 	return in
 }

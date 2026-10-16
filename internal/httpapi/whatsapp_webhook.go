@@ -149,6 +149,7 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 			fresh, err := recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
 				Brand: brand, WaID: m.From, MessageID: m.ID, Direction: directionIn,
 				Kind: m.Kind, Body: inboundBody(m), At: m.Timestamp, ProfileName: m.ProfileName,
+				MediaID: m.MediaID, MediaMimeType: m.MediaMimeType, MediaSHA256: m.MediaSHA256,
 			})
 			if err != nil {
 				return err
@@ -157,6 +158,15 @@ func (s *Server) ingestWhatsApp(ctx context.Context, brand string, ch whatsapp.C
 				jobs = append(jobs, river.InsertManyParams{Args: production.WhatsAppInboundArgs{
 					BrandSlug: brand, WaID: m.From, MessageID: m.ID,
 					MessageKind: m.Kind, Text: m.Text, ButtonID: m.ButtonID,
+				}})
+			}
+			// NOT gated on settings.answers: whether the bot replies to this
+			// number has nothing to do with whether its photograph belongs in
+			// the inbox. A number the bot ignores still has a conversation
+			// somebody reads.
+			if fresh && m.MediaID != "" {
+				jobs = append(jobs, river.InsertManyParams{Args: production.WhatsAppMediaArgs{
+					BrandSlug: brand, MessageID: m.ID,
 				}})
 			}
 		}
@@ -208,6 +218,14 @@ type whatsappMessageRecord struct {
 	Status      *string
 	At          time.Time
 	ProfileName string
+
+	// Media is Meta's handle for an attachment and what it says about it.
+	// Empty MediaID means there is nothing to fetch, and media_status is then
+	// left '' rather than 'pending' - which is what keeps the download
+	// worker's queue equal to the set of messages that actually carry one.
+	MediaID       string
+	MediaMimeType string
+	MediaSHA256   string
 }
 
 // recordWhatsAppMessage stores one message and keeps the conversation's
@@ -225,9 +243,15 @@ func recordWhatsAppMessage(ctx context.Context, q *gen.Queries, m whatsappMessag
 	if m.SentBy != "" {
 		sender = &m.SentBy
 	}
+	mediaStatus := ""
+	if m.MediaID != "" {
+		mediaStatus = mediaPending
+	}
 	rows, err := q.InsertWhatsAppMessage(ctx, gen.InsertWhatsAppMessageParams{
 		BrandSlug: m.Brand, WaID: m.WaID, WaMessageID: m.MessageID, Direction: m.Direction,
 		Kind: m.Kind, Body: m.Body, Status: stored, SentBy: sender, CreatedAt: db.Timestamptz(&at),
+		MediaID: m.MediaID, MediaMimeType: m.MediaMimeType, MediaSha256: m.MediaSHA256,
+		MediaStatus: mediaStatus,
 	})
 	if err != nil || rows == 0 {
 		return false, err
@@ -245,13 +269,20 @@ func recordWhatsAppMessage(ctx context.Context, q *gen.Queries, m whatsappMessag
 }
 
 // inboundBody is what the inbox shows for a customer message: the text, the
-// tapped option's id, or the media kind.
+// tapped option's id, or an attachment's caption.
+//
+// THE CAPTION GOES IN body, not a column of its own. It is the customer's own
+// words about the thing they sent - "the corner is snapped" says more than the
+// photograph - and putting it here means the chat list preview and anything
+// that ever searches messages pick it up for nothing.
 func inboundBody(m whatsapp.Inbound) string {
 	switch {
 	case m.Text != "":
 		return m.Text
 	case m.ButtonID != "":
 		return m.ButtonID
+	case m.Caption != "":
+		return m.Caption
 	default:
 		return ""
 	}

@@ -45,9 +45,37 @@ ORDER BY last_message_at DESC
 LIMIT sqlc.arg(row_limit);
 
 -- name: InsertWhatsAppMessage :execrows
-INSERT INTO whatsapp_messages (brand_slug, wa_id, wa_message_id, direction, kind, body, status, sent_by, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+-- media_status is set by the caller: 'pending' when there is an id to fetch,
+-- '' otherwise. Nothing else ever writes it to 'pending', so the download
+-- worker's set of work is exactly the messages that arrived with an
+-- attachment.
+INSERT INTO whatsapp_messages (
+    brand_slug, wa_id, wa_message_id, direction, kind, body, status, sent_by, created_at,
+    media_id, media_mime_type, media_sha256, media_status
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+    sqlc.arg('media_id'), sqlc.arg('media_mime_type'),
+    sqlc.arg('media_sha256'), sqlc.arg('media_status'))
 ON CONFLICT (wa_message_id) DO NOTHING;
+
+-- name: SetWhatsAppMessageMedia :exec
+-- The download landed: point the message at the stored file.
+--
+-- Guarded on 'pending' so a replayed job cannot overwrite a file that is
+-- already there with a second copy of the same bytes.
+UPDATE whatsapp_messages
+SET file_asset_id   = sqlc.arg('file_asset_id'),
+    media_mime_type = coalesce(nullif(sqlc.arg('media_mime_type')::text, ''), media_mime_type),
+    media_status    = 'stored',
+    media_error     = ''
+WHERE wa_message_id = sqlc.arg('wa_message_id') AND media_status = 'pending';
+
+-- name: FailWhatsAppMessageMedia :exec
+-- It is never coming. Recorded rather than left pending for ever, so a screen
+-- can say "unavailable" instead of "still downloading" until the heat death.
+UPDATE whatsapp_messages
+SET media_status = 'failed', media_error = sqlc.arg('media_error')
+WHERE wa_message_id = sqlc.arg('wa_message_id') AND media_status = 'pending';
 
 -- name: UpdateWhatsAppMessageStatus :exec
 UPDATE whatsapp_messages SET status = $2, error_code = $3 WHERE wa_message_id = $1;
@@ -114,3 +142,16 @@ WHERE order_id = sqlc.arg(order_id)
 
 -- name: GetWhatsAppMessageByWAID :one
 SELECT * FROM whatsapp_messages WHERE wa_message_id = $1;
+
+-- name: GetWhatsAppMessageMedia :one
+-- One message's attachment, scoped to the brand whose conversation it is on.
+--
+-- THE BRAND IS IN THE WHERE CLAUSE, not checked afterwards. This is what makes
+-- the route safe to expose by message id: a file belonging to one brand's chat
+-- cannot be fetched under another brand's slug, which the flat /files/:id
+-- route cannot promise.
+SELECT m.id, m.brand_slug, m.kind, m.media_status, m.media_mime_type, m.media_error,
+       f.storage_key, f.content_type, f.size_bytes, f.filename
+FROM whatsapp_messages m
+LEFT JOIN file_assets f ON f.id = m.file_asset_id
+WHERE m.id = sqlc.arg('id') AND m.brand_slug = sqlc.arg('brand_slug');
