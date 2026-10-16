@@ -1,16 +1,15 @@
-// Package whatsapp sends approved message templates through Meta's WhatsApp
-// Cloud API.
+// Package whatsapp talks to Meta's WhatsApp Cloud API: approved templates,
+// free-form text and reply buttons out (client.go, messages.go), and the webhook
+// Meta posts back in (webhook.go).
 //
-// SENDING ONLY. It posts templates to one business number and reads a template
-// back to check it. It cannot receive: inbound messages and delivery receipts
-// arrive by webhook at a public HTTPS callback, which Tensor does not have yet.
+// Free-form text and buttons are only allowed inside the 24-hour window that
+// opens when the customer writes; anything business-initiated is a template.
 //
 // ACCEPTED IS NOT DELIVERED. A 200 from /messages carries a message id and
 // means Meta took the message, not that a phone showed it. Meta will accept a
 // send to a number that is not on WhatsApp, and India applies per-user
-// marketing caps that drop accepted messages silently. Until the webhook
-// exists, "accepted" is the strongest claim this package can make, and nothing
-// here says otherwise.
+// marketing caps that drop accepted messages silently. Delivery is only known
+// from the status updates the webhook receives.
 package whatsapp
 
 import (
@@ -139,6 +138,11 @@ type TemplateMessage struct {
 	// Each value is everything after the host the approved template bakes in.
 	// Empty omits the button components entirely, for a template with none.
 	ButtonParams []string
+	// QuickReplyPayloads fill the template's QUICK_REPLY buttons, in order.
+	// Each payload comes back on the inbound message when the customer taps
+	// that button, which is how a tap is tied to the order it is about.
+	// A template uses URL buttons or quick replies, not both.
+	QuickReplyPayloads []string
 }
 
 // SendResult is Meta's acknowledgement, and nothing more than that.
@@ -155,8 +159,9 @@ type SendResult struct {
 }
 
 type templateParam struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type    string `json:"type"`
+	Text    string `json:"text,omitempty"`
+	Payload string `json:"payload,omitempty"`
 }
 
 type templateComponent struct {
@@ -218,17 +223,35 @@ func (c *Client) SendTemplate(ctx context.Context, msg TemplateMessage) (SendRes
 		})
 	}
 
-	body, err := json.Marshal(map[string]any{
-		"messaging_product": "whatsapp",
-		"recipient_type":    "individual",
-		"to":                to,
-		"type":              "template",
+	for i, p := range msg.QuickReplyPayloads {
+		if strings.TrimSpace(p) == "" {
+			return SendResult{}, fmt.Errorf(
+				"quick reply payload %d is empty, which Meta refuses", i)
+		}
+		components = append(components, templateComponent{
+			Type: "button", SubType: "quick_reply", Index: strconv.Itoa(i),
+			Parameters: []templateParam{{Type: "payload", Payload: p}},
+		})
+	}
+
+	return c.post(ctx, map[string]any{
+		"to":   to,
+		"type": "template",
 		"template": map[string]any{
 			"name":       name,
 			"language":   map[string]string{"code": language},
 			"components": components,
 		},
 	})
+}
+
+// post sends one message payload to /{phone_number_id}/messages and reads
+// Meta's acknowledgement. Every kind of send goes through here, so they share
+// one error shape and one rule about retries.
+func (c *Client) post(ctx context.Context, payload map[string]any) (SendResult, error) {
+	payload["messaging_product"] = "whatsapp"
+	payload["recipient_type"] = "individual"
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return SendResult{}, err
 	}

@@ -132,6 +132,11 @@ var (
 
 	OrderRead = PermissionSpec{"order", "read", "View imported Shopify orders"}
 
+	// The WhatsApp inbox. Read and reply are separate so a role can watch
+	// conversations without speaking for the shop.
+	WhatsAppRead  = PermissionSpec{"whatsapp", "read", "Read customer WhatsApp conversations"}
+	WhatsAppReply = PermissionSpec{"whatsapp", "reply", "Reply to customers on WhatsApp and hand chats back to the bot"}
+
 	BatchRead   = PermissionSpec{"batch", "read", "View print batches"}
 	BatchManage = PermissionSpec{"batch", "manage", "Create, plan and approve print batches"}
 
@@ -174,6 +179,7 @@ var AllPermissions = []PermissionSpec{
 	ShopifyPublish,
 	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 	OrderRead,
+	WhatsAppRead, WhatsAppReply,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
 	QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
@@ -236,6 +242,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		ShopifyPublish, ConfigRead, RegistryRead, AuditRead,
 		// Runs the whole production pipeline.
 		OrderRead,
+		WhatsAppRead, WhatsAppReply,
 		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 		BatchRead, BatchManage,
 		DispatchRead, DispatchManage,
@@ -267,6 +274,7 @@ var roleGrants = map[RoleName][]PermissionSpec{
 	RoleOperator: {
 		ProductionRead, ProductionUpdate, ProductionFail, AssemblySubmit, FinishingSubmit,
 		OrderRead, BatchRead,
+		WhatsAppRead, WhatsAppReply,
 		MachineRead, MachineManage, FilamentRead, RegistryRead,
 		BrandRead,
 	},

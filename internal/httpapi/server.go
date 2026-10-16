@@ -123,7 +123,15 @@ type Server struct {
 
 	planMu          sync.Mutex
 	lastPlannedPool string
+
+	// whatsappQueue schedules the bot's replies to an inbound message. Nil
+	// until EnableWhatsAppQueue is called; the webhook then still stores
+	// messages for the inbox but nothing answers them.
+	whatsappQueue *production.WhatsAppEnqueuer
 }
+
+// EnableWhatsAppQueue wires the WhatsApp bot's job queue.
+func (s *Server) EnableWhatsAppQueue(e *production.WhatsAppEnqueuer) { s.whatsappQueue = e }
 
 // NewServer wires the HTTP layer. logger may be nil, in which case the request
 // middleware falls back to slog's default. The Shopify client is built once here
@@ -136,7 +144,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		store:   store,
 		guards:  guards,
 		logger:  logger,
-		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
+		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout).WithBaseURL(cfg.ShopifyBaseURL),
 		secrets: box,
 		bambu: bambubuddy.NewWithTimeout(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey,
 			time.Duration(cfg.BambuBuddyTimeoutSeconds)*time.Second),
@@ -267,6 +275,8 @@ func (s *Server) Router() *gin.Engine {
 	s.registerShopify(r)
 	s.registerBulkOrders(r)
 	s.registerBambuBuddyEvents(r)
+	s.registerWhatsAppWebhook(r)
+	s.registerWhatsAppInbox(r)
 	s.registerInternal(r)
 
 	return r

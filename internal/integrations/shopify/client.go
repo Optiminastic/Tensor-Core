@@ -88,6 +88,13 @@ func New(apiVersion string, timeout time.Duration) *Client {
 	}
 }
 
+// WithBaseURL points every request at one host instead of https://<shop>.
+// For tests and nothing else; empty leaves the client unchanged.
+func (c *Client) WithBaseURL(url string) *Client {
+	c.baseURL = strings.TrimRight(url, "/")
+	return c
+}
+
 // APIError is a Shopify-side failure (transport, HTTP status, or userErrors),
 // safe to surface to the caller without leaking the token. It can carry a
 // wrapped cause (for errors.Is/As) and rate-limit retry hints.
