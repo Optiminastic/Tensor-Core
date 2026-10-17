@@ -56,6 +56,10 @@ var editableKeys = map[string]bool{
 	"engraving text":       true,
 	"rose name":            true,
 	"keychain name":        true,
+	// The desk plank's single name. Spelled out rather than left to the bare
+	// "name" key, which cannot match a longer label without matching every
+	// other product's too - see editableProperty.
+	"name on plank": true,
 }
 
 // editableProperty reports whether a customer may change this field, from the
@@ -63,8 +67,36 @@ var editableKeys = map[string]bool{
 //
 // The fallback, for products the registry does not describe - DNP is still on
 // the hardcoded render path and has no product_field_maps rows at all.
+//
+// MATCHED THE WAY THE RENDERER MATCHES, not by equality. This used to be a map
+// lookup on the exact normalised label, and the storefront writes the same
+// field under longer names: a Dual Name Plank with Light carries "First Name
+// on Plank" and "Second Name on Plank". The renderer finds those - lookupRaw
+// takes a label that contains the key - but the exact lookup here did not, so
+// the page showed the customer both of their names and offered an input box
+// for neither. The two rules are now one rule; see personalise.MatchesKey.
 func editableProperty(label string) bool {
-	return editableKeys[personalise.NormaliseKey(label)]
+	normalised := personalise.NormaliseKey(label)
+	if editableKeys[normalised] {
+		return true
+	}
+	// A LONGER LABEL FOR THE SAME FIELD, but only for a key specific enough to
+	// say so. The renderer can match on one word because it asks the narrow
+	// question - "which of this plank's properties is the first name?" - with
+	// the plank's own key list in hand. This asks the broad one, "is this any
+	// editable field at all", so the bare key "name" would swallow every other
+	// product's "TOP NAME" and "name-left" and offer a text box that feeds no
+	// render: the customer fixes their spelling, nothing changes, and the
+	// plank prints the old value.
+	//
+	// Two words is the line. "first name on plank" is unmistakably the first
+	// name; "top name" is unmistakably not.
+	for key := range editableKeys {
+		if strings.Contains(key, " ") && personalise.MatchesKey(normalised, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxFreeTextRunes bounds a field on a product Tensor does not render.

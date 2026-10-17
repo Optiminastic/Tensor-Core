@@ -151,6 +151,33 @@ func MappedArgs(props []production.LineProp, maps []FieldMap) (map[string]string
 	return args, nil
 }
 
+// MatchesKey reports whether a property label means a given canonical key.
+//
+// THE RULE THE RENDERER ALREADY USES, exported so that whoever decides a
+// customer MAY EDIT a field and whoever decides the model WILL PICK IT UP
+// cannot disagree. They disagreed for months: lookupRaw matches a label that
+// merely CONTAINS the key - which is what let "First Name on Plank" render as
+// a first name - while the personalisation page compared labels for equality,
+// so the very same field was drawn read-only with no input box beside it. A
+// Dual Name Plank with Light showed the customer both their names and let
+// them change neither. Measured 17 Oct 2026.
+//
+// Whole words, in order: "first name on plank" means "first name", and
+// "step 6 whatsapp number" means neither "name" nor "number" on its own.
+//
+// A caller asking the BROAD question - "is this label any of these fields?" -
+// must weigh how specific each key is before trusting a match: a one-word key
+// like "name" matches half the catalogue. The renderer gets away with it
+// because it asks the narrow question, with one product's key list in hand.
+// See httpapi.editableProperty for the other side of that.
+func MatchesKey(label, key string) bool {
+	normalised := NormaliseKey(label)
+	if normalised == key {
+		return true
+	}
+	return containsPhrase(normalised, key)
+}
+
 // NormaliseKey reduces a property label to its matchable form: lower case,
 // punctuation collapsed to single spaces.
 //

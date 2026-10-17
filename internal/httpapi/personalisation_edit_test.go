@@ -45,6 +45,39 @@ func TestANameIsEditableAndAHeartCountIsNot(t *testing.T) {
 	}
 }
 
+// The storefront writes the same field under longer labels, and the renderer
+// has always found them - lookupRaw matches a label that CONTAINS the key,
+// which is what makes "First Name on Plank" render as a first name. This side
+// compared labels for equality instead, so a Dual Name Plank with Light showed
+// the customer both of their names and gave them an input box for neither.
+//
+// Both rules are now personalise.MatchesKey. If this test fails, the page has
+// gone read-only for a whole product family again.
+func TestALongerLabelIsStillTheSameField(t *testing.T) {
+	for _, label := range []string{
+		"First Name on Plank",  // DNPLB - the bug this test exists for
+		"Second Name on Plank", // DNPLB
+		"Name on Plank",        // DNP-Doc, the desk plank
+		"STEP 4-First Name-",   // DNP, the ordinary plank
+		"STEP 5-Second Name",   // DNP
+	} {
+		if !editableProperty(label) {
+			t.Errorf("%q is a name the customer typed and must be editable", label)
+		}
+	}
+
+	// Containment must not drag anything else in with it. A heart count picks
+	// a different model, and a contact detail is not printed at all.
+	for _, label := range []string{
+		"STEP 3-", "Hearts", "1 RED HEART", "3 RED HEART",
+		"STEP 6 - WhatsApp Number", "Base Colour", "Text Colour",
+	} {
+		if editableProperty(label) {
+			t.Errorf("%q must not have become editable", label)
+		}
+	}
+}
+
 func TestAnUneditableFieldIsIgnoredEvenIfSubmitted(t *testing.T) {
 	// The page does not offer it, but the request is a POST a stranger can
 	// shape however they like. The server decides, not the form.
