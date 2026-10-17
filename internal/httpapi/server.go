@@ -276,9 +276,9 @@ func (s *Server) Router() *gin.Engine {
 	s.registerBulkOrders(r)
 	s.registerBambuBuddyEvents(r)
 	s.registerWhatsAppWebhook(r)
-	s.registerWhatsAppInbox(r)
 	s.registerWhatsAppMedia(r)
 	s.registerDamageReports(r)
+	s.registerWhatsAppBotContent(r)
 	s.registerInternal(r)
 
 	return r

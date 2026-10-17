@@ -828,6 +828,20 @@ type VariantDesign struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
+type WhatsappBotContent struct {
+	BrandSlug   string
+	Kind        string
+	ContentKey  string
+	Title       string
+	Description string
+	Answer      string
+	Position    int32
+	Enabled     bool
+	UpdatedBy   *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type WhatsappBrandState struct {
 	BrandSlug          string
 	ConfirmationsSince pgtype.Timestamptz

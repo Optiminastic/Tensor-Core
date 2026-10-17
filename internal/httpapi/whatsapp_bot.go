@@ -132,6 +132,18 @@ type botTurn struct {
 	// turn the shop started. It is what a damage report is deduped on, so a
 	// retried job files one report rather than two.
 	msgID string
+	// copy is the brand's own wording, read once per turn rather than per
+	// action: a menu and the answer behind it are one conversation.
+	copy *botContent
+}
+
+// content reads the brand's wording, once.
+func (t *botTurn) content(ctx context.Context) botContent {
+	if t.copy == nil {
+		resolved := t.server.botContentFor(ctx, t.brand)
+		t.copy = &resolved
+	}
+	return *t.copy
 }
 
 func (s *Server) newBotTurn(ctx context.Context, brand, waID string, logger *slog.Logger) *botTurn {
@@ -173,8 +185,32 @@ func (t *botTurn) perform(ctx context.Context, q *gen.Queries, a bot.Action) (bo
 		res, err := t.wa.SendText(ctx, t.waID, v.Text)
 		return nil, t.recordSend(ctx, q, res, err, "text", v.Text)
 	case bot.SendMenu:
-		res, err := t.wa.SendButtons(ctx, t.waID, v.Text, menuButtons(v.Menu))
+		menu := t.content(ctx).applyMenu(v.Menu)
+		res, err := t.wa.SendButtons(ctx, t.waID, v.Text, menuButtons(menu))
 		return nil, t.recordSend(ctx, q, res, err, "menu", v.Text)
+	case bot.SendList:
+		list := t.content(ctx).applyList(v.List)
+		if len(list.Rows) == 0 {
+			// Every question switched off. Opening an empty sheet is worse
+			// than saying so, and the menu is somewhere to go from.
+			res, err := t.wa.SendButtons(ctx, t.waID, content.Greeting,
+				menuButtons(t.content(ctx).applyMenu(content.MainMenu)))
+			return nil, t.recordSend(ctx, q, res, err, "menu", content.Greeting)
+		}
+		res, err := t.wa.SendList(ctx, t.waID, v.Text, list.Button, listRows(list))
+		return nil, t.recordSend(ctx, q, res, err, "list", v.Text)
+	case bot.SendAnswer:
+		text, ok := t.content(ctx).answerFor(v.Key)
+		if !ok {
+			// A question that no longer exists, or a tap on something this
+			// build does not know. The menu is the honest answer.
+			menu := t.content(ctx).applyMenu(content.MainMenu)
+			res, err := t.wa.SendButtons(ctx, t.waID, content.Greeting, menuButtons(menu))
+			return nil, t.recordSend(ctx, q, res, err, "menu", content.Greeting)
+		}
+		body := text + "\n\n" + content.MenuHint
+		res, err := t.wa.SendText(ctx, t.waID, body)
+		return nil, t.recordSend(ctx, q, res, err, "text", body)
 	case bot.LookupOrder:
 		return t.lookup(ctx, v)
 	case bot.TagOrder:
@@ -297,6 +333,14 @@ func menuButtons(m content.Menu) []whatsapp.Button {
 		buttons = append(buttons, whatsapp.Button{ID: o.ID, Title: o.Title})
 	}
 	return buttons
+}
+
+func listRows(l content.List) []whatsapp.ListRow {
+	rows := make([]whatsapp.ListRow, 0, len(l.Rows))
+	for _, r := range l.Rows {
+		rows = append(rows, whatsapp.ListRow{ID: r.ID, Title: r.Title, Description: r.Description})
+	}
+	return rows
 }
 
 // botOrder converts a live Shopify order to the bot's order shape. The

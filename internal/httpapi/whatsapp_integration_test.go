@@ -41,10 +41,14 @@ const (
 
 // metaSend is one message Tensor posted to the fake Graph API.
 type metaSend struct {
-	To       string
-	Type     string
-	Text     string
-	Buttons  int
+	To      string
+	Type    string
+	Text    string
+	Buttons int
+	// Rows is a list message's row count. A list and a button message are
+	// both "interactive" to Meta but carry their choices in different
+	// places, so counting only buttons reads a nine-row FAQ as empty.
+	Rows     int
 	Template string
 	Payloads []string
 }
@@ -64,7 +68,10 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 		Interactive struct {
 			Body   struct{ Text string } `json:"body"`
 			Action struct {
-				Buttons []any `json:"buttons"`
+				Buttons  []any `json:"buttons"`
+				Sections []struct {
+					Rows []any `json:"rows"`
+				} `json:"sections"`
 			} `json:"action"`
 		} `json:"interactive"`
 		Template struct {
@@ -90,6 +97,9 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 	if m.Type == "interactive" {
 		s.Text = m.Interactive.Body.Text
 		s.Buttons = len(m.Interactive.Action.Buttons)
+		for _, sec := range m.Interactive.Action.Sections {
+			s.Rows += len(sec.Rows)
+		}
 	}
 	for _, c := range m.Template.Components {
 		if c.SubType == "quick_reply" && len(c.Parameters) > 0 {
@@ -329,9 +339,16 @@ func TestIntegrationWhatsAppMenuAndOrderLookup(t *testing.T) {
 		t.Fatalf("greeting = %+v", s)
 	}
 
-	h.tap(t, content.OptionMore)
-	if s := h.meta.last(t); s.Buttons != 3 || s.Text != content.MoreIntro {
-		t.Fatalf("More menu = %+v", s)
+	// "Other" opens the FAQ as a LIST, not buttons: nine answers do not fit
+	// in three. A list row comes back as an ordinary button id, which is what
+	// lets the bot answer both with one branch.
+	h.tap(t, content.OptionOther)
+	if s := h.meta.last(t); s.Rows != len(content.FaqList.Rows) || s.Buttons != 0 || s.Text != content.FaqIntro {
+		t.Fatalf("FAQ list = %+v", s)
+	}
+	h.tap(t, content.FaqCOD)
+	if s := h.meta.last(t); !strings.Contains(s.Text, "don't offer COD") {
+		t.Fatalf("COD answer = %+v", s)
 	}
 
 	h.shop.order = `{"id":"gid://shopify/Order/9","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z",
@@ -508,62 +525,6 @@ func TestIntegrationWhatsAppUnapprovedTemplateTagsNothing(t *testing.T) {
 	}
 	if len(h.shop.tags) != 1 || h.shop.tags[0] != content.TagUnreachable {
 		t.Fatalf("tags = %v", h.shop.tags)
-	}
-}
-
-func TestIntegrationWhatsAppInbox(t *testing.T) {
-	h := newWAHarness(t, map[string]string{"bot_enabled": "false"})
-	if code := serve(h.router, signedWebhook(textWebhook(waPhoneID, "wamid.in.9", "Is my plank ready?"))).Code; code != http.StatusOK {
-		t.Fatalf("webhook = %d", code)
-	}
-	if h.jobs(t, production.WhatsAppInboundArgs{}.Kind()) != 0 {
-		t.Fatal("bot off, yet a reply was queued")
-	}
-
-	reader := h.minter.mint(t, []string{auth.WhatsAppRead.Key()})
-	writer := h.minter.mint(t, []string{auth.WhatsAppRead.Key(), auth.WhatsAppReply.Key()})
-	base := "/brands/" + waBrand + "/whatsapp/conversations"
-
-	rr := doJSON(h.router, http.MethodGet, base, reader, nil)
-	var list struct {
-		Items []whatsappConversationJSON `json:"items"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &list)
-	if rr.Code != http.StatusOK || len(list.Items) != 1 || !list.Items[0].CanReply || list.Items[0].Mode != "bot" {
-		t.Fatalf("list = %d %s", rr.Code, rr.Body.String())
-	}
-
-	if rr := doJSON(h.router, http.MethodPost, base+"/"+waCustomer+"/messages", reader, map[string]string{"text": "x"}); rr.Code != http.StatusForbidden {
-		t.Fatalf("reply without whatsapp:reply = %d", rr.Code)
-	}
-	rr = doJSON(h.router, http.MethodPost, base+"/"+waCustomer+"/messages", writer, map[string]string{"text": "Yes, it ships tomorrow!"})
-	if rr.Code != http.StatusCreated || h.meta.last(t).Text != "Yes, it ships tomorrow!" {
-		t.Fatalf("reply = %d %s", rr.Code, rr.Body.String())
-	}
-
-	rr = doJSON(h.router, http.MethodGet, base+"/"+waCustomer+"/messages", reader, nil)
-	var thread struct {
-		Conversation whatsappConversationJSON `json:"conversation"`
-		Items        []whatsappMessageJSON    `json:"items"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &thread)
-	if len(thread.Items) != 2 || thread.Items[0].Author != "customer" || thread.Items[1].Author != "staff" || thread.Conversation.Mode != "human" {
-		t.Fatalf("thread = %s", rr.Body.String())
-	}
-
-	if rr := doJSON(h.router, http.MethodPost, base+"/"+waCustomer+"/handback", writer, nil); rr.Code != http.StatusNoContent {
-		t.Fatalf("handback = %d", rr.Code)
-	}
-	conv, _ := h.store.Q.GetWhatsAppConversation(h.ctx, gen.GetWhatsAppConversationParams{BrandSlug: waBrand, WaID: waCustomer})
-	if conv.State != string(bot.StateIdle) {
-		t.Fatalf("after handback state = %s", conv.State)
-	}
-
-	if _, err := h.store.Pool.Exec(h.ctx, `UPDATE whatsapp_conversations SET last_customer_at = now() - interval '25 hours'`); err != nil {
-		t.Fatal(err)
-	}
-	if rr := doJSON(h.router, http.MethodPost, base+"/"+waCustomer+"/messages", writer, map[string]string{"text": "late"}); rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("reply outside the 24h window = %d", rr.Code)
 	}
 }
 

@@ -2,14 +2,25 @@
 // here; no other package builds customer-facing copy.
 package content
 
-// Button IDs. They come back to us verbatim when tapped.
+// Button and list-row IDs. They come back to us verbatim when tapped, and a
+// list row is indistinguishable from a button by the time the bot sees it.
 const (
-	OptionTrack           = "track"
-	OptionDamage          = "damage"
-	OptionMore            = "more"
-	OptionExplore         = "explore"
-	OptionDeliveryPayment = "delivery_payment"
-	OptionTeam            = "team"
+	OptionTrack  = "track"
+	OptionDamage = "damage"
+	// OptionOther opens the FAQ list. Named for what the customer sees rather
+	// than for the list behind it.
+	OptionOther   = "other"
+	OptionExplore = "explore"
+	OptionTeam    = "team"
+
+	// FAQ rows. One canned answer each: no state, no flow.
+	FaqCOD        = "faq_cod"
+	FaqDelivery   = "faq_delivery"
+	FaqMakingTime = "faq_making_time"
+	FaqChangeName = "faq_change_name"
+	FaqShipping   = "faq_shipping"
+	FaqReturns    = "faq_returns"
+	FaqCare       = "faq_care"
 )
 
 // Option is one reply button. WhatsApp limits its title to 20 characters.
@@ -19,24 +30,53 @@ type Option struct {
 }
 
 // Menu is a message with reply buttons shown right under it. WhatsApp allows
-// at most 3, which is why the fourth choice lives behind "More".
+// at most 3, which is why everything else lives behind "Other" as a list.
 type Menu struct {
 	Options []Option
 }
 
+// Row is one line of the FAQ list. WhatsApp caps Title at 24 characters and
+// Description at 72.
+type Row struct {
+	ID          string
+	Title       string
+	Description string
+}
+
+// List is a message with a tappable list behind one button: ten rows against
+// a button message's three.
+type List struct {
+	Button string
+	Rows   []Row
+}
+
 // MainMenu is what any message gets.
 var MainMenu = Menu{Options: []Option{
-	{ID: OptionTrack, Title: "Where is my order"},
 	{ID: OptionDamage, Title: "Damage concern"},
-	{ID: OptionMore, Title: "More"},
+	{ID: OptionExplore, Title: "Explore products"},
+	{ID: OptionOther, Title: "Other"},
 }}
 
-// MoreMenu is the second set of buttons, behind "More".
-var MoreMenu = Menu{Options: []Option{
-	{ID: OptionExplore, Title: "Explore more"},
-	{ID: OptionDeliveryPayment, Title: "Delivery & payment"},
-	{ID: OptionTeam, Title: "Talk to us"},
-}}
+// FaqList is everything behind "Other".
+//
+// A LIST, NOT BUTTONS. Nine answers do not fit in three buttons, and burying
+// the rest behind a second "More" is a menu nobody reaches the bottom of.
+// "Where is my order" sits here rather than on the main menu because the two
+// things a customer opens a chat about are a problem and a purchase.
+var FaqList = List{
+	Button: "See questions",
+	Rows: []Row{
+		{ID: FaqDelivery, Title: "Delivery time", Description: "When will my order reach me?"},
+		{ID: FaqCOD, Title: "Cash on delivery", Description: "Do you accept COD?"},
+		{ID: FaqMakingTime, Title: "How long to make", Description: "Everything is made after you order"},
+		{ID: OptionTrack, Title: "Where is my order", Description: "Track an order that has shipped"},
+		{ID: FaqChangeName, Title: "Change my spelling", Description: "Correct a name after ordering"},
+		{ID: FaqShipping, Title: "Where you deliver", Description: "Shipping across India"},
+		{ID: FaqReturns, Title: "Returns & refunds", Description: "How it works for personalised items"},
+		{ID: FaqCare, Title: "Caring for it", Description: "Keeping your plank looking new"},
+		{ID: OptionTeam, Title: "Talk to our team", Description: "A person will reply here"},
+	},
+}
 
 // Confirmation template button payload prefixes: "confirm:<order gid>".
 const (
@@ -63,7 +103,44 @@ const (
 const (
 	Greeting = "👋 Hi! Welcome to *The 3D Printing Store*.\n\nHow can we help you today?"
 
-	MoreIntro = "What else can we help with?"
+	FaqIntro = "Sure — here is what we are asked most. 👇\n\nTap *See questions* and pick one."
+
+	// --- FAQ answers. One tap, one answer, no flow. ---
+
+	FaqCODAnswer = "💳 *Cash on Delivery*\n\n" +
+		"We don't offer COD. Every product is personalised and made only after the order is placed, " +
+		"so it cannot be resold if a parcel is refused.\n\n" +
+		"Payment online at checkout is quick and secure — UPI, cards, net banking and wallets all work."
+
+	FaqDeliveryAnswer = "🚚 *Delivery time*\n\n" +
+		"You will have it in *5 to 10 working days*.\n\n" +
+		"That covers making your piece and the courier bringing it to you. " +
+		"We will send you a tracking link the moment it ships."
+
+	FaqMakingTimeAnswer = "🛠️ *How long it takes to make*\n\n" +
+		"Nothing is sitting on a shelf — your piece is printed after you order, which is why the names come out exactly as you typed them.\n\n" +
+		"Printing and finishing take 2 to 4 working days, then the courier does the rest."
+
+	FaqChangeNameAnswer = "✏️ *Changing a name or spelling*\n\n" +
+		"Yes, if we have not started printing. Send us your order ID here and tell us the correct spelling, " +
+		"and we will fix it before it goes to the printer.\n\n" +
+		"Once a piece is printed the names cannot be changed — the name is the product."
+
+	FaqShippingAnswer = "📦 *Where we deliver*\n\n" +
+		"All over India. Shipping is free on every order.\n\n" +
+		"We do not ship outside India at the moment."
+
+	FaqReturnsAnswer = "↩️ *Returns and refunds*\n\n" +
+		"Personalised pieces carry somebody's name, so they cannot be returned or resold — " +
+		"which is why we ask you to check the spelling before we print.\n\n" +
+		"If your parcel arrives *damaged*, that is on us: type *MENU* and tap *Damage concern*, " +
+		"and we will sort it out."
+
+	FaqCareAnswer = "🧼 *Looking after it*\n\n" +
+		"• Wipe with a soft dry cloth — no water, no cleaning sprays\n" +
+		"• Keep it out of direct sun and away from heat; it is plastic and will warp\n" +
+		"• Lift it by the base rather than by the letters\n\n" +
+		"Treated kindly it will look new for years."
 
 	DeliveryPaymentInfo = "🚚 *Delivery*\n" +
 		"Every product is crafted after you order:\n" +
@@ -85,6 +162,19 @@ const (
 
 	PhoneMismatch = "For your privacy we can only share details of orders placed with this WhatsApp number. Please send the order number again, or type *HUMAN* to talk to our team."
 
+	// AskDamageDetails asks for everything at once.
+	//
+	// ONE MESSAGE, NOT AN INTERROGATION. The flow used to ask for the order
+	// number, wait, look it up, then ask for photographs - four turns before
+	// the customer had told us anything useful, and two unreadable replies
+	// handed the chat to a person. Asking for both up front lets them send
+	// whatever they have to hand, in whatever order.
+	AskDamageDetails = "We're really sorry about that. 🙏\n\n" +
+		"Please send us:\n" +
+		"1️⃣ Your *order ID* — e.g. *115766* or *T3DPS-115766*\n" +
+		"2️⃣ *Photos or a video* of the damaged product and its packaging\n\n" +
+		"Our team will check them and reply to you here."
+
 	AskDamagePhotos = "We're really sorry about that. 🙏\n\nPlease send clear photos of the damaged product *and* the packaging. When you have sent all photos, type *DONE*."
 
 	PhotoReceived = "Got it 📸. Send more photos, or type *DONE* when finished."
@@ -93,7 +183,11 @@ const (
 
 	DamageReported = "Thank you. We've recorded your damage report for order %s and our team will check the photos and get back to you shortly."
 
-	Explore = "✨ Explore our personalised 3D printed gifts:\n\n" +
+	// Explore leads with the shop itself: somebody tapping "Explore products"
+	// wants the store, not a reading list.
+	Explore = "✨ Have a look around *The 3D Printing Store*:\n" +
+		"👉 https://the3dprintingstore.in\n\n" +
+		"Or go straight to a collection:\n\n" +
 		"⭐ Best sellers: https://the3dprintingstore.in/collections/best-seller\n" +
 		"💑 Dual name planks: https://the3dprintingstore.in/collections/dual-name-planks\n" +
 		"💞 Soulmate combos: https://the3dprintingstore.in/collections/soulmate-combo-collection\n" +

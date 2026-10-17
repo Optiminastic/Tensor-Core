@@ -125,11 +125,28 @@ type Action interface{ isAction() }
 
 type SendText struct{ Text string }
 
-// SendMenu sends Text with a list menu the customer picks from.
+// SendMenu sends Text with up to three reply buttons under it.
 type SendMenu struct {
 	Text string
 	Menu content.Menu
 }
+
+// SendList sends Text with a tappable list behind one button - ten rows
+// where SendMenu has three. A row comes back as an ordinary button id, so
+// nothing downstream has to tell them apart.
+type SendList struct {
+	Text string
+	List content.List
+}
+
+// SendAnswer is a canned reply identified by key rather than by text.
+//
+// THE WORDS ARE NOT HERE ON PURPOSE. A shop can rewrite an answer, and add
+// questions this package has never heard of, from the dashboard - so the
+// machine says WHICH answer and the caller looks up what it currently says.
+// An unknown key is not an error here either: the caller falls back to the
+// menu, which is also what happens to a question somebody has deleted.
+type SendAnswer struct{ Key string }
 
 type LookupOrder struct {
 	Purpose Purpose
@@ -164,6 +181,8 @@ type RecordDamage struct {
 
 func (SendText) isAction()           {}
 func (SendMenu) isAction()           {}
+func (SendList) isAction()           {}
+func (SendAnswer) isAction()         {}
 func (LookupOrder) isAction()        {}
 func (TagOrder) isAction()           {}
 func (AppendNote) isAction()         {}

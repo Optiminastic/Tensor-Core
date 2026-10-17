@@ -1371,3 +1371,24 @@ CREATE TABLE IF NOT EXISTS damage_report_photos (
     position   integer NOT NULL,
     PRIMARY KEY (report_id, message_id)
 );
+
+-- 0109: the words the bot says, editable without a deploy. An OVERLAY on the
+-- Go constants, not a replacement: an empty table means today's behaviour.
+-- kind is 'menu' (button label only; the action behind it is code) or 'faq'
+-- (a list row and its answer, which are wholly data).
+CREATE TABLE IF NOT EXISTS whatsapp_bot_content (
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    kind        varchar(16) NOT NULL,
+    content_key varchar(64) NOT NULL,
+    title       varchar(64) NOT NULL DEFAULT '',
+    description varchar(96) NOT NULL DEFAULT '',
+    answer      text NOT NULL DEFAULT '',
+    position    integer NOT NULL DEFAULT 0,
+    enabled     boolean NOT NULL DEFAULT true,
+    updated_by  varchar(64),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, kind, content_key)
+);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_bot_content_order
+    ON whatsapp_bot_content (brand_slug, kind, position);

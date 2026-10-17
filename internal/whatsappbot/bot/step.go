@@ -33,9 +33,9 @@ const (
 
 // numberedChoices lets customers type a main-menu position instead of tapping.
 var numberedChoices = map[string]string{
-	"1": content.OptionTrack,
-	"2": content.OptionDamage,
-	"3": content.OptionMore,
+	"1": content.OptionDamage,
+	"2": content.OptionExplore,
+	"3": content.OptionOther,
 }
 
 var (
@@ -124,18 +124,23 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 		c.State = StateAwaitTrackOrder
 		return c, []Action{SendText{Text: content.AskOrderNumber}}
 	case content.OptionDamage:
+		// Both asked for in one message, then the ordinary flow: a typed
+		// order number is looked up as before, and photographs that arrive
+		// first are still collected.
 		c.State = StateAwaitDamageOrder
-		return c, []Action{SendText{Text: content.AskOrderNumber}}
-	case content.OptionMore:
-		return c, []Action{SendMenu{Text: content.MoreIntro, Menu: content.MoreMenu}}
+		return c, []Action{SendText{Text: content.AskDamageDetails}}
+	case content.OptionOther:
+		return c, []Action{SendList{Text: content.FaqIntro, List: content.FaqList}}
 	case content.OptionExplore:
 		return c, []Action{withMenuHint(content.Explore)}
-	case content.OptionDeliveryPayment:
-		return c, []Action{withMenuHint(content.DeliveryPaymentInfo)}
 	case content.OptionTeam:
 		return handoff(c, now, content.Handoff)
 	}
-	return menu(c)
+	// ANYTHING ELSE IS A QUESTION, not a mistake. The shop adds and removes
+	// FAQ rows from the dashboard, so an id this package has never seen is
+	// ordinary - the caller looks it up and falls back to the menu when there
+	// is nothing to say.
+	return c, []Action{SendAnswer{Key: id}}
 }
 
 func withMenuHint(text string) SendText {
