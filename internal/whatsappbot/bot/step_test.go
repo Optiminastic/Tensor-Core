@@ -28,8 +28,6 @@ func texts(actions []Action) []string {
 		switch v := a.(type) {
 		case SendText:
 			out = append(out, v.Text)
-		case SendMenu:
-			out = append(out, v.Text)
 		}
 	}
 	return out
@@ -43,129 +41,74 @@ func assertMenu(t *testing.T, c Conversation, actions []Action) {
 	if len(actions) != 1 {
 		t.Fatalf("want 1 action, got %#v", actions)
 	}
-	m, ok := actions[0].(SendMenu)
-	if !ok || !reflect.DeepEqual(m.Menu, content.MainMenu) {
-		t.Fatalf("want the main menu, got %#v", actions[0])
+	if _, ok := actions[0].(SendMenu); !ok {
+		t.Fatalf("want the menu, got %#v", actions[0])
 	}
 }
 
-func TestMainMenuButtons(t *testing.T) {
-	want := []string{"Damage concern", "Explore products", "Other"}
-	if got := titles(content.MainMenu); !reflect.DeepEqual(got, want) {
-		t.Fatalf("main menu = %v", got)
+// The default tree is what a brand that has never opened the page behaves
+// as, so its shape has to be one WhatsApp will actually send.
+func TestTheDefaultTreeFitsWhatsApp(t *testing.T) {
+	nodes := content.DefaultTree()
+	keys := map[string]bool{}
+	for _, n := range nodes {
+		keys[n.Key] = true
 	}
-}
-
-func titles(m content.Menu) []string {
-	var out []string
-	for _, o := range m.Options {
-		out = append(out, o.Title)
+	if !keys[content.RootNode] {
+		t.Fatalf("the default tree has no root node")
 	}
-	return out
-}
 
-func TestMenusFitWhatsAppButtons(t *testing.T) {
-	for _, m := range []content.Menu{content.MainMenu} {
-		if len(m.Options) == 0 || len(m.Options) > 3 {
-			t.Errorf("a reply-button message carries 1 to 3 buttons, got %d", len(m.Options))
+	for _, n := range nodes {
+		limit := content.MaxButtons
+		if n.Kind == content.NodeList {
+			limit = content.MaxRows
 		}
-		for _, o := range m.Options {
-			if len([]rune(o.Title)) > 20 {
-				t.Errorf("button %q is longer than WhatsApp's 20 characters", o.Title)
+		if len(n.Options) == 0 || len(n.Options) > limit {
+			t.Errorf("%s carries %d options, want 1 to %d", n.Key, len(n.Options), limit)
+		}
+		if n.Body == "" {
+			t.Errorf("%s has nothing to say", n.Key)
+		}
+		for _, o := range n.Options {
+			switch o.Action {
+			case content.ActionAnswer:
+				if o.Answer == "" {
+					t.Errorf("%q answers nothing", o.Title)
+				}
+			case content.ActionOpen:
+				// A button that opens a message which is not in the tree is
+				// the quietest way for this to break.
+				if !keys[o.Target] {
+					t.Errorf("%q opens %q, which is not in the tree", o.Title, o.Target)
+				}
+			case content.ActionURL:
+				if o.Target == "" {
+					t.Errorf("%q is a link to nowhere", o.Title)
+				}
+			default:
+				// A code action's id is what the state machine listens for,
+				// so it is not free to be anything.
+				if content.CodeActionID(o.Action) != o.ID {
+					t.Errorf("%q has action %q but id %q", o.Title, o.Action, o.ID)
+				}
 			}
 		}
 	}
 }
 
-// Meta refuses the whole send if a row is too long, and the refusal names
-// neither the row nor the rule - so the shape is checked here, where the copy
-// is written, rather than discovered against the live number.
-func TestFaqListFitsWhatsAppLimits(t *testing.T) {
-	if n := len(content.FaqList.Rows); n == 0 || n > 10 {
-		t.Errorf("a list carries 1 to 10 rows, got %d", n)
-	}
-	if len([]rune(content.FaqList.Button)) > 20 {
-		t.Errorf("the list button %q is over 20 characters", content.FaqList.Button)
-	}
-	seen := map[string]bool{}
-	for _, r := range content.FaqList.Rows {
-		if len([]rune(r.Title)) > 24 {
-			t.Errorf("row %q is over WhatsApp's 24 characters", r.Title)
-		}
-		if len([]rune(r.Description)) > 72 {
-			t.Errorf("the description on %q is over 72 characters", r.Title)
-		}
-		// A duplicate id would answer the wrong question, silently.
-		if seen[r.ID] {
-			t.Errorf("two rows share the id %q", r.ID)
-		}
-		seen[r.ID] = true
-	}
-}
-
-// Every row has to land somewhere. A row that produced nothing, or that fell
-// back to the main menu, reads to the customer as the bot ignoring them.
-func TestEveryFaqRowIsAnswered(t *testing.T) {
-	for _, r := range content.FaqList.Rows {
-		_, actions := Step(idle(), ButtonIn{ID: r.ID}, now)
-		if len(actions) == 0 {
-			t.Errorf("row %q produced no reply", r.Title)
-			continue
-		}
-		if _, isMenu := actions[0].(SendMenu); isMenu {
-			t.Errorf("row %q fell through to the main menu", r.Title)
+// Every option id must be unique across the WHOLE tree, not just its own
+// message: WhatsApp sends back the id alone, so two options sharing one
+// answer each other's taps.
+func TestDefaultTreeIdsAreUnique(t *testing.T) {
+	seen := map[string]string{}
+	for _, n := range content.DefaultTree() {
+		for _, o := range n.Options {
+			if where, taken := seen[o.ID]; taken {
+				t.Errorf("id %q is on both %s and %s", o.ID, where, n.Key)
+			}
+			seen[o.ID] = n.Key
 		}
 	}
-}
-
-func TestOtherOpensTheFaqList(t *testing.T) {
-	for _, ev := range []Event{ButtonIn{ID: content.OptionOther}, TextIn{Text: "3"}} {
-		c, actions := Step(idle(), ev, now)
-		want := []Action{SendList{Text: content.FaqIntro, List: content.FaqList}}
-		if c.State != StateIdle || !reflect.DeepEqual(actions, want) {
-			t.Fatalf("%#v: got %s %#v", ev, c.State, actions)
-		}
-	}
-}
-
-// A question resolves to a KEY, not to words. The shop rewrites answers and
-// adds questions from the dashboard, so the machine says which answer and the
-// caller looks up what it currently says.
-func TestAQuestionAsksForItsAnswerByKey(t *testing.T) {
-	c, actions := Step(idle(), ButtonIn{ID: content.FaqCOD}, now)
-	want := []Action{SendAnswer{Key: content.FaqCOD}}
-	if c.State != StateIdle || !reflect.DeepEqual(actions, want) {
-		t.Fatalf("COD: %s %#v", c.State, actions)
-	}
-
-	// An id this build has never heard of is ordinary, not an error: it is a
-	// question somebody added in the dashboard. It must not fall through to
-	// the menu here, or a new question would silently do nothing.
-	c, actions = Step(idle(), ButtonIn{ID: "faq_added_last_tuesday"}, now)
-	if !reflect.DeepEqual(actions, []Action{SendAnswer{Key: "faq_added_last_tuesday"}}) {
-		t.Fatalf("unknown id: %#v", actions)
-	}
-	_ = c
-}
-
-func TestTalkToUs(t *testing.T) {
-	c, actions := Step(idle(), ButtonIn{ID: content.OptionTeam}, now)
-	assertHandoff(t, c, actions)
-}
-
-func TestGreetingShowsMenu(t *testing.T) {
-	for _, msg := range []string{"hi", "Hi!", "HELLO", "hey", "menu", "what's up", "anything"} {
-		c, actions := Step(idle(), TextIn{Text: msg}, now)
-		assertMenu(t, c, actions)
-		if c.LastCustomerAt == nil || !c.LastCustomerAt.Equal(now) {
-			t.Fatalf("LastCustomerAt not set for %q", msg)
-		}
-	}
-}
-
-func TestMediaWhileIdleShowsMenu(t *testing.T) {
-	c, actions := Step(idle(), MediaIn{Kind: "image"}, now)
-	assertMenu(t, c, actions)
 }
 
 func TestMenuChoices(t *testing.T) {
@@ -189,15 +132,18 @@ func TestMenuChoices(t *testing.T) {
 	}
 }
 
-func TestExplore(t *testing.T) {
-	for _, ev := range []Event{ButtonIn{ID: content.OptionExplore}} {
-		c, actions := Step(idle(), ev, now)
-		if c.State != StateIdle {
-			t.Fatalf("state = %s", c.State)
+// Anything that is not one of the three state-changing flows leaves this
+// package as a key for the caller to resolve - including options the shop
+// invented, which is the whole point of the tree. "Explore products" used to
+// be a case in the switch here; it is a row with a URL on it now.
+func TestAnOrdinaryOptionIsResolvedByTheCaller(t *testing.T) {
+	for _, id := range []string{content.OptionExplore, content.OptionOther, "faq_gift_wrap"} {
+		c, actions := Step(idle(), ButtonIn{ID: id}, now)
+		if !reflect.DeepEqual(actions, []Action{SendAnswer{Key: id}}) {
+			t.Errorf("%s: actions %#v", id, actions)
 		}
-		got := texts(actions)
-		if len(got) != 1 || !strings.Contains(got[0], "the3dprintingstore.in") || !strings.Contains(got[0], "MENU") {
-			t.Fatalf("explore texts %v", got)
+		if c.State != StateIdle {
+			t.Errorf("%s: state = %s", id, c.State)
 		}
 	}
 }
@@ -288,7 +234,9 @@ func TestStaleLookupResultIgnored(t *testing.T) {
 // minted against the phone number, not against an order, because the order
 // number is the thing the form is for.
 func TestDamageSendsALink(t *testing.T) {
-	for _, ev := range []Event{ButtonIn{ID: content.OptionDamage}, TextIn{Text: "1"}} {
+	// Only the tap. A typed "1" is turned into the tap it stands for by the
+	// caller, which can see the brand's own menu - this package cannot.
+	for _, ev := range []Event{ButtonIn{ID: content.OptionDamage}} {
 		c, actions := Step(idle(), ev, now)
 		if !reflect.DeepEqual(actions, []Action{SendDamageLink{}}) {
 			t.Fatalf("%#v: actions %#v", ev, actions)

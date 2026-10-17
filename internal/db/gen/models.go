@@ -846,13 +846,27 @@ type VariantDesign struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
-type WhatsappBotContent struct {
+type WhatsappBotNode struct {
+	BrandSlug  string
+	NodeKey    string
+	Kind       string
+	Body       string
+	ListButton string
+	Position   int32
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+type WhatsappBotOption struct {
 	BrandSlug   string
-	Kind        string
-	ContentKey  string
+	NodeKey     string
+	OptionKey   string
 	Title       string
 	Description string
+	Action      string
 	Answer      string
+	Target      string
+	ButtonLabel string
 	Position    int32
 	Enabled     bool
 	UpdatedBy   *string

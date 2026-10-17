@@ -24,13 +24,6 @@ const (
 	changeNotePrefix = "WhatsApp personalisation change requested: "
 )
 
-// numberedChoices lets customers type a main-menu position instead of tapping.
-var numberedChoices = map[string]string{
-	"1": content.OptionDamage,
-	"2": content.OptionExplore,
-	"3": content.OptionOther,
-}
-
 var (
 	greetings     = set("hi", "hii", "hiii", "hello", "hey", "helo", menuKeyword)
 	humanKeywords = set("human", "agent", "support")
@@ -97,10 +90,12 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 	return onIdle(c, word, now)
 }
 
-func onIdle(c Conversation, word string, now time.Time) (Conversation, []Action) {
-	if id, ok := numberedChoices[word]; ok {
-		return onMenuChoice(c, id, now)
-	}
+// onIdle answers anything the bot was not expecting.
+//
+// A typed menu position - "2" - is turned into the tap it stands for by the
+// caller, which can see the brand's own menu; by the time it reaches here it
+// is already a ButtonIn. So anything still arriving as text gets the menu.
+func onIdle(c Conversation, _ string, _ time.Time) (Conversation, []Action) {
 	return menu(c)
 }
 
@@ -117,10 +112,6 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 		// handing the chat to a person, which silences the bot for twelve
 		// hours. Sending a form leaves the menu working.
 		return c, []Action{SendDamageLink{}}
-	case content.OptionOther:
-		return c, []Action{SendList{Text: content.FaqIntro, List: content.FaqList}}
-	case content.OptionExplore:
-		return c, []Action{withMenuHint(content.Explore)}
 	case content.OptionTeam:
 		return handoff(c, now, content.Handoff)
 	}
@@ -204,8 +195,13 @@ func miss(c Conversation, now time.Time, retryText string) (Conversation, []Acti
 	return c, []Action{SendText{Text: retryText}}
 }
 
+// menu sends the first message in the brand's tree.
+//
+// NO TEXT AND NO OPTIONS HERE. This package is pure and the menu is now the
+// shop's to edit, so the machine says only WHICH message; the caller reads
+// what it currently says.
 func menu(c Conversation) (Conversation, []Action) {
-	return reset(c), []Action{SendMenu{Text: content.Greeting, Menu: content.MainMenu}}
+	return reset(c), []Action{SendMenu{}}
 }
 
 func handoff(c Conversation, now time.Time, text string) (Conversation, []Action) {

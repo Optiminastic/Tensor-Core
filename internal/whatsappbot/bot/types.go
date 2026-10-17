@@ -7,7 +7,6 @@ package bot
 import (
 	"time"
 
-	"github.com/Optiminastic/tensor-core/internal/whatsappbot/content"
 	"github.com/Optiminastic/tensor-core/internal/whatsappbot/order"
 )
 
@@ -117,19 +116,14 @@ type Action interface{ isAction() }
 
 type SendText struct{ Text string }
 
-// SendMenu sends Text with up to three reply buttons under it.
-type SendMenu struct {
-	Text string
-	Menu content.Menu
-}
-
-// SendList sends Text with a tappable list behind one button - ten rows
-// where SendMenu has three. A row comes back as an ordinary button id, so
-// nothing downstream has to tell them apart.
-type SendList struct {
-	Text string
-	List content.List
-}
+// SendMenu sends the first message of the brand's tree.
+//
+// EMPTY ON PURPOSE. What that message says, and whether its options are
+// three buttons or ten list rows, is the shop's to edit - so the machine
+// names the message and the caller resolves it. Before the tree existed this
+// carried the text and the buttons, which is why it reads like a verb with
+// nothing to say.
+type SendMenu struct{}
 
 // SendAnswer is a canned reply identified by key rather than by text.
 //
@@ -170,7 +164,6 @@ type SendDamageLink struct{}
 
 func (SendText) isAction()           {}
 func (SendMenu) isAction()           {}
-func (SendList) isAction()           {}
 func (SendAnswer) isAction()         {}
 func (LookupOrder) isAction()        {}
 func (TagOrder) isAction()           {}

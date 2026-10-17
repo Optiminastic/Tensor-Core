@@ -369,3 +369,16 @@ func textprotoHeader(filename, contentType string) textproto.MIMEHeader {
 	head.Set("Content-Type", contentType)
 	return head
 }
+
+// defaultNode is one node of the shipped tree, for a test that needs to know
+// what the bot will say before the shop has edited anything.
+func defaultNode(t *testing.T, key string) content.Node {
+	t.Helper()
+	for _, n := range content.DefaultTree() {
+		if n.Key == key {
+			return n
+		}
+	}
+	t.Fatalf("the default tree has no %q node", key)
+	return content.Node{}
+}

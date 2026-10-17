@@ -1410,23 +1410,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_reports_link
     ON damage_reports (link_id) WHERE link_id IS NOT NULL;
 
 
--- 0109: the words the bot says, editable without a deploy. An OVERLAY on the
--- Go constants, not a replacement: an empty table means today's behaviour.
--- kind is 'menu' (button label only; the action behind it is code) or 'faq'
--- (a list row and its answer, which are wholly data).
-CREATE TABLE IF NOT EXISTS whatsapp_bot_content (
+-- 0111: the bot as a tree, replacing 0109's flat word overlay. A node is a
+-- message with options under it; an option carries an ACTION, so "Explore
+-- products opens the website" is a row rather than a case in a switch. Three
+-- actions stay in code - damage, track, team - because each changes the
+-- conversation's state, which belongs to the pure state machine; their
+-- option ids are reserved so it still recognises them.
+CREATE TABLE IF NOT EXISTS whatsapp_bot_nodes (
     brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
-    kind        varchar(16) NOT NULL,
-    content_key varchar(64) NOT NULL,
+    node_key    varchar(64) NOT NULL,
+    -- 'buttons' (Meta allows at most 3) or 'list' (at most 10 rows behind
+    -- one button). A fourth button is not something WhatsApp can send.
+    kind        varchar(16) NOT NULL DEFAULT 'buttons',
+    body        text NOT NULL DEFAULT '',
+    list_button varchar(24) NOT NULL DEFAULT '',
+    position    integer NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, node_key)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_bot_options (
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    node_key    varchar(64) NOT NULL,
+    option_key  varchar(64) NOT NULL,
     title       varchar(64) NOT NULL DEFAULT '',
     description varchar(96) NOT NULL DEFAULT '',
+    -- 'answer' | 'open' | 'url' | 'damage' | 'track' | 'team'
+    action      varchar(16) NOT NULL DEFAULT 'answer',
     answer      text NOT NULL DEFAULT '',
+    -- A node key for 'open', a web address for 'url'.
+    target      varchar(500) NOT NULL DEFAULT '',
+    button_label varchar(24) NOT NULL DEFAULT '',
     position    integer NOT NULL DEFAULT 0,
     enabled     boolean NOT NULL DEFAULT true,
     updated_by  varchar(64),
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (brand_slug, kind, content_key)
+    PRIMARY KEY (brand_slug, node_key, option_key),
+    FOREIGN KEY (brand_slug, node_key)
+        REFERENCES whatsapp_bot_nodes (brand_slug, node_key) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS ix_whatsapp_bot_content_order
-    ON whatsapp_bot_content (brand_slug, kind, position);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_bot_options_order
+    ON whatsapp_bot_options (brand_slug, node_key, position);

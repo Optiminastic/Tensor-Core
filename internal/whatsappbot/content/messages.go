@@ -23,60 +23,11 @@ const (
 	FaqCare       = "faq_care"
 )
 
-// Option is one reply button. WhatsApp limits its title to 20 characters.
-type Option struct {
-	ID    string
-	Title string
-}
-
-// Menu is a message with reply buttons shown right under it. WhatsApp allows
-// at most 3, which is why everything else lives behind "Other" as a list.
-type Menu struct {
-	Options []Option
-}
-
-// Row is one line of the FAQ list. WhatsApp caps Title at 24 characters and
-// Description at 72.
-type Row struct {
-	ID          string
-	Title       string
-	Description string
-}
-
-// List is a message with a tappable list behind one button: ten rows against
-// a button message's three.
-type List struct {
-	Button string
-	Rows   []Row
-}
-
-// MainMenu is what any message gets.
-var MainMenu = Menu{Options: []Option{
-	{ID: OptionDamage, Title: "Damage concern"},
-	{ID: OptionExplore, Title: "Explore products"},
-	{ID: OptionOther, Title: "Other"},
-}}
-
-// FaqList is everything behind "Other".
-//
-// A LIST, NOT BUTTONS. Nine answers do not fit in three buttons, and burying
-// the rest behind a second "More" is a menu nobody reaches the bottom of.
-// "Where is my order" sits here rather than on the main menu because the two
-// things a customer opens a chat about are a problem and a purchase.
-var FaqList = List{
-	Button: "See questions",
-	Rows: []Row{
-		{ID: FaqDelivery, Title: "Delivery time", Description: "When will my order reach me?"},
-		{ID: FaqCOD, Title: "Cash on delivery", Description: "Do you accept COD?"},
-		{ID: FaqMakingTime, Title: "How long to make", Description: "Everything is made after you order"},
-		{ID: OptionTrack, Title: "Where is my order", Description: "Track an order that has shipped"},
-		{ID: FaqChangeName, Title: "Change my spelling", Description: "Correct a name after ordering"},
-		{ID: FaqShipping, Title: "Where you deliver", Description: "Shipping across India"},
-		{ID: FaqReturns, Title: "Returns & refunds", Description: "How it works for personalised items"},
-		{ID: FaqCare, Title: "Caring for it", Description: "Keeping your plank looking new"},
-		{ID: OptionTeam, Title: "Talk to our team", Description: "A person will reply here"},
-	},
-}
+// The menu used to live here as a MainMenu and a FaqList: two fixed shapes,
+// three buttons and ten rows, with the behaviour of each in a switch. It is
+// a tree now - see tree.go - because the shop needed to add an option and
+// say what it should do. The answers below remain the DEFAULT wording for
+// the options the tree ships with.
 
 // Confirmation template button payload prefixes: "confirm:<order gid>".
 const (

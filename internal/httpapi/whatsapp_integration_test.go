@@ -354,12 +354,16 @@ func TestIntegrationWhatsAppMenuAndOrderLookup(t *testing.T) {
 		t.Fatalf("greeting = %+v", s)
 	}
 
-	// "Other" opens the FAQ as a LIST, not buttons: nine answers do not fit
-	// in three. A list row comes back as an ordinary button id, which is what
-	// lets the bot answer both with one branch.
+	// "Other" opens the questions as a LIST, not buttons: nine answers do
+	// not fit in three. A list row comes back as an ordinary button id,
+	// which is what lets the bot answer both with one branch.
+	//
+	// It is also the tree's own ActionOpen in use - the second level is a
+	// row pointing at another node, not a case in a switch.
+	questions := defaultNode(t, content.QuestionsNode)
 	h.tap(t, content.OptionOther)
-	if s := h.meta.last(t); s.Rows != len(content.FaqList.Rows) || s.Buttons != 0 || s.Text != content.FaqIntro {
-		t.Fatalf("FAQ list = %+v", s)
+	if s := h.meta.last(t); s.Rows != len(questions.Options) || s.Buttons != 0 || s.Text != questions.Body {
+		t.Fatalf("questions list = %+v", s)
 	}
 	h.tap(t, content.FaqCOD)
 	if s := h.meta.last(t); !strings.Contains(s.Text, "don't offer COD") {
@@ -567,5 +571,125 @@ func TestIntegrationWhatsAppTestNumbersOnly(t *testing.T) {
 	}
 	if c := h.confirmation(t, orderID); c.Status != string(bot.ConfirmationSkipped) {
 		t.Fatalf("status = %s", c.Status)
+	}
+}
+
+// The tree the Bot Messages page edits, and the bot obeying it.
+//
+// This is the whole point of the tree, so it is pinned end to end: a shop
+// adds a button the code has never heard of, points it at a web address,
+// and a customer tapping it gets a link - with no deploy anywhere.
+func TestIntegrationBotTreeDrivesTheBot(t *testing.T) {
+	h := newWAHarness(t, nil)
+	reader := h.minter.mint(t, []string{auth.WhatsAppRead.Key()})
+	writer := h.minter.mint(t, []string{auth.WhatsAppRead.Key(), auth.WhatsAppReply.Key()})
+	path := "/brands/" + waBrand + "/whatsapp/bot-content"
+
+	// Before anything is saved the page is given the code's own tree, so
+	// there is always something to edit.
+	rr := doJSON(h.router, http.MethodGet, path, reader, nil)
+	var tree struct {
+		Nodes    []botNodeJSON `json:"nodes"`
+		FromCode bool          `json:"from_code"`
+		Root     string        `json:"root"`
+		Limits   struct {
+			Buttons int `json:"buttons"`
+			Rows    int `json:"rows"`
+		} `json:"limits"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &tree)
+	if rr.Code != http.StatusOK || !tree.FromCode || len(tree.Nodes) != 2 {
+		t.Fatalf("default tree = %d %s", rr.Code, rr.Body.String())
+	}
+	if tree.Limits.Buttons != content.MaxButtons || tree.Root != content.RootNode {
+		t.Fatalf("limits/root = %+v", tree)
+	}
+
+	// whatsapp:read may look; it may not rewrite what the bot says.
+	if rr := doJSON(h.router, http.MethodPatch, path, reader, nil); rr.Code == http.StatusOK {
+		t.Error("PATCH is not a method this router offers")
+	}
+	if rr := doJSON(h.router, http.MethodPut, path, reader,
+		map[string]any{"nodes": tree.Nodes}); rr.Code != http.StatusForbidden {
+		t.Fatalf("save without whatsapp:reply = %d", rr.Code)
+	}
+
+	// A FOURTH BUTTON IS REFUSED. Meta cannot send one, and finding that out
+	// from a silent bot is the failure this check exists to prevent.
+	tooMany := map[string]any{"nodes": []map[string]any{{
+		"key": content.RootNode, "kind": "buttons", "body": "Hi",
+		"options": []map[string]any{
+			{"key": "a", "title": "One", "action": "answer", "answer": "1", "enabled": true},
+			{"key": "b", "title": "Two", "action": "answer", "answer": "2", "enabled": true},
+			{"key": "c", "title": "Three", "action": "answer", "answer": "3", "enabled": true},
+			{"key": "d", "title": "Four", "action": "answer", "answer": "4", "enabled": true},
+		},
+	}}}
+	rr = doJSON(h.router, http.MethodPut, path, writer, tooMany)
+	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(rr.Body.String(), "3 buttons") {
+		t.Fatalf("a fourth button = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Now a tree the shop could plausibly have built: the damage button it
+	// keeps, a link to the shop, and a question the code has never heard of
+	// behind a list.
+	saved := map[string]any{"nodes": []map[string]any{
+		{
+			"key": content.RootNode, "kind": "buttons", "body": "Hello from the shop",
+			"options": []map[string]any{
+				{"key": "damage", "title": "Broken item", "action": "damage", "enabled": true},
+				{"key": "shop", "title": "Our shop", "action": "url",
+					"target": "https://the3dprintingstore.in/", "button_label": "Visit store",
+					"answer": "Have a look around:", "enabled": true},
+				{"key": "more", "title": "Something else", "action": "open",
+					"target": "q", "enabled": true},
+			},
+		},
+		{
+			"key": "q", "kind": "list", "body": "What can we help with?", "list_button": "See questions",
+			"options": []map[string]any{
+				{"key": "gift_wrap", "title": "Gift wrapping", "description": "Can you gift wrap it?",
+					"action": "answer", "answer": "Yes — every order is gift wrapped free.", "enabled": true},
+			},
+		},
+	}}
+	if rr := doJSON(h.router, http.MethodPut, path, writer, saved); rr.Code != http.StatusOK {
+		t.Fatalf("save = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// The greeting is now the shop's, with its own three buttons.
+	h.say(t, "hi")
+	if s := h.meta.last(t); s.Text != "Hello from the shop" || s.Buttons != 3 {
+		t.Fatalf("greeting = %+v", s)
+	}
+
+	// A button the code has never heard of, opening another message.
+	h.tap(t, "more")
+	if s := h.meta.last(t); s.Rows != 1 || s.Text != "What can we help with?" {
+		t.Fatalf("second level = %+v", s)
+	}
+	h.tap(t, "gift_wrap")
+	if s := h.meta.last(t); !strings.Contains(s.Text, "gift wrapped free") {
+		t.Fatalf("invented question = %+v", s)
+	}
+
+	// The URL action sends a link BUTTON, not a bare address in the text.
+	h.tap(t, "shop")
+	if s := h.meta.last(t); s.URL != "https://the3dprintingstore.in/" || s.ButtonLabel != "Visit store" {
+		t.Fatalf("link option = %+v", s)
+	}
+
+	// Typing a position still works now the menu is the shop's: "2" is the
+	// second button of THEIR greeting, not a fixed id.
+	h.say(t, "2")
+	if s := h.meta.last(t); s.URL != "https://the3dprintingstore.in/" {
+		t.Fatalf("typed choice = %+v", s)
+	}
+
+	// And the damage button still reaches the flow the state machine owns,
+	// under its reserved id, despite being renamed.
+	h.tap(t, "damage")
+	if n := countRows(t, h, "SELECT count(*) FROM damage_links"); n != 1 {
+		t.Fatalf("renamed damage button minted %d links", n)
 	}
 }

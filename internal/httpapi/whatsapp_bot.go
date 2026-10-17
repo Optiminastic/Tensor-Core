@@ -62,6 +62,7 @@ func (w *WhatsAppInboundWorker) Work(ctx context.Context, job *river.Job[product
 		if err != nil {
 			return c, err
 		}
+		ev = turn.asMenuChoice(ctx, c, ev)
 		return turn.run(ctx, q, c, ev)
 	})
 }
@@ -127,18 +128,18 @@ type botTurn struct {
 	shop     string
 	token    string
 	shopOK   bool
-	// copy is the brand's own wording, read once per turn rather than per
-	// action: a menu and the answer behind it are one conversation.
-	copy *botContent
+	// tree is the brand's own menu, read once per turn rather than per
+	// action: a message and the option tapped on it are one conversation.
+	tree *botTree
 }
 
-// content reads the brand's wording, once.
-func (t *botTurn) content(ctx context.Context) botContent {
-	if t.copy == nil {
-		resolved := t.server.botContentFor(ctx, t.brand)
-		t.copy = &resolved
+// menu reads the brand's tree, once.
+func (t *botTurn) menu(ctx context.Context) botTree {
+	if t.tree == nil {
+		resolved := t.server.botTreeFor(ctx, t.brand)
+		t.tree = &resolved
 	}
-	return *t.copy
+	return *t.tree
 }
 
 func (s *Server) newBotTurn(ctx context.Context, brand, waID string, logger *slog.Logger) *botTurn {
@@ -180,32 +181,13 @@ func (t *botTurn) perform(ctx context.Context, q *gen.Queries, a bot.Action) (bo
 		res, err := t.wa.SendText(ctx, t.waID, v.Text)
 		return nil, t.recordSend(ctx, q, res, err, "text", v.Text)
 	case bot.SendMenu:
-		menu := t.content(ctx).applyMenu(v.Menu)
-		res, err := t.wa.SendButtons(ctx, t.waID, v.Text, menuButtons(menu))
-		return nil, t.recordSend(ctx, q, res, err, "menu", v.Text)
-	case bot.SendList:
-		list := t.content(ctx).applyList(v.List)
-		if len(list.Rows) == 0 {
-			// Every question switched off. Opening an empty sheet is worse
-			// than saying so, and the menu is somewhere to go from.
-			res, err := t.wa.SendButtons(ctx, t.waID, content.Greeting,
-				menuButtons(t.content(ctx).applyMenu(content.MainMenu)))
-			return nil, t.recordSend(ctx, q, res, err, "menu", content.Greeting)
-		}
-		res, err := t.wa.SendList(ctx, t.waID, v.Text, list.Button, listRows(list))
-		return nil, t.recordSend(ctx, q, res, err, "list", v.Text)
-	case bot.SendAnswer:
-		text, ok := t.content(ctx).answerFor(v.Key)
+		root, ok := t.menu(ctx).root()
 		if !ok {
-			// A question that no longer exists, or a tap on something this
-			// build does not know. The menu is the honest answer.
-			menu := t.content(ctx).applyMenu(content.MainMenu)
-			res, err := t.wa.SendButtons(ctx, t.waID, content.Greeting, menuButtons(menu))
-			return nil, t.recordSend(ctx, q, res, err, "menu", content.Greeting)
+			return nil, nil
 		}
-		body := text + "\n\n" + content.MenuHint
-		res, err := t.wa.SendText(ctx, t.waID, body)
-		return nil, t.recordSend(ctx, q, res, err, "text", body)
+		return nil, t.sendNode(ctx, q, root)
+	case bot.SendAnswer:
+		return nil, t.answer(ctx, q, v.Key)
 	case bot.LookupOrder:
 		return t.lookup(ctx, v)
 	case bot.TagOrder:
@@ -292,6 +274,28 @@ var allConfirmationStatuses = []string{
 	string(bot.ConfirmationAutoConfirmed), string(bot.ConfirmationUnreachable),
 }
 
+// asMenuChoice turns a typed menu position into the tap it stands for.
+//
+// HERE RATHER THAN IN THE STATE MACHINE, because which option is second is
+// now the shop's to decide and bot.Step cannot read the tree. The old
+// version mapped "2" to a fixed id, which stopped being true the moment a
+// button was reordered.
+//
+// ONLY WHEN THE CONVERSATION IS IDLE. Mid-flow a bare number is an answer -
+// part of an order number, most likely - and rewriting it into a button tap
+// would derail the flow the customer is already in.
+func (t *botTurn) asMenuChoice(ctx context.Context, c bot.Conversation, ev bot.Event) bot.Event {
+	text, ok := ev.(bot.TextIn)
+	if !ok || c.State != bot.StateIdle || c.OptedOut {
+		return ev
+	}
+	id := t.menu(ctx).numberedChoice(text.Text)
+	if id == "" {
+		return ev
+	}
+	return bot.ButtonIn{ID: id}
+}
+
 // inboundEvent turns a stored message into a bot event. A tap on a
 // confirmation template's button is resolved to its order here, so the bot
 // stays pure.
@@ -320,22 +324,6 @@ func buttonEvent(ctx context.Context, q *gen.Queries, id string) (bot.Event, err
 		return nil, err
 	}
 	return bot.ConfirmationReply{OrderID: conf.ShopifyGid, OrderName: conf.OrderNumber, Confirmed: confirmed}, nil
-}
-
-func menuButtons(m content.Menu) []whatsapp.Button {
-	buttons := make([]whatsapp.Button, 0, len(m.Options))
-	for _, o := range m.Options {
-		buttons = append(buttons, whatsapp.Button{ID: o.ID, Title: o.Title})
-	}
-	return buttons
-}
-
-func listRows(l content.List) []whatsapp.ListRow {
-	rows := make([]whatsapp.ListRow, 0, len(l.Rows))
-	for _, r := range l.Rows {
-		rows = append(rows, whatsapp.ListRow{ID: r.ID, Title: r.Title, Description: r.Description})
-	}
-	return rows
 }
 
 // botOrder converts a live Shopify order to the bot's order shape. The
