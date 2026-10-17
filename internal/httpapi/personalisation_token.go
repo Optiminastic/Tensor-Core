@@ -89,3 +89,16 @@ func personalisationLinkURL(frontendURL, token string) string {
 	}
 	return base + "/p/" + token
 }
+
+// damageLinkURL is the address a customer reporting damage is sent.
+//
+// Same reasoning as personalisationLinkURL - path, never query string - and
+// the same token machinery above it. Shorter prefix because this one is typed
+// out in a WhatsApp button and read on a phone.
+func damageLinkURL(frontendURL, token string) string {
+	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
+	if base == "" || strings.TrimSpace(token) == "" {
+		return ""
+	}
+	return base + "/d/" + token
+}

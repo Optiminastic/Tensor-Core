@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -175,11 +174,9 @@ func TestMenuChoices(t *testing.T) {
 		state State
 		text  string
 	}{
-		// Track still asks for the order number alone; damage asks for the
-		// number and the photographs in one message.
+		// Track is the only choice that still starts a conversation. Damage
+		// is a link now and has its own test.
 		{ButtonIn{ID: content.OptionTrack}, StateAwaitTrackOrder, content.AskOrderNumber},
-		{ButtonIn{ID: content.OptionDamage}, StateAwaitDamageOrder, content.AskDamageDetails},
-		{TextIn{Text: "1"}, StateAwaitDamageOrder, content.AskDamageDetails},
 	}
 	for _, tc := range cases {
 		c, actions := Step(idle(), tc.event, now)
@@ -206,7 +203,7 @@ func TestExplore(t *testing.T) {
 }
 
 func TestMenuButtonWorksFromAnyFlow(t *testing.T) {
-	c, _ := Step(in(StateAwaitDamagePhotos), ButtonIn{ID: content.OptionTrack}, now)
+	c, _ := Step(in(StateAwaitChangeText), ButtonIn{ID: content.OptionTrack}, now)
 	if c.State != StateAwaitTrackOrder {
 		t.Fatalf("state = %s", c.State)
 	}
@@ -282,100 +279,38 @@ func TestStaleLookupResultIgnored(t *testing.T) {
 	}
 }
 
-func TestDamageFlow(t *testing.T) {
-	c, _ := Step(idle(), ButtonIn{ID: content.OptionDamage}, now)
-	c, actions := Step(c, TextIn{Text: "115766"}, now)
-	if !reflect.DeepEqual(actions, []Action{LookupOrder{Purpose: PurposeDamage, Number: "115766"}}) {
-		t.Fatalf("lookup actions %#v", actions)
-	}
-	c, actions = Step(c, LookupResult{Purpose: PurposeDamage, Outcome: OrderFound, Order: shipped()}, now)
-	if c.State != StateAwaitDamagePhotos || c.Ctx.OrderID != "gid://shopify/Order/1" || texts(actions)[0] != content.AskDamagePhotos {
-		t.Fatalf("after lookup: %+v %v", c, texts(actions))
-	}
-
-	c, actions = Step(c, TextIn{Text: "done"}, now)
-	if texts(actions)[0] != content.DamageNeedPhotos || c.State != StateAwaitDamagePhotos {
-		t.Fatalf("done without photos: %v", texts(actions))
-	}
-
-	c, actions = Step(c, MediaIn{Kind: "image", MessageID: "wamid.A"}, now)
-	if texts(actions)[0] != content.PhotoReceived {
-		t.Fatalf("first photo: %v", texts(actions))
-	}
-	c, actions = Step(c, MediaIn{Kind: "image", MessageID: "wamid.B"}, now)
-	if len(actions) != 0 {
-		t.Fatalf("second photo should be silent, got %v", texts(actions))
-	}
-	// An audio note is not a damage photograph, and must not be counted as
-	// one - the customer would then be told their photos were received.
-	c, _ = Step(c, MediaIn{Kind: "audio", MessageID: "wamid.C"}, now)
-	if c.Ctx.Photos != 2 || len(c.Ctx.PhotoMessages) != 2 {
-		t.Fatalf("audio counted as a photo: %d, %v", c.Ctx.Photos, c.Ctx.PhotoMessages)
-	}
-
-	c, actions = Step(c, TextIn{Text: "Done"}, now)
-	if c.State != StateHuman {
-		t.Fatalf("state after DONE = %s", c.State)
-	}
-	// RecordDamage FIRST. The two Shopify writes after it go through
-	// requireShop, which cancels the job when a brand has no connected store;
-	// Tensor's own record must be made before anything that can do that.
-	want := []Action{
-		RecordDamage{
-			OrderID: "gid://shopify/Order/1", OrderName: "T3DPS-115766",
-			Photos: 2, PhotoMessages: []string{"wamid.A", "wamid.B"},
-		},
-		TagOrder{OrderID: "gid://shopify/Order/1", Tag: content.TagDamageReported},
-		AppendNote{OrderID: "gid://shopify/Order/1", Note: "WhatsApp damage report: 2 photos. See the WhatsApp chat."},
-	}
-	if !reflect.DeepEqual(actions[:3], want) {
-		t.Fatalf("damage actions %#v", actions)
-	}
-	if !strings.Contains(texts(actions)[0], "T3DPS-115766") {
-		t.Fatalf("damage reply %v", texts(actions))
-	}
-	// The scratchpad is wiped, and that is correct: the conversation has left
-	// the flow, and the durable record is the damage_reports row. Pinned so
-	// nobody later "fixes" the wipe to keep the order id around.
-	if !reflect.DeepEqual(c.Ctx, Context{}) {
-		t.Fatalf("context survived the handoff: %+v", c.Ctx)
+// Tapping Damage asks for a form and NOTHING ELSE.
+//
+// Two things are pinned here that the old conversational flow got wrong. The
+// conversation stays IDLE: that flow ended in a handoff, and StateHuman
+// silences the bot for twelve hours, so the menu stopped working right after
+// somebody reported damage. And the scratchpad stays empty - the link is
+// minted against the phone number, not against an order, because the order
+// number is the thing the form is for.
+func TestDamageSendsALink(t *testing.T) {
+	for _, ev := range []Event{ButtonIn{ID: content.OptionDamage}, TextIn{Text: "1"}} {
+		c, actions := Step(idle(), ev, now)
+		if !reflect.DeepEqual(actions, []Action{SendDamageLink{}}) {
+			t.Fatalf("%#v: actions %#v", ev, actions)
+		}
+		if c.State != StateIdle {
+			t.Fatalf("%#v: state = %s, want idle so the menu still works", ev, c.State)
+		}
+		if !reflect.DeepEqual(c.Ctx, Context{}) {
+			t.Fatalf("%#v: context = %+v, want empty", ev, c.Ctx)
+		}
 	}
 }
 
-// The wamid list is bounded; the count is not. A report of thirty photographs
-// still says thirty, and links the first twenty.
-func TestThePhotoListIsBounded(t *testing.T) {
-	c, _ := Step(idle(), ButtonIn{ID: content.OptionDamage}, now)
-	c, _ = Step(c, TextIn{Text: "115766"}, now)
-	c, _ = Step(c, LookupResult{Purpose: PurposeDamage, Outcome: OrderFound, Order: shipped()}, now)
-
-	for i := 0; i < maxDamagePhotos+10; i++ {
-		c, _ = Step(c, MediaIn{Kind: "image", MessageID: fmt.Sprintf("wamid.%d", i)}, now)
+// Damage from inside another flow still sends the link and abandons the flow
+// it interrupted, rather than reading the tap as that flow's answer.
+func TestDamageInterruptsAnotherFlow(t *testing.T) {
+	c, actions := Step(in(StateAwaitTrackOrder), ButtonIn{ID: content.OptionDamage}, now)
+	if !reflect.DeepEqual(actions, []Action{SendDamageLink{}}) {
+		t.Fatalf("actions %#v", actions)
 	}
-	if c.Ctx.Photos != maxDamagePhotos+10 {
-		t.Errorf("counted %d photos, want every one of them", c.Ctx.Photos)
-	}
-	if len(c.Ctx.PhotoMessages) != maxDamagePhotos {
-		t.Errorf("linked %d messages, want the cap of %d", len(c.Ctx.PhotoMessages), maxDamagePhotos)
-	}
-}
-
-// A conversation that was already mid-flow when PhotoMessages shipped has a
-// count and no ids. It must still be able to finish.
-func TestAFlowFromBeforeThePhotoListStillFinishes(t *testing.T) {
-	c := in(StateAwaitDamagePhotos)
-	c.Ctx = Context{OrderID: "gid://shopify/Order/1", OrderName: "T3DPS-115766", Photos: 2}
-
-	c, actions := Step(c, TextIn{Text: "DONE"}, now)
-	rec, ok := actions[0].(RecordDamage)
-	if !ok {
-		t.Fatalf("first action %#v, want RecordDamage", actions[0])
-	}
-	if rec.Photos != 2 || len(rec.PhotoMessages) != 0 {
-		t.Errorf("record = %+v", rec)
-	}
-	if c.State != StateHuman {
-		t.Errorf("state = %s", c.State)
+	if c.State != StateIdle {
+		t.Fatalf("state = %s", c.State)
 	}
 }
 

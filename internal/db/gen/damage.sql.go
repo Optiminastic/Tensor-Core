@@ -45,29 +45,47 @@ func (q *Queries) CountDamageReportsByStatus(ctx context.Context, brandSlug stri
 }
 
 const findOrderByNumber = `-- name: FindOrderByNumber :one
-SELECT id, customer_name FROM orders WHERE order_number = $1 LIMIT 1
+SELECT id, customer_name FROM orders
+WHERE order_number = $1
+   OR ($2::text <> ''
+       AND regexp_replace(order_number, '\D', '', 'g') = $2::text)
+ORDER BY (order_number = $1) DESC, created_at DESC
+LIMIT 1
 `
+
+type FindOrderByNumberParams struct {
+	Typed  string
+	Digits string
+}
 
 type FindOrderByNumberRow struct {
 	ID           uuid.UUID
 	CustomerName *string
 }
 
-// The Tensor order behind an order number, when there is one.
+// The Tensor order behind whatever the customer typed, when there is one.
 //
-// Best effort by design. The bot resolves orders live against Shopify, so a
-// damage report can name an order Tensor has never imported - a brand new one,
-// or one from a shop whose sync is behind. Finding nothing is ordinary and the
-// report is filed either way.
-func (q *Queries) FindOrderByNumber(ctx context.Context, orderNumber string) (FindOrderByNumberRow, error) {
-	row := q.db.QueryRow(ctx, findOrderByNumber, orderNumber)
+// TWO WAYS OF SAYING THE SAME ORDER. They are asked for "your order ID" and
+// the confirmation email shows T3DPS-115766, so some type that and some type
+// 115766 - and orders.order_number holds the full prefixed form. Matching on
+// the exact text alone finds the first group and not the second.
+//
+// The digit comparison is a scan, and that is affordable here: it runs once
+// per damage report, of which there are tens a month, and only when the
+// exact match has already missed.
+//
+// Best effort throughout. A customer can name an order Tensor has never
+// imported - a brand new one, one from a shop whose sync is behind, or a
+// number they mistyped - and the report is filed either way.
+func (q *Queries) FindOrderByNumber(ctx context.Context, arg FindOrderByNumberParams) (FindOrderByNumberRow, error) {
+	row := q.db.QueryRow(ctx, findOrderByNumber, arg.Typed, arg.Digits)
 	var i FindOrderByNumberRow
 	err := row.Scan(&i.ID, &i.CustomerName)
 	return i, err
 }
 
 const getDamageReport = `-- name: GetDamageReport :one
-SELECT id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at FROM damage_reports
+SELECT id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, link_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at FROM damage_reports
 WHERE id = $1 AND brand_slug = $2
 `
 
@@ -91,6 +109,7 @@ func (q *Queries) GetDamageReport(ctx context.Context, arg GetDamageReportParams
 		&i.Status,
 		&i.ResolutionNote,
 		&i.WaMessageID,
+		&i.LinkID,
 		&i.ReportedAt,
 		&i.StatusChangedAt,
 		&i.StatusChangedBy,
@@ -100,46 +119,16 @@ func (q *Queries) GetDamageReport(ctx context.Context, arg GetDamageReportParams
 	return i, err
 }
 
-const insertDamageReport = `-- name: InsertDamageReport :one
-INSERT INTO damage_reports (
-    brand_slug, wa_id, shopify_order_gid, order_number, order_id,
-    customer_name, photo_count, wa_message_id
-) VALUES (
-    $1, $2, $3,
-    $4, $5, $6,
-    $7, $8
-)
-ON CONFLICT (wa_message_id) DO NOTHING
-RETURNING id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at
+const getDamageReportByLink = `-- name: GetDamageReportByLink :one
+SELECT id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, link_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at FROM damage_reports WHERE link_id = $1
 `
 
-type InsertDamageReportParams struct {
-	BrandSlug       string
-	WaID            string
-	ShopifyOrderGid string
-	OrderNumber     string
-	OrderID         *uuid.UUID
-	CustomerName    string
-	PhotoCount      int32
-	WaMessageID     string
-}
-
-// Files one damage report, once.
+// The report already filed against this link, if any.
 //
-// ON CONFLICT on the closing message's wamid: a River retry after the row was
-// written - or a webhook Meta replayed - must not file the same report twice.
-// Nothing returned means it already exists, and the caller stands down.
-func (q *Queries) InsertDamageReport(ctx context.Context, arg InsertDamageReportParams) (DamageReport, error) {
-	row := q.db.QueryRow(ctx, insertDamageReport,
-		arg.BrandSlug,
-		arg.WaID,
-		arg.ShopifyOrderGid,
-		arg.OrderNumber,
-		arg.OrderID,
-		arg.CustomerName,
-		arg.PhotoCount,
-		arg.WaMessageID,
-	)
+// Read by the public form so that reopening the link shows what the customer
+// already sent, rather than an empty box asking for the order number again.
+func (q *Queries) GetDamageReportByLink(ctx context.Context, linkID *uuid.UUID) (DamageReport, error) {
+	row := q.db.QueryRow(ctx, getDamageReportByLink, linkID)
 	var i DamageReport
 	err := row.Scan(
 		&i.ID,
@@ -153,6 +142,7 @@ func (q *Queries) InsertDamageReport(ctx context.Context, arg InsertDamageReport
 		&i.Status,
 		&i.ResolutionNote,
 		&i.WaMessageID,
+		&i.LinkID,
 		&i.ReportedAt,
 		&i.StatusChangedAt,
 		&i.StatusChangedBy,
@@ -162,75 +152,44 @@ func (q *Queries) InsertDamageReport(ctx context.Context, arg InsertDamageReport
 	return i, err
 }
 
-const linkDamageReportPhotos = `-- name: LinkDamageReportPhotos :execrows
-INSERT INTO damage_report_photos (report_id, message_id, position)
-SELECT $1, m.id, w.ord - 1
-FROM unnest($2::text[]) WITH ORDINALITY AS w(wamid, ord)
-JOIN whatsapp_messages m
-  ON m.wa_message_id = w.wamid AND m.brand_slug = $3
-ON CONFLICT DO NOTHING
+const listDamageReportFiles = `-- name: ListDamageReportFiles :many
+SELECT f.id, f.filename, f.content_type, f.size_bytes, d.position, d.created_at
+FROM damage_reports r
+JOIN damage_files d ON d.link_id = r.link_id
+JOIN file_assets f ON f.id = d.file_id
+WHERE r.id = $1
+ORDER BY d.position
 `
 
-type LinkDamageReportPhotosParams struct {
-	ReportID     uuid.UUID
-	WaMessageIds []string
-	BrandSlug    string
+type ListDamageReportFilesRow struct {
+	ID          uuid.UUID
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+	Position    int32
+	CreatedAt   pgtype.Timestamptz
 }
 
-// Attaches the photographs this report was built from, in arrival order.
+// The photographs and videos a report holds, in the order they were uploaded.
 //
-// One statement, and the brand is in the WHERE clause: the wamids come from a
-// conversation's own scratchpad, and a forged one must not be able to reach
-// another brand's message. unnest WITH ORDINALITY keeps the order the customer
-// sent them in.
-func (q *Queries) LinkDamageReportPhotos(ctx context.Context, arg LinkDamageReportPhotosParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkDamageReportPhotos, arg.ReportID, arg.WaMessageIds, arg.BrandSlug)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const listDamageReportPhotos = `-- name: ListDamageReportPhotos :many
-SELECT m.id AS message_id, m.kind, m.body, m.media_status, m.media_mime_type,
-       m.media_error, m.created_at, p.position
-FROM damage_report_photos p
-JOIN whatsapp_messages m ON m.id = p.message_id
-WHERE p.report_id = $1
-ORDER BY p.position
-`
-
-type ListDamageReportPhotosRow struct {
-	MessageID     uuid.UUID
-	Kind          string
-	Body          string
-	MediaStatus   string
-	MediaMimeType string
-	MediaError    string
-	CreatedAt     pgtype.Timestamptz
-	Position      int32
-}
-
-// The photographs, in the order the customer sent them, each with where its
-// download got to. The body is the caption they typed alongside it.
-func (q *Queries) ListDamageReportPhotos(ctx context.Context, reportID uuid.UUID) ([]ListDamageReportPhotosRow, error) {
-	rows, err := q.db.Query(ctx, listDamageReportPhotos, reportID)
+// Reached through the report's own link, which is also what scopes them: the
+// files belong to the link, and the link belongs to the brand.
+func (q *Queries) ListDamageReportFiles(ctx context.Context, reportID uuid.UUID) ([]ListDamageReportFilesRow, error) {
+	rows, err := q.db.Query(ctx, listDamageReportFiles, reportID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListDamageReportPhotosRow{}
+	items := []ListDamageReportFilesRow{}
 	for rows.Next() {
-		var i ListDamageReportPhotosRow
+		var i ListDamageReportFilesRow
 		if err := rows.Scan(
-			&i.MessageID,
-			&i.Kind,
-			&i.Body,
-			&i.MediaStatus,
-			&i.MediaMimeType,
-			&i.MediaError,
-			&i.CreatedAt,
+			&i.ID,
+			&i.Filename,
+			&i.ContentType,
+			&i.SizeBytes,
 			&i.Position,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -243,22 +202,13 @@ func (q *Queries) ListDamageReportPhotos(ctx context.Context, reportID uuid.UUID
 }
 
 const listDamageReports = `-- name: ListDamageReports :many
-SELECT r.id, r.brand_slug, r.wa_id, r.shopify_order_gid, r.order_number, r.order_id, r.customer_name, r.photo_count, r.status, r.resolution_note, r.wa_message_id, r.reported_at, r.status_changed_at, r.status_changed_by, r.created_at, r.updated_at,
-       coalesce(c.linked, 0)::int   AS photos_linked,
-       coalesce(c.stored, 0)::int   AS photos_stored,
-       coalesce(c.failed, 0)::int   AS photos_failed,
-       coalesce(c.pending, 0)::int  AS photos_pending,
-       o.order_number IS NOT NULL   AS order_imported
+SELECT r.id, r.brand_slug, r.wa_id, r.shopify_order_gid, r.order_number, r.order_id, r.customer_name, r.photo_count, r.status, r.resolution_note, r.wa_message_id, r.link_id, r.reported_at, r.status_changed_at, r.status_changed_by, r.created_at, r.updated_at,
+       coalesce(c.files, 0)::int AS file_count,
+       o.order_number IS NOT NULL AS order_imported
 FROM damage_reports r
 LEFT JOIN orders o ON o.id = r.order_id
 LEFT JOIN LATERAL (
-    SELECT count(*) AS linked,
-           count(*) FILTER (WHERE m.media_status = 'stored')  AS stored,
-           count(*) FILTER (WHERE m.media_status = 'failed')  AS failed,
-           count(*) FILTER (WHERE m.media_status = 'pending') AS pending
-    FROM damage_report_photos p
-    JOIN whatsapp_messages m ON m.id = p.message_id
-    WHERE p.report_id = r.id
+    SELECT count(*) AS files FROM damage_files d WHERE d.link_id = r.link_id
 ) c ON true
 WHERE r.brand_slug = $1
 ORDER BY r.reported_at DESC
@@ -281,26 +231,23 @@ type ListDamageReportsRow struct {
 	PhotoCount      int32
 	Status          string
 	ResolutionNote  string
-	WaMessageID     string
+	WaMessageID     *string
+	LinkID          *uuid.UUID
 	ReportedAt      pgtype.Timestamptz
 	StatusChangedAt pgtype.Timestamptz
 	StatusChangedBy *string
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
-	PhotosLinked    int32
-	PhotosStored    int32
-	PhotosFailed    int32
-	PhotosPending   int32
+	FileCount       int32
 	OrderImported   interface{}
 }
 
-// The brand's damage reports, newest first, with how many of their
-// photographs actually arrived.
+// The brand's damage reports, newest first, with how many files each holds.
 //
-// THE PHOTO TALLY IS THE POINT. "Three photographs" and "three photographs,
-// none of which we hold" are different situations and the page has to tell
-// them apart, so the counts are computed here rather than inferred from
-// photo_count alone.
+// ONE TALLY, not four. The old list carried stored/pending/failed because a
+// WhatsApp attachment had to be fetched out of Meta and could still be in
+// flight or have failed. A file the customer uploaded to the form is simply
+// there.
 func (q *Queries) ListDamageReports(ctx context.Context, arg ListDamageReportsParams) ([]ListDamageReportsRow, error) {
 	rows, err := q.db.Query(ctx, listDamageReports, arg.BrandSlug, arg.RowLimit)
 	if err != nil {
@@ -322,15 +269,13 @@ func (q *Queries) ListDamageReports(ctx context.Context, arg ListDamageReportsPa
 			&i.Status,
 			&i.ResolutionNote,
 			&i.WaMessageID,
+			&i.LinkID,
 			&i.ReportedAt,
 			&i.StatusChangedAt,
 			&i.StatusChangedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.PhotosLinked,
-			&i.PhotosStored,
-			&i.PhotosFailed,
-			&i.PhotosPending,
+			&i.FileCount,
 			&i.OrderImported,
 		); err != nil {
 			return nil, err
@@ -351,7 +296,7 @@ SET status            = coalesce($1, status),
     status_changed_by = $3,
     updated_at        = now()
 WHERE id = $4 AND brand_slug = $5
-RETURNING id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at
+RETURNING id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, link_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at
 `
 
 type UpdateDamageReportStatusParams struct {
@@ -387,6 +332,77 @@ func (q *Queries) UpdateDamageReportStatus(ctx context.Context, arg UpdateDamage
 		&i.Status,
 		&i.ResolutionNote,
 		&i.WaMessageID,
+		&i.LinkID,
+		&i.ReportedAt,
+		&i.StatusChangedAt,
+		&i.StatusChangedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertDamageReportForLink = `-- name: UpsertDamageReportForLink :one
+INSERT INTO damage_reports (
+    brand_slug, wa_id, order_number, order_id, customer_name,
+    photo_count, link_id
+) VALUES (
+    $1, $2, $3,
+    $4, $5,
+    $6, $7
+)
+ON CONFLICT (link_id) WHERE link_id IS NOT NULL DO UPDATE
+SET order_number  = excluded.order_number,
+    order_id      = coalesce(excluded.order_id, damage_reports.order_id),
+    customer_name = CASE WHEN excluded.customer_name <> ''
+                         THEN excluded.customer_name ELSE damage_reports.customer_name END,
+    photo_count   = excluded.photo_count,
+    updated_at    = now()
+RETURNING id, brand_slug, wa_id, shopify_order_gid, order_number, order_id, customer_name, photo_count, status, resolution_note, wa_message_id, link_id, reported_at, status_changed_at, status_changed_by, created_at, updated_at
+`
+
+type UpsertDamageReportForLinkParams struct {
+	BrandSlug    string
+	WaID         string
+	OrderNumber  string
+	OrderID      *uuid.UUID
+	CustomerName string
+	PhotoCount   int32
+	LinkID       *uuid.UUID
+}
+
+// Files the report behind one link, or updates the one already there.
+//
+// ONE REPORT PER LINK, which is the whole deduplication story now that the
+// old wamid key is gone. A customer who reopens their link inside its 24
+// hours and sends another photograph is correcting the report they already
+// filed, not making a second one - so a resubmission updates the order
+// number they typed and the tally, and leaves the status and the resolution
+// note alone. Somebody in the shop may already have moved it to in_review.
+func (q *Queries) UpsertDamageReportForLink(ctx context.Context, arg UpsertDamageReportForLinkParams) (DamageReport, error) {
+	row := q.db.QueryRow(ctx, upsertDamageReportForLink,
+		arg.BrandSlug,
+		arg.WaID,
+		arg.OrderNumber,
+		arg.OrderID,
+		arg.CustomerName,
+		arg.PhotoCount,
+		arg.LinkID,
+	)
+	var i DamageReport
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WaID,
+		&i.ShopifyOrderGid,
+		&i.OrderNumber,
+		&i.OrderID,
+		&i.CustomerName,
+		&i.PhotoCount,
+		&i.Status,
+		&i.ResolutionNote,
+		&i.WaMessageID,
+		&i.LinkID,
 		&i.ReportedAt,
 		&i.StatusChangedAt,
 		&i.StatusChangedBy,

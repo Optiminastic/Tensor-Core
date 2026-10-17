@@ -1,13 +1,14 @@
 package httpapi
 
-// The damaged-products queue: every customer who reported damage, what they
-// sent, and how far anyone has got with it.
+// The damaged-products queue: every customer who filled in the damage form,
+// what they sent, and how far anyone has got with it.
 //
-// WHETHER THE PHOTOGRAPHS ARRIVED IS A FIRST-CLASS FACT HERE, not something
-// the page infers. A report saying "3 photos" when Tensor holds none of them
-// is a report nobody can act on, and the difference between "still
-// downloading" and "never arrived" decides whether waiting helps. So the list
-// carries the tally per report and the detail carries it per photograph.
+// ONE TALLY, NOT FOUR. The first version of this carried
+// stored/pending/failed counts, because the photographs arrived as WhatsApp
+// attachments that had to be fetched back out of Meta and could still be in
+// flight or have failed outright. They are uploaded straight to Tensor now,
+// so a file a report holds is simply there - and "3 photos, none of which we
+// hold" has stopped being a state this screen has to describe.
 
 import (
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/storage"
 )
 
 // damageReportRows caps one brand's list.
@@ -54,14 +56,10 @@ type damageReportJSON struct {
 	OrderNumber     string  `json:"order_number"`
 	ShopifyOrderGID string  `json:"shopify_order_gid"`
 	OrderID         *string `json:"order_id"`
-	// PhotoCount is how many the customer sent. The three that follow are how
-	// many Tensor actually holds, is still fetching, and gave up on - which is
-	// not the same number and is the one that decides whether anybody can work
-	// the report.
-	PhotoCount      int32      `json:"photo_count"`
-	PhotosStored    int32      `json:"photos_stored"`
-	PhotosPending   int32      `json:"photos_pending"`
-	PhotosFailed    int32      `json:"photos_failed"`
+	// FileCount is how many photographs and videos the report holds. It is
+	// counted from the files themselves rather than read off the row, so it
+	// cannot disagree with what the drawer then lists.
+	FileCount       int32      `json:"file_count"`
 	Status          string     `json:"status"`
 	ResolutionNote  string     `json:"resolution_note"`
 	ReportedAt      time.Time  `json:"reported_at"`
@@ -69,15 +67,15 @@ type damageReportJSON struct {
 	StatusChangedBy *string    `json:"status_changed_by"`
 }
 
-type damagePhotoJSON struct {
-	MessageID string `json:"message_id"`
-	Kind      string `json:"kind"`
-	// Caption is what the customer typed alongside the photograph, which is
-	// stored as the message body.
-	Caption     string    `json:"caption"`
-	MediaStatus string    `json:"media_status"`
-	MimeType    string    `json:"mime_type"`
-	MediaError  string    `json:"media_error"`
+// damageFileJSON is one uploaded photograph or video.
+//
+// No URL: the bytes come from this router's own route, which the dashboard
+// builds from the report id and this id. A pre-signed link would be a second
+// way in to a customer's photographs that outlives the permission check.
+type damageFileJSON struct {
+	ID          string    `json:"id"`
+	ContentType string    `json:"content_type"`
+	SizeBytes   int64     `json:"size_bytes"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -91,6 +89,12 @@ func (s *Server) registerDamageReports(r *gin.Engine) {
 	// in catalog.go plus those two assertions.
 	g.GET("", s.guards.RequirePermission(auth.WhatsAppRead.Key()), s.listDamageReports)
 	g.GET("/:id", s.guards.RequirePermission(auth.WhatsAppRead.Key()), s.getDamageReport)
+	// NOT /files/:id, which serves file_assets from a flat global id space on
+	// production:read. A customer's photographs are not production data -
+	// PACKAGING_QC holds the latter and has no business with the former - and
+	// the id has to be checked against the report and the brand, or this
+	// would hand out any file in the database.
+	g.GET("/:id/files/:fileID", s.guards.RequirePermission(auth.WhatsAppRead.Key()), s.damageReportFile)
 	g.PATCH("/:id", s.guards.RequirePermission(auth.WhatsAppReply.Key()), s.updateDamageReport)
 }
 
@@ -133,17 +137,63 @@ func (s *Server) getDamageReport(c *gin.Context) {
 		return
 	}
 
-	photos := make([]damagePhotoJSON, 0, row.PhotoCount)
-	if found, err := s.store.Q.ListDamageReportPhotos(ctx, id); err == nil {
-		for _, p := range found {
-			photos = append(photos, damagePhotoJSON{
-				MessageID: p.MessageID.String(), Kind: p.Kind, Caption: p.Body,
-				MediaStatus: p.MediaStatus, MimeType: p.MediaMimeType,
-				MediaError: p.MediaError, CreatedAt: p.CreatedAt.Time,
+	files := make([]damageFileJSON, 0, row.PhotoCount)
+	if found, err := s.store.Q.ListDamageReportFiles(ctx, id); err == nil {
+		for _, f := range found {
+			files = append(files, damageFileJSON{
+				ID: f.ID.String(), ContentType: f.ContentType,
+				SizeBytes: f.SizeBytes, CreatedAt: f.CreatedAt.Time,
 			})
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"report": damageJSON(row, photoTally(photos)), "photos": photos})
+	c.JSON(http.StatusOK, gin.H{"report": damageJSON(row, int32(len(files))), "files": files})
+}
+
+// damageReportFile hands one photograph or video to the dashboard.
+func (s *Server) damageReportFile(c *gin.Context) {
+	ctx := c.Request.Context()
+	brand := c.Param("slug")
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	fileID, ok := parseUUIDParam(c, "fileID")
+	if !ok {
+		return
+	}
+	// The query joins report -> link -> file, so a file id belonging to
+	// another report, or to another brand, simply does not resolve. Asked
+	// BEFORE the storage check, so a file that is not on this report is
+	// refused as such whatever state object storage is in.
+	row, err := s.store.Q.GetDamageReportFile(ctx, gen.GetDamageReportFileParams{
+		ReportID: id, BrandSlug: brand, FileID: fileID,
+	})
+	if err != nil {
+		dbError(c, err, "That file is not on this report.", "Could not load the file.")
+		return
+	}
+	if s.storage == nil {
+		detail(c, http.StatusServiceUnavailable, "File storage is not configured.")
+		return
+	}
+
+	obj, err := s.storage.Get(ctx, row.StorageKey)
+	if err != nil {
+		if storage.IsNotFound(err) {
+			detail(c, http.StatusNotFound, "That file is no longer in storage.")
+			return
+		}
+		detail(c, http.StatusInternalServerError, "Could not read the file.")
+		return
+	}
+	defer func() { _ = obj.Body.Close() }()
+
+	// Inline, because the point is to look at it in the page rather than to
+	// save it. Cached hard and privately: the bytes never change once stored,
+	// and they are one customer's photographs.
+	c.Header("Content-Disposition", "inline")
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.DataFromReader(http.StatusOK, obj.Size, row.ContentType, obj.Body, nil)
 }
 
 func (s *Server) updateDamageReport(c *gin.Context) {
@@ -184,47 +234,24 @@ func (s *Server) updateDamageReport(c *gin.Context) {
 		dbError(c, err, "That damage report does not exist.", "Could not update the report.")
 		return
 	}
-	c.JSON(http.StatusOK, damageJSON(row, photoCounts{}))
-}
-
-// photoCounts is how many of a report's photographs Tensor actually holds.
-type photoCounts struct{ stored, pending, failed int32 }
-
-func photoTally(photos []damagePhotoJSON) photoCounts {
-	var out photoCounts
-	for _, p := range photos {
-		switch p.MediaStatus {
-		case mediaStored:
-			out.stored++
-		case mediaPending:
-			out.pending++
-		case mediaFailed:
-			out.failed++
-		}
-	}
-	return out
+	c.JSON(http.StatusOK, damageJSON(row, row.PhotoCount))
 }
 
 func damageListJSON(row gen.ListDamageReportsRow) damageReportJSON {
-	out := damageJSON(gen.DamageReport{
+	return damageJSON(gen.DamageReport{
 		ID: row.ID, WaID: row.WaID, CustomerName: row.CustomerName,
 		OrderNumber: row.OrderNumber, ShopifyOrderGid: row.ShopifyOrderGid,
 		OrderID: row.OrderID, PhotoCount: row.PhotoCount, Status: row.Status,
 		ResolutionNote: row.ResolutionNote, ReportedAt: row.ReportedAt,
 		StatusChangedAt: row.StatusChangedAt, StatusChangedBy: row.StatusChangedBy,
-	}, photoCounts{
-		stored: row.PhotosStored, pending: row.PhotosPending, failed: row.PhotosFailed,
-	})
-	return out
+	}, row.FileCount)
 }
 
-func damageJSON(row gen.DamageReport, counts photoCounts) damageReportJSON {
+func damageJSON(row gen.DamageReport, files int32) damageReportJSON {
 	out := damageReportJSON{
 		ID: row.ID.String(), WaID: row.WaID, CustomerName: row.CustomerName,
 		OrderNumber: row.OrderNumber, ShopifyOrderGID: row.ShopifyOrderGid,
-		PhotoCount: row.PhotoCount, PhotosStored: counts.stored,
-		PhotosPending: counts.pending, PhotosFailed: counts.failed,
-		Status: row.Status, ResolutionNote: row.ResolutionNote,
+		FileCount: files, Status: row.Status, ResolutionNote: row.ResolutionNote,
 		ReportedAt: row.ReportedAt.Time, StatusChangedBy: row.StatusChangedBy,
 	}
 	if row.OrderID != nil {

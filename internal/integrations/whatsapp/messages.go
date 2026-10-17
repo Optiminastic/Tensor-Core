@@ -129,3 +129,50 @@ func (c *Client) SendList(ctx context.Context, to, body, buttonText string, rows
 		},
 	})
 }
+
+// SendCTAURL sends text with one button that opens a link.
+//
+// WHY NOT JUST PUT THE URL IN THE TEXT. A bare link in a WhatsApp message is
+// a line of grey text a customer has to notice, read and trust; a button is
+// the thing their thumb is already looking for. The damage form is the only
+// way to report damage now, so the tap rate is the feature.
+//
+// Two consequences worth knowing before using it:
+//
+//   - The same 24-hour rule as SendText. A cta_url message is free-form, so
+//     it cannot reopen a closed window - fine where the customer has just
+//     tapped a button, which is the only place this is used.
+//   - NOTHING COMES BACK WHEN IT IS TAPPED. Unlike a reply button there is no
+//     webhook event, so whatever the button leads to has to correlate itself.
+//     Here that is the token in the URL.
+func (c *Client) SendCTAURL(ctx context.Context, to, body, displayText, url string) (SendResult, error) {
+	if !c.Configured() {
+		return SendResult{}, fmt.Errorf("WhatsApp is not configured")
+	}
+	if strings.TrimSpace(body) == "" {
+		return SendResult{}, fmt.Errorf("no text to send")
+	}
+	if strings.TrimSpace(displayText) == "" {
+		return SendResult{}, fmt.Errorf("the button needs a label")
+	}
+	if utf8.RuneCountInString(displayText) > maxButtonTitleRunes {
+		return SendResult{}, fmt.Errorf("button %q is over %d characters", displayText, maxButtonTitleRunes)
+	}
+	// Meta refuses anything that is not an absolute http(s) address, and says
+	// so with a generic 100. Caught here so the reason names the URL.
+	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+		return SendResult{}, fmt.Errorf("the button link %q is not an absolute URL", url)
+	}
+	return c.post(ctx, map[string]any{
+		"to":   strings.TrimPrefix(strings.TrimSpace(to), "+"),
+		"type": "interactive",
+		"interactive": map[string]any{
+			"type": "cta_url",
+			"body": map[string]any{"text": body},
+			"action": map[string]any{
+				"name":       "cta_url",
+				"parameters": map[string]any{"display_text": displayText, "url": url},
+			},
+		},
+	})
+}

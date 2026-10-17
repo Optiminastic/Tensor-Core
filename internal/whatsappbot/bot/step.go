@@ -14,20 +14,13 @@ const (
 	// last human activity before the bot answers again.
 	HumanIdleTimeout = 12 * time.Hour
 	// MaxMisses is how many unusable replies a flow tolerates before handoff.
-	MaxMisses      = 2
-	minOrderDigits = 5
-	maxOrderDigits = 10
-	keywordTrimSet = " !.?,"
-	kindImage      = "image"
-	kindVideo      = "video"
-	doneKeyword    = "done"
-	// maxDamagePhotos bounds the wamid list kept on the conversation. The
-	// photo COUNT is not capped; only the list of ids this report links.
-	maxDamagePhotos  = 20
+	MaxMisses        = 2
+	minOrderDigits   = 5
+	maxOrderDigits   = 10
+	keywordTrimSet   = " !.?,"
 	menuKeyword      = "menu"
 	startKeyword     = "start"
 	stopKeyword      = "stop"
-	damageNoteFmt    = "WhatsApp damage report: %d photos. See the WhatsApp chat."
 	changeNotePrefix = "WhatsApp personalisation change requested: "
 )
 
@@ -98,16 +91,10 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 		return handoff(c, now, content.Handoff)
 	}
 
-	switch c.State {
-	case StateAwaitTrackOrder:
+	if c.State == StateAwaitTrackOrder {
 		return onOrderNumber(c, ev, PurposeTrack, now)
-	case StateAwaitDamageOrder:
-		return onOrderNumber(c, ev, PurposeDamage, now)
-	case StateAwaitDamagePhotos:
-		return onDamagePhotos(c, ev, word, now)
-	default:
-		return onIdle(c, word, now)
 	}
+	return onIdle(c, word, now)
 }
 
 func onIdle(c Conversation, word string, now time.Time) (Conversation, []Action) {
@@ -124,11 +111,12 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 		c.State = StateAwaitTrackOrder
 		return c, []Action{SendText{Text: content.AskOrderNumber}}
 	case content.OptionDamage:
-		// Both asked for in one message, then the ordinary flow: a typed
-		// order number is looked up as before, and photographs that arrive
-		// first are still collected.
-		c.State = StateAwaitDamageOrder
-		return c, []Action{SendText{Text: content.AskDamageDetails}}
+		// A LINK, NOT A CONVERSATION, and the conversation stays idle behind
+		// it. The flow this replaced asked for the order number, looked it
+		// up, asked for photographs and waited for DONE - and ended by
+		// handing the chat to a person, which silences the bot for twelve
+		// hours. Sending a form leaves the menu working.
+		return c, []Action{SendDamageLink{}}
 	case content.OptionOther:
 		return c, []Action{SendList{Text: content.FaqIntro, List: content.FaqList}}
 	case content.OptionExplore:
@@ -170,48 +158,8 @@ func onLookup(c Conversation, r LookupResult, now time.Time) (Conversation, []Ac
 		return miss(c, now, content.PhoneMismatch)
 	}
 
-	if r.Purpose == PurposeTrack {
-		c = reset(c)
-		return c, []Action{withMenuHint(content.OrderStatus(r.Order, now))}
-	}
-	c.State = StateAwaitDamagePhotos
-	c.Ctx = Context{OrderID: r.Order.ID, OrderName: r.Order.Name}
-	return c, []Action{SendText{Text: content.AskDamagePhotos}}
-}
-
-func onDamagePhotos(c Conversation, ev Event, word string, now time.Time) (Conversation, []Action) {
-	if m, ok := ev.(MediaIn); ok && (m.Kind == kindImage || m.Kind == kindVideo) {
-		c.Ctx.Photos++
-		// Bounded: the count is the customer's, the list is ours to store,
-		// and a jsonb column is not the place for an unbounded one. A report
-		// of more than twenty photographs still says how many arrived.
-		if m.MessageID != "" && len(c.Ctx.PhotoMessages) < maxDamagePhotos {
-			c.Ctx.PhotoMessages = append(c.Ctx.PhotoMessages, m.MessageID)
-		}
-		if c.Ctx.Photos == 1 {
-			return c, []Action{SendText{Text: content.PhotoReceived}}
-		}
-		return c, nil
-	}
-	if c.Ctx.Photos == 0 {
-		return c, []Action{SendText{Text: content.DamageNeedPhotos}}
-	}
-	if word != doneKeyword {
-		return c, []Action{SendText{Text: content.PhotoReceived}}
-	}
-
-	orderID, orderName, photos := c.Ctx.OrderID, c.Ctx.OrderName, c.Ctx.Photos
-	msgs := c.Ctx.PhotoMessages
-	c, reply := handoff(c, now, fmt.Sprintf(content.DamageReported, orderName))
-	// RECORDED FIRST, before the two Shopify writes. Those go through
-	// requireShop, which cancels the whole job when a brand has no connected
-	// store - and Tensor's own record of a damaged parcel must not be lost
-	// because Shopify happens to be disconnected or returning 500s.
-	return c, append([]Action{
-		RecordDamage{OrderID: orderID, OrderName: orderName, Photos: photos, PhotoMessages: msgs},
-		TagOrder{OrderID: orderID, Tag: content.TagDamageReported},
-		AppendNote{OrderID: orderID, Note: fmt.Sprintf(damageNoteFmt, photos)},
-	}, reply...)
+	c = reset(c)
+	return c, []Action{withMenuHint(content.OrderStatus(r.Order, now))}
 }
 
 func onConfirmation(c Conversation, r ConfirmationReply) (Conversation, []Action) {
@@ -291,15 +239,10 @@ func humanExpired(c Conversation, now time.Time) bool {
 	return last == nil || now.Sub(*last) > HumanIdleTimeout
 }
 
-func stateFor(p Purpose) State {
-	if p == PurposeDamage {
-		return StateAwaitDamageOrder
-	}
-	return StateAwaitTrackOrder
-}
+func stateFor(Purpose) State { return StateAwaitTrackOrder }
 
 // keyword is the lower-cased message with surrounding punctuation removed, so
-// "Hi!" and "DONE." match. Non-text events have no keyword.
+// "Hi!" and "Menu." match. Non-text events have no keyword.
 func keyword(ev Event) string {
 	t, ok := ev.(TextIn)
 	if !ok {

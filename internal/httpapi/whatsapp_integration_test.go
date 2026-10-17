@@ -37,6 +37,7 @@ const (
 	waAppSecret   = "test-app-secret"
 	waVerifyToken = "test-verify-token"
 	waCustomer    = "919876543210"
+	waFrontendURL = "https://tensor.test"
 )
 
 // metaSend is one message Tensor posted to the fake Graph API.
@@ -51,6 +52,13 @@ type metaSend struct {
 	Rows     int
 	Template string
 	Payloads []string
+	// URL and ButtonLabel are a cta_url message's link and the word on the
+	// button. A cta_url is "interactive" to Meta like a button message, but
+	// carries its one action under action.parameters rather than in a
+	// buttons array - so without these a damage link reads as an interactive
+	// message with no buttons and no text to check.
+	URL         string
+	ButtonLabel string
 }
 
 type fakeMeta struct {
@@ -72,6 +80,10 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 				Sections []struct {
 					Rows []any `json:"rows"`
 				} `json:"sections"`
+				Parameters struct {
+					DisplayText string `json:"display_text"`
+					URL         string `json:"url"`
+				} `json:"parameters"`
 			} `json:"action"`
 		} `json:"interactive"`
 		Template struct {
@@ -100,6 +112,8 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 		for _, sec := range m.Interactive.Action.Sections {
 			s.Rows += len(sec.Rows)
 		}
+		s.URL = m.Interactive.Action.Parameters.URL
+		s.ButtonLabel = m.Interactive.Action.Parameters.DisplayText
 	}
 	for _, c := range m.Template.Components {
 		if c.SubType == "quick_reply" && len(c.Parameters) > 0 {
@@ -214,6 +228,7 @@ func newWAHarness(t *testing.T, settings map[string]string) *waHarness {
 	cfg := config.Settings{
 		Environment: "development", AuthAudience: "tensor-core",
 		WhatsAppBaseURL: metaSrv.URL, ShopifyBaseURL: shopSrv.URL, ShopifyAPIVersion: "2024-10",
+		FrontendURL: waFrontendURL,
 	}
 	server := NewServer(cfg, store, auth.NewGuards(minter.verifier, ""), nil)
 
@@ -552,155 +567,5 @@ func TestIntegrationWhatsAppTestNumbersOnly(t *testing.T) {
 	}
 	if c := h.confirmation(t, orderID); c.Status != string(bot.ConfirmationSkipped) {
 		t.Fatalf("status = %s", c.Status)
-	}
-}
-
-// The whole damage path: tap, order number, two photographs, DONE.
-//
-// What it pins, in order of how badly each has gone wrong before:
-//   - the media id survives the webhook, and a download job is queued per
-//     attachment - the parser used to drop it on the floor;
-//   - the caption is stored as the message body, so the customer's own words
-//     about the damage are not lost;
-//   - a damage_reports row is written at all, and the photographs are linked
-//     to it in arrival order;
-//   - replaying the closing message files ONE report, not two.
-func TestIntegrationWhatsAppDamageReport(t *testing.T) {
-	h := newWAHarness(t, nil)
-	orderID := paidOrder(t, h.store, "T3DPS-115766", 7001)
-	h.shop.order = `{"id":"gid://shopify/Order/9","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z",
-"shippingAddress":{"phone":"+91 98765 43210"},"lineItems":{"nodes":[]},"fulfillments":[]}`
-
-	h.tap(t, content.OptionDamage)
-	h.say(t, "115766")
-	if s := h.meta.last(t); s.Text != content.AskDamagePhotos {
-		t.Fatalf("after the order number = %q", s.Text)
-	}
-
-	// Through the webhook, not h.inbound, because the media id and the caption
-	// are what this is about and only the webhook parses them.
-	for _, w := range []struct{ id, media, caption string }{
-		{"wamid.img.1", "MEDIA-A", "the corner is snapped"},
-		{"wamid.img.2", "MEDIA-B", ""},
-	} {
-		if code := serve(h.router, signedWebhook(
-			imageWebhook(waPhoneID, w.id, w.media, w.caption))).Code; code != http.StatusOK {
-			t.Fatalf("image webhook = %d", code)
-		}
-		h.inbound(t, production.WhatsAppInboundArgs{
-			BrandSlug: waBrand, WaID: waCustomer, MessageID: w.id, MessageKind: "image",
-		})
-	}
-
-	// One download queued per attachment. Without this the report links two
-	// photographs whose bytes nothing will ever fetch.
-	if n := h.jobs(t, production.WhatsAppMediaArgs{}.Kind()); n != 2 {
-		t.Fatalf("queued %d media downloads, want 2", n)
-	}
-	var body, mediaID, mediaStatus string
-	if err := h.store.Pool.QueryRow(h.ctx,
-		`SELECT body, media_id, media_status FROM whatsapp_messages WHERE wa_message_id = 'wamid.img.1'`,
-	).Scan(&body, &mediaID, &mediaStatus); err != nil {
-		t.Fatal(err)
-	}
-	if body != "the corner is snapped" || mediaID != "MEDIA-A" || mediaStatus != mediaPending {
-		t.Fatalf("stored image = %q / %q / %q", body, mediaID, mediaStatus)
-	}
-
-	h.inbound(t, production.WhatsAppInboundArgs{
-		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
-	})
-
-	reports, err := h.store.Q.ListDamageReports(h.ctx, gen.ListDamageReportsParams{
-		BrandSlug: waBrand, RowLimit: 10,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reports) != 1 {
-		t.Fatalf("filed %d reports, want 1", len(reports))
-	}
-	r := reports[0]
-	if r.OrderNumber != "T3DPS-115766" || r.Status != damageNew || r.PhotoCount != 2 {
-		t.Errorf("report = %+v", r)
-	}
-	// Resolved against Tensor's own orders table, so the page can link to it.
-	if r.OrderID == nil || *r.OrderID != orderID {
-		t.Errorf("order_id = %v, want %v", r.OrderID, orderID)
-	}
-	if r.PhotosLinked != 2 || r.PhotosPending != 2 {
-		t.Errorf("photo tally = linked %d, pending %d", r.PhotosLinked, r.PhotosPending)
-	}
-
-	photos, err := h.store.Q.ListDamageReportPhotos(h.ctx, r.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(photos) != 2 || photos[0].Body != "the corner is snapped" {
-		t.Fatalf("photos = %+v", photos)
-	}
-
-	// A replayed closing message must not file a second report.
-	h.inbound(t, production.WhatsAppInboundArgs{
-		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
-	})
-	again, _ := h.store.Q.ListDamageReports(h.ctx, gen.ListDamageReportsParams{
-		BrandSlug: waBrand, RowLimit: 10,
-	})
-	if len(again) != 1 {
-		t.Fatalf("a replay filed %d reports", len(again))
-	}
-}
-
-// The queue's own endpoints, and who may use them.
-func TestIntegrationDamageReportsAPI(t *testing.T) {
-	h := newWAHarness(t, nil)
-	paidOrder(t, h.store, "T3DPS-115766", 7002)
-	h.shop.order = `{"id":"gid://shopify/Order/9","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z",
-"shippingAddress":{"phone":"+91 98765 43210"},"lineItems":{"nodes":[]},"fulfillments":[]}`
-	h.tap(t, content.OptionDamage)
-	h.say(t, "115766")
-	h.inbound(t, production.WhatsAppInboundArgs{
-		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.p1", MessageKind: "image",
-	})
-	h.inbound(t, production.WhatsAppInboundArgs{
-		BrandSlug: waBrand, WaID: waCustomer, MessageID: "wamid.done", MessageKind: "text", Text: "DONE",
-	})
-
-	reader := h.minter.mint(t, []string{auth.WhatsAppRead.Key()})
-	writer := h.minter.mint(t, []string{auth.WhatsAppRead.Key(), auth.WhatsAppReply.Key()})
-	base := "/brands/" + waBrand + "/damage-reports"
-
-	rr := doJSON(h.router, http.MethodGet, base, reader, nil)
-	var list struct {
-		Items  []damageReportJSON `json:"items"`
-		Counts map[string]int32   `json:"counts"`
-	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &list)
-	if rr.Code != http.StatusOK || len(list.Items) != 1 {
-		t.Fatalf("list = %d %s", rr.Code, rr.Body.String())
-	}
-	if list.Counts[damageNew] != 1 || list.Counts[""] != 1 {
-		t.Errorf("counts = %v", list.Counts)
-	}
-
-	id := list.Items[0].ID
-	// whatsapp:read is enough to look; it is not enough to close one.
-	if rr := doJSON(h.router, http.MethodPatch, base+"/"+id, reader,
-		map[string]string{"status": damageResolved}); rr.Code != http.StatusForbidden {
-		t.Fatalf("patch without whatsapp:reply = %d", rr.Code)
-	}
-	if rr := doJSON(h.router, http.MethodPatch, base+"/"+id, writer,
-		map[string]string{"status": "exploded"}); rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("patch with a nonsense status = %d", rr.Code)
-	}
-
-	rr = doJSON(h.router, http.MethodPatch, base+"/"+id, writer,
-		map[string]string{"status": damageInReview, "resolution_note": "replacement posted"})
-	var updated damageReportJSON
-	_ = json.Unmarshal(rr.Body.Bytes(), &updated)
-	if rr.Code != http.StatusOK || updated.Status != damageInReview ||
-		updated.ResolutionNote != "replacement posted" || updated.StatusChangedAt == nil {
-		t.Fatalf("patch = %d %s", rr.Code, rr.Body.String())
 	}
 }

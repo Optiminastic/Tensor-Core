@@ -134,7 +134,7 @@ const (
 		"Personalised pieces carry somebody's name, so they cannot be returned or resold — " +
 		"which is why we ask you to check the spelling before we print.\n\n" +
 		"If your parcel arrives *damaged*, that is on us: type *MENU* and tap *Damage concern*, " +
-		"and we will sort it out."
+		"and we will send you a link to upload the photos."
 
 	FaqCareAnswer = "🧼 *Looking after it*\n\n" +
 		"• Wipe with a soft dry cloth — no water, no cleaning sprays\n" +
@@ -162,26 +162,32 @@ const (
 
 	PhoneMismatch = "For your privacy we can only share details of orders placed with this WhatsApp number. Please send the order number again, or type *HUMAN* to talk to our team."
 
-	// AskDamageDetails asks for everything at once.
-	//
-	// ONE MESSAGE, NOT AN INTERROGATION. The flow used to ask for the order
-	// number, wait, look it up, then ask for photographs - four turns before
-	// the customer had told us anything useful, and two unreadable replies
-	// handed the chat to a person. Asking for both up front lets them send
-	// whatever they have to hand, in whatever order.
-	AskDamageDetails = "We're really sorry about that. 🙏\n\n" +
-		"Please send us:\n" +
-		"1️⃣ Your *order ID* — e.g. *115766* or *T3DPS-115766*\n" +
+	// DamageLinkBody introduces the form. The address itself is not in it -
+	// it travels as the button beside it, which is what a thumb goes for.
+	DamageLinkBody = "We're really sorry about that. 🙏\n\n" +
+		"Please open the link below and send us:\n" +
+		"1️⃣ Your *order ID*\n" +
 		"2️⃣ *Photos or a video* of the damaged product and its packaging\n\n" +
-		"Our team will check them and reply to you here."
+		"You can upload several files at once. Our team will check them and reply here."
 
-	AskDamagePhotos = "We're really sorry about that. 🙏\n\nPlease send clear photos of the damaged product *and* the packaging. When you have sent all photos, type *DONE*."
+	// DamageLinkButton is what the button says. WhatsApp caps it at 20
+	// characters, and the shop asked for this word.
+	DamageLinkButton = "LINK"
 
-	PhotoReceived = "Got it 📸. Send more photos, or type *DONE* when finished."
+	// DamageLinkAlready answers a second tap from somebody who already has a
+	// form open.
+	//
+	// IT CANNOT RESEND THE LINK. Only the token's hash is stored, so the
+	// address exists nowhere but in the message already sitting in their
+	// chat - which is the whole reason a database dump opens nobody's form.
+	DamageLinkAlready = "You already have a damage form open — scroll up in this chat and tap *LINK*.\n\n" +
+		"It stays open for 24 hours, and you can add more photos to it any time before then."
 
-	DamageNeedPhotos = "Please send at least one photo of the damaged product, then type *DONE*."
-
-	DamageReported = "Thank you. We've recorded your damage report for order %s and our team will check the photos and get back to you shortly."
+	// DamageLinkFailed is said when the form could not be minted. It names
+	// the way through rather than apologising twice: the customer still has
+	// a damaged parcel and still needs somebody to look at it.
+	DamageLinkFailed = "Sorry — we couldn't open the damage form just now. " +
+		"Please send us your order ID and photos of the damage here and our team will take it from there."
 
 	// Explore leads with the shop itself: somebody tapping "Explore products"
 	// wants the store, not a reading list.

@@ -1337,23 +1337,65 @@ CREATE TABLE IF NOT EXISTS whatsapp_brand_state (
     confirmations_since timestamptz NOT NULL DEFAULT now()
 );
 
--- 0108: damage reports. One row per completed WhatsApp damage flow. The order
--- is Shopify's (resolved live by the bot), so the GID is NOT NULL while
--- order_id may be null for an order Tensor has not imported. Photos link to
--- the MESSAGE, not the file: the download is asynchronous, so at the moment
--- the report is written there may be no file to point at yet.
+-- 0110: damage links. Tapping "Damage concern" mints one of these and the bot
+-- sends its URL; the customer fills in a web form instead of a conversation.
+-- Same shape and same reasoning as personalisation_links: the URL is the whole
+-- credential, so only its hash is stored. Keyed on the PHONE, not an order -
+-- the form is where the order number is learnt.
+CREATE TABLE IF NOT EXISTS damage_links (
+    id          uuid PRIMARY KEY,
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id       varchar(32) NOT NULL,
+    token_hash  varchar(64) NOT NULL UNIQUE,
+    status      varchar(16) NOT NULL,
+    issued_at   timestamptz NOT NULL DEFAULT now(),
+    expires_at  timestamptz NOT NULL,
+    sent_at     timestamptz,
+    opened_at   timestamptz,
+    submitted_at timestamptz,
+    message_id  varchar(160),
+    detail      varchar(500),
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+-- One live link per person: a second tap resends the one they already hold.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_links_live
+    ON damage_links (brand_slug, wa_id)
+    WHERE status IN ('sent', 'opened');
+CREATE INDEX IF NOT EXISTS ix_damage_links_expiry
+    ON damage_links (expires_at)
+    WHERE status IN ('pending', 'sent', 'opened');
+
+-- The uploaded files, by LINK: they arrive before the report is submitted, so
+-- there is nothing else to hang them on. file_assets has no brand_slug, so
+-- brand ownership runs through the link and never through a client-sent id.
+CREATE TABLE IF NOT EXISTS damage_files (
+    link_id    uuid NOT NULL REFERENCES damage_links(id) ON DELETE CASCADE,
+    file_id    uuid NOT NULL REFERENCES file_assets(id) ON DELETE CASCADE,
+    position   integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (link_id, file_id)
+);
+
+-- 0108: damage reports. One row per damage form a customer submitted. The
+-- order number is whatever they typed, so order_id is best effort and the
+-- Shopify GID is usually empty - there is no live lookup on this path. The
+-- photographs hang off the LINK (damage_files), reached through link_id.
 CREATE TABLE IF NOT EXISTS damage_reports (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     brand_slug        varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
     wa_id             varchar(32) NOT NULL,
-    shopify_order_gid varchar(64) NOT NULL,
+    shopify_order_gid varchar(64) NOT NULL DEFAULT '',
     order_number      varchar(64) NOT NULL,
     order_id          uuid REFERENCES orders(id) ON DELETE SET NULL,
     customer_name     varchar(255) NOT NULL DEFAULT '',
     photo_count       integer NOT NULL DEFAULT 0,
     status            varchar(16) NOT NULL DEFAULT 'new',
     resolution_note   text NOT NULL DEFAULT '',
-    wa_message_id     varchar(128) NOT NULL UNIQUE,
+    -- 0110: nullable and no longer unique. It identified the message that
+    -- closed the old conversational flow; a report filed from the form has no
+    -- wamid at all, and link_id is what dedupes now.
+    wa_message_id     varchar(128),
+    link_id           uuid REFERENCES damage_links(id) ON DELETE SET NULL,
     reported_at       timestamptz NOT NULL DEFAULT now(),
     status_changed_at timestamptz,
     status_changed_by varchar(64),
@@ -1364,13 +1406,9 @@ CREATE INDEX IF NOT EXISTS ix_damage_reports_queue
     ON damage_reports (brand_slug, status, reported_at DESC);
 CREATE INDEX IF NOT EXISTS ix_damage_reports_order
     ON damage_reports (order_id) WHERE order_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_reports_link
+    ON damage_reports (link_id) WHERE link_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS damage_report_photos (
-    report_id  uuid NOT NULL REFERENCES damage_reports(id) ON DELETE CASCADE,
-    message_id uuid NOT NULL REFERENCES whatsapp_messages(id) ON DELETE CASCADE,
-    position   integer NOT NULL,
-    PRIMARY KEY (report_id, message_id)
-);
 
 -- 0109: the words the bot says, editable without a deploy. An OVERLAY on the
 -- Go constants, not a replacement: an empty table means today's behaviour.

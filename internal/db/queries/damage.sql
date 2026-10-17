@@ -1,67 +1,65 @@
 -- name: FindOrderByNumber :one
--- The Tensor order behind an order number, when there is one.
+-- The Tensor order behind whatever the customer typed, when there is one.
 --
--- Best effort by design. The bot resolves orders live against Shopify, so a
--- damage report can name an order Tensor has never imported - a brand new one,
--- or one from a shop whose sync is behind. Finding nothing is ordinary and the
--- report is filed either way.
-SELECT id, customer_name FROM orders WHERE order_number = sqlc.arg('order_number') LIMIT 1;
+-- TWO WAYS OF SAYING THE SAME ORDER. They are asked for "your order ID" and
+-- the confirmation email shows T3DPS-115766, so some type that and some type
+-- 115766 - and orders.order_number holds the full prefixed form. Matching on
+-- the exact text alone finds the first group and not the second.
+--
+-- The digit comparison is a scan, and that is affordable here: it runs once
+-- per damage report, of which there are tens a month, and only when the
+-- exact match has already missed.
+--
+-- Best effort throughout. A customer can name an order Tensor has never
+-- imported - a brand new one, one from a shop whose sync is behind, or a
+-- number they mistyped - and the report is filed either way.
+SELECT id, customer_name FROM orders
+WHERE order_number = sqlc.arg('typed')
+   OR (sqlc.arg('digits')::text <> ''
+       AND regexp_replace(order_number, '\D', '', 'g') = sqlc.arg('digits')::text)
+ORDER BY (order_number = sqlc.arg('typed')) DESC, created_at DESC
+LIMIT 1;
 
--- name: InsertDamageReport :one
--- Files one damage report, once.
+-- name: UpsertDamageReportForLink :one
+-- Files the report behind one link, or updates the one already there.
 --
--- ON CONFLICT on the closing message's wamid: a River retry after the row was
--- written - or a webhook Meta replayed - must not file the same report twice.
--- Nothing returned means it already exists, and the caller stands down.
+-- ONE REPORT PER LINK, which is the whole deduplication story now that the
+-- old wamid key is gone. A customer who reopens their link inside its 24
+-- hours and sends another photograph is correcting the report they already
+-- filed, not making a second one - so a resubmission updates the order
+-- number they typed and the tally, and leaves the status and the resolution
+-- note alone. Somebody in the shop may already have moved it to in_review.
 INSERT INTO damage_reports (
-    brand_slug, wa_id, shopify_order_gid, order_number, order_id,
-    customer_name, photo_count, wa_message_id
+    brand_slug, wa_id, order_number, order_id, customer_name,
+    photo_count, link_id
 ) VALUES (
-    sqlc.arg('brand_slug'), sqlc.arg('wa_id'), sqlc.arg('shopify_order_gid'),
-    sqlc.arg('order_number'), sqlc.narg('order_id'), sqlc.arg('customer_name'),
-    sqlc.arg('photo_count'), sqlc.arg('wa_message_id')
+    sqlc.arg('brand_slug'), sqlc.arg('wa_id'), sqlc.arg('order_number'),
+    sqlc.narg('order_id'), sqlc.arg('customer_name'),
+    sqlc.arg('photo_count'), sqlc.arg('link_id')
 )
-ON CONFLICT (wa_message_id) DO NOTHING
+ON CONFLICT (link_id) WHERE link_id IS NOT NULL DO UPDATE
+SET order_number  = excluded.order_number,
+    order_id      = coalesce(excluded.order_id, damage_reports.order_id),
+    customer_name = CASE WHEN excluded.customer_name <> ''
+                         THEN excluded.customer_name ELSE damage_reports.customer_name END,
+    photo_count   = excluded.photo_count,
+    updated_at    = now()
 RETURNING *;
 
--- name: LinkDamageReportPhotos :execrows
--- Attaches the photographs this report was built from, in arrival order.
---
--- One statement, and the brand is in the WHERE clause: the wamids come from a
--- conversation's own scratchpad, and a forged one must not be able to reach
--- another brand's message. unnest WITH ORDINALITY keeps the order the customer
--- sent them in.
-INSERT INTO damage_report_photos (report_id, message_id, position)
-SELECT sqlc.arg('report_id'), m.id, w.ord - 1
-FROM unnest(sqlc.arg('wa_message_ids')::text[]) WITH ORDINALITY AS w(wamid, ord)
-JOIN whatsapp_messages m
-  ON m.wa_message_id = w.wamid AND m.brand_slug = sqlc.arg('brand_slug')
-ON CONFLICT DO NOTHING;
-
 -- name: ListDamageReports :many
--- The brand's damage reports, newest first, with how many of their
--- photographs actually arrived.
+-- The brand's damage reports, newest first, with how many files each holds.
 --
--- THE PHOTO TALLY IS THE POINT. "Three photographs" and "three photographs,
--- none of which we hold" are different situations and the page has to tell
--- them apart, so the counts are computed here rather than inferred from
--- photo_count alone.
+-- ONE TALLY, not four. The old list carried stored/pending/failed because a
+-- WhatsApp attachment had to be fetched out of Meta and could still be in
+-- flight or have failed. A file the customer uploaded to the form is simply
+-- there.
 SELECT r.*,
-       coalesce(c.linked, 0)::int   AS photos_linked,
-       coalesce(c.stored, 0)::int   AS photos_stored,
-       coalesce(c.failed, 0)::int   AS photos_failed,
-       coalesce(c.pending, 0)::int  AS photos_pending,
-       o.order_number IS NOT NULL   AS order_imported
+       coalesce(c.files, 0)::int AS file_count,
+       o.order_number IS NOT NULL AS order_imported
 FROM damage_reports r
 LEFT JOIN orders o ON o.id = r.order_id
 LEFT JOIN LATERAL (
-    SELECT count(*) AS linked,
-           count(*) FILTER (WHERE m.media_status = 'stored')  AS stored,
-           count(*) FILTER (WHERE m.media_status = 'failed')  AS failed,
-           count(*) FILTER (WHERE m.media_status = 'pending') AS pending
-    FROM damage_report_photos p
-    JOIN whatsapp_messages m ON m.id = p.message_id
-    WHERE p.report_id = r.id
+    SELECT count(*) AS files FROM damage_files d WHERE d.link_id = r.link_id
 ) c ON true
 WHERE r.brand_slug = sqlc.arg('brand_slug')
 ORDER BY r.reported_at DESC
@@ -77,15 +75,17 @@ GROUP BY status;
 SELECT * FROM damage_reports
 WHERE id = sqlc.arg('id') AND brand_slug = sqlc.arg('brand_slug');
 
--- name: ListDamageReportPhotos :many
--- The photographs, in the order the customer sent them, each with where its
--- download got to. The body is the caption they typed alongside it.
-SELECT m.id AS message_id, m.kind, m.body, m.media_status, m.media_mime_type,
-       m.media_error, m.created_at, p.position
-FROM damage_report_photos p
-JOIN whatsapp_messages m ON m.id = p.message_id
-WHERE p.report_id = sqlc.arg('report_id')
-ORDER BY p.position;
+-- name: ListDamageReportFiles :many
+-- The photographs and videos a report holds, in the order they were uploaded.
+--
+-- Reached through the report's own link, which is also what scopes them: the
+-- files belong to the link, and the link belongs to the brand.
+SELECT f.id, f.filename, f.content_type, f.size_bytes, d.position, d.created_at
+FROM damage_reports r
+JOIN damage_files d ON d.link_id = r.link_id
+JOIN file_assets f ON f.id = d.file_id
+WHERE r.id = sqlc.arg('report_id')
+ORDER BY d.position;
 
 -- name: UpdateDamageReportStatus :one
 -- Moves a report along, records a resolution, or both.
@@ -100,3 +100,10 @@ SET status            = coalesce(sqlc.narg('status'), status),
     updated_at        = now()
 WHERE id = sqlc.arg('id') AND brand_slug = sqlc.arg('brand_slug')
 RETURNING *;
+
+-- name: GetDamageReportByLink :one
+-- The report already filed against this link, if any.
+--
+-- Read by the public form so that reopening the link shows what the customer
+-- already sent, rather than an empty box asking for the order number again.
+SELECT * FROM damage_reports WHERE link_id = sqlc.arg('link_id');

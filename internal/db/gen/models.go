@@ -167,6 +167,29 @@ type CostAssumptionSet struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+type DamageFile struct {
+	LinkID    uuid.UUID
+	FileID    uuid.UUID
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
+type DamageLink struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	WaID        string
+	TokenHash   string
+	Status      string
+	IssuedAt    pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+	SentAt      pgtype.Timestamptz
+	OpenedAt    pgtype.Timestamptz
+	SubmittedAt pgtype.Timestamptz
+	MessageID   *string
+	Detail      *string
+	CreatedAt   pgtype.Timestamptz
+}
+
 type DamageReport struct {
 	ID              uuid.UUID
 	BrandSlug       string
@@ -178,18 +201,13 @@ type DamageReport struct {
 	PhotoCount      int32
 	Status          string
 	ResolutionNote  string
-	WaMessageID     string
+	WaMessageID     *string
+	LinkID          *uuid.UUID
 	ReportedAt      pgtype.Timestamptz
 	StatusChangedAt pgtype.Timestamptz
 	StatusChangedBy *string
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
-}
-
-type DamageReportPhoto struct {
-	ReportID  uuid.UUID
-	MessageID uuid.UUID
-	Position  int32
 }
 
 type Design struct {

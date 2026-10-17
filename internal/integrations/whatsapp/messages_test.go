@@ -93,3 +93,46 @@ func TestQuickReplyPayloadsBecomeButtonComponents(t *testing.T) {
 		t.Fatalf("quick reply component = %v", change)
 	}
 }
+
+func TestSendCTAURLShapesTheLinkButton(t *testing.T) {
+	c, got := capture(t)
+	if _, err := c.SendCTAURL(context.Background(), "+919876543210",
+		"Open the damage form", "LINK", "https://tensor.example/d/abc"); err != nil {
+		t.Fatal(err)
+	}
+	body := *got
+	if body["to"] != "919876543210" || body["type"] != "interactive" {
+		t.Fatalf("body = %v", body)
+	}
+	interactive := body["interactive"].(map[string]any)
+	action := interactive["action"].(map[string]any)
+	params := action["parameters"].(map[string]any)
+	if interactive["type"] != "cta_url" || action["name"] != "cta_url" {
+		t.Fatalf("interactive = %v", interactive)
+	}
+	if params["display_text"] != "LINK" || params["url"] != "https://tensor.example/d/abc" {
+		t.Fatalf("parameters = %v", params)
+	}
+	if interactive["body"].(map[string]any)["text"] != "Open the damage form" {
+		t.Fatalf("body text = %v", interactive["body"])
+	}
+}
+
+// Refused here rather than by Meta, which answers a generic 100 and names
+// neither the field nor the rule.
+func TestSendCTAURLRefusesWhatMetaWould(t *testing.T) {
+	c, _ := capture(t)
+	cases := []struct {
+		name, body, label, url string
+	}{
+		{"no body", " ", "LINK", "https://x.test/d/a"},
+		{"no label", "hello", "", "https://x.test/d/a"},
+		{"a label over 20 characters", "hello", "Open the damage form now", "https://x.test/d/a"},
+		{"a relative address", "hello", "LINK", "/d/a"},
+	}
+	for _, tc := range cases {
+		if _, err := c.SendCTAURL(context.Background(), "919876543210", tc.body, tc.label, tc.url); err == nil {
+			t.Errorf("%s was accepted", tc.name)
+		}
+	}
+}

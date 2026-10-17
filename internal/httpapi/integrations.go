@@ -151,8 +151,8 @@ var integrationSpecs = []integrationSpec{
 				Help: "Any long random value. Paste the same value into the webhook setup in " +
 					"Meta's app dashboard; Meta sends it back once to prove the callback is yours."},
 			{Key: "bot_enabled", Label: "Menu bot", Required: false, Default: "false",
-				Help: "true answers every customer message with the menu (Where is my order, " +
-					"Damage concern, Explore more, More). false records messages for the inbox only."},
+				Help: "true answers every customer message with the menu (Damage concern, " +
+					"Explore products, Other). false records messages for the inbox only."},
 			{Key: "confirmations_enabled", Label: "Personalisation confirmations", Required: false,
 				Default: "false",
 				Help: "true messages each newly paid order's customer to confirm the names to be " +

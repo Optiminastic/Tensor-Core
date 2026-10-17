@@ -57,7 +57,6 @@ func (w *WhatsAppInboundWorker) Work(ctx context.Context, job *river.Job[product
 	}
 	a := job.Args
 	turn := w.server.newBotTurn(ctx, a.BrandSlug, a.WaID, w.logger)
-	turn.msgID = a.MessageID
 	return w.server.withWhatsAppConversation(ctx, a.BrandSlug, a.WaID, func(q *gen.Queries, c bot.Conversation) (bot.Conversation, error) {
 		ev, err := inboundEvent(ctx, q, a)
 		if err != nil {
@@ -128,10 +127,6 @@ type botTurn struct {
 	shop     string
 	token    string
 	shopOK   bool
-	// msgID is the wamid of the message this turn is answering, empty for a
-	// turn the shop started. It is what a damage report is deduped on, so a
-	// retried job files one report rather than two.
-	msgID string
 	// copy is the brand's own wording, read once per turn rather than per
 	// action: a menu and the answer behind it are one conversation.
 	copy *botContent
@@ -219,8 +214,8 @@ func (t *botTurn) perform(ctx context.Context, q *gen.Queries, a bot.Action) (bo
 		return nil, t.requireShop(t.server.shopify.AppendOrderNote(ctx, t.shop, t.token, v.OrderID, v.Note))
 	case bot.RecordConfirmation:
 		return nil, recordConfirmationReply(ctx, q, v)
-	case bot.RecordDamage:
-		return nil, recordDamageReport(ctx, q, t.brand, t.waID, t.msgID, v)
+	case bot.SendDamageLink:
+		return nil, t.sendDamageLink(ctx, q)
 	default:
 		return nil, fmt.Errorf("unknown bot action %T", a)
 	}
@@ -307,7 +302,7 @@ func inboundEvent(ctx context.Context, q *gen.Queries, a production.WhatsAppInbo
 	case whatsapp.KindButton:
 		return buttonEvent(ctx, q, a.ButtonID)
 	default:
-		return bot.MediaIn{Kind: a.MessageKind, MessageID: a.MessageID}, nil
+		return bot.MediaIn{Kind: a.MessageKind}, nil
 	}
 }
 
