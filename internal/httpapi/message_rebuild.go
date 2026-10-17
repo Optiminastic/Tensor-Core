@@ -39,6 +39,14 @@ import (
 // rows are the ones least likely to still be in Shopify's window anyway.
 const maxRebuilds = 40
 
+// rebuildBudget is the longest this decoration may hold a response.
+//
+// Well inside the frontend's own 20-second budget for this endpoint, so a
+// slow upstream costs the message bodies and never the list itself. Picked
+// to leave room for the database read that already happened and the JSON
+// that follows.
+const rebuildBudget = 6 * time.Second
+
 // rebuildWindowDays is how far back to ask Shopify for checkouts.
 //
 // Shopify retains abandoned checkouts for about thirty days and silently
@@ -61,9 +69,24 @@ type rebuilt struct {
 // EVERY FAILURE IS SILENT AND PARTIAL. This decorates a page whose rows have
 // already loaded; a brand with no Shopify token, an expired template, a
 // Shopify timeout must each cost the decoration and nothing else.
+//
+// WHICH IS WHY IT HAS ITS OWN DEADLINE. That promise was not kept: the work
+// below is one Meta template read and up to forty Shopify queries, all on
+// the critical path of a list endpoint, so a slow Shopify did not cost the
+// decoration - it cost the whole response, through the caller's own timeout.
+// The Agent Overview then showed "Tensor-Core is unreachable" above a page
+// of figures that had loaded perfectly, because its 8-second budget expired
+// while this was still asking Shopify about month-old baskets.
+//
+// Past the deadline the rows return undecorated, which is exactly what they
+// do for a basket that has aged out of Shopify - a case this page already
+// handles and already explains.
 func (s *Server) rebuildMessages(
 	ctx context.Context, slug string, rows []gen.AbandonedCheckoutCall,
 ) map[string]rebuilt {
+	ctx, cancel := context.WithTimeout(ctx, rebuildBudget)
+	defer cancel()
+
 	wanted := make([]gen.AbandonedCheckoutCall, 0, len(rows))
 	for _, r := range rows {
 		if r.Status == "sent" && (r.MessageBody == nil || *r.MessageBody == "") {
