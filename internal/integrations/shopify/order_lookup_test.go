@@ -34,7 +34,7 @@ func scripted(t *testing.T, responses ...string) (*Client, *[]gqlCall) {
 const orderByNameResponse = `{"data":{"orders":{"nodes":[{
   "id":"gid://shopify/Order/1","name":"T3DPS-115766","createdAt":"2026-10-12T10:33:59Z","cancelledAt":null,
   "phone":null,"shippingLine":{"title":"EXPRESS DISPATCH"},"displayFulfillmentStatus":"FULFILLED",
-  "shippingAddress":{"phone":"+91 98765 43210"},"billingAddress":null,"customer":{"defaultPhoneNumber":null},
+  "shippingAddress":{"phone":"+91 98765 43210"},"billingAddress":null,
   "lineItems":{"nodes":[{"customAttributes":[{"key":"STEP 6 - WhatsApp Number","value":"99999 88888"}]}]},
   "fulfillments":[
     {"createdAt":"2026-10-13T10:00:00Z","displayStatus":"IN_TRANSIT","trackingInfo":[{"company":"Delhivery","number":"2","url":"u2"}]},
@@ -108,5 +108,26 @@ func TestAppendOrderNoteKeepsTheExistingNote(t *testing.T) {
 	input := (*calls)[1].Variables["input"].(map[string]any)
 	if input["note"] != "Gift wrap please\nWhatsApp damage report: 2 photos." {
 		t.Fatalf("note = %q", input["note"])
+	}
+}
+
+// The order lookup must not ask for anything needing a scope this app does
+// not hold.
+//
+// `customer` needs read_customers, and Shopify fails the WHOLE query over one
+// unreadable field - so asking for it turned every lookup into "Access denied
+// for customer field" and the bot could not answer anybody about any order.
+// Caught only by running it against the live shop, which is why it is pinned
+// here.
+func TestTheLookupAsksForNothingNeedingReadCustomers(t *testing.T) {
+	if strings.Contains(orderByNameQuery, "customer") {
+		t.Error("orderByNameQuery asks for a customer field; that needs read_customers " +
+			"and fails the entire query. Take the phone from shippingAddress instead.")
+	}
+	// The sources that remain, and that the ownership check depends on.
+	for _, field := range []string{"shippingAddress", "billingAddress", "phone"} {
+		if !strings.Contains(orderByNameQuery, field) {
+			t.Errorf("orderByNameQuery no longer asks for %s", field)
+		}
 	}
 }

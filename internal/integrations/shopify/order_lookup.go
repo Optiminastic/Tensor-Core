@@ -21,7 +21,6 @@ const orderByNameQuery = `query OrderByName($q: String!) {
       displayFulfillmentStatus
       shippingAddress { phone }
       billingAddress { phone }
-      customer { defaultPhoneNumber { phoneNumber } }
       lineItems(first: 20) { nodes { customAttributes { key value } } }
       fulfillments(first: 5) { createdAt displayStatus trackingInfo(first: 3) { company number url } }
     }
@@ -69,7 +68,18 @@ type OrderStatus struct {
 	FulfillmentStatus string
 	// Fulfillments oldest first, so the last one is the latest shipment.
 	Fulfillments []OrderFulfillment
-	// Phones are the order's own numbers: order, shipping, billing, customer.
+	// Phones are the order's own numbers: the order's, the shipping address's
+	// and the billing address's.
+	//
+	// NOT the customer record's. Reading `customer` needs the read_customers
+	// scope, which this app does not hold, and Shopify fails the WHOLE query
+	// for one unreadable field - so asking for it made every order lookup
+	// return "Access denied for customer field" and the bot could not answer
+	// anybody. Measured against the live shop on 16 Oct 2026.
+	//
+	// It costs almost nothing: of 1,269 imported orders only 20 carried a
+	// customer phone, against 1,249 with one on the shipping address. The
+	// shipping address is where an Indian Shopify order actually puts it.
 	Phones []string
 	// Attributes are every line item's custom attributes, flattened, which is
 	// where a "WhatsApp Number" step lives.
@@ -169,12 +179,7 @@ type lookupNode struct {
 	DisplayFulfillmentStatus string       `json:"displayFulfillmentStatus"`
 	ShippingAddress          *lookupPhone `json:"shippingAddress"`
 	BillingAddress           *lookupPhone `json:"billingAddress"`
-	Customer                 *struct {
-		DefaultPhoneNumber *struct {
-			PhoneNumber string `json:"phoneNumber"`
-		} `json:"defaultPhoneNumber"`
-	} `json:"customer"`
-	LineItems struct {
+	LineItems                struct {
 		Nodes []struct {
 			CustomAttributes []struct {
 				Key   string `json:"key"`
@@ -234,9 +239,6 @@ func (n lookupNode) phones() []string {
 		if h != nil {
 			add(h.Phone)
 		}
-	}
-	if n.Customer != nil && n.Customer.DefaultPhoneNumber != nil {
-		add(&n.Customer.DefaultPhoneNumber.PhoneNumber)
 	}
 	return phones
 }
