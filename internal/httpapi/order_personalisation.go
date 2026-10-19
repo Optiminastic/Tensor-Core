@@ -41,6 +41,16 @@ const (
 	// nobody asked this customer anything and the row should not imply
 	// otherwise.
 	personalisationWindowNotSent = "not_sent"
+	// personalisationWindowChanged - the window closed AND the customer
+	// corrected something while it was open.
+	//
+	// Split out of "done" because the two call for different care from the
+	// person about to print. "Done" means the values are the ones the
+	// customer typed at checkout; "Changed" means somebody edited a name
+	// after ordering, and the plank will carry whatever they changed it to.
+	// Both are closed windows, and reading them as the same thing is how a
+	// correction gets printed as though nothing had happened.
+	personalisationWindowChanged = "changed"
 )
 
 // stampPersonalisationWindows tells each order on the page where its window
@@ -81,7 +91,7 @@ func (s *Server) stampPersonalisationWindows(ctx context.Context, out []orderRes
 		if !ok {
 			continue
 		}
-		out[i].Personalisation = windowStateOf(r)
+		out[i].Personalisation = windowStateFor(r)
 		if out[i].Personalisation == personalisationWindowOpen && r.ExpiresAt.Valid {
 			when := r.ExpiresAt.Time.UTC().Format(time.RFC3339)
 			out[i].PersonalisationWindowEndsAt = &when
@@ -92,6 +102,19 @@ func (s *Server) stampPersonalisationWindows(ctx context.Context, out []orderRes
 			out[i].PersonalisationSkipReason = r.SkipReason
 		}
 	}
+}
+
+// windowStateFor is what the orders page column shows.
+//
+// Only a CLOSED window becomes "changed". While one is still open the row's
+// job is to hand over the link, and the customer may yet edit again - the
+// tally is not final until the window is.
+func windowStateFor(r gen.ListPersonalisationLinkStatesForOrdersRow) string {
+	state := windowStateOf(r)
+	if state == personalisationWindowDone && r.Changed {
+		return personalisationWindowChanged
+	}
+	return state
 }
 
 // windowStateOf is the one place "is this window open?" is decided.

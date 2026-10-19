@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -224,5 +225,41 @@ func TestUnconfiguredClientIsNil(t *testing.T) {
 	var nilClient *Client
 	if nilClient.Configured() {
 		t.Error("Configured must be safe on a nil client")
+	}
+}
+
+// A waybill the carrier has never heard of must not blank the page.
+//
+// Delhivery answers a batch it cannot find with HTTP 200 and
+// {"Error": "No such waybill or Order Id found"} - the same shape as a
+// malformed request. Treated as a fault, one stale tracking number on one
+// order hid every other parcel for the brand behind a red banner. The
+// caller already draws an unknown parcel as untrackable, at the top of the
+// page, which is what that page is for.
+func TestAnUnknownWaybillIsAnAnswerNotAFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"Error":"No such waybill or Order Id found"}`)
+	}))
+	defer server.Close()
+
+	got, err := New(Config{APIKey: "k", BaseURL: server.URL}).Track(context.Background(), []string{"NOPE123"})
+	if err != nil {
+		t.Fatalf("an unknown waybill failed the whole read: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("tracked %d shipments for a waybill the carrier does not know", len(got))
+	}
+}
+
+// Everything else Delhivery refuses is still a fault: the page would
+// otherwise claim to list every delivery while silently holding none.
+func TestOtherCarrierErrorsStillFail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"Error":"Client id is invalid"}`)
+	}))
+	defer server.Close()
+
+	if _, err := New(Config{APIKey: "k", BaseURL: server.URL}).Track(context.Background(), []string{"X1"}); err == nil {
+		t.Fatal("a rejected API key was reported as an empty delivery list")
 	}
 }

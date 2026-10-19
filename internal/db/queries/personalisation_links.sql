@@ -218,11 +218,21 @@ WHERE order_id = ANY(sqlc.arg('order_ids')::uuid[])
 -- an order was simply absent and the column drew a dash that meant six
 -- different things at once (see migration 0105). An empty status is what
 -- "there is no link row" looks like, and the caller reads it as such.
+--
+-- `changed` is whether the customer actually moved anything, which is a
+-- different question from whether they were asked. An order they corrected
+-- and one they ignored both end as a closed window, and the floor needs to
+-- tell them apart: somebody is about to print these names. EXISTS rather
+-- than a join, because one altered job is enough and the snapshots are heavy.
 SELECT o.id                          AS order_id,
        coalesce(l.status, '')::text  AS status,
        l.expires_at,
        o.personalisation_skip_reason AS skip_reason,
-       o.personalisation_skipped_at  AS skipped_at
+       o.personalisation_skipped_at  AS skipped_at,
+       EXISTS (
+           SELECT 1 FROM production_jobs j
+           WHERE j.order_id = o.id AND j.personalisation_original IS NOT NULL
+       ) AS changed
 FROM orders o
 LEFT JOIN personalisation_links l ON l.order_id = o.id
 WHERE o.id = ANY(sqlc.arg('order_ids')::uuid[]);

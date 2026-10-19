@@ -108,3 +108,39 @@ func TestTheFrozenCopyIsQuotedAsSent(t *testing.T) {
 		t.Error("a frozen body is the message, not a reconstruction of it")
 	}
 }
+
+// A customer who corrected a name reads as "Changed", not "Done".
+//
+// Both are closed windows, and the difference is what the floor is about to
+// print: "Done" means the values are the ones typed at checkout, "Changed"
+// means somebody edited a name afterwards. Reading them as the same thing is
+// how a correction gets printed as though nobody had made it.
+func TestAChangedWindowIsNotJustDone(t *testing.T) {
+	closed := func(changed bool) gen.ListPersonalisationLinkStatesForOrdersRow {
+		return gen.ListPersonalisationLinkStatesForOrdersRow{
+			Status:    "confirmed",
+			ExpiresAt: at(time.Now().Add(-time.Hour)),
+			Changed:   changed,
+		}
+	}
+
+	if got := windowStateFor(closed(false)); got != personalisationWindowDone {
+		t.Errorf("an untouched order = %q, want done", got)
+	}
+	if got := windowStateFor(closed(true)); got != personalisationWindowChanged {
+		t.Errorf("a corrected order = %q, want changed", got)
+	}
+}
+
+// While the window is still open the row hands over the link, and the
+// customer may yet edit again - the tally is not final until it closes.
+func TestAnOpenWindowIsNeverChanged(t *testing.T) {
+	open := gen.ListPersonalisationLinkStatesForOrdersRow{
+		Status:    "opened",
+		ExpiresAt: at(time.Now().Add(time.Hour)),
+		Changed:   true,
+	}
+	if got := windowStateFor(open); got != personalisationWindowOpen {
+		t.Errorf("an open window = %q, want open", got)
+	}
+}
