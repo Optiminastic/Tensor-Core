@@ -13,14 +13,17 @@ const (
 	// HumanIdleTimeout is how long a handed-off chat stays with staff after the
 	// last human activity before the bot answers again.
 	//
-	// TWELVE HOURS, chosen by the shop. Worth knowing what it costs: a
-	// customer who replies the next day to a thread a person was handling
-	// gets the bot, not that person - visible in production as conversations
-	// sitting at 'idle' with a last_staff_at from two days earlier. Raising
-	// this is the fix if that becomes a nuisance; isClosing below is what
-	// keeps the commonest case - being thanked after a query is resolved -
+	// TWENTY-FOUR HOURS, which also happens to be the window Meta allows a
+	// free-form reply in: past it the bot could only reach that customer with
+	// a template anyway, so handing the chat back sooner buys nothing.
+	//
+	// Worth knowing what it still costs: a customer who replies two days
+	// later to a thread a person was handling gets the bot, not that person.
+	// That shows up in production as a conversation sitting at 'idle' with a
+	// last_staff_at from earlier in the week. isClosing below is what keeps
+	// the commonest version of it - being thanked after a resolved query -
 	// from reopening a finished conversation whatever this is set to.
-	HumanIdleTimeout = 12 * time.Hour
+	HumanIdleTimeout = 24 * time.Hour
 	// MaxMisses is how many unusable replies a flow tolerates before handoff.
 	MaxMisses        = 2
 	minOrderDigits   = 5
