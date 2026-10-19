@@ -15,6 +15,18 @@ package shopify
 // live store rather than assumed. There is no `email` field on the type at
 // all, so an address is the only contact detail available without widening the
 // app's scopes and reinstalling it on the shop.
+//
+// WHICH IS WHY A ROW CAN READ "No phone" WHILE SHOPIFY'S OWN ADMIN SHOWS ONE.
+// Shopify is reading the customer record; Tensor cannot see it. Two things
+// follow, and only one is fixable here:
+//
+//   - The NAME has no other source. A checkout whose addresses are empty has
+//     no name Tensor may read, and it will stay that way until the app is
+//     granted read_customers and reinstalled on the shop.
+//   - The PHONE usually does: this store asks for a WhatsApp number at the
+//     personalisation step, so it sits in a line item's own properties. That
+//     fallback is below, and it is what makes the ordinary abandoned
+//     checkout - abandoned BEFORE the address step - reachable at all.
 
 import (
 	"context"
@@ -192,19 +204,24 @@ type abandonedNode struct {
 	BillingAddress  *abandonedAddress `json:"billingAddress"`
 	ShippingAddress *abandonedAddress `json:"shippingAddress"`
 	LineItems       struct {
-		Nodes []struct {
-			Title        string `json:"title"`
-			Quantity     int    `json:"quantity"`
-			SKU          string `json:"sku"`
-			VariantTitle string `json:"variantTitle"`
-			Image        *struct {
-				URL string `json:"url"`
-			} `json:"image"`
-			OriginalUnitPriceSet                 moneyBag            `json:"originalUnitPriceSet"`
-			DiscountedTotalPriceWithCodeDiscount moneyBag            `json:"discountedTotalPriceWithCodeDiscount"`
-			CustomAttributes                     []CheckoutAttribute `json:"customAttributes"`
-		} `json:"nodes"`
+		Nodes []abandonedLineItemNode `json:"nodes"`
 	} `json:"lineItems"`
+}
+
+// abandonedLineItemNode is named rather than inline because two things now
+// read it: the conversion below, and the WhatsApp-number fallback that looks
+// for the customer's own number among a line item's properties.
+type abandonedLineItemNode struct {
+	Title        string `json:"title"`
+	Quantity     int    `json:"quantity"`
+	SKU          string `json:"sku"`
+	VariantTitle string `json:"variantTitle"`
+	Image        *struct {
+		URL string `json:"url"`
+	} `json:"image"`
+	OriginalUnitPriceSet                 moneyBag            `json:"originalUnitPriceSet"`
+	DiscountedTotalPriceWithCodeDiscount moneyBag            `json:"discountedTotalPriceWithCodeDiscount"`
+	CustomAttributes                     []CheckoutAttribute `json:"customAttributes"`
 }
 
 type abandonedResponse struct {
@@ -324,6 +341,23 @@ func toAbandonedCheckout(n abandonedNode) AbandonedCheckout {
 			pick(func(a *abandonedAddress) string { return a.LastName }),
 	)
 	out.Phone = pick(func(a *abandonedAddress) string { return a.Phone })
+	if out.Phone == "" {
+		// THE NUMBER THE CUSTOMER TYPED THEMSELVES, when no address carries
+		// one. This store asks for a WhatsApp number at the personalisation
+		// step - "STEP 6 - WhatsApp Number" - so a cart abandoned before the
+		// address step still has a reachable number on it, in a line item's
+		// own properties.
+		//
+		// It is the commonest shape of an abandoned checkout, and without
+		// this the row reads "No phone" and the win-back agent never calls
+		// or messages that basket at all. The order path has always read
+		// this attribute (whatsappbot/summary.WhatsAppNumber); the checkout
+		// path did not, which is why the same customer was reachable after
+		// they bought and unreachable before.
+		// Read from the raw node: out.LineItems is not built until further
+		// down, and an empty slice here would look like "no number given".
+		out.Phone = whatsAppAttribute(n)
+	}
 	out.City = pick(func(a *abandonedAddress) string { return a.City })
 	out.Province = pick(func(a *abandonedAddress) string { return a.Province })
 	if t, err := time.Parse(time.RFC3339, n.CreatedAt); err == nil {
@@ -378,4 +412,39 @@ func nonNil[T any](items []T) []T {
 		return []T{}
 	}
 	return items
+}
+
+// whatsAppAttribute is the number the customer typed at checkout, if any.
+//
+// Checkout-level properties first, then each line item's. On this store the
+// key is "STEP 6 - WhatsApp Number", so the match is on the word rather than
+// the whole key: the step number moves when the product's form changes, and
+// a number that stops being found because a form was reordered is a customer
+// who stops being called.
+//
+// The same rule as whatsappbot/summary.isWhatsAppKey, deliberately restated
+// rather than imported - an integration reaching into the bot's packages for
+// a two-line predicate is a dependency the wrong way round.
+func whatsAppAttribute(n abandonedNode) string {
+	if v := firstWhatsApp(n.CustomAttributes); v != "" {
+		return v
+	}
+	for _, li := range n.LineItems.Nodes {
+		if v := firstWhatsApp(li.CustomAttributes); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstWhatsApp(attrs []CheckoutAttribute) string {
+	for _, a := range attrs {
+		if !strings.Contains(strings.ToLower(a.Key), "whatsapp") {
+			continue
+		}
+		if v := strings.TrimSpace(a.Value); v != "" {
+			return v
+		}
+	}
+	return ""
 }

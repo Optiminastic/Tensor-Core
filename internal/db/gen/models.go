@@ -167,6 +167,49 @@ type CostAssumptionSet struct {
 	UpdatedAt              pgtype.Timestamptz
 }
 
+type DamageFile struct {
+	LinkID    uuid.UUID
+	FileID    uuid.UUID
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
+type DamageLink struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	WaID        string
+	TokenHash   string
+	Status      string
+	IssuedAt    pgtype.Timestamptz
+	ExpiresAt   pgtype.Timestamptz
+	SentAt      pgtype.Timestamptz
+	OpenedAt    pgtype.Timestamptz
+	SubmittedAt pgtype.Timestamptz
+	MessageID   *string
+	Detail      *string
+	CreatedAt   pgtype.Timestamptz
+}
+
+type DamageReport struct {
+	ID              uuid.UUID
+	BrandSlug       string
+	WaID            string
+	ShopifyOrderGid string
+	OrderNumber     string
+	OrderID         *uuid.UUID
+	CustomerName    string
+	PhotoCount      int32
+	Status          string
+	ResolutionNote  string
+	WaMessageID     *string
+	LinkID          *uuid.UUID
+	ReportedAt      pgtype.Timestamptz
+	StatusChangedAt pgtype.Timestamptz
+	StatusChangedBy *string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
 type Design struct {
 	ID          uuid.UUID
 	BrandSlug   string
@@ -345,42 +388,61 @@ type MaterialProfile struct {
 }
 
 type Order struct {
-	ID                  uuid.UUID
-	ShopConnectionID    *uuid.UUID
-	BrandSlug           *string
-	ShopifyOrderID      int64
-	OrderNumber         string
-	CustomerName        *string
-	ShopifyCustomerID   *int64
-	CustomerEmail       *string
-	CustomerPhone       *string
-	FinancialStatus     string
-	TotalPrice          pgtype.Numeric
-	Currency            string
-	LineItems           []byte
-	Status              string
-	Source              string
-	ImportedAt          pgtype.Timestamptz
-	JobCreationError    *string
-	JobCreationFailedAt pgtype.Timestamptz
-	PlacedAt            pgtype.Timestamptz
-	Note                *string
-	Attributes          []byte
-	Tags                []byte
-	FulfillmentStatus   *string
-	DeliveryStatus      *string
-	ReturnStatus        *string
-	SourceName          *string
-	SubtotalPrice       pgtype.Numeric
-	TotalDiscounts      pgtype.Numeric
-	TotalShipping       pgtype.Numeric
-	TotalReceived       pgtype.Numeric
-	DiscountTitle       *string
-	ShippingTitle       *string
-	ShippingAddress     []byte
-	BillingAddress      []byte
-	CreatedAt           pgtype.Timestamptz
-	UpdatedAt           pgtype.Timestamptz
+	ID                        uuid.UUID
+	ShopConnectionID          *uuid.UUID
+	BrandSlug                 *string
+	ShopifyOrderID            int64
+	OrderNumber               string
+	CustomerName              *string
+	ShopifyCustomerID         *int64
+	CustomerEmail             *string
+	CustomerPhone             *string
+	FinancialStatus           string
+	TotalPrice                pgtype.Numeric
+	Currency                  string
+	LineItems                 []byte
+	Status                    string
+	Source                    string
+	ImportedAt                pgtype.Timestamptz
+	JobCreationError          *string
+	JobCreationFailedAt       pgtype.Timestamptz
+	PlacedAt                  pgtype.Timestamptz
+	Note                      *string
+	Attributes                []byte
+	Tags                      []byte
+	FulfillmentStatus         *string
+	DeliveryStatus            *string
+	ReturnStatus              *string
+	SourceName                *string
+	SubtotalPrice             pgtype.Numeric
+	TotalDiscounts            pgtype.Numeric
+	TotalShipping             pgtype.Numeric
+	TotalReceived             pgtype.Numeric
+	DiscountTitle             *string
+	ShippingTitle             *string
+	ShippingAddress           []byte
+	BillingAddress            []byte
+	PersonalisationSkipReason *string
+	PersonalisationSkippedAt  pgtype.Timestamptz
+	CreatedAt                 pgtype.Timestamptz
+	UpdatedAt                 pgtype.Timestamptz
+}
+
+type OrderConfirmation struct {
+	OrderID     uuid.UUID
+	BrandSlug   string
+	OrderNumber string
+	ShopifyGid  string
+	WaID        string
+	FirstName   string
+	Summary     string
+	Status      string
+	WaMessageID *string
+	ChangeText  *string
+	SentAt      pgtype.Timestamptz
+	RespondedAt pgtype.Timestamptz
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
 }
 
 type OrderLineItem struct {
@@ -405,21 +467,24 @@ type Permission struct {
 }
 
 type PersonalisationLink struct {
-	ID          uuid.UUID
-	BrandSlug   string
-	OrderID     uuid.UUID
-	TokenHash   string
-	TokenSealed *string
-	Phone       string
-	Status      string
-	IssuedAt    pgtype.Timestamptz
-	ExpiresAt   pgtype.Timestamptz
-	SentAt      pgtype.Timestamptz
-	OpenedAt    pgtype.Timestamptz
-	ConfirmedAt pgtype.Timestamptz
-	MessageID   *string
-	Detail      *string
-	CreatedAt   pgtype.Timestamptz
+	ID           uuid.UUID
+	BrandSlug    string
+	OrderID      uuid.UUID
+	TokenHash    string
+	TokenSealed  *string
+	Phone        string
+	Status       string
+	IssuedAt     pgtype.Timestamptz
+	ExpiresAt    pgtype.Timestamptz
+	SentAt       pgtype.Timestamptz
+	OpenedAt     pgtype.Timestamptz
+	ConfirmedAt  pgtype.Timestamptz
+	MessageID    *string
+	Detail       *string
+	TemplateName *string
+	MessageBody  *string
+	ButtonCount  *int16
+	CreatedAt    pgtype.Timestamptz
 }
 
 type PersonalisationWatermark struct {
@@ -779,6 +844,75 @@ type VariantDesign struct {
 	Version     int32
 	Status      string
 	CreatedAt   pgtype.Timestamptz
+}
+
+type WhatsappBotNode struct {
+	BrandSlug  string
+	NodeKey    string
+	Kind       string
+	Body       string
+	ListButton string
+	Position   int32
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+type WhatsappBotOption struct {
+	BrandSlug   string
+	NodeKey     string
+	OptionKey   string
+	Title       string
+	Description string
+	Action      string
+	Answer      string
+	Target      string
+	ButtonLabel string
+	Position    int32
+	Enabled     bool
+	UpdatedBy   *string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+type WhatsappBrandState struct {
+	BrandSlug          string
+	ConfirmationsSince pgtype.Timestamptz
+}
+
+type WhatsappConversation struct {
+	BrandSlug          string
+	WaID               string
+	ProfileName        string
+	State              string
+	Context            []byte
+	LastCustomerAt     pgtype.Timestamptz
+	LastStaffAt        pgtype.Timestamptz
+	HumanSince         pgtype.Timestamptz
+	OptedOut           bool
+	LastMessageAt      pgtype.Timestamptz
+	LastMessagePreview string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
+type WhatsappMessage struct {
+	ID            uuid.UUID
+	BrandSlug     string
+	WaID          string
+	WaMessageID   string
+	Direction     string
+	Kind          string
+	Body          string
+	Status        string
+	ErrorCode     *int32
+	SentBy        *string
+	MediaID       string
+	MediaMimeType string
+	MediaSha256   string
+	MediaStatus   string
+	MediaError    string
+	FileAssetID   *uuid.UUID
+	CreatedAt     pgtype.Timestamptz
 }
 
 type WinbackWatermark struct {

@@ -123,7 +123,15 @@ type Server struct {
 
 	planMu          sync.Mutex
 	lastPlannedPool string
+
+	// whatsappQueue schedules the bot's replies to an inbound message. Nil
+	// until EnableWhatsAppQueue is called; the webhook then still stores
+	// messages for the inbox but nothing answers them.
+	whatsappQueue *production.WhatsAppEnqueuer
 }
+
+// EnableWhatsAppQueue wires the WhatsApp bot's job queue.
+func (s *Server) EnableWhatsAppQueue(e *production.WhatsAppEnqueuer) { s.whatsappQueue = e }
 
 // NewServer wires the HTTP layer. logger may be nil, in which case the request
 // middleware falls back to slog's default. The Shopify client is built once here
@@ -136,7 +144,7 @@ func NewServer(cfg config.Settings, store *db.Store, guards *auth.Guards, logger
 		store:   store,
 		guards:  guards,
 		logger:  logger,
-		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout),
+		shopify: shopify.New(cfg.ShopifyAPIVersion, cfg.ShopifyTimeout).WithBaseURL(cfg.ShopifyBaseURL),
 		secrets: box,
 		bambu: bambubuddy.NewWithTimeout(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey,
 			time.Duration(cfg.BambuBuddyTimeoutSeconds)*time.Second),
@@ -222,6 +230,13 @@ func (s *Server) EnableModelGeneration(r *personalise.Renderer, e *production.Mo
 // the same prefixes as the FastAPI app.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
+	// Gin's default is 32 MiB, which is how much of a multipart upload it
+	// keeps in the heap before spilling to disk. That was invisible while
+	// every upload route was behind a login and a handful of staff used
+	// them; /public/damage is open to anyone holding a link, and several
+	// concurrent 25 MB videos resident at once is how a modest process dies.
+	// Small enough that parts go to disk almost immediately.
+	r.MaxMultipartMemory = 8 << 20
 	r.Use(s.recoverPanic())
 	r.Use(s.requestContext())
 	r.Use(s.cors())
@@ -260,6 +275,9 @@ func (s *Server) Router() *gin.Engine {
 	// their own order has no account; the random token in the path is the
 	// whole authority. See personalisation_public.go.
 	s.registerPersonalisationPublic(r)
+	// Also unauthenticated, and the only route in Tensor that accepts a file
+	// from a stranger. See damage_public.go.
+	s.registerDamagePublic(r)
 	s.registerShipments(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)
@@ -267,6 +285,10 @@ func (s *Server) Router() *gin.Engine {
 	s.registerShopify(r)
 	s.registerBulkOrders(r)
 	s.registerBambuBuddyEvents(r)
+	s.registerWhatsAppWebhook(r)
+	s.registerWhatsAppMedia(r)
+	s.registerDamageReports(r)
+	s.registerWhatsAppBotContent(r)
 	s.registerInternal(r)
 
 	return r

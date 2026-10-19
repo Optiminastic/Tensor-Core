@@ -7,13 +7,19 @@ package httpapi
 // what did it say, and did they correct anything?" Splitting them would make
 // the tab wait on two round trips to show one story.
 //
-// THE MESSAGE IS REBUILT, NOT STORED, and unlike the win-back log's
-// reconstruction that is exact rather than a best effort. The copy lives at
-// Meta and is fetched and cached; the three values are computed by
-// personalisationBodyParams from the ORDER, which is the same function the
-// sender called on the same row. The only way this can drift is if the order
-// itself were edited after the message went out, and nothing in Tensor edits
-// an imported order.
+// THE MESSAGE IS THE ONE THAT WAS SENT, read back from the row the sender
+// froze it on (migration 0104). It used to be rebuilt on every read from the
+// template THIS process is configured with, which is exact only while every
+// process agrees on the name - and they did not. tensor-api carries no
+// PERSONALISATION_TEMPLATE_NAME, the rebuild therefore asked for "", and
+// whatsapp.Client.Template falls back to the configured default: this tab
+// quoted the brand's CART-RECOVERY message to an operator asking what a
+// customer had been told about their order.
+//
+// Rows written before that migration are still rebuilt, because there is
+// nothing else to show them - but only ever by explicit name, so the fallback
+// that caused this cannot happen again. A blank name now means no body at
+// all, which is honest, rather than somebody else's words.
 //
 // THE TOKEN IS NOT HERE. The body is the words, and the buttons are named
 // rather than linked. A live link is a credential and has its own route, which
@@ -33,6 +39,11 @@ import (
 )
 
 type orderPersonalisationResponse struct {
+	// SkipReason is why nobody was asked, when nobody was. The rule the
+	// sender named, kept on the order - see migration 0105. Absent when a
+	// message did go out, and absent on an order the sender has not reached a
+	// verdict on yet.
+	SkipReason *string `json:"skip_reason,omitempty"`
 	// Message is absent when this order was never asked - the feature was off,
 	// the order predates the watermark, there was no phone. The tab says so
 	// rather than showing an empty quotation.
@@ -61,8 +72,10 @@ type personalisationMessage struct {
 	Detail    string  `json:"detail,omitempty"`
 	SentAt    *string `json:"sent_at,omitempty"`
 	ExpiresAt *string `json:"expires_at,omitempty"`
-	// Reconstructed is always true and says so plainly. The words are Meta's
-	// and the values are the order's; nothing was stored at send time.
+	// Reconstructed is true only for a row sent before the copy was frozen,
+	// whose body is today's template filled with this order's values rather
+	// than the words that actually left. The tab says which it is looking at,
+	// because they are not the same claim.
 	Reconstructed bool `json:"reconstructed"`
 }
 
@@ -88,7 +101,12 @@ func (s *Server) orderPersonalisation(c *gin.Context) {
 
 	out := orderPersonalisationResponse{Items: s.personalisationChangesForOrder(ctx, id)}
 	if link, err := s.store.Q.GetPersonalisationLinkRowForOrder(ctx, id); err == nil {
-		out.Message = s.rebuildPersonalisationMessage(ctx, gen.Order(order), link)
+		out.Message = s.personalisationMessageFor(ctx, gen.Order(order), link)
+	} else if order.PersonalisationSkipReason != nil {
+		// No link, but the sender did reach a verdict. That verdict is the
+		// whole answer to "why does this order show nothing", and it is the
+		// reason somebody opened this tab.
+		out.SkipReason = order.PersonalisationSkipReason
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -118,15 +136,16 @@ func (s *Server) personalisationChangesForOrder(
 	return out
 }
 
-// rebuildPersonalisationMessage fills the approved copy with this order's
-// values. Returns nil when the template cannot be read, rather than quoting a
-// message with {{1}} still in it.
-func (s *Server) rebuildPersonalisationMessage(
+// personalisationMessageFor is what this customer was sent.
+//
+// The frozen copy when there is one, and only then today's template as a
+// fallback for a row that predates the freezing.
+func (s *Server) personalisationMessageFor(
 	ctx context.Context, order gen.Order, link gen.PersonalisationLink,
 ) *personalisationMessage {
 	msg := &personalisationMessage{
-		To: link.Phone, Status: link.Status, Reconstructed: true,
-		Template: strings.TrimSpace(s.cfg.PersonalisationTemplate),
+		To: link.Phone, Status: link.Status,
+		Template: strings.TrimSpace(deref(link.TemplateName)),
 	}
 	if link.Detail != nil {
 		msg.Detail = *link.Detail
@@ -140,6 +159,28 @@ func (s *Server) rebuildPersonalisationMessage(
 		msg.ExpiresAt = &at
 	}
 
+	// The words the sender wrote down, which need nothing from Meta and
+	// cannot be the wrong template.
+	if body := strings.TrimSpace(deref(link.MessageBody)); body != "" {
+		msg.Body = body
+		if link.ButtonCount != nil {
+			msg.Buttons = int(*link.ButtonCount)
+		}
+		return msg
+	}
+
+	// Older row: rebuild it, and say so.
+	msg.Reconstructed = true
+	if msg.Template == "" {
+		// NO FALLBACK. An empty name sent to the client means "whatever this
+		// process's default template is", which is the cart-recovery one -
+		// and quoting that here is worse than quoting nothing, because it
+		// reads as a message this customer was sent.
+		msg.Template = strings.TrimSpace(s.cfg.PersonalisationTemplate)
+	}
+	if msg.Template == "" {
+		return msg
+	}
 	messenger := s.whatsappFor(ctx, link.BrandSlug)
 	if messenger == nil || !messenger.Configured() {
 		return msg

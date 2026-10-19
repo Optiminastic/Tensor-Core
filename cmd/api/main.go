@@ -142,6 +142,9 @@ func main() {
 	// imports on the request, having discovered that a five-second browser
 	// timeout cancelled the import halfway and lost thirty-five orders.
 	server.EnableOrderSync(production.NewOrderSyncEnqueuer(riverClient))
+	// The WhatsApp webhook stores a message and enqueues its answer in one
+	// transaction; the workers that answer run in the production worker.
+	server.EnableWhatsAppQueue(production.NewWhatsAppEnqueuer(riverClient))
 
 	// Pinning a sent plate to the printer an operator chose. Wired HERE as well
 	// as in the worker because this is the process the Queue button talks to:

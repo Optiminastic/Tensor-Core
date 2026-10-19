@@ -330,6 +330,11 @@ CREATE TABLE orders (
     shipping_title      text,
     shipping_address    jsonb,
     billing_address     jsonb,
+    -- Why this order's customer was never asked to check their
+    -- personalisation - see migration 0105. Null while a link is live, and on
+    -- any order the sender has not reached a verdict on yet.
+    personalisation_skip_reason text,
+    personalisation_skipped_at  timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
@@ -1218,6 +1223,13 @@ CREATE TABLE IF NOT EXISTS personalisation_links (
     confirmed_at timestamptz,
     message_id   varchar(160),
     detail       varchar(500),
+    -- What was actually sent, frozen at send time - see migration 0104. The
+    -- name because the reader's own configuration is not evidence of which
+    -- template this send used; the body because the copy lives at Meta and is
+    -- edited there.
+    template_name varchar(160),
+    message_body  text,
+    button_count  smallint,
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
@@ -1235,3 +1247,209 @@ CREATE TABLE IF NOT EXISTS personalisation_watermarks (
     watch_from timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- 0106: WhatsApp bot, confirmations and inbox
+-- The WhatsApp menu bot, the personalisation confirmation and the inbox.
+--
+-- One conversation per (brand, customer number). The bot's state machine is
+-- pure; this row is where its state lives between messages, and the inbox reads
+-- the same row for its chat list.
+CREATE TABLE IF NOT EXISTS whatsapp_conversations (
+    brand_slug           varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id                varchar(32) NOT NULL,
+    profile_name         varchar(255) NOT NULL DEFAULT '',
+    state                varchar(32) NOT NULL DEFAULT 'idle',
+    context              jsonb NOT NULL DEFAULT '{}',
+    last_customer_at     timestamptz,
+    last_staff_at        timestamptz,
+    human_since          timestamptz,
+    opted_out            boolean NOT NULL DEFAULT false,
+    last_message_at      timestamptz,
+    last_message_preview text NOT NULL DEFAULT '',
+    created_at           timestamptz NOT NULL DEFAULT now(),
+    updated_at           timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, wa_id)
+);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_conversations_recent
+    ON whatsapp_conversations (brand_slug, last_message_at DESC);
+
+-- Every message in either direction. direction is 'in' (customer), 'out'
+-- (bot or an inbox reply; sent_by says which) or 'echo' (staff, from the
+-- WhatsApp Business app). wa_message_id is Meta's wamid and dedupes webhook
+-- retries. Holds personal data: purged after 180 days.
+CREATE TABLE IF NOT EXISTS whatsapp_messages (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_slug    varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id         varchar(32) NOT NULL,
+    wa_message_id varchar(128) NOT NULL UNIQUE,
+    direction     varchar(8) NOT NULL,
+    kind          varchar(32) NOT NULL,
+    body          text NOT NULL DEFAULT '',
+    status        varchar(16) NOT NULL DEFAULT '',
+    error_code    integer,
+    sent_by       varchar(64),
+    -- The attachment, if any - see migration 0107. media_status is
+    -- '' | pending | stored | failed; media_id is kept after the download
+    -- because it is the only handle that can fetch those bytes again.
+    media_id        varchar(256) NOT NULL DEFAULT '',
+    media_mime_type varchar(127) NOT NULL DEFAULT '',
+    media_sha256    varchar(64)  NOT NULL DEFAULT '',
+    media_status    varchar(16)  NOT NULL DEFAULT '',
+    media_error     text         NOT NULL DEFAULT '',
+    file_asset_id   uuid REFERENCES file_assets(id) ON DELETE SET NULL,
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_media_pending
+    ON whatsapp_messages (created_at) WHERE media_status = 'pending';
+CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_thread
+    ON whatsapp_messages (brand_slug, wa_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_messages_created_at
+    ON whatsapp_messages (created_at);
+
+-- One personalisation confirmation per order. status moves pending -> sent ->
+-- reminded -> confirmed | change_requested | auto_confirmed | unreachable, and
+-- the outcome is written to Shopify as an order tag.
+CREATE TABLE IF NOT EXISTS order_confirmations (
+    order_id      uuid PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+    brand_slug    varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    order_number  varchar(64) NOT NULL,
+    shopify_gid   varchar(64) NOT NULL,
+    wa_id         varchar(32) NOT NULL,
+    first_name    varchar(255) NOT NULL DEFAULT '',
+    summary       text NOT NULL,
+    status        varchar(24) NOT NULL DEFAULT 'pending',
+    wa_message_id varchar(128),
+    change_text   text,
+    sent_at       timestamptz,
+    responded_at  timestamptz,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_order_confirmations_wa_message_id
+    ON order_confirmations (wa_message_id);
+
+-- When confirmations were switched on for a brand. Orders placed before it are
+-- never messaged, so turning the feature on does not text every past customer.
+-- Its own row rather than the setting's updated_at, which moves every time an
+-- admin saves the integration form.
+CREATE TABLE IF NOT EXISTS whatsapp_brand_state (
+    brand_slug          varchar(64) PRIMARY KEY REFERENCES brands(slug) ON DELETE CASCADE,
+    confirmations_since timestamptz NOT NULL DEFAULT now()
+);
+
+-- 0110: damage links. Tapping "Damage concern" mints one of these and the bot
+-- sends its URL; the customer fills in a web form instead of a conversation.
+-- Same shape and same reasoning as personalisation_links: the URL is the whole
+-- credential, so only its hash is stored. Keyed on the PHONE, not an order -
+-- the form is where the order number is learnt.
+CREATE TABLE IF NOT EXISTS damage_links (
+    id          uuid PRIMARY KEY,
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id       varchar(32) NOT NULL,
+    token_hash  varchar(64) NOT NULL UNIQUE,
+    status      varchar(16) NOT NULL,
+    issued_at   timestamptz NOT NULL DEFAULT now(),
+    expires_at  timestamptz NOT NULL,
+    sent_at     timestamptz,
+    opened_at   timestamptz,
+    submitted_at timestamptz,
+    message_id  varchar(160),
+    detail      varchar(500),
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+-- One live link per person: a second tap resends the one they already hold.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_links_live
+    ON damage_links (brand_slug, wa_id)
+    WHERE status IN ('sent', 'opened');
+CREATE INDEX IF NOT EXISTS ix_damage_links_expiry
+    ON damage_links (expires_at)
+    WHERE status IN ('pending', 'sent', 'opened');
+
+-- The uploaded files, by LINK: they arrive before the report is submitted, so
+-- there is nothing else to hang them on. file_assets has no brand_slug, so
+-- brand ownership runs through the link and never through a client-sent id.
+CREATE TABLE IF NOT EXISTS damage_files (
+    link_id    uuid NOT NULL REFERENCES damage_links(id) ON DELETE CASCADE,
+    file_id    uuid NOT NULL REFERENCES file_assets(id) ON DELETE CASCADE,
+    position   integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (link_id, file_id)
+);
+
+-- 0108: damage reports. One row per damage form a customer submitted. The
+-- order number is whatever they typed, so order_id is best effort and the
+-- Shopify GID is usually empty - there is no live lookup on this path. The
+-- photographs hang off the LINK (damage_files), reached through link_id.
+CREATE TABLE IF NOT EXISTS damage_reports (
+    id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_slug        varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    wa_id             varchar(32) NOT NULL,
+    shopify_order_gid varchar(64) NOT NULL DEFAULT '',
+    order_number      varchar(64) NOT NULL,
+    order_id          uuid REFERENCES orders(id) ON DELETE SET NULL,
+    customer_name     varchar(255) NOT NULL DEFAULT '',
+    photo_count       integer NOT NULL DEFAULT 0,
+    status            varchar(16) NOT NULL DEFAULT 'new',
+    resolution_note   text NOT NULL DEFAULT '',
+    -- 0110: nullable and no longer unique. It identified the message that
+    -- closed the old conversational flow; a report filed from the form has no
+    -- wamid at all, and link_id is what dedupes now.
+    wa_message_id     varchar(128),
+    link_id           uuid REFERENCES damage_links(id) ON DELETE SET NULL,
+    reported_at       timestamptz NOT NULL DEFAULT now(),
+    status_changed_at timestamptz,
+    status_changed_by varchar(64),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_damage_reports_queue
+    ON damage_reports (brand_slug, status, reported_at DESC);
+CREATE INDEX IF NOT EXISTS ix_damage_reports_order
+    ON damage_reports (order_id) WHERE order_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_reports_link
+    ON damage_reports (link_id) WHERE link_id IS NOT NULL;
+
+
+-- 0111: the bot as a tree, replacing 0109's flat word overlay. A node is a
+-- message with options under it; an option carries an ACTION, so "Explore
+-- products opens the website" is a row rather than a case in a switch. Three
+-- actions stay in code - damage, track, team - because each changes the
+-- conversation's state, which belongs to the pure state machine; their
+-- option ids are reserved so it still recognises them.
+CREATE TABLE IF NOT EXISTS whatsapp_bot_nodes (
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    node_key    varchar(64) NOT NULL,
+    -- 'buttons' (Meta allows at most 3) or 'list' (at most 10 rows behind
+    -- one button). A fourth button is not something WhatsApp can send.
+    kind        varchar(16) NOT NULL DEFAULT 'buttons',
+    body        text NOT NULL DEFAULT '',
+    list_button varchar(24) NOT NULL DEFAULT '',
+    position    integer NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, node_key)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_bot_options (
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    node_key    varchar(64) NOT NULL,
+    option_key  varchar(64) NOT NULL,
+    title       varchar(64) NOT NULL DEFAULT '',
+    description varchar(96) NOT NULL DEFAULT '',
+    -- 'answer' | 'open' | 'url' | 'damage' | 'track' | 'team'
+    action      varchar(16) NOT NULL DEFAULT 'answer',
+    answer      text NOT NULL DEFAULT '',
+    -- A node key for 'open', a web address for 'url'.
+    target      varchar(500) NOT NULL DEFAULT '',
+    button_label varchar(24) NOT NULL DEFAULT '',
+    position    integer NOT NULL DEFAULT 0,
+    enabled     boolean NOT NULL DEFAULT true,
+    updated_by  varchar(64),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, node_key, option_key),
+    FOREIGN KEY (brand_slug, node_key)
+        REFERENCES whatsapp_bot_nodes (brand_slug, node_key) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_whatsapp_bot_options_order
+    ON whatsapp_bot_options (brand_slug, node_key, position);

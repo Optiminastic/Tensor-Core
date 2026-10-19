@@ -11,11 +11,11 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	admin := PermissionsFor(RoleAdmin)
 	// 43: registry:read split reading the product registry away from reading
 	// cost configuration, bulk_order:read/manage are admin-only by being
-	// granted to no other role, and design:job_read/job_supply give a designer
-	// the production jobs waiting for a 3MF without giving them production:*.
-	// See catalog.go.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 43 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 43 each", len(admin), len(AllPermissions))
+	// granted to no other role, design:job_read/job_supply give a designer
+	// the production jobs waiting for a 3MF without giving them production:*,
+	// and whatsapp:read/reply added the inbox. See catalog.go.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 45 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 45 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -179,8 +179,8 @@ func TestPermissionsForRolesUnion(t *testing.T) {
 }
 
 func TestTotalGrantsMatchSpec(t *testing.T) {
-	// 41 (admin) + 6 (designer) + 28 (project lead) + 3 (marketer) + 12 (operator)
-	// + 6 (packaging_qc) = 96.
+	// 43 (admin) + 6 (designer) + 30 (project lead) + 3 (marketer) + 14 (operator)
+	// + 6 (packaging_qc) = 102.
 	//
 	// Moved from 84 when the shop restated three roles: +1 admin and +1 project
 	// lead for registry:read, +1 designer for pricing:read (Costing), and the
@@ -190,14 +190,19 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// brand:read then went to every role (+5), because without it no non-admin
 	// could list the brands their own pages live under - see
 	// TestProjectAndBrandManageAreAdminOnly.
+	//
+	// whatsapp:read and whatsapp:reply then went to admin, project lead and
+	// operator (+6): the people who already see orders answer the customers
+	// asking about them.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
 	}
-	// 102: design:job_read and design:job_supply each go to DESIGNER,
-	// PROJECT_LEAD and ADMIN.
-	if total != 102 {
-		t.Fatalf("total grants = %d, want 102", total)
+	// 108: design:job_read and design:job_supply each go to DESIGNER,
+	// PROJECT_LEAD and ADMIN; whatsapp:read and whatsapp:reply each go to
+	// ADMIN, PROJECT_LEAD and OPERATOR.
+	if total != 108 {
+		t.Fatalf("total grants = %d, want 108", total)
 	}
 }
 
@@ -216,6 +221,20 @@ func TestDesignerSuppliesDesignFilesWithoutProductionAccess(t *testing.T) {
 	for _, p := range []PermissionSpec{ProductionRead, ProductionUpdate, ProductionCreate, ProductionFail} {
 		if has(designer, p.Key()) {
 			t.Errorf("designer holds %s; supplying a design file must not open the production queue", p.Key())
+		}
+	}
+}
+
+func TestWhatsAppInboxGoesToTheRolesThatSeeOrders(t *testing.T) {
+	for _, role := range []RoleName{RoleAdmin, RoleProjectLead, RoleOperator} {
+		perms := PermissionsFor(role)
+		if !has(perms, WhatsAppRead.Key()) || !has(perms, WhatsAppReply.Key()) {
+			t.Errorf("%s cannot use the WhatsApp inbox", role)
+		}
+	}
+	for _, role := range []RoleName{RoleDesigner, RolePerformanceMarketer, RolePackagingQc} {
+		if has(PermissionsFor(role), WhatsAppRead.Key()) {
+			t.Errorf("%s must not read customer chats", role)
 		}
 	}
 }

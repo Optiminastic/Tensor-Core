@@ -69,6 +69,10 @@ type orderResponse struct {
 	// PersonalisationWindowEndsAt is set only while the window is open, so a
 	// row can count down without asking a second time.
 	PersonalisationWindowEndsAt *string `json:"personalisation_window_ends_at,omitempty"`
+	// PersonalisationSkipReason is why nobody was asked, for an order with no
+	// window at all. Set only alongside an empty Personalisation: a dash on
+	// the orders page means six different things, and this is which one.
+	PersonalisationSkipReason *string `json:"personalisation_skip_reason,omitempty"`
 	// ItemCount is the units on the order, summed across its lines.
 	//
 	// Carried on the LIST response, unlike line_items itself: the orders table

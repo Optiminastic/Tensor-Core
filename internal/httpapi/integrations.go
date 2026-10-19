@@ -145,8 +145,26 @@ var integrationSpecs = []integrationSpec{
 			{Key: "app_id", Label: "App ID", Required: true,
 				Help: "The Meta app the token belongs to."},
 			{Key: "app_secret", Label: "App secret", Secret: true, Required: false,
-				Help: "Only needed to verify inbound webhooks. Sending works without it; " +
-					"nothing Meta posts back can be trusted until it is set."},
+				Help: "Verifies inbound webhooks, so the WhatsApp bot and inbox need it. " +
+					"Sending works without it; nothing Meta posts back is trusted until it is set."},
+			{Key: "webhook_verify_token", Label: "Webhook verify token", Secret: true, Required: false,
+				Help: "Any long random value. Paste the same value into the webhook setup in " +
+					"Meta's app dashboard; Meta sends it back once to prove the callback is yours."},
+			{Key: "bot_enabled", Label: "Menu bot", Required: false, Default: "false",
+				Help: "true answers every customer message with the menu (Damage concern, " +
+					"Explore products, Other). false records messages for the inbox only."},
+			{Key: "confirmations_enabled", Label: "Personalisation confirmations", Required: false,
+				Default: "false",
+				Help: "true messages each newly paid order's customer to confirm the names to be " +
+					"printed. Needs the approved order_personalisation_confirm and _reminder " +
+					"templates. Orders placed before it was switched on are never messaged."},
+			{Key: "test_numbers", Label: "Test numbers only", Required: false,
+				Help: "Leave empty to message every customer. Otherwise a comma-separated list " +
+					"(e.g. 9876543210, 9123456789): the bot answers only these numbers and " +
+					"confirmations go only to them. Everyone else's messages still reach the inbox."},
+			{Key: "order_prefix", Label: "Order number prefix", Required: false, Default: "T3DPS-",
+				Help: "What a customer's order number is prefixed with in Shopify. A customer " +
+					"types 115766; Tensor looks up T3DPS-115766."},
 			{Key: "template_name", Label: "Win-back template", Required: true,
 				Default: "cart_recovery_personalised",
 				Help: "An APPROVED template on that business account. It must take five " +
@@ -535,6 +553,7 @@ func (s *Server) whatsappFor(ctx context.Context, brandSlug string) *whatsapp.Cl
 		APIVersion:       s.cfg.WhatsAppAPIVersion,
 		TemplateName:     s.cfg.WhatsAppTemplateName,
 		TemplateLanguage: s.cfg.WhatsAppTemplateLanguage,
+		BaseURL:          s.cfg.WhatsAppBaseURL,
 	}
 	for key, value := range s.integrationSettings(ctx, brandSlug, providerWhatsApp) {
 		switch key {

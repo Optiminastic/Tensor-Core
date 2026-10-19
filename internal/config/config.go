@@ -591,6 +591,8 @@ type Settings struct {
 	// needed to send, so it is optional: without it Tensor can message
 	// customers but cannot trust anything Meta posts back.
 	WhatsAppAppSecret string
+	// WhatsAppBaseURL overrides Meta's Graph API host, for tests and nothing else.
+	WhatsAppBaseURL string
 	// WhatsAppAPIVersion pins the Graph API version. Meta deprecates these on
 	// a schedule, and a silently floating version is how a working integration
 	// breaks on a date nobody wrote down.
@@ -622,7 +624,10 @@ type Settings struct {
 	// Shopify Admin API version used when publishing an approved design, and the
 	// per-request timeout for the outbound Admin API calls.
 	ShopifyAPIVersion string
-	ShopifyTimeout    time.Duration
+	// ShopifyBaseURL overrides every shop's Admin API host, for tests and
+	// nothing else. Empty means https://<shop>.
+	ShopifyBaseURL string
+	ShopifyTimeout time.Duration
 
 	// Shopify order import (inbound): the single app's OAuth credentials, this
 	// backend's own reachable URL (for the OAuth redirect + webhook callback), the
@@ -632,7 +637,20 @@ type Settings struct {
 	ShopifyClientSecret string
 	PublicBaseURL       string
 	FrontendURL         string
-	TokenEncryptionKey  string
+	// CustomerLinkURL is the address customers are sent, and it is
+	// deliberately separate from FrontendURL.
+	//
+	// The dashboard lives at tensor.optiminastic.com. A customer opening a
+	// personalisation check or a damage form should never see that: it is
+	// the shop's internal tool, the name means nothing to them, and the link
+	// arrives in WhatsApp where an unfamiliar domain is what a scam looks
+	// like. These pages go out under the shop's own name instead.
+	//
+	// Empty falls back to FrontendURL, so a brand that has not set up a
+	// second domain keeps working exactly as before - and local development
+	// needs no extra configuration at all.
+	CustomerLinkURL    string
+	TokenEncryptionKey string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -773,6 +791,7 @@ func Load() Settings {
 		WhatsAppWABAID:              envOr("WHATSAPP_WABA_ID", ""),
 		WhatsAppAppID:               envOr("WHATSAPP_APP_ID", ""),
 		WhatsAppAppSecret:           os.Getenv("WHATSAPP_APP_SECRET"),
+		WhatsAppBaseURL:             envOr("WHATSAPP_BASE_URL", ""),
 		WhatsAppAPIVersion:          envOr("WHATSAPP_API_VERSION", "v25.0"),
 		WhatsAppTemplateName:        envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_personalised"),
 		WhatsAppTemplateLanguage:    envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
@@ -781,12 +800,14 @@ func Load() Settings {
 		DelhiveryBaseURL: envOr("DELHIVERY_BASE_URL", ""),
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
+		ShopifyBaseURL:    envOr("SHOPIFY_BASE_URL", ""),
 		ShopifyTimeout:    secondsEnvOr("SHOPIFY_TIMEOUT_SECONDS", 15),
 
 		ShopifyClientID:     os.Getenv("SHOPIFY_CLIENT_ID"),
 		ShopifyClientSecret: os.Getenv("SHOPIFY_CLIENT_SECRET"),
 		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
+		CustomerLinkURL:     strings.TrimRight(os.Getenv("CUSTOMER_LINK_URL"), "/"),
 		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
 	}
 }

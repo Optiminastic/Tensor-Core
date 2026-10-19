@@ -191,6 +191,10 @@ func TestMetaErrorsNameTheFix(t *testing.T) {
 		{130429, 429, "rate limiting", true},
 		{131056, 429, "throttling the pair", true},
 		{100, 400, "index must be the string", false},
+		// Meta's catch-all. It MUST be retryable: settling it as permanent
+		// marked a personalisation link 'failed' for good and released the
+		// order, so that customer was never asked and never would be.
+		{131000, 400, "try again", true},
 	}
 	for _, tc := range cases {
 		body := `{"error":{"message":"(#` + itoa(tc.code) + `) something",` +

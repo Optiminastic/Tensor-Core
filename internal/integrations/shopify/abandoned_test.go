@@ -113,3 +113,65 @@ func TestAbsentListsAndTaxComeBackEmpty(t *testing.T) {
 		t.Errorf("shipping address = %+v, want nil when none was given", got.ShippingAddress)
 	}
 }
+
+// The number the customer typed, when no address carries one.
+//
+// THE COMMONEST SHAPE OF AN ABANDONED CHECKOUT. Shopify calls a checkout
+// abandoned once contact details are entered, which on this store happens at
+// the personalisation step - before the address. So the basket has a
+// "STEP 6 - WhatsApp Number" on a line item and two empty addresses, and
+// reading only the addresses leaves it as "No phone": a reachable customer
+// the win-back agent never rings or messages.
+func TestThePhoneFallsBackToTheWhatsAppProperty(t *testing.T) {
+	node := abandonedNode{}
+	node.LineItems.Nodes = []abandonedLineItemNode{{
+		CustomAttributes: []CheckoutAttribute{
+			{Key: "STEP 1 - First Name", Value: "RAHUL"},
+			{Key: "STEP 6 - WhatsApp Number", Value: "98765 43210"},
+		},
+	}}
+
+	if got := toAbandonedCheckout(node); got.Phone != "98765 43210" {
+		t.Fatalf("phone = %q, want the number off the line item", got.Phone)
+	}
+}
+
+// An address number is the better one and must still win: it is the number
+// the courier would use, and it has been through Shopify's own validation.
+func TestAnAddressPhoneBeatsTheProperty(t *testing.T) {
+	node := abandonedNode{
+		ShippingAddress: &abandonedAddress{Phone: "7989797791"},
+	}
+	node.LineItems.Nodes = []abandonedLineItemNode{{
+		CustomAttributes: []CheckoutAttribute{{Key: "STEP 6 - WhatsApp Number", Value: "98765 43210"}},
+	}}
+
+	if got := toAbandonedCheckout(node); got.Phone != "7989797791" {
+		t.Fatalf("phone = %q, want the address number", got.Phone)
+	}
+}
+
+// Matched on the word, not the whole key: the step number moves whenever a
+// product's form is reordered, and a number that stops being found because
+// of that is a customer who stops being called.
+func TestTheWhatsAppKeyIsMatchedLoosely(t *testing.T) {
+	for _, key := range []string{
+		"STEP 6 - WhatsApp Number", "STEP 4 - Whatsapp Number", "whatsapp number", "WhatsApp No.",
+	} {
+		node := abandonedNode{CustomAttributes: []CheckoutAttribute{{Key: key, Value: "98765 43210"}}}
+		if got := toAbandonedCheckout(node); got.Phone != "98765 43210" {
+			t.Errorf("%q: phone = %q", key, got.Phone)
+		}
+	}
+}
+
+// An empty value is not a number. Shopify keeps the property with a blank
+// value when the customer clears the field, and "" would read as given.
+func TestABlankWhatsAppPropertyIsNotAPhone(t *testing.T) {
+	node := abandonedNode{CustomAttributes: []CheckoutAttribute{
+		{Key: "STEP 6 - WhatsApp Number", Value: "   "},
+	}}
+	if got := toAbandonedCheckout(node); got.Phone != "" {
+		t.Fatalf("phone = %q, want empty", got.Phone)
+	}
+}
