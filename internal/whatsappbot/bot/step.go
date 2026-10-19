@@ -12,6 +12,14 @@ import (
 const (
 	// HumanIdleTimeout is how long a handed-off chat stays with staff after the
 	// last human activity before the bot answers again.
+	//
+	// TWELVE HOURS, chosen by the shop. Worth knowing what it costs: a
+	// customer who replies the next day to a thread a person was handling
+	// gets the bot, not that person - visible in production as conversations
+	// sitting at 'idle' with a last_staff_at from two days earlier. Raising
+	// this is the fix if that becomes a nuisance; isClosing below is what
+	// keeps the commonest case - being thanked after a query is resolved -
+	// from reopening a finished conversation whatever this is set to.
 	HumanIdleTimeout = 12 * time.Hour
 	// MaxMisses is how many unusable replies a flow tolerates before handoff.
 	MaxMisses        = 2
@@ -22,6 +30,19 @@ const (
 	startKeyword     = "start"
 	stopKeyword      = "stop"
 	changeNotePrefix = "WhatsApp personalisation change requested: "
+)
+
+// closings end a conversation rather than starting one.
+//
+// WHAT THEY MUST NOT GET IS THE MENU. A customer whose problem a person has
+// just solved says "thank you" - and the bot answering that with a greeting
+// and three buttons reopens a conversation that was finished, in front of
+// the customer, immediately after a colleague closed it well. Silence is the
+// right reply to being thanked.
+var closings = set(
+	"thanks", "thank", "thankyou", "ty", "tq",
+	"ok", "okay", "okey", "k", "kk", "fine", "good", "great", "nice",
+	"done", "noted", "sure", "cool", "got", "perfect", "welcome", "bye",
 )
 
 var (
@@ -95,8 +116,30 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 // A typed menu position - "2" - is turned into the tap it stands for by the
 // caller, which can see the brand's own menu; by the time it reaches here it
 // is already a ButtonIn. So anything still arriving as text gets the menu.
-func onIdle(c Conversation, _ string, _ time.Time) (Conversation, []Action) {
+func onIdle(c Conversation, word string, _ time.Time) (Conversation, []Action) {
+	if isClosing(word) {
+		return c, nil
+	}
 	return menu(c)
+}
+
+// isClosing reports whether a message is somebody signing off.
+//
+// THE FIRST WORD, AND ONLY IN A SHORT MESSAGE. "Thanks" is a closing;
+// "thanks but my order is still late" is a complaint that has to be
+// answered, and matching on the word alone would swallow it. Four words is
+// long enough for "thank you, for guide" - the message that prompted this -
+// and short enough that a real question cannot hide inside it.
+func isClosing(word string) bool {
+	if word == "" {
+		return false
+	}
+	fields := strings.Fields(word)
+	if len(fields) == 0 || len(fields) > 4 {
+		return false
+	}
+	first := strings.Trim(fields[0], keywordTrimSet)
+	return closings[first]
 }
 
 func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Action) {

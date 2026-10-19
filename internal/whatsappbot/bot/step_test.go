@@ -276,8 +276,47 @@ func TestHumanModeIsSilent(t *testing.T) {
 }
 
 func TestHumanModeResumesAfterIdleTimeout(t *testing.T) {
-	c, actions := Step(human(now.Add(-13*time.Hour)), TextIn{Text: "hi"}, now)
+	c, actions := Step(human(now.Add(-HumanIdleTimeout-time.Hour)), TextIn{Text: "hi"}, now)
 	assertMenu(t, c, actions)
+}
+
+// A chat a person is still working stays theirs for the whole window: a
+// customer chasing an update must reach the colleague handling it, not a menu.
+func TestHumanModeHoldsInsideTheWindow(t *testing.T) {
+	c, actions := Step(human(now.Add(-HumanIdleTimeout/2)), TextIn{Text: "any update?"}, now)
+	if c.State != StateHuman || len(actions) != 0 {
+		t.Fatalf("the bot spoke inside the handover window: %s %v", c.State, texts(actions))
+	}
+}
+
+// Being thanked is not a reason to reopen a conversation somebody has just
+// closed well. This is the message that prompted the change.
+func TestClosingsGetNoReply(t *testing.T) {
+	for _, text := range []string{
+		"Thank you, for guide", "thanks", "Thanks!", "ok", "Okay 👍", "got it", "Noted.", "bye",
+	} {
+		c, actions := Step(idle(), TextIn{Text: text}, now)
+		if len(actions) != 0 {
+			t.Errorf("%q was answered with %v", text, texts(actions))
+		}
+		if c.State != StateIdle {
+			t.Errorf("%q changed the state to %s", text, c.State)
+		}
+	}
+}
+
+// A complaint that opens with a pleasantry is still a complaint. Matching on
+// the first word alone would swallow it.
+func TestAClosingWordInALongerMessageStillGetsTheMenu(t *testing.T) {
+	for _, text := range []string{
+		"thanks but my order is still not delivered",
+		"ok so when will it ship, it has been a week",
+	} {
+		_, actions := Step(idle(), TextIn{Text: text}, now)
+		if len(actions) == 0 {
+			t.Errorf("%q was ignored", text)
+		}
+	}
 }
 
 func TestRecentStaffActivityKeepsHumanMode(t *testing.T) {
