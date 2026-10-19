@@ -329,11 +329,41 @@ func (s *Server) saveIntegration(c *gin.Context) {
 	}
 
 	for _, field := range spec.Fields {
-		value := strings.TrimSpace(req.Values[field.Key])
+		raw, sent := req.Values[field.Key]
+		value := strings.TrimSpace(raw)
 		if value == "" {
 			if field.Required && !held[field.Key] {
 				detail(c, http.StatusUnprocessableEntity, spec.Label+" needs "+field.Label+".")
 				return
+			}
+			// BLANK CLEARS A NON-SECRET FIELD, and leaves a secret alone.
+			//
+			// "Blank means no change" protects a secret: it comes back
+			// masked, so an admin who may not read a token must not be able
+			// to wipe it by saving the form. Applied to every field, it also
+			// made a plain one impossible to empty - the save returned 200
+			// and changed nothing.
+			//
+			// That silence had teeth. test_numbers restricts the WhatsApp bot
+			// to a list of numbers while it is being tried out, and clearing
+			// it is how the shop opens the bot to real customers. It could not
+			// be cleared: the field went blank on screen, the save reported
+			// success, and every customer except the test number went on
+			// getting no reply at all.
+			// ONLY A FIELD THE FORM ACTUALLY SENT, and never a required or
+			// secret one. A caller that posts a single field leaves every
+			// other key absent from the map, which is indistinguishable from
+			// blank unless the presence of the key is checked - clearing on
+			// absence would have wiped phone_number_id and bot_enabled the
+			// first time somebody saved one box. Caught by the test below
+			// rather than in production.
+			if sent && !field.Secret && !field.Required && held[field.Key] {
+				if err := s.store.Q.ClearIntegrationSetting(ctx, gen.ClearIntegrationSettingParams{
+					BrandSlug: slug, Provider: spec.Provider, SettingKey: field.Key,
+				}); err != nil {
+					detail(c, http.StatusInternalServerError, "Could not clear "+field.Label+".")
+					return
+				}
 			}
 			continue
 		}

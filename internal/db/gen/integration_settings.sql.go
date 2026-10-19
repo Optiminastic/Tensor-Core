@@ -9,6 +9,33 @@ import (
 	"context"
 )
 
+const clearIntegrationSetting = `-- name: ClearIntegrationSetting :exec
+DELETE FROM integration_settings
+WHERE brand_slug = $1
+  AND provider = $2
+  AND setting_key = $3
+`
+
+type ClearIntegrationSettingParams struct {
+	BrandSlug  string
+	Provider   string
+	SettingKey string
+}
+
+// Forgets ONE setting, so a field can be emptied from the dashboard.
+//
+// A row rather than a blank value: absent and empty mean the same thing to
+// every reader, and an empty string left behind reads in the table as though
+// somebody meant to put something there.
+//
+// Only ever called for a non-secret field. A secret comes back masked, so a
+// blank box cannot be taken as "clear this" without wiping a token the admin
+// was never allowed to see.
+func (q *Queries) ClearIntegrationSetting(ctx context.Context, arg ClearIntegrationSettingParams) error {
+	_, err := q.db.Exec(ctx, clearIntegrationSetting, arg.BrandSlug, arg.Provider, arg.SettingKey)
+	return err
+}
+
 const deleteIntegrationSettings = `-- name: DeleteIntegrationSettings :exec
 DELETE FROM integration_settings
 WHERE brand_slug = $1 AND provider = $2
