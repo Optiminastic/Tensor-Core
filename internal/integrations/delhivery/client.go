@@ -136,6 +136,11 @@ func (c *Client) Track(ctx context.Context, waybills []string) ([]Shipment, erro
 		i, chunk := i, chunk
 		group.Go(func() error {
 			batch, err := c.trackBatch(groupCtx, chunk)
+			if errors.Is(err, ErrNoSuchWaybill) {
+				// Nothing known in this batch. Every parcel in it is reported
+				// as untrackable by the caller; the rest of the page stands.
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -159,6 +164,11 @@ func (c *Client) Track(ctx context.Context, waybills []string) ([]Shipment, erro
 
 // ErrRateLimited is what Delhivery's 429 becomes, after the retries are spent.
 var ErrRateLimited = errors.New("delhivery rate limited")
+
+// ErrNoSuchWaybill means the carrier recognised none of the waybills asked
+// about. It is an answer, not a fault: those parcels are untrackable, which
+// the caller reports per parcel rather than failing the whole read.
+var ErrNoSuchWaybill = errors.New("delhivery knows none of these waybills")
 
 // rateLimited carries the carrier's own Retry-After so the loop waits as long
 // as it was asked to rather than guessing.
@@ -253,6 +263,21 @@ func (c *Client) trackBatchOnce(ctx context.Context, waybills []string) ([]Shipm
 		return nil, fmt.Errorf("could not decode Delhivery's response: %w", err)
 	}
 	if body.Error != "" {
+		// NOT A FAILURE WHEN IT MEANS "I DO NOT KNOW THESE".
+		//
+		// Delhivery answers a batch whose waybills it cannot find with
+		// {"Error": "No such waybill or Order Id found"} - the same shape it
+		// uses for a malformed request. Treated as a fault it blanked the
+		// whole Deliveries page: one stale or mistyped tracking number on one
+		// order, and every other parcel for the brand disappeared behind a
+		// red banner.
+		//
+		// The caller already knows what to do with a parcel the carrier has
+		// never heard of - it draws it as untrackable, at the top, which is
+		// what that page is for. So this is an empty answer, not an error.
+		if strings.Contains(strings.ToLower(body.Error), "no such waybill") {
+			return nil, ErrNoSuchWaybill
+		}
 		return nil, fmt.Errorf("Delhivery: %s", body.Error)
 	}
 
