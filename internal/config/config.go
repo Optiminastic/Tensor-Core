@@ -637,7 +637,20 @@ type Settings struct {
 	ShopifyClientSecret string
 	PublicBaseURL       string
 	FrontendURL         string
-	TokenEncryptionKey  string
+	// CustomerLinkURL is the address customers are sent, and it is
+	// deliberately separate from FrontendURL.
+	//
+	// The dashboard lives at tensor.optiminastic.com. A customer opening a
+	// personalisation check or a damage form should never see that: it is
+	// the shop's internal tool, the name means nothing to them, and the link
+	// arrives in WhatsApp where an unfamiliar domain is what a scam looks
+	// like. These pages go out under the shop's own name instead.
+	//
+	// Empty falls back to FrontendURL, so a brand that has not set up a
+	// second domain keeps working exactly as before - and local development
+	// needs no extra configuration at all.
+	CustomerLinkURL    string
+	TokenEncryptionKey string
 }
 
 // Load reads settings from the process environment. It never fails: missing
@@ -794,6 +807,7 @@ func Load() Settings {
 		ShopifyClientSecret: os.Getenv("SHOPIFY_CLIENT_SECRET"),
 		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
+		CustomerLinkURL:     strings.TrimRight(os.Getenv("CUSTOMER_LINK_URL"), "/"),
 		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
 	}
 }

@@ -123,7 +123,7 @@ const (
 
 	// DamageLinkButton is what the button says. WhatsApp caps it at 20
 	// characters, and the shop asked for this word.
-	DamageLinkButton = "LINK"
+	DamageLinkButton = "Open"
 
 	// DamageLinkAlready answers a second tap from somebody who already has a
 	// form open.
@@ -131,7 +131,7 @@ const (
 	// IT CANNOT RESEND THE LINK. Only the token's hash is stored, so the
 	// address exists nowhere but in the message already sitting in their
 	// chat - which is the whole reason a database dump opens nobody's form.
-	DamageLinkAlready = "You already have a damage form open — scroll up in this chat and tap *LINK*.\n\n" +
+	DamageLinkAlready = "You already have a damage form open — scroll up in this chat and tap *Open*.\n\n" +
 		"It stays open for 24 hours, and you can add more photos to it any time before then."
 
 	// DamageLinkFailed is said when the form could not be minted. It names

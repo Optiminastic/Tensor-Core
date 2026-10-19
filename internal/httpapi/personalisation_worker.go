@@ -279,7 +279,7 @@ func (w *PersonalisationLinkWorker) ask(
 	if err != nil {
 		return err
 	}
-	url := personalisationLinkURL(w.server.cfg.FrontendURL, token)
+	url := personalisationLinkURL(w.server.customerLinkBase(), token)
 	if url == "" {
 		w.logger.Error("personalisation: no public address is configured, so the link would go nowhere",
 			"brand", slug, "order", order.OrderNumber)

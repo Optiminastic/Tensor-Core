@@ -102,3 +102,19 @@ func damageLinkURL(frontendURL, token string) string {
 	}
 	return base + "/d/" + token
 }
+
+// customerLinkBase is the host every customer-facing link is built on.
+//
+// ONE PLACE, so the two public pages cannot drift onto different domains -
+// a customer who gets a personalisation check from one host and a damage
+// form from another has no way to tell which is really the shop.
+//
+// Falls back to the dashboard's own address when no customer domain is
+// configured, which is what keeps local development and any brand that has
+// not set one up working unchanged.
+func (s *Server) customerLinkBase() string {
+	if base := strings.TrimSpace(s.cfg.CustomerLinkURL); base != "" {
+		return base
+	}
+	return s.cfg.FrontendURL
+}

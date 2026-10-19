@@ -6,6 +6,8 @@ package httpapi
 import (
 	"strings"
 	"testing"
+
+	"github.com/Optiminastic/tensor-core/internal/config"
 )
 
 func TestEveryTokenIsDifferent(t *testing.T) {
@@ -97,5 +99,36 @@ func TestNoHostOrNoTokenMeansNoLink(t *testing.T) {
 	}
 	if got := personalisationLinkURL("https://x.test", " "); got != "" {
 		t.Errorf("url = %q, want empty", got)
+	}
+}
+
+// Customer-facing links go out under the shop's own domain.
+//
+// THE DASHBOARD'S ADDRESS IS NOT THE CUSTOMER'S. tensor.optiminastic.com is
+// the shop's internal tool; a link arriving in WhatsApp from an unfamiliar
+// domain is what a scam looks like. Both public pages must use the same
+// configured host, or a customer has no way to tell which one is really the
+// shop.
+func TestCustomerLinksUseTheCustomerDomain(t *testing.T) {
+	s := &Server{cfg: config.Settings{
+		FrontendURL:     "https://tensor.optiminastic.com",
+		CustomerLinkURL: "https://design.the3dprintingstore.in",
+	}}
+	base := s.customerLinkBase()
+
+	if got := personalisationLinkURL(base, "TOKEN"); got != "https://design.the3dprintingstore.in/p/TOKEN" {
+		t.Errorf("personalisation link = %q", got)
+	}
+	if got := damageLinkURL(base, "TOKEN"); got != "https://design.the3dprintingstore.in/d/TOKEN" {
+		t.Errorf("damage link = %q", got)
+	}
+}
+
+// Unset, it falls back to the dashboard - which is what keeps local
+// development and any brand without a second domain working unchanged.
+func TestCustomerLinksFallBackToTheDashboard(t *testing.T) {
+	s := &Server{cfg: config.Settings{FrontendURL: "http://localhost:3001"}}
+	if got := s.customerLinkBase(); got != "http://localhost:3001" {
+		t.Fatalf("base = %q", got)
 	}
 }

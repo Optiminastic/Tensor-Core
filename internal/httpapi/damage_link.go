@@ -63,7 +63,7 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 	if err != nil {
 		return err
 	}
-	url := damageLinkURL(t.server.cfg.FrontendURL, token)
+	url := damageLinkURL(t.server.customerLinkBase(), token)
 	if url == "" {
 		// No FRONTEND_URL means no form, and a button with no address is
 		// worse than a sentence asking them to send the photographs here.

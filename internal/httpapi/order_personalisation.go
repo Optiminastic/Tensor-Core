@@ -160,7 +160,7 @@ func (s *Server) openLinkForOrder(
 	if err != nil || strings.TrimSpace(token) == "" {
 		return personalisationLinkResponse{}
 	}
-	out := personalisationLinkResponse{URL: personalisationLinkURL(s.cfg.FrontendURL, token)}
+	out := personalisationLinkResponse{URL: personalisationLinkURL(s.customerLinkBase(), token)}
 	if link.ExpiresAt.Valid {
 		out.ExpiresAt = link.ExpiresAt.Time.UTC().Format(time.RFC3339)
 	}
