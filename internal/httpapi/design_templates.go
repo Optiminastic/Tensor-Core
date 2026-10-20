@@ -57,7 +57,12 @@ type templateResponse struct {
 // Listed so the Designs tab can show a key that nobody has uploaded yet - a
 // page that only listed uploads would be empty on a fresh install and would
 // look like the shop had no designs at all.
+// The three per-heart-count keys are still listed although nothing renders
+// from them: an upload against one is what a shop with a model still in the
+// bucket would reach for, and a key that vanished from this page would look
+// like the design had been deleted.
 var embeddedTemplateKeys = []string{
+	"dnp_heart_joinery",
 	"dnp_with_no_heart", "dual_one_heart", "dnp_two_heart", "dnpf_without_heart",
 }
 
@@ -233,7 +238,11 @@ func requiredParamsFor(key string) []string {
 	for _, embedded := range embeddedTemplateKeys {
 		if key == embedded {
 			// A plank, driven by the DNP path, which passes the names too.
-			return personalise.RequiredTemplateParams
+			// WHICH names depends on the key: the joinery template took over
+			// from the three per-heart-count files and is driven in its own
+			// vocabulary, so the gate asks it for the variables it actually
+			// has rather than the ones its predecessors had.
+			return personalise.RequiredParamsForTemplate(key)
 		}
 	}
 	return alwaysPassedParams

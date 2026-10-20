@@ -108,7 +108,7 @@ func loadOne(
 	// Refused before it is stored, not after it has printed something: OpenSCAD
 	// accepts an unknown -D silently, so a template missing NAME_L renders a
 	// plank with no name and exits 0.
-	if missing := personalise.MissingTemplateParams(source); len(missing) > 0 {
+	if missing := personalise.MissingParamsForTemplate(key, source); len(missing) > 0 {
 		return fmt.Errorf("does not declare %s", strings.Join(missing, ", "))
 	}
 

@@ -19,10 +19,30 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// The three templates, one per heart count. They are not cosmetic variants of
-// each other: dual_name.scad renders with FUSION_MATCH on (reproducing the
-// 58.43%/70.11% shear from the Fusion master) while the other two do not, and
-// the margins differ - 40/40, 9/35 and 9/9 respectively.
+// templateJoinery renders EVERY heart count, from the shop's own
+// "DNP + Heart (with joinery)" file.
+//
+// It replaced three templates - one per heart count - which were not cosmetic
+// variants of each other: they differed in margins (40/40, 9/35 and 9/9) and
+// in whether the Fusion shear was applied, so a heart count could not be
+// layered on top of one of them. This file takes side_hearts = 0, 1 or 2 and
+// lays the plank out for it, which is what makes one file enough.
+//
+// It is also a DIFFERENT PRODUCT at 1 and 2 hearts, not just a tidier way to
+// render the old one: the heart is no longer only a glyph padding the letter
+// run. The plank now carries a snap-fit LEAF PEG at each heart end, and the
+// heart itself prints as a separate part with a matching hole - which means a
+// one- or two-heart order is two printed pieces and an assembly step, where
+// before it was one. That is the shop's decision, embodied in this file; it is
+// recorded here because nothing else in the code says so.
+const templateJoinery = "dnp_heart_joinery"
+
+// The three templates templateJoinery replaced, one per heart count.
+//
+// KEPT, though nothing renders from them any more. Models already in the
+// bucket record the template they came off, and HeartsForTemplate reads that
+// record to decide whether to draw a heart beside a stored model. Delete these
+// and every plank rendered before the joinery file loses its heart on screen.
 const (
 	templateTwoHeart = "dnp_two_heart"
 	templateOneHeart = "dual_one_heart"
@@ -187,6 +207,9 @@ func (p Params) Args() map[string]string {
 	if shape.X == 0 {
 		shape = PlankShape
 	}
+	if p.Template == templateJoinery {
+		return joineryArgs(p, shape)
+	}
 	args := map[string]string{
 		"NAME_L": Quote(p.NameLeft),
 		"NAME_R": Quote(p.NameRight),
@@ -200,6 +223,39 @@ func (p Params) Args() map[string]string {
 	// Margins are NOT set here. They are the template's, and the template is
 	// the only place they are stated - see the block comment on Args.
 	return args
+}
+
+// joineryArgs is Args in the joinery template's own vocabulary.
+//
+// A different set of names from the three templates it replaced, and
+// deliberately NOT renamed to match them. The shop opens this exact file in
+// OpenSCAD's Customizer to try an order before it prints, and a file whose
+// variables Tensor had renamed would no longer be the file they tested. The
+// translation belongs on this side, where it is one function.
+//
+// THERE IS NO OUT_X/OUT_Y/OUT_Z HERE, and that is the substance of the change
+// rather than a tidy-up. The old templates drew the plank at whatever length
+// the letters needed and Tensor scaled the result into 200x50x40 - a
+// NON-UNIFORM scale that squeezed X and stretched Z, thinning every stroke the
+// longer the name (see the note on OutputXMM). This template is told the
+// finished dimensions instead and lays the letter run out inside them, so the
+// size is reached by construction. Passing the old scale args on top would
+// scale a model that is already the right size.
+//
+// side_hearts is why one file replaces three: the count is an argument now,
+// not a choice of file.
+func joineryArgs(p Params, shape Shape) map[string]string {
+	return map[string]string{
+		"name1":       Quote(p.NameLeft),
+		"name2":       Quote(p.NameRight),
+		"side_hearts": strconv.Itoa(p.Hearts),
+		// The finished product size, stated rather than scaled to. Kept on
+		// Shape so a product with its own dimensions - the photo frame is the
+		// one that exists - still has somewhere to say so.
+		"plank_length": strconv.Itoa(shape.X),
+		"plank_width":  strconv.Itoa(shape.Y),
+		"total_height": strconv.Itoa(shape.Z),
+	}
 }
 
 // The storefront's own wording, e.g. "STEP 4-First Name-:". Matched on the
@@ -410,15 +466,15 @@ func heartCount(value string) (int, error) {
 }
 
 // templateForHearts picks the .scad file for a heart count.
+//
+// One file for all three now. The count is no longer in the CHOICE of file -
+// it is the side_hearts argument, which Args passes - so this says the same
+// thing three times on purpose: it is the seam a future product with its own
+// geometry per count would reopen, and a caller reading "templateForHearts"
+// should find the answer here rather than discover there is no longer a
+// question.
 func templateForHearts(hearts int) string {
-	switch hearts {
-	case 2:
-		return templateTwoHeart
-	case 1:
-		return templateOneHeart
-	default:
-		return templateNoHeart
-	}
+	return templateJoinery
 }
 
 // lookup returns the first non-empty value among the given keys.

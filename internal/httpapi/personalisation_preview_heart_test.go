@@ -180,10 +180,24 @@ func TestHeartsForPreviewReadsTheModelsOwnRecord(t *testing.T) {
 		params string
 		want   int
 	}{
+		// The three per-heart-count templates. Nothing renders from them any
+		// more, but their models are still in the bucket and the KEY is the
+		// only count those rows carry.
 		{"one heart", `{"template":"dual_one_heart"}`, 1},
 		{"two hearts", `{"template":"dnp_two_heart"}`, 2},
 		{"no heart", `{"template":"dnp_with_no_heart"}`, 0},
 		{"a product this knows nothing about", `{"template":"soulmate_keychain"}`, 0},
+
+		// The joinery template renders every count, so its key says nothing -
+		// the count travels beside it. A row read by the key alone would draw
+		// every plank in the catalogue plain.
+		{"joinery, two hearts", `{"template":"dnp_heart_joinery","hearts":2}`, 2},
+		{"joinery, one heart", `{"template":"dnp_heart_joinery","hearts":1}`, 1},
+		{"joinery, no heart", `{"template":"dnp_heart_joinery","hearts":0}`, 0},
+		// A count recorded against a legacy key must not override it either
+		// way round: both sources agree here, and the point is that reading
+		// the count first does not break the rows that only have a key.
+		{"both sources agree", `{"template":"dnp_two_heart","hearts":2}`, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := heartsForPreview(gen.ProductionJob{}, []byte(tc.params))
