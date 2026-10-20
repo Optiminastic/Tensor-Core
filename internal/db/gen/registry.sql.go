@@ -496,18 +496,20 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 const insertProductFieldMap = `-- name: InsertProductFieldMap :exec
 INSERT INTO product_field_maps (
     id, product_id, property_key, scad_variable, value_type, role, required,
-    fixed_value, position
+    fixed_value, default_value, position
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
-    $7, $8, $9
+    $7, $8, $9,
+    $10
 )
 ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
-SET property_key = EXCLUDED.property_key,
-    value_type   = EXCLUDED.value_type,
-    required     = EXCLUDED.required,
-    fixed_value  = EXCLUDED.fixed_value,
-    position     = EXCLUDED.position
+SET property_key  = EXCLUDED.property_key,
+    value_type    = EXCLUDED.value_type,
+    required      = EXCLUDED.required,
+    fixed_value   = EXCLUDED.fixed_value,
+    default_value = EXCLUDED.default_value,
+    position      = EXCLUDED.position
 `
 
 type InsertProductFieldMapParams struct {
@@ -519,6 +521,7 @@ type InsertProductFieldMapParams struct {
 	Role         string
 	Required     bool
 	FixedValue   *string
+	DefaultValue *string
 	Position     int32
 }
 
@@ -540,6 +543,7 @@ func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFi
 		arg.Role,
 		arg.Required,
 		arg.FixedValue,
+		arg.DefaultValue,
 		arg.Position,
 	)
 	return err
@@ -731,7 +735,7 @@ func (q *Queries) ListAllPipelineMappings(ctx context.Context) ([]ListAllPipelin
 }
 
 const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, position, created_at FROM product_field_maps
 WHERE product_id = $1
 ORDER BY role, position, lower(scad_variable)
 `
@@ -759,6 +763,7 @@ func (q *Queries) ListAllProductFieldMaps(ctx context.Context, productID uuid.UU
 			&i.Role,
 			&i.Required,
 			&i.FixedValue,
+			&i.DefaultValue,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {
@@ -965,7 +970,7 @@ func (q *Queries) ListDesignsForProduct(ctx context.Context, productID uuid.UUID
 }
 
 const listFieldMapsForProducts = `-- name: ListFieldMapsForProducts :many
-SELECT f.id, f.product_id, f.property_key, f.scad_variable, f.value_type, f.role, f.required, f.fixed_value, f.position, f.created_at, p.code AS product_code, p.name AS product_name
+SELECT f.id, f.product_id, f.property_key, f.scad_variable, f.value_type, f.role, f.required, f.fixed_value, f.default_value, f.position, f.created_at, p.code AS product_code, p.name AS product_name
 FROM product_field_maps f
 JOIN products p ON p.id = f.product_id
 WHERE f.product_id = ANY($1::uuid[])
@@ -983,6 +988,7 @@ type ListFieldMapsForProductsRow struct {
 	Role         string
 	Required     bool
 	FixedValue   *string
+	DefaultValue *string
 	Position     int32
 	CreatedAt    pgtype.Timestamptz
 	ProductCode  string
@@ -1018,6 +1024,7 @@ func (q *Queries) ListFieldMapsForProducts(ctx context.Context, productIds []uui
 			&i.Role,
 			&i.Required,
 			&i.FixedValue,
+			&i.DefaultValue,
 			&i.Position,
 			&i.CreatedAt,
 			&i.ProductCode,
@@ -1084,7 +1091,7 @@ func (q *Queries) ListOptionValues(ctx context.Context, productID uuid.UUID) ([]
 }
 
 const listProductFieldMaps = `-- name: ListProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, position, created_at FROM product_field_maps
 WHERE product_id = $1
   AND role = $2
 ORDER BY position, lower(scad_variable)
@@ -1121,6 +1128,7 @@ func (q *Queries) ListProductFieldMaps(ctx context.Context, arg ListProductField
 			&i.Role,
 			&i.Required,
 			&i.FixedValue,
+			&i.DefaultValue,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {

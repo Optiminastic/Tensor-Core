@@ -63,12 +63,50 @@ func assertFinishedSize(t *testing.T, label string, stl []byte) {
 	// stores float32 vertices, so demanding bit-equality would be asserting
 	// something about IEEE rounding rather than about the model.
 	const tol = 0.1
+
+	// HEIGHT IS THE ONE AXIS THAT IS NOT EXACT, and only on the joinery
+	// template.
+	//
+	// The old templates drew the plank at whatever size the letters needed and
+	// Tensor scaled the finished bounding box into 200x50x40, so all three
+	// axes landed exactly. The joinery file is told the dimensions instead and
+	// lays the letters out inside them, scaling by the font's NOMINAL cap
+	// height - and the round glyphs do not respect it: S, O, C, G and Q reach
+	// 9.8871 against a nominal 9.7243, which is 1.67% over.
+	//
+	// The model is an INTERSECTION of the two names, so a single round glyph
+	// is clipped by whatever letter it meets in the other name and nothing
+	// shows. The overshoot survives only when a round glyph meets another
+	// round glyph in the same slot - SUBHANJANA x SUBHANTIKA pairs S with S -
+	// and then the plank comes out 40.65mm instead of 40mm.
+	//
+	// Allowed rather than corrected: this file is what the shop opens in
+	// OpenSCAD and prints from by hand, so forcing Z to 40 here would make
+	// Tensor's output differ from theirs - the exact drift this change exists
+	// to remove. Pinned at the measured worst case so a REGRESSION still
+	// fails, and the shop can decide separately whether 0.65mm matters.
+	const capHeightOvershoot = 0.7
+
+	// ASYMMETRIC, and only upward. A plank SHORTER than its stated height is a
+	// fault on any template - the overshoot can only ever add - so the slack
+	// goes on the high side alone.
+	over := tol
+	if label == templateJoinery {
+		over = capHeightOvershoot
+	}
 	for _, c := range []struct {
 		axis      string
 		got, want float64
-	}{{"X", x, OutputXMM}, {"Y", y, OutputYMM}, {"Z", z, OutputZMM}} {
-		if diff := c.got - c.want; diff > tol || diff < -tol {
-			t.Errorf("%s: %s = %.4f mm, want %d mm", label, c.axis, c.got, int(c.want))
+		under     float64
+		over      float64
+	}{
+		{"X", x, OutputXMM, tol, tol},
+		{"Y", y, OutputYMM, tol, tol},
+		{"Z", z, OutputZMM, tol, over},
+	} {
+		if diff := c.got - c.want; diff > c.over || diff < -c.under {
+			t.Errorf("%s: %s = %.4f mm, want %d mm (-%.2f/+%.2f)",
+				label, c.axis, c.got, int(c.want), c.under, c.over)
 		}
 	}
 }

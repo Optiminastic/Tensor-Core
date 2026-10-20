@@ -297,6 +297,21 @@ func placeHeart(heart orientation.Mesh, g gap, b box) ([]orientation.Triangle, b
 // The job's own property snapshot answers both, with no extra query: it is the
 // very thing templateForHearts read to choose the template.
 func heartsForPreview(job gen.ProductionJob, renderParams []byte) int {
+	// THE RECORDED COUNT BEFORE THE RECORDED TEMPLATE.
+	//
+	// The template key used to BE the count - one .scad per heart count, so
+	// "dnp_two_heart" said two and nothing else had to. One file renders all
+	// three now (personalise.templateJoinery), so the key answers 0 for every
+	// plank and a two-heart model would be drawn plain. The count travels
+	// beside the model instead, which it already did: plankPlan has written
+	// Hearts into render_params since before this mattered.
+	//
+	// Still FALLS BACK to the template, and that is not belt-and-braces: every
+	// plank rendered before the joinery file records one of the three old keys
+	// and no usable Hearts, and those models are still in the bucket.
+	if hearts, ok := recordedHearts(renderParams); ok {
+		return hearts
+	}
 	if template, ok := recordedTemplate(renderParams); ok {
 		return personalise.HeartsForTemplate(template)
 	}
@@ -317,7 +332,33 @@ func heartsForPreview(job gen.ProductionJob, renderParams []byte) int {
 	// and a frame with a heart drawn on it would be a product that does not
 	// exist.
 	params = params.ForProduct(deref(job.Sku), deref(job.ProductName))
-	return personalise.HeartsForTemplate(params.Template)
+	// The COUNT, not the template it would have chosen. These are the same
+	// answer under the old per-heart-count files and different ones now: a
+	// plank whose record is silent resolves to the joinery template, which
+	// renders every count and so names none. Reading the key here put every
+	// such plank back to nought hearts - the very rows this fallback exists
+	// for, since a recoloured model and a model older than render_params are
+	// both silent.
+	return params.Hearts
+}
+
+// recordedHearts is the heart count a stored model carries, and whether it
+// carries one at all.
+//
+// Zero is indistinguishable from absent in the stored JSON, so a no-heart
+// plank reports "not recorded" and falls through to the template - which
+// answers 0 for all three old keys and for the joinery key alike. The answer
+// is the same either way; what this must never do is report a confident 0 for
+// a model whose record simply predates the field.
+func recordedHearts(renderParams []byte) (int, bool) {
+	if len(renderParams) == 0 {
+		return 0, false
+	}
+	var stored storedRenderParams
+	if err := json.Unmarshal(renderParams, &stored); err != nil {
+		return 0, false
+	}
+	return stored.Hearts, stored.Hearts > 0
 }
 
 // recordedTemplate is the template a stored model says it came from, and

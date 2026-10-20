@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +45,13 @@ func TestTheShopsOwnTemplatesPassTheCheck(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if missing := MissingTemplateParams(source); len(missing) > 0 {
+		// Keyed by filename, because the key is what decides WHICH
+		// vocabulary a template is checked against. There are two now: the
+		// joinery file is driven by name1/side_hearts and has never had a
+		// NAME_L, and checking it against the legacy list would refuse the
+		// shop's own file the moment they re-uploaded it.
+		key := strings.TrimSuffix(filepath.Base(path), ".scad")
+		if missing := MissingParamsForTemplate(key, source); len(missing) > 0 {
 			t.Errorf("%s would be refused for missing %v - the check is wrong, "+
 				"not the template", filepath.Base(path), missing)
 		}

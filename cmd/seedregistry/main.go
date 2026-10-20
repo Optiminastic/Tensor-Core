@@ -46,15 +46,64 @@ var lightKit = []struct {
 	{"DNP-WIRE", "Wire", "piece", 2},
 }
 
-// heartVariants pairs each heart count with the template that renders it,
-// mirroring templateForHearts in internal/personalise/dnp.go. Seeding them here
-// is the first step in that switch statement becoming data.
+// plankTemplate renders EVERY heart count.
+//
+// It replaced three templates, one per count, and that is why heartVariants no
+// longer carries a template of its own: the count is an argument now
+// (side_hearts), fed by the field mapping below, not a choice of file. A
+// variant still exists per count because the storefront sells them as separate
+// options and the bill of materials differs - but all six print from this.
+const plankTemplate = "dnp_heart_joinery"
+
+// heartVariants is the heart axis the storefront sells.
 var heartVariants = []struct {
-	code, label, template string
+	code, label string
 }{
-	{"0", "No heart", "dnp_with_no_heart"},
-	{"1", "1 heart", "dual_one_heart"},
-	{"2", "2 hearts", "dnp_two_heart"},
+	{"0", "No heart"},
+	{"1", "1 heart"},
+	{"2", "2 hearts"},
+}
+
+// plankFieldMap is which of the customer's answers feeds which variable in
+// dnp_heart_joinery.scad - the registry's statement of what ParamsFromProperties
+// knows in Go.
+//
+// Seeding it is what MOVES THE PLANK onto the registry path: resolveRenderPlan
+// falls through to the Go path while a product maps no fields, and takes over
+// the moment it maps any. That is why it is behind -map-fields rather than
+// seeded by default, and why nothing past that point falls back - a configured
+// product that cannot render holds its job instead of quietly printing from
+// the other path.
+//
+// Keys are NORMALISED, as normalisePropKey stores them: "step 4 first name",
+// never "STEP 4-First Name-:".
+var plankFieldMap = []struct {
+	key, variable, valueType, fixed, deflt string
+	optional                               bool
+}{
+	// The two names. Required: a plank with one name is scrap, and holding
+	// the job names the field a person can go and fill in.
+	{key: "step 4 first name", variable: "name1", valueType: "string"},
+	{key: "step 5 second name", variable: "name2", valueType: "string"},
+
+	// The heart count, read out of the storefront's WORDING - "1 RED HEART"
+	// is 1 - which is what value_type 'count' exists for.
+	//
+	// OPTIONAL WITH A DEFAULT OF ZERO, and the default is the point. The
+	// 2-STEP plank sells no heart option at all, so nothing on those lines
+	// names one; the Go path reads that as zero. Required, those orders would
+	// be held for a choice the customer was never offered. Optional with no
+	// default, the template's own side_hearts = 1 would stand and every one
+	// of them would grow a heart nobody bought.
+	{key: "step 3", variable: "side_hearts", valueType: "count",
+		optional: true, deflt: "0"},
+
+	// The finished product size. Fixed, not from the order: the customer does
+	// not choose it, and without it the template would use its own defaults -
+	// which happen to agree today and are one edit from not.
+	{variable: "plank_length", valueType: "number", fixed: "200"},
+	{variable: "plank_width", valueType: "number", fixed: "50"},
+	{variable: "total_height", valueType: "number", fixed: "40"},
 }
 
 var lightVariants = []struct{ code, label string }{
@@ -64,6 +113,13 @@ var lightVariants = []struct{ code, label string }{
 
 func main() {
 	dry := flag.Bool("dry-run", false, "print what would be written and stop")
+	// OFF by default, because seeding the mapping is not a description - it is
+	// a SWITCH. A product that maps no fields renders through the Go path that
+	// has printed every plank so far; one that maps any renders from the
+	// registry, and past that point nothing falls back. Worth doing, worth
+	// doing deliberately.
+	mapFields := flag.Bool("map-fields", false,
+		"also seed the field mapping, which MOVES the plank onto the registry render path")
 	flag.Parse()
 
 	_ = godotenv.Load("env/local.env")
@@ -86,20 +142,46 @@ func main() {
 		fmt.Printf("  options: heart_count (%d values), light (%d values)\n",
 			len(heartVariants), len(lightVariants))
 		fmt.Printf("  variants: %d\n", len(heartVariants)*len(lightVariants))
+		fmt.Printf("  every variant prints from %s\n", plankTemplate)
 		fmt.Println("  parts on every lit variant:")
 		for _, p := range lightKit {
 			fmt.Printf("    %-14s %-22s x%g %s\n", p.code, p.name, p.qty, p.unit)
 		}
+		if *mapFields {
+			fmt.Println("\n  field mapping - THIS MOVES THE PLANK ONTO THE REGISTRY RENDER PATH:")
+			for _, m := range plankFieldMap {
+				describeFieldMap(m.key, m.variable, m.valueType, m.fixed, m.deflt, m.optional)
+			}
+		} else {
+			fmt.Println("\n  no field mapping (pass -map-fields to seed it)")
+			fmt.Println("  without it the plank keeps rendering through the Go path, unchanged")
+		}
 		return
 	}
 
-	if err := seed(ctx, store); err != nil {
+	if err := seed(ctx, store, *mapFields); err != nil {
 		log.Fatalf("seed registry: %v", err)
 	}
 	fmt.Println("registry seeded")
 }
 
-func seed(ctx context.Context, store *db.Store) error {
+// describeFieldMap prints one mapped field the way the dry run shows it.
+func describeFieldMap(key, variable, valueType, fixed, deflt string, optional bool) {
+	source := fmt.Sprintf("order %q", key)
+	if fixed != "" {
+		source = fmt.Sprintf("fixed %s", fixed)
+	}
+	note := "required"
+	if optional {
+		note = "optional"
+		if deflt != "" {
+			note = fmt.Sprintf("optional, %s when unanswered", deflt)
+		}
+	}
+	fmt.Printf("    %-14s <- %-28s %-8s (%s)\n", variable, source, valueType, note)
+}
+
+func seed(ctx context.Context, store *db.Store, mapFields bool) error {
 	q := store.Q
 
 	product, err := q.GetProductByCode(ctx, "DNP")
@@ -172,7 +254,7 @@ func seed(ctx context.Context, store *db.Store) error {
 				}
 			}
 
-			if err := ensureDesign(ctx, q, variantID, h.template); err != nil {
+			if err := ensureDesign(ctx, q, variantID, plankTemplate); err != nil {
 				return err
 			}
 			// Only a lit plank carries parts. A plain one is the printed plank
@@ -185,12 +267,56 @@ func seed(ctx context.Context, store *db.Store) error {
 			}
 		}
 	}
+
+	if mapFields {
+		if err := ensureFieldMaps(ctx, store, product.ID); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// ensureFieldMaps writes the plank's mapping, whole and in one transaction.
+//
+// Written whole rather than row by row, like the editor does: the mapping IS
+// the list, and a half-written one is a product that renders a model missing
+// what the customer asked for and exits 0. Clearing and rewriting inside one
+// transaction means a failure leaves the previous mapping - or none, which
+// falls back to the Go path - rather than a partial one.
+func ensureFieldMaps(ctx context.Context, store *db.Store, productID uuid.UUID) error {
+	return store.InTx(ctx, func(q *gen.Queries) error {
+		if err := q.ClearProductFieldMaps(ctx, gen.ClearProductFieldMapsParams{
+			ProductID: productID, Role: "body",
+		}); err != nil {
+			return fmt.Errorf("clear the existing mapping: %w", err)
+		}
+		for i, m := range plankFieldMap {
+			var fixed, deflt *string
+			if m.fixed != "" {
+				v := m.fixed
+				fixed = &v
+			}
+			if m.deflt != "" {
+				v := m.deflt
+				deflt = &v
+			}
+			if err := q.InsertProductFieldMap(ctx, gen.InsertProductFieldMapParams{
+				ID: uuid.New(), ProductID: productID, PropertyKey: m.key,
+				ScadVariable: m.variable, ValueType: m.valueType, Role: "body",
+				Required: !m.optional, FixedValue: fixed, DefaultValue: deflt,
+				Position: int32(i),
+			}); err != nil {
+				return fmt.Errorf("map %s: %w", m.variable, err)
+			}
+			describeFieldMap(m.key, m.variable, m.valueType, m.fixed, m.deflt, m.optional)
+		}
+		return nil
+	})
 }
 
 type valueSpec struct{ code, label string }
 
-func optionValues(in []struct{ code, label, template string }) []valueSpec {
+func optionValues(in []struct{ code, label string }) []valueSpec {
 	out := make([]valueSpec, 0, len(in))
 	for _, v := range in {
 		out = append(out, valueSpec{code: v.code, label: v.label})
@@ -284,15 +410,42 @@ func ensureParts(ctx context.Context, q *gen.Queries) (map[string]uuid.UUID, err
 	return out, nil
 }
 
+// ensureDesign makes `template` the file this variant's body prints from.
+//
+// It used to return as soon as a body design existed, which made this seeder
+// create-only: the six variants were seeded against the three per-heart-count
+// templates, and when one file replaced all three a second run left every
+// variant still naming a file nothing renders from. The registry would then
+// DESCRIBE the plank wrongly - and the moment a field mapping made it the
+// authority, it would have rendered the old geometry.
+//
+// Superseded rather than updated in place, following the table's own rule:
+// "which file printed the planks we shipped last Tuesday" has to stay
+// answerable after somebody changes it.
 func ensureDesign(ctx context.Context, q *gen.Queries, variantID uuid.UUID, template string) error {
 	designs, err := q.ListVariantDesigns(ctx, variantID)
 	if err != nil {
 		return fmt.Errorf("list variant designs: %w", err)
 	}
 	for _, d := range designs {
-		if d.Role == "body" {
+		if d.Role != "body" || d.Status != "active" {
+			continue
+		}
+		if d.TemplateKey != nil && *d.TemplateKey == template {
 			return nil
 		}
+		// An uploaded design (no template key) is somebody's deliberate
+		// override and is left alone - replacing it would throw away a file
+		// this seeder cannot reproduce.
+		if d.TemplateKey == nil {
+			return nil
+		}
+		if err := q.SupersedeVariantDesign(ctx, gen.SupersedeVariantDesignParams{
+			VariantID: variantID, Role: "body",
+		}); err != nil {
+			return fmt.Errorf("retire the previous design: %w", err)
+		}
+		fmt.Printf("  design %s -> %s\n", *d.TemplateKey, template)
 	}
 	key := template
 	if _, err := q.InsertVariantDesign(ctx, gen.InsertVariantDesignParams{

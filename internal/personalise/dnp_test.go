@@ -1,6 +1,7 @@
 package personalise
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,34 +29,44 @@ func liveOrder(hearts string) []production.LineProp {
 	)
 }
 
-// The heart count picks the template, and the three templates are not
-// interchangeable: they differ in margins (40/40, 9/35, 9/9), plate thickness
-// and whether the Fusion shear is applied. Rendering the wrong one produces a
-// plank that is wrong in the hand, not merely different on screen.
-func TestTemplateChosenByHeartCount(t *testing.T) {
+// The heart count used to pick the template - one .scad per count, because the
+// three differed in margins (40/40, 9/35, 9/9), plate thickness and whether the
+// Fusion shear was applied. One file renders all three now, so the count has
+// moved off the choice of file and onto side_hearts.
+//
+// Both halves are asserted together on purpose. Reading the count correctly is
+// still what decides the product in the customer's hand; only where the answer
+// is carried has changed, and a test that stopped checking the count while the
+// template became constant would assert nothing at all.
+func TestHeartCountReadFromTheOrder(t *testing.T) {
 	for _, c := range []struct {
 		value string
-		want  string
 		heart int
 	}{
-		{"2 RED HEART", templateTwoHeart, 2},
-		{"1 RED HEART", templateOneHeart, 1},
+		{"2 RED HEART", 2},
+		{"1 RED HEART", 1},
 		// The store may reword its options; a number anywhere still decides.
-		{"2 PINK HEARTS", templateTwoHeart, 2},
-		{"NO HEART", templateNoHeart, 0},
-		{"none", templateNoHeart, 0},
-		{"0 HEART", templateNoHeart, 0},
+		{"2 PINK HEARTS", 2},
+		{"NO HEART", 0},
+		{"none", 0},
+		{"0 HEART", 0},
 	} {
 		t.Run(c.value, func(t *testing.T) {
 			p, err := ParamsFromProperties(liveOrder(c.value))
 			if err != nil {
 				t.Fatalf("ParamsFromProperties(%q): %v", c.value, err)
 			}
-			if p.Template != c.want {
-				t.Errorf("template = %q, want %q", p.Template, c.want)
+			if p.Template != templateJoinery {
+				t.Errorf("template = %q, want %q", p.Template, templateJoinery)
 			}
 			if p.Hearts != c.heart {
 				t.Errorf("hearts = %d, want %d", p.Hearts, c.heart)
+			}
+			// The count has to REACH OpenSCAD, which the template key used to
+			// carry for free. A plank whose Hearts is right and whose
+			// side_hearts is not renders the wrong product and reports success.
+			if got, want := p.Args()["side_hearts"], strconv.Itoa(c.heart); got != want {
+				t.Errorf("side_hearts = %q, want %q", got, want)
 			}
 		})
 	}
@@ -80,9 +91,9 @@ func TestNoHeartOptionOfferedRendersWithNoHearts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParamsFromProperties = %v, want a no-heart plank", err)
 	}
-	if got.Hearts != 0 || got.Template != templateNoHeart {
+	if got.Hearts != 0 || got.Template != templateJoinery {
 		t.Errorf("hearts = %d, template = %q; want 0 and %q",
-			got.Hearts, got.Template, templateNoHeart)
+			got.Hearts, got.Template, templateJoinery)
 	}
 }
 
@@ -135,8 +146,19 @@ func TestNamesAreUppercasedAndQuoted(t *testing.T) {
 	}
 
 	args := p.Args()
-	if args["NAME_L"] != `"VASU"` {
-		t.Errorf("NAME_L = %s, want a quoted OpenSCAD literal", args["NAME_L"])
+	if args["name1"] != `"VASU"` {
+		t.Errorf("name1 = %s, want a quoted OpenSCAD literal", args["name1"])
+	}
+	if args["name2"] != `"PADMANABH"` {
+		t.Errorf("name2 = %s, want a quoted OpenSCAD literal", args["name2"])
+	}
+	// The old vocabulary must be GONE, not merely joined by the new one.
+	// OpenSCAD accepts an unknown -D silently, so a file driven by both would
+	// render from whichever it happens to read and never say which.
+	for _, stale := range []string{"NAME_L", "NAME_R", "OUT_X", "OUT_Y", "OUT_Z"} {
+		if _, ok := args[stale]; ok {
+			t.Errorf("%s is still passed to the joinery template", stale)
+		}
 	}
 	// The finished size is asserted in TestArgsPinTheFinishedSize.
 }
@@ -158,6 +180,12 @@ func TestQuoteEscapes(t *testing.T) {
 // The finished size must be on every render. Without it the template grows the
 // plate to fit the text and the model comes out at its natural size - about
 // 317mm for a seven-letter pair.
+//
+// STATED, not scaled to. The old templates drew the plank at whatever length
+// the letters needed and Tensor scaled the result into 200x50x40; this one is
+// told the dimensions and lays the letters out inside them. The assertion is
+// unchanged in substance - the numbers have to reach OpenSCAD - but under the
+// names the joinery file actually reads.
 func TestArgsPinTheFinishedSize(t *testing.T) {
 	p, err := ParamsFromProperties(liveOrder("1 RED HEART"))
 	if err != nil {
@@ -165,9 +193,9 @@ func TestArgsPinTheFinishedSize(t *testing.T) {
 	}
 	args := p.Args()
 	for k, want := range map[string]string{
-		"OUT_X": "200",
-		"OUT_Y": "50",
-		"OUT_Z": "40",
+		"plank_length": "200",
+		"plank_width":  "50",
+		"total_height": "40",
 	} {
 		if args[k] != want {
 			t.Errorf("%s = %q, want %q", k, args[k], want)
@@ -331,10 +359,9 @@ func TestParamsFromPropertiesReadsACombosPlankWithNoHearts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParamsFromProperties = %v, want the combo's plank", err)
 	}
-	if got.Hearts != 0 || got.Template != templateNoHeart {
-		t.Errorf("hearts = %d, template = %q; want 0 and %q - neither the second name "+
-			"nor the keychain's engraving is a heart count",
-			got.Hearts, got.Template, templateNoHeart)
+	if got.Hearts != 0 {
+		t.Errorf("hearts = %d, want 0 - neither the second name nor the "+
+			"keychain's engraving is a heart count", got.Hearts)
 	}
 
 	// The names must still resolve - the step numbers moved, not the meaning.
@@ -384,8 +411,8 @@ func TestParamsFromPropertiesDefaultsToNoHeartsWhenNoneAreOffered(t *testing.T) 
 		t.Errorf("names = %q/%q, want KALYANI/KRISHNA - the step numbers moved, not the meaning",
 			got.NameLeft, got.NameRight)
 	}
-	if got.Template != templateNoHeart {
-		t.Errorf("template = %q, want %q", got.Template, templateNoHeart)
+	if got.Template != templateJoinery {
+		t.Errorf("template = %q, want %q", got.Template, templateJoinery)
 	}
 }
 
@@ -448,7 +475,10 @@ func TestIsNameLabel(t *testing.T) {
 // separating the two products is the finished size - which makes getting that
 // size right the whole job.
 func TestPhotoFrameRendersAtItsOwnSize(t *testing.T) {
-	base := Params{Template: templateTwoHeart, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
+	// Starts from the template a real order now resolves to, so this covers
+	// the live path: a plank on the joinery file, forced onto the frame's own
+	// key - and with it, back into the frame's own vocabulary.
+	base := Params{Template: templateJoinery, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
 
 	for _, c := range []struct{ name, sku, product string }{
 		{"by SKU segment", "T3DPS-DNPF-2", ""},
@@ -483,7 +513,7 @@ func TestPhotoFrameRendersAtItsOwnSize(t *testing.T) {
 // "DNPF", and treating the frame as a plank - or a plank as a frame - prints
 // the wrong object at the wrong size.
 func TestPlankIsNotMistakenForAFrame(t *testing.T) {
-	base := Params{Template: templateTwoHeart, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
+	base := Params{Template: templateJoinery, NameLeft: "ASHA", NameRight: "RAVI", Hearts: 2}
 
 	for _, c := range []struct{ name, sku, product string }{
 		{"plain plank SKU", "T3DPS-DNP-2", "Dual Name Plank"},
@@ -495,12 +525,13 @@ func TestPlankIsNotMistakenForAFrame(t *testing.T) {
 			if got.Shape != (Shape{}) && got.Shape != PlankShape {
 				t.Errorf("shape = %+v, want the plank's", got.Shape)
 			}
-			if got.Template != templateTwoHeart {
+			if got.Template != templateJoinery {
 				t.Errorf("template = %q, want it left alone", got.Template)
 			}
 			args := got.Args()
-			if args["OUT_X"] != "200" || args["OUT_Y"] != "50" {
-				t.Errorf("OUT_X/OUT_Y = %q/%q, want 200/50", args["OUT_X"], args["OUT_Y"])
+			if args["plank_length"] != "200" || args["plank_width"] != "50" {
+				t.Errorf("plank_length/plank_width = %q/%q, want 200/50",
+					args["plank_length"], args["plank_width"])
 			}
 		})
 	}

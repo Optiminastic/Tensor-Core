@@ -2,8 +2,6 @@ package httpapi
 
 import (
 	"testing"
-
-	"github.com/Optiminastic/tensor-core/internal/personalise"
 )
 
 // A template's required variables depend on what it is replacing.
@@ -14,10 +12,28 @@ import (
 // whose variables are whatever its own mapping names, and a keychain has no
 // NAME_R: demanding one would refuse every product that is not a plank.
 func TestRequiredParamsDependOnTheKey(t *testing.T) {
+	// Every plank key demands the names - under whichever of the two
+	// vocabularies that key is driven in. The joinery template has never had a
+	// NAME_L and never will; what matters is that a replacement for it still
+	// has to declare the two names the renderer passes, or it renders somebody
+	// else's plank and exits 0.
+	namesFor := map[string][2]string{
+		"dnp_heart_joinery": {"name1", "name2"},
+	}
 	for _, key := range embeddedTemplateKeys {
 		got := requiredParamsFor(key)
-		if len(got) != len(personalise.RequiredTemplateParams) {
-			t.Errorf("%s requires %v; a plank replacement must still declare the names", key, got)
+		names, ok := namesFor[key]
+		if !ok {
+			names = [2]string{"NAME_L", "NAME_R"}
+		}
+		for _, want := range names {
+			if !contains(got, want) {
+				t.Errorf("%s requires %v; a plank replacement must still declare %s",
+					key, got, want)
+			}
+		}
+		if !contains(got, "PART") {
+			t.Errorf("%s requires %v; the renderer passes PART to every template", key, got)
 		}
 	}
 

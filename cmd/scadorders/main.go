@@ -57,6 +57,9 @@ func main() {
 	n := flag.Int("n", 10, "how many of the most recent personalised jobs to render")
 	match := flag.String("match", "",
 		`only jobs whose SKU or product name contains this, case-insensitive (e.g. "photo frame")`)
+	hearts := flag.Int("hearts", -1, "only jobs asking for this many hearts (0, 1 or 2); -1 for any")
+	take := flag.Int("take", 0, "render at most this many of the jobs that match -hearts; 0 for all")
+	png := flag.Bool("png", false, "also write a PNG of each model, so it can be looked at without a slicer")
 	out := flag.String("out", "./scadorders-out", "directory to write the models into")
 	timeout := flag.Duration("timeout", 4*time.Minute, "per-render timeout")
 	flag.Parse()
@@ -88,9 +91,27 @@ func main() {
 		log.Fatalf("create output directory: %v", err)
 	}
 
+	if *hearts >= 0 {
+		// -n is the SIZE OF THE POOL to filter, and -take is how many of the
+		// matches to render. They are separate because the heart count is not
+		// a column - it has to be read out of each line's properties - so
+		// finding three one-heart planks may mean reading two hundred jobs,
+		// and without a cap this would then render all two hundred.
+		matched := withHearts(planks, *hearts)
+		if len(matched) == 0 {
+			log.Fatalf("no job among the %d read asks for %d heart(s)", *n, *hearts)
+		}
+		if *take > 0 && len(matched) > *take {
+			matched = matched[:*take]
+		}
+		log.Printf("%d of %d jobs read ask for %d heart(s); rendering %d",
+			len(withHearts(planks, *hearts)), len(planks), *hearts, len(matched))
+		planks = matched
+	}
+
 	var ok, failed int
 	for _, p := range planks {
-		if err := renderOne(ctx, r, p, *out); err != nil {
+		if err := renderOne(ctx, r, p, *out, *png); err != nil {
 			failed++
 			log.Printf("  %-18s %-28s FAILED: %v", p.JobNumber, p.ProductName, err)
 			continue
@@ -105,7 +126,27 @@ func main() {
 // both parts. Deliberately the same shape as production rather than a
 // shortcut - a harness that assembled the model differently would not be
 // showing what the pipeline would produce.
-func renderOne(ctx context.Context, r *personalise.Renderer, p plank, outDir string) error {
+// withHearts keeps the planks asking for exactly n hearts.
+//
+// Read from the line properties rather than from a column, because that is
+// where the count lives - heartsFromProperties is the same reading the
+// renderer does, so a job selected here is a job that renders that way. A
+// plank whose properties will not parse is simply not one of them.
+func withHearts(planks []plank, n int) []plank {
+	var out []plank
+	for _, p := range planks {
+		params, err := personalise.ParamsFromProperties(p.Props)
+		if err != nil {
+			continue
+		}
+		if params.ForProduct(p.SKU, p.ProductName).Hearts == n {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func renderOne(ctx context.Context, r *personalise.Renderer, p plank, outDir string, png bool) error {
 	params, err := personalise.ParamsFromProperties(p.Props)
 	if err != nil {
 		return fmt.Errorf("read personalisation: %w", err)
@@ -160,9 +201,22 @@ func renderOne(ctx context.Context, r *personalise.Renderer, p plank, outDir str
 	if err := os.WriteFile(path, model, 0o644); err != nil {
 		return err
 	}
-	log.Printf("  %-18s %-28s %-20s %q + %q -> %s",
+	log.Printf("  %-18s %-28s %-20s %q + %q %d heart(s) -> %s",
 		p.JobNumber, truncate(p.ProductName, 28), params.Template,
-		params.NameLeft, params.NameRight, filepath.Base(path))
+		params.NameLeft, params.NameRight, params.Hearts, filepath.Base(path))
+
+	// The picture is the point of the -png flag: a 3MF needs a slicer open to
+	// say anything, and "does this look like the plank we sell?" is the
+	// question a render change is actually being judged on.
+	if png {
+		shot, err := r.RenderPNG(ctx, params.Template, params.Args(), 1400, 520)
+		if err != nil {
+			return fmt.Errorf("render the picture: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(outDir, name+".png"), shot, 0o644); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

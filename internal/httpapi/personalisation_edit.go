@@ -239,7 +239,11 @@ func (s *Server) editableFields(ctx context.Context, job gen.ProductionJob) map[
 
 	out := make(map[string]bool, len(rows))
 	for _, r := range rows {
-		if r.ValueType == "number" || strings.TrimSpace(deref(r.FixedValue)) != "" {
+		// A count is no more editable than a number: both reach OpenSCAD
+		// unquoted, so free text in that box is a render failure rather than a
+		// different plank.
+		if personalise.KindFor(r.ValueType).Unquoted() ||
+			strings.TrimSpace(deref(r.FixedValue)) != "" {
 			continue
 		}
 		// Stored already normalised (migration 0079), and normalised again on
