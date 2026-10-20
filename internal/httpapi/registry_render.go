@@ -147,9 +147,10 @@ func (s *Server) resolveRenderPlan(
 		maps = append(maps, personalise.FieldMap{
 			PropertyKey:  r.PropertyKey,
 			ScadVariable: r.ScadVariable,
-			Numeric:      r.ValueType == "number",
+			Kind:         personalise.KindFor(r.ValueType),
 			Optional:     !r.Required,
 			Fixed:        deref(r.FixedValue),
+			Default:      deref(r.DefaultValue),
 		})
 	}
 

@@ -22,6 +22,48 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
+// ValueKind is how a mapped answer is READ out of the order and written into
+// a -D flag. It decides quoting, and quoting is not cosmetic: an unquoted
+// string is an OpenSCAD syntax error, and a quoted number is a string that
+// fails every arithmetic comparison the script makes against it in silence.
+type ValueKind string
+
+const (
+	// ValueString is the customer's answer, quoted, as they typed it.
+	ValueString ValueKind = "string"
+	// ValueNumber is a value the order already states as a number.
+	ValueNumber ValueKind = "number"
+	// ValueCount is a number read out of the storefront's WORDING.
+	//
+	// The storefront does not sell "1"; it sells "1 RED HEART", and renames
+	// the option freely. Without this a heart count could be mapped as a
+	// string - reaching OpenSCAD as side_hearts="1 RED HEART", which is not a
+	// number - or as a number, which refuses it outright. Neither renders the
+	// plank, which is why the shop's highest-volume product could not be
+	// described in the registry at all.
+	//
+	// Resolved through CountFromWording, the same function the Go plank path
+	// uses, so the two cannot disagree about what "NO HEART" means.
+	ValueCount ValueKind = "count"
+)
+
+// KindFor reads a stored value_type. An unrecognised one is a string, which is
+// the safe reading: it reaches the template quoted and visibly wrong rather
+// than unquoted and a syntax error.
+func KindFor(valueType string) ValueKind {
+	switch ValueKind(strings.TrimSpace(strings.ToLower(valueType))) {
+	case ValueNumber:
+		return ValueNumber
+	case ValueCount:
+		return ValueCount
+	default:
+		return ValueString
+	}
+}
+
+// Unquoted reports whether this kind reaches OpenSCAD without quotes.
+func (k ValueKind) Unquoted() bool { return k == ValueNumber || k == ValueCount }
+
 // FieldMap is one mapped field: the customer's answer feeding one variable.
 type FieldMap struct {
 	// PropertyKey is NORMALISED, as normalisePropKey produces it and as the
@@ -31,10 +73,9 @@ type FieldMap struct {
 	// DeclaresAll is what checks that, because OpenSCAD accepts an unknown -D
 	// in silence and simply never reads it.
 	ScadVariable string
-	// Numeric writes the value unquoted. Not cosmetic: an unquoted string is a
-	// syntax error, and a quoted number is a string that fails every
-	// arithmetic comparison the script makes against it without erroring.
-	Numeric bool
+	// Kind is how the answer is read and written. The zero value is
+	// ValueString, so a caller that sets nothing gets the quoted reading.
+	Kind ValueKind
 	// Fixed is a value that does not come from the order. When set, the order
 	// is not consulted at all and PropertyKey is unused.
 	//
@@ -44,8 +85,22 @@ type FieldMap struct {
 	// wrong product, successfully, which is only caught because no bed is
 	// that big.
 	Fixed string
+	// Default is passed when the order does not answer an OPTIONAL field.
+	//
+	// Different from Fixed, which ignores the order entirely: this is the
+	// answer for an order that is silent, not for every order. The heart
+	// count is why it exists. The 2-STEP plank sells no heart option at all,
+	// so nothing on those lines names one, and the Go path reads that as
+	// zero - while the joinery template's own default is 1. Left to the
+	// template, every plank sold without the option would grow a heart
+	// nobody bought.
+	//
+	// Empty means "pass nothing", which is the old behaviour and still the
+	// right one for a rose the customer did not name.
+	Default string
 	// Optional lets the order not answer this field. The variable is then not
-	// passed at all and the template's own default stands.
+	// passed at all and the template's own default stands - unless Default
+	// says otherwise.
 	//
 	// Not every mapped field is a plank's name. Two of the seven Soulmate
 	// Combos in the database carry no rose name, and holding those orders
@@ -111,7 +166,12 @@ func MappedArgs(props []production.LineProp, maps []FieldMap) (map[string]string
 			// Still typed: a fixed string is quoted and a fixed number is
 			// not, for the same reason a mapped one is. A quoted 200 would
 			// fail every arithmetic comparison the script makes against it.
-			if m.Numeric {
+			if m.Kind.Unquoted() {
+				// A fixed count is checked as a plain number, not through the
+				// wording reader: it is written by whoever configured the
+				// product, not by the storefront, so "2" is what it should
+				// say and "2 PINK HEARTS" in that box is a mistake worth
+				// naming rather than quietly interpreting.
 				if _, err := strconv.ParseFloat(m.Fixed, 64); err != nil {
 					return nil, fmt.Errorf("%s is set to %q, which is not a number",
 						m.ScadVariable, m.Fixed)
@@ -128,27 +188,63 @@ func MappedArgs(props []production.LineProp, maps []FieldMap) (map[string]string
 			// is the commoner one: the storefront sends the property with an
 			// empty value when a customer skips a box rather than omitting it.
 			if m.Optional {
+				if m.Default == "" {
+					continue
+				}
+				// The configured answer for a silent order. Typed exactly as
+				// a mapped value is - a count default is read through the
+				// same wording reader, so "no heart" in that box means what
+				// it means everywhere else.
+				written, err := writeValue(m, m.Default)
+				if err != nil {
+					return nil, fmt.Errorf("the default for %s: %w", m.ScadVariable, err)
+				}
+				args[m.ScadVariable] = written
 				continue
 			}
 			return nil, &MissingFieldError{
 				PropertyKey: m.PropertyKey, ScadVariable: m.ScadVariable,
 			}
 		}
-		if m.Numeric {
-			// Refused rather than passed through. OpenSCAD would take
-			// `-D HEARTS=two` as an undefined variable reference and render
-			// something, exit 0, and leave nobody any the wiser.
-			if _, err := strconv.ParseFloat(value, 64); err != nil {
-				return nil, fmt.Errorf(
-					"%s expects a number for %s and this order says %q",
-					m.ScadVariable, m.PropertyKey, value)
-			}
-			args[m.ScadVariable] = value
-			continue
+		written, err := writeValue(m, value)
+		if err != nil {
+			return nil, fmt.Errorf("%w for %s and this order says %q",
+				err, m.PropertyKey, value)
 		}
-		args[m.ScadVariable] = Quote(value)
+		args[m.ScadVariable] = written
 	}
 	return args, nil
+}
+
+// writeValue turns one answer into the text that follows `-D name=`.
+//
+// Shared by the mapped value and the default so the two cannot be typed
+// differently: a count default of "no heart" has to mean zero exactly as a
+// customer's "NO HEART" does, and a number default that is not a number has
+// to be refused exactly as a customer's would be.
+func writeValue(m FieldMap, value string) (string, error) {
+	switch m.Kind {
+	case ValueNumber:
+		// Refused rather than passed through. OpenSCAD would take
+		// `-D HEARTS=two` as an undefined variable reference and render
+		// something, exit 0, and leave nobody any the wiser.
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return "", fmt.Errorf("%s expects a number", m.ScadVariable)
+		}
+		return value, nil
+	case ValueCount:
+		// "1 RED HEART" is the storefront's wording for 1. Wording that names
+		// no number at all is refused for the same reason a non-number is: a
+		// count guessed from an option nobody anticipated renders the wrong
+		// product and exits 0.
+		n, err := CountFromWording(value)
+		if err != nil {
+			return "", fmt.Errorf("%s expects a count", m.ScadVariable)
+		}
+		return strconv.Itoa(n), nil
+	default:
+		return Quote(value), nil
+	}
 }
 
 // MatchesKey reports whether a property label means a given canonical key.

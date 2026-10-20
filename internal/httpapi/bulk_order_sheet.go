@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/personalise"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -120,7 +121,7 @@ func columnsFromMaps(rows []gen.ListFieldMapsForProductsRow) []sheetColumn {
 			// the label the renderer already looks for.
 			PropertyKey: strings.TrimSpace(r.PropertyKey),
 			Role:        r.Role,
-			Numeric:     r.ValueType == "number",
+			Numeric:     personalise.KindFor(r.ValueType).Unquoted(),
 			Required:    r.Required,
 		})
 	}
@@ -180,7 +181,7 @@ func buildProductSheets(
 				Header:   columnHeader(r.ScadVariable, r.Role, seen[key] > 1),
 				Variable: strings.TrimSpace(r.ScadVariable),
 				Role:     r.Role,
-				Numeric:  r.ValueType == "number",
+				Numeric:  personalise.KindFor(r.ValueType).Unquoted(),
 				Required: r.Required,
 			})
 		}

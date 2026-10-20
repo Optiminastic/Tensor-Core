@@ -436,24 +436,32 @@ func heartCandidates(props []production.LineProp, keys []string) []string {
 	return out
 }
 
-// heartCount reads a count out of the storefront's wording.
+// CountFromWording reads a count out of the storefront's wording.
 //
-// A number anywhere in the string wins, so the store can rename "2 RED HEART"
-// to "2 PINK HEARTS" without breaking this. Wording that names no number is
-// only read as zero when it actually says so - anything else is an error
-// rather than a guess.
-func heartCount(value string) (int, error) {
+// The storefront does not sell "1" - it sells "1 RED HEART", and it renames
+// the option to "2 PINK HEARTS" or "NO HEART" whenever the catalogue changes.
+// A number anywhere in the string wins, so a rename does not break this.
+// Wording that names no number is only read as zero when it actually SAYS so;
+// anything else is an error rather than a guess, because a count invented from
+// wording nobody anticipated prints the wrong product and exits 0.
+//
+// Exported because the registry needs the same reading. A field mapped with
+// value_type 'count' is resolved through this very function, so a plank
+// described in the registry and a plank rendered by the Go path cannot
+// disagree about what "NO HEART" means - see MappedArgs.
+//
+// NOT clamped here. "A plank takes 0, 1 or 2" is the plank's rule, not
+// arithmetic's, and the registry may one day describe a product that offers
+// four of something. heartCount applies that bound.
+func CountFromWording(value string) (int, error) {
 	v := strings.ToLower(strings.TrimSpace(value))
 	if v == "" {
-		return 0, fmt.Errorf("the heart option is blank")
+		return 0, fmt.Errorf("the option is blank")
 	}
 	if m := digits.FindString(v); m != "" {
 		n, err := strconv.Atoi(m)
 		if err != nil {
-			return 0, fmt.Errorf("could not read a heart count from %q", value)
-		}
-		if n < 0 || n > 2 {
-			return 0, fmt.Errorf("a plank takes 0, 1 or 2 hearts; this order asks for %d", n)
+			return 0, fmt.Errorf("could not read a count from %q", value)
 		}
 		return n, nil
 	}
@@ -462,7 +470,27 @@ func heartCount(value string) (int, error) {
 			return 0, nil
 		}
 	}
-	return 0, fmt.Errorf("could not read a heart count from %q", value)
+	return 0, fmt.Errorf("could not read a count from %q", value)
+}
+
+// heartCount is CountFromWording with the plank's own bound applied.
+//
+// Three hearts is not a product. A count past two means the option was read
+// out of the wrong field - which is exactly what happened when "STEP 3 -Second
+// Name" was matched as a heart option and a name produced a number - so it
+// stops rather than rendering a plank nobody sells.
+func heartCount(value string) (int, error) {
+	n, err := CountFromWording(value)
+	if err != nil {
+		if strings.TrimSpace(value) == "" {
+			return 0, fmt.Errorf("the heart option is blank")
+		}
+		return 0, fmt.Errorf("could not read a heart count from %q", value)
+	}
+	if n < 0 || n > 2 {
+		return 0, fmt.Errorf("a plank takes 0, 1 or 2 hearts; this order asks for %d", n)
+	}
+	return n, nil
 }
 
 // templateForHearts picks the .scad file for a heart count.

@@ -25,7 +25,7 @@ func TestMappedArgsBuildsTheFlags(t *testing.T) {
 		[]FieldMap{
 			{PropertyKey: "step 4 first name", ScadVariable: "NAME_L"},
 			{PropertyKey: "step 5 second name", ScadVariable: "NAME_R"},
-			{PropertyKey: "step 3", ScadVariable: "HEARTS", Numeric: true},
+			{PropertyKey: "step 3", ScadVariable: "HEARTS", Kind: ValueNumber},
 		},
 	)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestMappedArgsHoldsTheJobAndNamesTheField(t *testing.T) {
 func TestMappedArgsRefusesANumberThatIsNotOne(t *testing.T) {
 	_, err := MappedArgs(
 		lineProps("STEP 3-", "2 RED HEART"),
-		[]FieldMap{{PropertyKey: "step 3", ScadVariable: "HEARTS", Numeric: true}},
+		[]FieldMap{{PropertyKey: "step 3", ScadVariable: "HEARTS", Kind: ValueNumber}},
 	)
 	if err == nil {
 		// OpenSCAD would read -D HEARTS=2 RED HEART as an undefined variable,
@@ -228,7 +228,7 @@ func TestMappedArgsStillHoldsWhenARequiredFieldIsMissingBesideAnOptionalOne(t *t
 func TestMappedArgsRefusesABadNumberEvenWhenOptional(t *testing.T) {
 	_, err := MappedArgs(
 		lineProps("STEP 3-", "two"),
-		[]FieldMap{{PropertyKey: "step 3", ScadVariable: "HEARTS", Numeric: true, Optional: true}},
+		[]FieldMap{{PropertyKey: "step 3", ScadVariable: "HEARTS", Kind: ValueNumber, Optional: true}},
 	)
 	if err == nil {
 		t.Fatal("an optional field answered with a non-number was accepted")
@@ -248,8 +248,8 @@ func TestMappedArgsUsesAFixedValueWithoutConsultingTheOrder(t *testing.T) {
 		lineProps("OUT X", "999", "STEP 2 - First Name-", "AYUSH"),
 		[]FieldMap{
 			{PropertyKey: "step 2 first name", ScadVariable: "NAME_L"},
-			{ScadVariable: "OUT_X", Numeric: true, Fixed: "200"},
-			{PropertyKey: "out x", ScadVariable: "OUT_Y", Numeric: true, Fixed: "50"},
+			{ScadVariable: "OUT_X", Kind: ValueNumber, Fixed: "200"},
+			{PropertyKey: "out x", ScadVariable: "OUT_Y", Kind: ValueNumber, Fixed: "50"},
 		},
 	)
 	if err != nil {
@@ -283,7 +283,7 @@ func TestMappedArgsQuotesAFixedString(t *testing.T) {
 // it as an undefined reference, render, and exit 0.
 func TestMappedArgsRefusesAFixedNumberThatIsNotOne(t *testing.T) {
 	_, err := MappedArgs(nil, []FieldMap{
-		{ScadVariable: "OUT_X", Numeric: true, Fixed: "two hundred"},
+		{ScadVariable: "OUT_X", Kind: ValueNumber, Fixed: "two hundred"},
 	})
 	if err == nil {
 		t.Fatal("a fixed non-number was accepted")
@@ -294,7 +294,7 @@ func TestMappedArgsRefusesAFixedNumberThatIsNotOne(t *testing.T) {
 // able to hold a job.
 func TestMappedArgsNeverHoldsOnAFixedField(t *testing.T) {
 	if _, err := MappedArgs(nil, []FieldMap{
-		{ScadVariable: "OUT_X", Numeric: true, Fixed: "200"},
+		{ScadVariable: "OUT_X", Kind: ValueNumber, Fixed: "200"},
 	}); err != nil {
 		t.Errorf("an order with no properties held on a fixed field: %v", err)
 	}

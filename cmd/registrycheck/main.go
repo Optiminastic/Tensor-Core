@@ -71,12 +71,33 @@ func main() {
 		}
 		sort.Strings(names)
 
+		// THE SKU IS THE LOOKUP, and it was missing from this verdict.
+		//
+		// FindProductBySKU joins product_variants on the SKU an order line
+		// carries - a product whose variants carry none can never be found,
+		// however completely it is configured. DNP is exactly that: six
+		// variants on (heart count x light), none with a SKU, because the
+		// storefront sells the plank on (colour x light) and its SKU
+		// -DNPWL-BLU - does not encode a heart count at all.
+		//
+		// Reported "RENDERS from registry" all the same, which is how a
+		// fully seeded template and mapping looked correct while every order
+		// quietly went down the Go path instead.
+		withSKU := 0
+		for _, v := range variants {
+			if v.Sku != nil && strings.TrimSpace(*v.Sku) != "" && v.Status == "active" {
+				withSKU++
+			}
+		}
+
 		verdict := "RENDERS from registry"
 		switch {
 		case withTemplate == 0:
 			verdict = "no  - no design row names a template"
 		case len(maps) == 0:
 			verdict = "no  - no field maps"
+		case withSKU == 0:
+			verdict = "no  - no active variant carries a SKU, so no order line can find this product"
 		}
 		fmt.Printf("\n%-14s %-34s variants=%-4d designs=%-3d (with template %d) fieldmaps=%-3d\n",
 			p.Code, p.Name, len(variants), len(designs), withTemplate, len(maps))

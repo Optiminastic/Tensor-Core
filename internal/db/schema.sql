@@ -904,10 +904,15 @@ CREATE TABLE product_field_maps (
     -- plank needs OUT_X=200 to reach the product's finished size, and without
     -- it renders at its natural 377 mm: the wrong product, successfully.
     fixed_value   varchar(120),
+    -- What to pass when the order does not answer an optional field - see
+    -- migration 0112. Without it an unanswered heart count fell through to the
+    -- template's own default of 1, and every plank sold without a heart option
+    -- would have grown one.
+    default_value varchar(120),
     position      integer      NOT NULL DEFAULT 0,
     created_at    timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT product_field_maps_value_type_check
-        CHECK (value_type IN ('string', 'number')),
+        CHECK (value_type IN ('string', 'number', 'count')),
     -- One source or the other. A row that is half a mapping renders a model
     -- missing what it names, and exits 0.
     CONSTRAINT ck_product_field_map_source CHECK (

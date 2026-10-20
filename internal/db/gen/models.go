@@ -513,6 +513,7 @@ type ProductFieldMap struct {
 	Role         string
 	Required     bool
 	FixedValue   *string
+	DefaultValue *string
 	Position     int32
 	CreatedAt    pgtype.Timestamptz
 }

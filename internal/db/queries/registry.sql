@@ -261,18 +261,20 @@ ORDER BY role, position, lower(scad_variable);
 -- scripts and both are kept.
 INSERT INTO product_field_maps (
     id, product_id, property_key, scad_variable, value_type, role, required,
-    fixed_value, position
+    fixed_value, default_value, position
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('property_key'),
     sqlc.arg('scad_variable'), sqlc.arg('value_type'), sqlc.arg('role'),
-    sqlc.arg('required'), sqlc.narg('fixed_value'), sqlc.arg('position')
+    sqlc.arg('required'), sqlc.narg('fixed_value'), sqlc.narg('default_value'),
+    sqlc.arg('position')
 )
 ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
-SET property_key = EXCLUDED.property_key,
-    value_type   = EXCLUDED.value_type,
-    required     = EXCLUDED.required,
-    fixed_value  = EXCLUDED.fixed_value,
-    position     = EXCLUDED.position;
+SET property_key  = EXCLUDED.property_key,
+    value_type    = EXCLUDED.value_type,
+    required      = EXCLUDED.required,
+    fixed_value   = EXCLUDED.fixed_value,
+    default_value = EXCLUDED.default_value,
+    position      = EXCLUDED.position;
 
 -- name: ClearProductFieldMaps :exec
 -- Empties ONE design file's mapping so it can be written whole.

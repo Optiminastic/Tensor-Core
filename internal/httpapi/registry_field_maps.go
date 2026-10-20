@@ -43,6 +43,9 @@ type fieldMapResponse struct {
 	PropertyKey  string `json:"property_key"`
 	ScadVariable string `json:"scad_variable"`
 	ValueType    string `json:"value_type"`
+	// DefaultValue is what an OPTIONAL field passes when the order is silent.
+	// Distinct from fixed_value, which ignores the order entirely.
+	DefaultValue string `json:"default_value"`
 	Position     int32  `json:"position"`
 }
 
@@ -50,13 +53,19 @@ type fieldMapWriteRequest struct {
 	Maps []struct {
 		PropertyKey  string `json:"property_key" binding:"required,max=120"`
 		ScadVariable string `json:"scad_variable" binding:"required,max=64"`
-		ValueType    string `json:"value_type" binding:"required,oneof=string number"`
+		// "count" reads a number out of the storefront's WORDING - "1 RED
+		// HEART" is 1 - which is the only way a heart option can feed a
+		// numeric variable. See personalise.ValueCount.
+		ValueType string `json:"value_type" binding:"required,oneof=string number count"`
 		// Absent means required, so a caller written before optional fields
 		// existed keeps the behaviour it was written against.
 		Optional bool `json:"optional"`
 		// FixedValue replaces the order field. A row carrying one ignores
 		// property_key entirely.
 		FixedValue string `json:"fixed_value"`
+		// DefaultValue is used only when an optional field is unanswered, so
+		// unlike FixedValue the order is still consulted first.
+		DefaultValue string `json:"default_value"`
 	} `json:"maps"`
 }
 
@@ -102,7 +111,7 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 			Role: r.Role, Required: r.Required,
 			PropertyKey: r.PropertyKey, ScadVariable: r.ScadVariable,
 			ValueType: r.ValueType, Position: r.Position,
-			FixedValue: deref(r.FixedValue),
+			FixedValue: deref(r.FixedValue), DefaultValue: deref(r.DefaultValue),
 		})
 	}
 	c.JSON(http.StatusOK, out)
@@ -112,6 +121,9 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 type fieldMapEntry struct {
 	key, variable, valueType string
 	required                 bool
+	// deflt is passed when an OPTIONAL field is unanswered. Spelt without the
+	// 'a' because `default` is a keyword.
+	deflt string
 	// fixed is a value that does not come from the order. When set, key is
 	// unused - see migration 0082.
 	fixed string
@@ -164,9 +176,20 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 			return
 		}
 		seen[strings.ToLower(variable)] = true
+		// A default on a REQUIRED field can never be reached - a required
+		// field that is unanswered holds the job - so it is refused rather
+		// than saved somewhere it will quietly do nothing.
+		deflt := strings.TrimSpace(m.DefaultValue)
+		if deflt != "" && !m.Optional {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s has a default but is required. A required field that the order "+
+					"does not answer holds the job, so the default would never be used. "+
+					"Mark it optional, or drop the default.", variable))
+			return
+		}
 		entries = append(entries, fieldMapEntry{
 			key: key, variable: variable, valueType: m.ValueType,
-			required: !m.Optional, fixed: fixed,
+			required: !m.Optional, fixed: fixed, deflt: deflt,
 		})
 	}
 
@@ -194,10 +217,16 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 				v := e.fixed
 				fixed = &v
 			}
+			var deflt *string
+			if e.deflt != "" {
+				v := e.deflt
+				deflt = &v
+			}
 			if err := q.InsertProductFieldMap(ctx, gen.InsertProductFieldMapParams{
 				ID: uuid.New(), ProductID: product.ID, PropertyKey: e.key,
 				ScadVariable: e.variable, ValueType: e.valueType,
-				Role: role, Required: e.required, FixedValue: fixed, Position: int32(i),
+				Role: role, Required: e.required, FixedValue: fixed,
+				DefaultValue: deflt, Position: int32(i),
 			}); err != nil {
 				return err
 			}
