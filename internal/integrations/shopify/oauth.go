@@ -17,7 +17,20 @@ import (
 )
 
 // OrderImportScopes are the scopes the inbound order-import app requests.
-const OrderImportScopes = "read_orders,read_products"
+//
+// read_customers is what makes an abandoned checkout reachable. Without it
+// AbandonedCheckout.customer fails the WHOLE query with ACCESS_DENIED, so the
+// name and phone could only be read off the checkout's addresses - and a
+// customer who abandoned before the address step has none. Shopify's own admin
+// showed a phone that Tensor could not see, because Shopify was reading the
+// customer record.
+//
+// SCOPES ARE GRANTED AT INSTALL. Adding one here does nothing to a shop that
+// is already connected: its token carries the scopes it was issued with, and
+// the app has to be reinstalled before the new one takes effect. ExchangeCode
+// records what was actually granted, which is how a stale connection is told
+// apart from a fresh one.
+const OrderImportScopes = "read_orders,read_products,read_customers"
 
 // shopDomainPattern validates a store domain before it is used in a URL, so a
 // crafted value cannot redirect the OAuth flow elsewhere.
