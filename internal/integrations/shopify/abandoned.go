@@ -86,17 +86,22 @@ type AbandonedCheckout struct {
 	// RecoveryURL restores the customer's exact basket. It is the one genuinely
 	// actionable field here, which is why it is not optional in the UI.
 	RecoveryURL string `json:"recovery_url"`
-	// CustomerName and Phone come off the billing address, falling back to the
-	// shipping one. Either may be empty: a customer can reach the contact step
-	// having given an email only, and the phone comes back null for those.
-	CustomerName string              `json:"customer_name"`
-	Phone        string              `json:"phone"`
-	City         string              `json:"city"`
-	Province     string              `json:"province"`
-	TotalAmount  string              `json:"total_amount"`
-	Currency     string              `json:"currency"`
-	ItemCount    int                 `json:"item_count"`
-	LineItems    []AbandonedLineItem `json:"line_items"`
+	// CustomerName and Phone come off the CUSTOMER RECORD first and the
+	// addresses second - the order Shopify's own admin reads them in. Either
+	// may still be empty: a guest checkout has no customer record, and one
+	// abandoned before the address step has no address.
+	CustomerName string `json:"customer_name"`
+	Phone        string `json:"phone"`
+	// Email has ONE source. The abandoned-checkout type carries no email
+	// field at all, so this is empty for every guest checkout and for every
+	// shop still on a token issued without read_customers.
+	Email       string              `json:"email"`
+	City        string              `json:"city"`
+	Province    string              `json:"province"`
+	TotalAmount string              `json:"total_amount"`
+	Currency    string              `json:"currency"`
+	ItemCount   int                 `json:"item_count"`
+	LineItems   []AbandonedLineItem `json:"line_items"`
 	// CompletedAt is set once the buyer finished the checkout after all, which
 	// happens later than it sounds: measured on the live store, one cart
 	// converted six days after it was abandoned.
@@ -139,6 +144,7 @@ query AbandonedCheckouts($first: Int!, $after: String, $query: String) {
       discountCodes
       taxesIncluded
       customAttributes { key value }
+      customer { firstName lastName displayName email phone }
       totalPriceSet { shopMoney { amount currencyCode } }
       subtotalPriceSet { shopMoney { amount } }
       totalLineItemsPriceSet { shopMoney { amount } }
@@ -158,6 +164,21 @@ query AbandonedCheckouts($first: Int!, $after: String, $query: String) {
     }
   }
 }`
+
+// abandonedCustomer is the customer record behind a checkout.
+//
+// NEEDS read_customers. Asking for it without the scope fails the whole query
+// with ACCESS_DENIED rather than returning a null field, so a shop still on an
+// older token must be reinstalled - see OrderImportScopes.
+//
+// It is the only source of an EMAIL: the abandoned-checkout type carries none.
+type abandonedCustomer struct {
+	FirstName   string `json:"firstName"`
+	LastName    string `json:"lastName"`
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email"`
+	Phone       string `json:"phone"`
+}
 
 type abandonedAddress struct {
 	FirstName string `json:"firstName"`
@@ -179,20 +200,24 @@ type moneyBag struct {
 }
 
 type abandonedNode struct {
-	ID                     string              `json:"id"`
-	Name                   string              `json:"name"`
-	CreatedAt              string              `json:"createdAt"`
-	CompletedAt            string              `json:"completedAt"`
-	AbandonedCheckoutURL   string              `json:"abandonedCheckoutUrl"`
-	LineItemsQuantity      int                 `json:"lineItemsQuantity"`
-	UpdatedAt              string              `json:"updatedAt"`
-	Note                   string              `json:"note"`
-	DiscountCodes          []string            `json:"discountCodes"`
-	TaxesIncluded          bool                `json:"taxesIncluded"`
-	CustomAttributes       []CheckoutAttribute `json:"customAttributes"`
-	SubtotalPriceSet       moneyBag            `json:"subtotalPriceSet"`
-	TotalLineItemsPriceSet moneyBag            `json:"totalLineItemsPriceSet"`
-	TotalDiscountSet       moneyBag            `json:"totalDiscountSet"`
+	ID                   string              `json:"id"`
+	Name                 string              `json:"name"`
+	CreatedAt            string              `json:"createdAt"`
+	CompletedAt          string              `json:"completedAt"`
+	AbandonedCheckoutURL string              `json:"abandonedCheckoutUrl"`
+	LineItemsQuantity    int                 `json:"lineItemsQuantity"`
+	UpdatedAt            string              `json:"updatedAt"`
+	Note                 string              `json:"note"`
+	DiscountCodes        []string            `json:"discountCodes"`
+	TaxesIncluded        bool                `json:"taxesIncluded"`
+	CustomAttributes     []CheckoutAttribute `json:"customAttributes"`
+	// Nil for a GUEST checkout, which is most of them - and null too on a
+	// token issued before read_customers was granted, though that case fails
+	// the whole query rather than reaching here.
+	Customer               *abandonedCustomer `json:"customer"`
+	SubtotalPriceSet       moneyBag           `json:"subtotalPriceSet"`
+	TotalLineItemsPriceSet moneyBag           `json:"totalLineItemsPriceSet"`
+	TotalDiscountSet       moneyBag           `json:"totalDiscountSet"`
 	// Nullable in Shopify's schema, unlike the three above.
 	TotalTaxSet   *moneyBag `json:"totalTaxSet"`
 	TotalPriceSet struct {
@@ -336,11 +361,28 @@ func toAbandonedCheckout(n abandonedNode) AbandonedCheckout {
 	if t, err := time.Parse(time.RFC3339, n.UpdatedAt); err == nil {
 		out.UpdatedAt = t
 	}
-	out.CustomerName = strings.TrimSpace(
-		pick(func(a *abandonedAddress) string { return a.FirstName }) + " " +
-			pick(func(a *abandonedAddress) string { return a.LastName }),
-	)
-	out.Phone = pick(func(a *abandonedAddress) string { return a.Phone })
+	// THE CUSTOMER RECORD FIRST, the addresses second.
+	//
+	// This is the order Shopify's own admin reads them in, and it is why a row
+	// could say "No phone" beside an admin screen showing one: a checkout
+	// abandoned before the address step has no address to read, while the
+	// customer record has had the number since they created the account.
+	//
+	// Still falls through to the addresses, and that is not belt-and-braces: a
+	// guest checkout has no customer record at all, and those are a large part
+	// of this list.
+	out.CustomerName = strings.TrimSpace(nameOf(n.Customer))
+	if out.CustomerName == "" {
+		out.CustomerName = strings.TrimSpace(
+			pick(func(a *abandonedAddress) string { return a.FirstName }) + " " +
+				pick(func(a *abandonedAddress) string { return a.LastName }),
+		)
+	}
+	out.Email = customerField(n.Customer, func(c abandonedCustomer) string { return c.Email })
+	out.Phone = customerField(n.Customer, func(c abandonedCustomer) string { return c.Phone })
+	if out.Phone == "" {
+		out.Phone = pick(func(a *abandonedAddress) string { return a.Phone })
+	}
 	if out.Phone == "" {
 		// THE NUMBER THE CUSTOMER TYPED THEMSELVES, when no address carries
 		// one. This store asks for a WhatsApp number at the personalisation
@@ -412,6 +454,32 @@ func nonNil[T any](items []T) []T {
 		return []T{}
 	}
 	return items
+}
+
+// customerField reads one field off the customer record, or "" when there is
+// no record. Nil-safe because a guest checkout has none, and that is the
+// ordinary case rather than an error.
+func customerField(c *abandonedCustomer, get func(abandonedCustomer) string) string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(get(*c))
+}
+
+// nameOf is the customer's name as Shopify would show it.
+//
+// displayName FIRST, because Shopify builds it the way the merchant expects -
+// including for a customer with only one name filled in, where joining first
+// and last would leave a stray space. The parts are the fallback for a record
+// that has them without a display name.
+func nameOf(c *abandonedCustomer) string {
+	if c == nil {
+		return ""
+	}
+	if n := strings.TrimSpace(c.DisplayName); n != "" {
+		return n
+	}
+	return strings.TrimSpace(strings.TrimSpace(c.FirstName) + " " + strings.TrimSpace(c.LastName))
 }
 
 // whatsAppAttribute is the number the customer typed at checkout, if any.
