@@ -52,6 +52,31 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 	// Safe without a lock of its own because the whole turn runs inside
 	// withWhatsAppConversation, which holds this customer's conversation row:
 	// two taps from one person cannot be in here at once.
+	// CLOSE THE DEAD ONES FIRST, or a link that ran out yesterday blocks
+	// every link this person is ever sent again.
+	//
+	// The unique index holds over status IN ('sent','opened') and says
+	// NOTHING about expiry - a predicate cannot call now(). The read below
+	// does filter on expiry. So an expired-but-'sent' row is invisible here
+	// and still occupies the slot: this mints a new link, sends it, and then
+	// fails to settle it on the index. River retries the whole job, which
+	// sends the message AGAIN, for ever.
+	//
+	// That is not hypothetical. It span on production on 2026-10-26, sending
+	// one customer the same damage message every few seconds:
+	//
+	//	duplicate key value violates unique constraint "ux_damage_links_live"
+	//
+	// ExpireDamageLinks existed for exactly this - its comment says "so the
+	// partial unique index lets the same person ask again" - and had no
+	// caller outside a test. Sweeping here rather than on a timer means the
+	// slot is always clear at the one moment it has to be.
+	if _, err := q.ExpireDamageLinks(ctx); err != nil {
+		// Not fatal: the claim below may still succeed, and refusing to send
+		// a damage form because a cleanup failed helps nobody.
+		t.logger.Warn("could not expire old damage links", "brand", t.brand, "error", err)
+	}
+
 	if _, err := q.GetLiveDamageLinkForWaID(ctx, gen.GetLiveDamageLinkForWaIDParams{
 		BrandSlug: t.brand, WaID: t.waID,
 	}); err == nil {
@@ -104,17 +129,32 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 		return river.JobCancel(sendErr)
 	}
 
+	// THE MESSAGE HAS GONE. From here on, failing the job re-sends it.
+	//
+	// Every error below is therefore CANCELLED rather than returned: a row
+	// that did not get updated is a tidying problem somebody can see in the
+	// logs, and a customer receiving the same message every few seconds is
+	// not. The link still works - the public page accepts a 'pending' row.
 	status := res.Status
 	if _, err := q.SettleDamageLink(ctx, gen.SettleDamageLinkParams{
 		ID: link.ID, Status: "sent", MessageID: &res.MessageID,
 	}); err != nil {
-		return err
+		t.logger.Error("damage link sent but not settled; not retrying, "+
+			"because a retry would send it again",
+			"brand", t.brand, "link", link.ID, "error", err)
+		return river.JobCancel(err)
 	}
-	_, err = recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
+	if _, err = recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
 		Brand: t.brand, WaID: t.waID, MessageID: res.MessageID, Direction: directionOut,
 		Kind: "cta_url", Body: said.text(noticeDamageLinkBody), Status: &status, At: time.Now(),
-	})
-	return err
+	}); err != nil {
+		// Same rule as the settle above: the message is already with the
+		// customer, so a retry costs them a duplicate and gains us a row.
+		t.logger.Error("damage link sent but not recorded; not retrying",
+			"brand", t.brand, "link", link.ID, "error", err)
+		return river.JobCancel(err)
+	}
+	return nil
 }
 
 // remindDamageLink answers a second tap from somebody who already has a form.
