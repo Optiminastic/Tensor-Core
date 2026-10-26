@@ -13,6 +13,21 @@ const (
 	OptionExplore = "explore"
 	OptionTeam    = "team"
 
+	// The first question: which kind of customer this is.
+	//
+	// IT ASKS BEFORE IT OFFERS, at the shop's instruction. Both answers open
+	// the same menu today, so the choice is a record rather than a branch -
+	// it is in the conversation log, and either answer can be pointed at its
+	// own message later by changing where it opens on the Bot Messages page.
+	OptionReturning = "returning_customer"
+	OptionNew       = "new_customer"
+
+	// OptionFeedback hands the chat to a person, like OptionTeam, but says
+	// something different when it does: somebody offering praise or a
+	// complaint should not be answered with "our team will reply shortly"
+	// as though they had asked a question.
+	OptionFeedback = "feedback"
+
 	// FAQ rows. One canned answer each: no state, no flow.
 	FaqCOD        = "faq_cod"
 	FaqDelivery   = "faq_delivery"
@@ -52,7 +67,20 @@ const (
 )
 
 const (
-	Greeting = "👋 Hi! Welcome to *The 3D Printing Store*.\n\nHow can we help you today?"
+	Greeting = "👋 Hi! Welcome to *The 3D Printing Store*.\n\n" +
+		"Have you ordered from us before?"
+
+	// MenuIntro is the second message, shown once they have answered.
+	//
+	// IT DOES NOT THANK THEM FOR ANSWERING. Two messages in a row that both
+	// sound like a greeting read as a bot talking to itself; this one gets
+	// straight to what it can do.
+	MenuIntro = "How can we help you today?"
+
+	// FeedbackThanks is said when somebody picks Feedback, and the bot then
+	// stops replying so a person can read what comes next.
+	FeedbackThanks = "We would love to hear it 🙂 Please type your feedback here " +
+		"and a member of our team will read it personally."
 
 	FaqIntro = "Sure — here is what we are asked most. 👇\n\nTap *See questions* and pick one."
 
@@ -134,6 +162,72 @@ const (
 	DamageLinkAlready = "You already have a damage form open — scroll up in this chat and tap *Open*.\n\n" +
 		"It stays open for 24 hours, and you can add more photos to it any time before then."
 
+	// --- The reprint. ---
+	//
+	// Sent the moment an admin or support decides the outcome, so the customer
+	// stops wondering. It carries no question and no link: the shop has taken
+	// the whole thing on, and the one useful thing to say is that there is
+	// nothing for them to do.
+	//
+	// THE THREE TICKS ARE THE POINT. "We will reprint it" leaves a customer
+	// with a damaged parcel in their hall asking three questions - do I pay,
+	// do I send this one back, do I need to arrange anything - and support
+	// then answers them one at a time. Answering them before they are asked is
+	// the difference between a message and a reply.
+	//
+	// It says "as soon as it is ready" rather than a date, because nothing has
+	// been printed yet and a date invented here is a promise the floor did not
+	// make. The tracking message when it ships is the one that carries a
+	// number.
+	ReprintScheduled = "We're really sorry your order arrived damaged. 🙏\n\n" +
+		"We've scheduled a *reprint* of your product — our team is making it again now.\n\n" +
+		"✅ Nothing to pay\n" +
+		"✅ Nothing you need to do\n" +
+		"✅ No need to return the damaged piece\n\n" +
+		"We'll message you here with tracking as soon as your new one ships. " +
+		"Thank you for your patience."
+
+	// --- The reverse pickup. ---
+	//
+	// Rs 100 is the customer's money, so the message says the whole deal
+	// before it asks for anything: what a reverse pickup IS in one line, what
+	// they pay, what we pay, and what happens in between. A customer who only
+	// learns about the second leg after paying for the first has been sold
+	// something they did not agree to.
+
+	ReversePaymentRequest = "We can arrange a *reverse pickup* — our courier collects the " +
+		"damaged product from your address and brings it to our warehouse.\n\n" +
+		"Here is how it works:\n" +
+		"1️⃣ *₹100 from you* for the pickup from your home to our warehouse\n" +
+		"2️⃣ We repair the product at our warehouse\n" +
+		"3️⃣ *We pay* to send it back to your home\n\n" +
+		"Please pay *₹100* by scanning this QR with any UPI app, then " +
+		"*send us a screenshot of the payment here* and our team will arrange " +
+		"the pickup."
+
+	// ReversePaymentRequestNoQR is the same ask with the QR promised rather
+	// than attached, for a brand whose public base URL is not set.
+	//
+	// IT STILL ASKS. Dropping the message because the image is missing would
+	// leave a report that says the customer was asked and a customer who was
+	// not - and somebody can always send the QR by hand.
+	ReversePaymentRequestNoQR = "We can arrange a *reverse pickup* — our courier collects the " +
+		"damaged product from your address and brings it to our warehouse.\n\n" +
+		"Here is how it works:\n" +
+		"1️⃣ *₹100 from you* for the pickup from your home to our warehouse\n" +
+		"2️⃣ We repair the product at our warehouse\n" +
+		"3️⃣ *We pay* to send it back to your home\n\n" +
+		"Our team will send you the payment QR here in a moment. Once you have " +
+		"paid, *send us a screenshot of the payment* and we will arrange the pickup."
+
+	// ReversePickupBooked is sent when an admin books the courier. It gives
+	// the one instruction the customer has to act on - keep it packed - and
+	// does not promise a date, because the courier has not given us one.
+	ReversePickupBooked = "✅ Your reverse pickup is booked.\n\n" +
+		"Please keep the product packed and ready. Our courier partner will " +
+		"collect it from your address, and we will message you here as soon as " +
+		"it reaches our warehouse."
+
 	// DamageLinkFailed is said when the form could not be minted. It names
 	// the way through rather than apologising twice: the customer still has
 	// a damaged parcel and still needs somebody to look at it.
@@ -155,6 +249,14 @@ const (
 		"🎁 20% OFF on orders above ₹2000!"
 
 	Handoff = "Thanks! Our team will reply to you here shortly. 🙂"
+
+	// HandedOverTap answers a button pressed while a person has the chat.
+	//
+	// IT DOES NOT APOLOGISE AND DOES NOT PROMISE A TIME. It says who has it
+	// and gives the one way back, because the escape is a typed word and the
+	// customer has just demonstrated they are tapping, not typing.
+	HandedOverTap = "Our team has this one and will reply here. 🙂\n\n" +
+		"Type *MENU* if you would like the options again."
 
 	StopAck = "You won't receive any more automated messages from us. Type *START* to turn them back on."
 

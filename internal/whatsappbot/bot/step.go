@@ -76,7 +76,7 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 	switch {
 	case word == stopKeyword:
 		c.OptedOut = true
-		return reset(c), []Action{SendText{Text: content.StopAck}}
+		return reset(c), []Action{SendText{Text: content.StopAck, Key: KeyStopAck}}
 	case word == startKeyword:
 		c.OptedOut = false
 		return menu(c)
@@ -86,6 +86,25 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 
 	if c.State == StateHuman {
 		if word != menuKeyword && !humanExpired(c, now) {
+			// A TAP IS ANSWERED; TYPING IS NOT.
+			//
+			// The silence exists so the bot does not talk over the person now
+			// handling the chat, and for anything the customer TYPES that is
+			// still right - they are mid-conversation with a human.
+			//
+			// A tap is different. It is the customer pressing the bot's own
+			// button and getting nothing at all, which reads as broken rather
+			// than as "somebody is on it" - and leaves them with no way back,
+			// because the escape is a typed word and a tap carries no words.
+			// So this says who has it and how to reopen the menu.
+			//
+			// THE STATE DOES NOT MOVE. The human still has the chat; this is
+			// a signpost, not a handback.
+			if _, tapped := ev.(ButtonIn); tapped {
+				return c, []Action{SendText{
+					Text: content.HandedOverTap, Key: KeyHandedOverTap,
+				}}
+			}
 			return c, nil
 		}
 		c = reset(c)
@@ -105,7 +124,7 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 		return menu(c)
 	}
 	if humanKeywords[word] {
-		return handoff(c, now, content.Handoff)
+		return handoff(c, now, content.Handoff, KeyHandoff)
 	}
 
 	if c.State == StateAwaitTrackOrder {
@@ -150,7 +169,7 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 	switch id {
 	case content.OptionTrack:
 		c.State = StateAwaitTrackOrder
-		return c, []Action{SendText{Text: content.AskOrderNumber}}
+		return c, []Action{SendText{Text: content.AskOrderNumber, Key: KeyAskOrderNumber}}
 	case content.OptionDamage:
 		// A LINK, NOT A CONVERSATION, and the conversation stays idle behind
 		// it. The flow this replaced asked for the order number, looked it
@@ -159,7 +178,14 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 		// hours. Sending a form leaves the menu working.
 		return c, []Action{SendDamageLink{}}
 	case content.OptionTeam:
-		return handoff(c, now, content.Handoff)
+		return handoff(c, now, content.Handoff, KeyHandoff)
+	case content.OptionFeedback:
+		// A HANDOFF LIKE OptionTeam, with different words. Somebody offering
+		// praise or a complaint answered with "our team will reply shortly"
+		// has been treated as though they asked a question; this invites the
+		// thing they came to say, and then gets out of the way so a person
+		// reads it.
+		return handoff(c, now, content.FeedbackThanks, KeyFeedbackThanks)
 	}
 	// ANYTHING ELSE IS A QUESTION, not a mistake. The shop adds and removes
 	// FAQ rows from the dashboard, so an id this package has never seen is
@@ -169,13 +195,18 @@ func onMenuChoice(c Conversation, id string, now time.Time) (Conversation, []Act
 }
 
 func withMenuHint(text string) SendText {
-	return SendText{Text: text + "\n\n" + content.MenuHint}
+	// The answer itself comes from the shop's own tree and is already their
+	// words; only the hint under it is an editable message of ours.
+	return SendText{
+		Text:         text + "\n\n" + content.MenuHint,
+		WithMenuHint: true,
+	}
 }
 
 func onOrderNumber(c Conversation, ev Event, purpose Purpose, now time.Time) (Conversation, []Action) {
 	t, ok := ev.(TextIn)
 	if !ok {
-		return c, []Action{SendText{Text: content.AskOrderNumber}}
+		return c, []Action{SendText{Text: content.AskOrderNumber, Key: KeyAskOrderNumber}}
 	}
 	number := parseOrderNumber(t.Text)
 	if number == "" {
@@ -204,13 +235,19 @@ func onConfirmation(c Conversation, r ConfirmationReply) (Conversation, []Action
 		return c, []Action{
 			RecordConfirmation{OrderID: r.OrderID, Status: ConfirmationConfirmed},
 			TagOrder{OrderID: r.OrderID, Tag: content.TagConfirmed},
-			SendText{Text: fmt.Sprintf(content.ConfirmThanks, r.OrderName)},
+			SendText{
+				Text: fmt.Sprintf(content.ConfirmThanks, r.OrderName),
+				Key:  KeyConfirmThanks, Args: []string{r.OrderName},
+			},
 		}
 	}
 	c = reset(c)
 	c.State = StateAwaitChangeText
 	c.Ctx = Context{OrderID: r.OrderID, OrderName: r.OrderName}
-	return c, []Action{SendText{Text: fmt.Sprintf(content.AskChangeText, r.OrderName)}}
+	return c, []Action{SendText{
+		Text: fmt.Sprintf(content.AskChangeText, r.OrderName),
+		Key:  KeyAskChangeText, Args: []string{r.OrderName},
+	}}
 }
 
 func onChangeText(c Conversation, ev Event, now time.Time) (Conversation, []Action) {
@@ -220,11 +257,12 @@ func onChangeText(c Conversation, ev Event, now time.Time) (Conversation, []Acti
 		text = strings.TrimSpace(t.Text)
 	}
 	if text == "" {
-		return c, []Action{SendText{Text: content.AskChangeTextAgain}}
+		return c, []Action{SendText{Text: content.AskChangeTextAgain, Key: KeyAskChangeTextAgain}}
 	}
 
 	orderID, orderName := c.Ctx.OrderID, c.Ctx.OrderName
-	c, reply := handoff(c, now, fmt.Sprintf(content.ChangeReceived, orderName))
+	c, reply := handoff(c, now,
+		fmt.Sprintf(content.ChangeReceived, orderName), KeyChangeReceived, orderName)
 	return c, append([]Action{
 		AppendNote{OrderID: orderID, Note: changeNotePrefix + text},
 		TagOrder{OrderID: orderID, Tag: content.TagChangeRequested},
@@ -236,7 +274,7 @@ func onChangeText(c Conversation, ev Event, now time.Time) (Conversation, []Acti
 func miss(c Conversation, now time.Time, retryText string) (Conversation, []Action) {
 	c.Ctx.Misses++
 	if c.Ctx.Misses >= MaxMisses {
-		return handoff(c, now, content.Handoff)
+		return handoff(c, now, content.Handoff, KeyHandoff)
 	}
 	return c, []Action{SendText{Text: retryText}}
 }
@@ -250,11 +288,19 @@ func menu(c Conversation) (Conversation, []Action) {
 	return reset(c), []Action{SendMenu{}}
 }
 
-func handoff(c Conversation, now time.Time, text string) (Conversation, []Action) {
+// handoff stops the bot replying and says so.
+//
+// args ARE NOT OPTIONAL DECORATION. They are what the shop's own wording for
+// this message gets rendered with: a key passed without them renders a
+// rewritten "order %s" as "%!s(MISSING)" in a customer's WhatsApp. Any caller
+// passing a key for a message that takes a placeholder must pass the value too.
+func handoff(
+	c Conversation, now time.Time, text, key string, args ...string,
+) (Conversation, []Action) {
 	c = reset(c)
 	c.State = StateHuman
 	c.HumanSince = &now
-	return c, []Action{SendText{Text: text}}
+	return c, []Action{SendText{Text: text, Key: key, Args: args}}
 }
 
 func toHumanByStaff(c Conversation, now time.Time) Conversation {

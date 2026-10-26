@@ -14,11 +14,28 @@ func TestNoOverridesMeansTheCodeIsUnchanged(t *testing.T) {
 	if !ok {
 		t.Fatal("the default tree has no root")
 	}
-	if len(root.Options) != 3 {
-		t.Fatalf("the greeting carries %d buttons", len(root.Options))
+	// TWO, and they are the new/returning question. The menu of things the
+	// bot can do is the message BEHIND them now.
+	if len(root.Options) != 2 {
+		t.Fatalf("the greeting carries %d buttons, want the two customer answers",
+			len(root.Options))
 	}
-	if _, found := tree.node(content.QuestionsNode); !found {
-		t.Error("the questions list is missing")
+	// Both answers have to land somewhere, or the first message is a dead end.
+	for _, o := range root.Options {
+		if o.Action != content.ActionOpen || o.Target != content.MenuNode {
+			t.Errorf("%q does not open the menu (action %q, target %q)",
+				o.Title, o.Action, o.Target)
+		}
+	}
+	for _, key := range []string{content.MenuNode, content.QuestionsNode} {
+		if _, found := tree.node(key); !found {
+			t.Errorf("the %q message is missing", key)
+		}
+	}
+	// Damage moved off the first message and into the questions list; it must
+	// still be reachable, because losing it loses the whole damage flow.
+	if d, found := tree.option(content.OptionDamage); !found || d.Action != content.ActionDamage {
+		t.Error("the damage option is no longer in the tree")
 	}
 
 	cod, found := tree.option(content.FaqCOD)
@@ -41,7 +58,8 @@ func TestEveryDefaultOptionDoesSomething(t *testing.T) {
 				if o.Target == "" {
 					t.Errorf("%q points nowhere", o.Title)
 				}
-			case content.ActionDamage, content.ActionTrack, content.ActionTeam:
+			case content.ActionDamage, content.ActionTrack, content.ActionTeam,
+				content.ActionFeedback:
 			default:
 				t.Errorf("%q has no action", o.Title)
 			}

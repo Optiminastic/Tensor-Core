@@ -33,6 +33,13 @@ const (
 	ActionDamage ActionKind = "damage"
 	ActionTrack  ActionKind = "track"
 	ActionTeam   ActionKind = "team"
+	// ActionFeedback hands the chat over like ActionTeam and says something
+	// else when it does. Its OWN action rather than a second option sharing
+	// "team", because a code action's id is what the state machine listens
+	// for - two options claiming the same action could not both be heard,
+	// and on the Bot Messages page they would read as the same thing while
+	// behaving differently.
+	ActionFeedback ActionKind = "feedback"
 )
 
 // CodeAction reports whether an action is one the state machine performs,
@@ -55,6 +62,8 @@ func CodeActionID(a ActionKind) string {
 		return OptionTrack
 	case ActionTeam:
 		return OptionTeam
+	case ActionFeedback:
+		return OptionFeedback
 	}
 	return ""
 }
@@ -110,6 +119,7 @@ type Node struct {
 // RootNode is the message any unrecognised message gets.
 const (
 	RootNode      = "main"
+	MenuNode      = "menu"
 	QuestionsNode = "questions"
 )
 
@@ -121,25 +131,54 @@ const (
 func DefaultTree() []Node {
 	return []Node{
 		{
+			// THE FIRST MESSAGE ASKS A QUESTION rather than offering help, at
+			// the shop's instruction: who they are shapes everything a person
+			// says next, and a bot that leads with three choices has already
+			// guessed.
+			//
+			// Both answers open the SAME menu today. That is deliberate and
+			// not a shortcut - the answer is recorded in the conversation
+			// either way, and pointing one of them at its own message is a
+			// change on the Bot Messages page rather than in here.
 			Key:  RootNode,
 			Kind: NodeButtons,
 			Body: Greeting,
 			Options: []NodeOption{
-				{ID: OptionDamage, Title: "Damage concern", Action: ActionDamage},
+				{ID: OptionReturning, Title: "Old customer", Action: ActionOpen, Target: MenuNode},
+				{ID: OptionNew, Title: "New customer", Action: ActionOpen, Target: MenuNode},
+			},
+		},
+		{
+			// WHAT THE BOT CAN ACTUALLY DO, in three buttons - which is all
+			// WhatsApp allows, so anything else has to live under Other.
+			Key:  MenuNode,
+			Kind: NodeButtons,
+			Body: MenuIntro,
+			Options: []NodeOption{
 				{
 					ID: OptionExplore, Title: "Explore products", Action: ActionURL,
 					Target: "https://the3dprintingstore.in/", ButtonLabel: "Visit store",
 					Answer: Explore,
 				},
+				{ID: OptionFeedback, Title: "Feedback", Action: ActionFeedback},
 				{ID: OptionOther, Title: "Other", Action: ActionOpen, Target: QuestionsNode},
 			},
 		},
 		{
+			// DAMAGE SITS FIRST, and is the only row here that starts a flow
+			// rather than answering a question. It used to be a button on the
+			// first message; it is one tap further away now, so it leads.
+			//
+			// TEN ROWS IS META'S CAP and this list is at it. A new question
+			// means retiring one, which the Bot Messages page says when you
+			// try.
 			Key:        QuestionsNode,
 			Kind:       NodeList,
 			Body:       FaqIntro,
 			ListButton: "See questions",
 			Options: []NodeOption{
+				{ID: OptionDamage, Title: "Damage concern",
+					Description: "Something arrived broken", Action: ActionDamage},
 				{ID: FaqDelivery, Title: "Delivery time", Description: "When will my order reach me?",
 					Action: ActionAnswer, Answer: FaqDeliveryAnswer},
 				{ID: FaqCOD, Title: "Cash on delivery", Description: "Do you accept COD?",

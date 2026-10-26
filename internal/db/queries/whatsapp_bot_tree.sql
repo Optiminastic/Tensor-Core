@@ -57,3 +57,31 @@ SET title        = excluded.title,
 -- whole tree and this clears what was there first. Options cascade from
 -- their node, so one statement is enough.
 DELETE FROM whatsapp_bot_nodes WHERE brand_slug = sqlc.arg('brand_slug');
+
+-- name: ListBotMessages :many
+-- This brand's rewritten one-off messages.
+--
+-- READ ON EVERY SEND, deliberately. The table holds a handful of rows behind
+-- its primary key, and the alternative - a cache - is how an edit saved on the
+-- Bot Messages page keeps sending the old wording until somebody restarts the
+-- API. "Changes apply to the next message" is the promise the page makes.
+SELECT message_key, body FROM whatsapp_bot_messages
+WHERE brand_slug = sqlc.arg('brand_slug');
+
+-- name: UpsertBotMessage :exec
+-- Stores one rewritten message, replacing whatever was there.
+INSERT INTO whatsapp_bot_messages (brand_slug, message_key, body, updated_by)
+VALUES (sqlc.arg('brand_slug'), sqlc.arg('message_key'), sqlc.arg('body'), sqlc.narg('updated_by'))
+ON CONFLICT (brand_slug, message_key) DO UPDATE
+SET body       = excluded.body,
+    updated_by = excluded.updated_by,
+    updated_at = now();
+
+-- name: DeleteBotMessage :exec
+-- Puts one message back to the wording in the binary.
+--
+-- A DELETE, NOT A COPY OF THE DEFAULT. Storing the default as a row would
+-- freeze it: a later improvement to the shipped wording would never reach a
+-- brand that had once pressed "reset".
+DELETE FROM whatsapp_bot_messages
+WHERE brand_slug = sqlc.arg('brand_slug') AND message_key = sqlc.arg('message_key');
