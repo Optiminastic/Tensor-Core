@@ -22,7 +22,6 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
-	"github.com/Optiminastic/tensor-core/internal/whatsappbot/content"
 	"github.com/Optiminastic/tensor-core/internal/whatsappbot/phone"
 )
 
@@ -59,6 +58,11 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 		return t.remindDamageLink(ctx, q)
 	}
 
+	// Read once for this send: the covering message and the button caption
+	// are one message, and a shop that rewrote both should not get one old
+	// half and one new one.
+	said := t.notices(ctx)
+
 	token, hash, err := newPersonalisationToken()
 	if err != nil {
 		return err
@@ -87,7 +91,7 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 	}
 
 	res, sendErr := t.wa.SendCTAURL(ctx, t.waID,
-		content.DamageLinkBody, content.DamageLinkButton, url)
+		said.text(noticeDamageLinkBody), said.text(noticeDamageLinkButton), url)
 	if sendErr != nil {
 		// Released, not marked failed: nothing was sent, so the customer
 		// should be able to ask again rather than be blocked by a row that
@@ -108,20 +112,22 @@ func (t *botTurn) sendDamageLink(ctx context.Context, q *gen.Queries) error {
 	}
 	_, err = recordWhatsAppMessage(ctx, q, whatsappMessageRecord{
 		Brand: t.brand, WaID: t.waID, MessageID: res.MessageID, Direction: directionOut,
-		Kind: "cta_url", Body: content.DamageLinkBody, Status: &status, At: time.Now(),
+		Kind: "cta_url", Body: said.text(noticeDamageLinkBody), Status: &status, At: time.Now(),
 	})
 	return err
 }
 
 // remindDamageLink answers a second tap from somebody who already has a form.
 func (t *botTurn) remindDamageLink(ctx context.Context, q *gen.Queries) error {
-	res, err := t.wa.SendText(ctx, t.waID, content.DamageLinkAlready)
-	return t.recordSend(ctx, q, res, err, "text", content.DamageLinkAlready)
+	body := t.notices(ctx).text(noticeDamageLinkAlready)
+	res, err := t.wa.SendText(ctx, t.waID, body)
+	return t.recordSend(ctx, q, res, err, "text", body)
 }
 
 // sendDamageFallback is the chat flow of last resort: ask for the order
 // number and the photographs here, as the old bot did.
 func (t *botTurn) sendDamageFallback(ctx context.Context, q *gen.Queries) error {
-	res, err := t.wa.SendText(ctx, t.waID, content.DamageLinkFailed)
-	return t.recordSend(ctx, q, res, err, "text", content.DamageLinkFailed)
+	body := t.notices(ctx).text(noticeDamageLinkFailed)
+	res, err := t.wa.SendText(ctx, t.waID, body)
+	return t.recordSend(ctx, q, res, err, "text", body)
 }

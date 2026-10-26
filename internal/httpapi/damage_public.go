@@ -62,16 +62,32 @@ const (
 	damageUploader = "customer"
 )
 
-// damageFileTypes is what the form accepts.
+// damageFileExt is what the form accepts, and what each one actually IS.
 //
-// IMAGES AND VIDEO ONLY, checked on the declared type AND the extension. A
-// customer photographing a parcel sends one of these; anything else on an
-// unauthenticated upload route is somebody else's idea.
-var damageFileExt = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".heic": true,
-	".heif": true, ".gif": true,
-	".mp4": true, ".mov": true, ".m4v": true, ".3gp": true, ".webm": true,
-	".avi": true, ".mkv": true,
+// IMAGES AND VIDEO ONLY: a customer photographing a parcel sends one of
+// these, and anything else on an unauthenticated upload route is somebody
+// else's idea.
+//
+// THE EXTENSION IS THE GATE, AND THE TYPE HERE IS THE ANSWER. The browser's
+// own Content-Type is not trustworthy enough to refuse on. Chrome on Windows
+// builds it from the registry, and a machine with no registry entry for .heic
+// - which is most of them - sends "application/octet-stream" for an ordinary
+// iPhone photograph. Refusing that told a customer "please send a photo or a
+// video" about a photo, which is the least actionable sentence this form can
+// produce. Verified on 2026-10-26: the same .heic is refused as
+// octet-stream and accepted as image/heic.
+//
+// So the declared type is only ever used when it is already an image or a
+// video; otherwise the extension's own type is stored. That is also the safer
+// direction - a .jpg declaring itself text/html gets stored as image/jpeg
+// rather than served back as markup.
+var damageFileExt = map[string]string{
+	".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+	".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
+	".gif": "image/gif",
+	".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v",
+	".3gp": "video/3gpp", ".webm": "video/webm", ".avi": "video/x-msvideo",
+	".mkv": "video/x-matroska",
 }
 
 func (s *Server) registerDamagePublic(r *gin.Engine) {
@@ -180,11 +196,19 @@ func (s *Server) publicDamageUpload(c *gin.Context) {
 		return
 	}
 	ext := strings.ToLower(path.Ext(header.Filename))
-	contentType := strings.ToLower(strings.TrimSpace(header.Header.Get("Content-Type")))
-	if !damageFileExt[ext] || !isDamageMedia(contentType) {
+	known, ok := damageFileExt[ext]
+	if !ok {
 		detail(c, http.StatusUnprocessableEntity,
 			"Please send a photo or a video of the damage.")
 		return
+	}
+	// The browser's word is taken only when it says image or video. See
+	// damageFileExt: an octet-stream here is an ordinary iPhone photograph on
+	// a Windows machine, not an attack.
+	contentType := known
+	if declared := strings.ToLower(strings.TrimSpace(
+		header.Header.Get("Content-Type"))); isDamageMedia(declared) {
+		contentType = declared
 	}
 
 	// ASKED AFTER THE FILE IS CHECKED, not before. A misconfigured process

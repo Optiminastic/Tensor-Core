@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +19,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
+	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/whatsappbot/bot"
 	"github.com/Optiminastic/tensor-core/internal/whatsappbot/content"
 )
@@ -195,7 +198,22 @@ func TestIntegrationDamageUploadRefusals(t *testing.T) {
 		{"a video", "clip.mp4", "video/mp4", http.StatusServiceUnavailable},
 		{"a web page", "page.html", "text/html", http.StatusUnprocessableEntity},
 		{"a script wearing an image type", "run.sh", "image/jpeg", http.StatusUnprocessableEntity},
-		{"an image extension over another type", "shot.jpg", "application/zip", http.StatusUnprocessableEntity},
+
+		// AN IPHONE PHOTOGRAPH ON A WINDOWS MACHINE. Chrome builds the
+		// Content-Type from the registry, and a machine with no entry for
+		// .heic - most of them - sends octet-stream for an ordinary photo.
+		// This was refused with "please send a photo or a video", about a
+		// photo, and cost a customer their whole damage report.
+		{"a HEIC with no type the browser knows", "IMG_0042.heic",
+			"application/octet-stream", http.StatusServiceUnavailable},
+		{"a photo the browser could not name at all", "shot.jpg", "",
+			http.StatusServiceUnavailable},
+		// Accepted on the EXTENSION and stored as image/jpeg, not as the zip
+		// it claims to be. The declared type is only believed when it is
+		// already an image or a video, so this cannot smuggle a served type
+		// in - and the file route sends X-Content-Type-Options: nosniff.
+		{"an image extension over another type", "shot.jpg", "application/zip",
+			http.StatusServiceUnavailable},
 	}
 	for _, tc := range cases {
 		rr := serve(h.router, uploadRequest(t, path, tc.filename, tc.contentType, 32))
@@ -353,6 +371,35 @@ func uploadRequest(t *testing.T, path, filename, contentType string, size int) *
 	return req
 }
 
+func seedFinishedJob(t *testing.T, store *db.Store, orderID uuid.UUID, number string, batch *uuid.UUID) uuid.UUID {
+	t.Helper()
+	return insertDamageTestJob(t, store, orderID, number, "completed", batch, "completed")
+}
+
+func seedJobWithStatus(t *testing.T, store *db.Store, orderID uuid.UUID, number, status string) uuid.UUID {
+	t.Helper()
+	return insertDamageTestJob(t, store, orderID, number, status, nil, "pending")
+}
+
+func insertDamageTestJob(
+	t *testing.T, store *db.Store, orderID uuid.UUID,
+	number, status string, batch *uuid.UUID, station string,
+) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	order := orderID
+	if _, err := store.Q.InsertProductionJob(context.Background(), gen.InsertProductionJobParams{
+		ID: id, JobNumber: number, OrderID: &order, BatchID: batch,
+		Description: "Dual Name Plank", Quantity: 1, Status: status,
+		AssemblyStatus: station, QcStatus: station, PackagingStatus: station,
+		PersonalisationStatus: production.PersonalisationNotRequired,
+		Colours:               []byte("[]"),
+	}); err != nil {
+		t.Fatalf("seed job %s: %v", number, err)
+	}
+	return id
+}
+
 func countRows(t *testing.T, h *waHarness, query string) int {
 	t.Helper()
 	var n int
@@ -381,4 +428,101 @@ func defaultNode(t *testing.T, key string) content.Node {
 	}
 	t.Fatalf("the default tree has no %q node", key)
 	return content.Node{}
+}
+
+// Re-queueing the print for a reprint.
+//
+// THE JOBS ALREADY EXIST. The order was printed once, so a reprint puts those
+// jobs back in the queue rather than creating a second set - which would
+// double the work on the floor and the count on every board that totals jobs
+// per order.
+//
+// It runs even though the courier could not be booked, and that ordering is
+// the point: the plank has to be made either way. A courier can be booked by
+// hand afterwards and a customer can be rung, but a replacement nobody started
+// printing is days behind before anyone notices.
+func TestIntegrationAReprintRequeuesTheFinishedJobs(t *testing.T) {
+	h := newWAHarness(t, nil)
+	orderID := paidOrder(t, h.store, "T3DPS-115766", 7002)
+	ctx := context.Background()
+
+	// A real bed, because the re-queue has to take the job OFF it: that bed
+	// has already printed, and leaving the job attached would put a reprint
+	// on a plate that is finished.
+	bed, err := h.store.Q.InsertBatch(ctx, gen.InsertBatchParams{
+		ID: uuid.New(), BatchNumber: "BATCH-DMG-1", Status: "completed",
+	})
+	if err != nil {
+		t.Fatalf("seed batch: %v", err)
+	}
+	finished := seedFinishedJob(t, h.store, orderID, "JOB-115766-1", &bed.ID)
+	// A job still ON A BED must not be touched: a reprint decided while the
+	// original is mid-print would otherwise reset something somebody is
+	// standing in front of.
+	printing := seedJobWithStatus(t, h.store, orderID, "JOB-115766-2", "in_production")
+
+	h.tap(t, content.OptionDamage)
+	token := strings.TrimPrefix(h.meta.last(t).URL, waFrontendURL+"/d/")
+	attachDamageFile(t, h, token, "image/jpeg")
+	if rr := postDamageJSON(h.router, "/public/damage/"+token, "115766"); rr.Code != http.StatusOK {
+		t.Fatalf("submit = %d %s", rr.Code, rr.Body.String())
+	}
+
+	support := h.minter.mint(t, []string{
+		auth.WhatsAppRead.Key(), auth.WhatsAppReply.Key(), auth.DamageResolve.Key(),
+	})
+	base := "/brands/" + waBrand + "/damage-reports"
+	rr := doJSON(h.router, http.MethodGet, base, support, nil)
+	var list struct {
+		Items []damageReportJSON `json:"items"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("list = %d %s", rr.Code, rr.Body.String())
+	}
+
+	decide := doJSON(h.router, http.MethodPost, base+"/"+list.Items[0].ID+"/resolution", support,
+		map[string]any{"kind": "reprint"})
+	if decide.Code != http.StatusOK {
+		t.Fatalf("decide = %d %s", decide.Code, decide.Body.String())
+	}
+
+	// The finished job is back in the queue, off its bed, with every station
+	// reset: a reprinted plank has to be assembled, checked and packed again.
+	back, err := h.store.Q.GetProductionJobByID(ctx, finished)
+	if err != nil {
+		t.Fatalf("read the re-queued job: %v", err)
+	}
+	if back.Status != "queued" {
+		t.Errorf("status = %q, want queued", back.Status)
+	}
+	if back.BatchID != nil {
+		t.Error("the job is still on its old bed, which has already printed")
+	}
+	for name, got := range map[string]string{
+		"assembly": back.AssemblyStatus, "qc": back.QcStatus, "packaging": back.PackagingStatus,
+	} {
+		if got == "completed" {
+			t.Errorf("%s is still 'completed'; a reprinted plank needs checking again", name)
+		}
+	}
+
+	// The one mid-print is untouched.
+	mid, err := h.store.Q.GetProductionJobByID(ctx, printing)
+	if err != nil {
+		t.Fatalf("read the in-production job: %v", err)
+	}
+	if mid.Status != "in_production" {
+		t.Errorf("a job on a bed was reset to %q underneath whoever is printing it", mid.Status)
+	}
+
+	// The count reaches the screen, so support sees work was actually
+	// scheduled rather than assuming it.
+	var decided struct {
+		Requeued int `json:"requeued"`
+	}
+	_ = json.Unmarshal(decide.Body.Bytes(), &decided)
+	if decided.Requeued != 1 {
+		t.Errorf("requeued = %d, want 1 - the finished job only", decided.Requeued)
+	}
 }
