@@ -44,8 +44,11 @@ func TestIntegrationSKUPipelinesTablePages(t *testing.T) {
 			continue
 		}
 		for k, family := range machineFamilies() {
+			// A pointer now that the column is nullable: a row with no SKU is
+			// a PRODUCT's default, which every one of its SKUs inherits.
+			skuArg := sku
 			if _, err := store.Q.UpsertSKUPipeline(ctx, gen.UpsertSKUPipelineParams{
-				ID: uuid.New(), Sku: sku, MachineFamily: family, PipelineID: int32(100 + k), PipelineName: "p",
+				ID: uuid.New(), Sku: &skuArg, MachineFamily: family, PipelineID: int32(100 + k), PipelineName: "p",
 			}); err != nil {
 				t.Fatalf("map %s: %v", sku, err)
 			}

@@ -28,13 +28,19 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
-// maxCustomerFieldRunes bounds one edited value.
+// maxCustomerFieldRunes bounds one edited value when the product says nothing.
 //
 // Runes, not bytes: a name in Devanagari is multi-byte and clipping on bytes
 // would cut a character in half. Twelve is the plank's own limit
-// (personalise.MaxNameLen) and the tightest of the products here; a longer
-// value simply does not fit the model, so it is refused in the form rather
-// than thirty seconds later in a render that fails.
+// (personalise.MaxNameLen); a longer value simply does not fit the model, so
+// it is refused in the form rather than thirty seconds later in a render that
+// fails.
+//
+// THE DEFAULT, NOT THE RULE. It used to be the rule, applied to every product
+// because the plank was the tightest of them - which held until the lotus
+// holder, whose 100 x 30 mm box wraps two lines and takes about sixteen. A
+// product states its own in the registry (product_field_maps.max_runes) and
+// this is what a field that states nothing gets.
 const maxCustomerFieldRunes = 12
 
 // editableKeys are the property keys a customer may change.
@@ -127,8 +133,20 @@ type fieldRules struct {
 	registry map[string]bool
 	// open is true for a product Tensor does not render, where every text
 	// property the customer filled in is theirs to correct.
-	open     bool
+	open bool
+	// maxRunes is the cap for a field the product says nothing about.
 	maxRunes int
+	// perField is what the registry says for the fields that state a limit,
+	// by normalised property key. Absent is maxRunes.
+	perField map[string]int
+}
+
+// limitFor is how long this field's value may be.
+func (r fieldRules) limitFor(label string) int {
+	if n, ok := r.perField[personalise.NormaliseKey(label)]; ok && n > 0 {
+		return n
+	}
+	return r.maxRunes
 }
 
 // canEdit answers for one field.
@@ -152,9 +170,11 @@ func (r fieldRules) canEdit(label, value string) bool {
 
 // fieldRulesFor reads the rules for one job.
 func (s *Server) fieldRulesFor(ctx context.Context, job gen.ProductionJob) fieldRules {
-	registry := s.editableFields(ctx, job)
+	registry, limits := s.editableFields(ctx, job)
 	if registry != nil {
-		return fieldRules{registry: registry, maxRunes: maxCustomerFieldRunes}
+		return fieldRules{
+			registry: registry, maxRunes: maxCustomerFieldRunes, perField: limits,
+		}
 	}
 	if s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {
 		// A rendered product with no field map: the plank, still on the
@@ -221,23 +241,31 @@ func looksLikeURL(value string) bool {
 //
 // Returns nil when the product is not in the registry, and the caller falls
 // back to the hardcoded list.
-func (s *Server) editableFields(ctx context.Context, job gen.ProductionJob) map[string]bool {
+// It also returns each field's own length limit, where the product states
+// one - the same rows, read once.
+func (s *Server) editableFields(
+	ctx context.Context, job gen.ProductionJob,
+) (editable map[string]bool, limits map[string]int) {
 	sku := strings.TrimSpace(deref(job.Sku))
 	if sku == "" {
-		return nil
+		return nil, nil
 	}
 	product, err := s.store.Q.FindProductBySKU(ctx, sku)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	rows, err := s.store.Q.ListProductFieldMaps(ctx, gen.ListProductFieldMapsParams{
-		ProductID: product.ID, Role: partRoleOf(job),
-	})
-	if err != nil || len(rows) == 0 {
-		return nil
+	// THE SAME MAPPING THE RENDERER WILL USE, variant override included.
+	//
+	// If this read the product's mapping while the render read the variant's,
+	// the page would offer a field the model never consumes, or refuse one it
+	// does - and the customer would be editing a box that changes nothing.
+	rows := s.fieldMapsFor(ctx, product.ID, sku, partRoleOf(job))
+	if len(rows) == 0 {
+		return nil, nil
 	}
 
 	out := make(map[string]bool, len(rows))
+	caps := make(map[string]int, len(rows))
 	for _, r := range rows {
 		// A count is no more editable than a number: both reach OpenSCAD
 		// unquoted, so free text in that box is a render failure rather than a
@@ -248,9 +276,13 @@ func (s *Server) editableFields(ctx context.Context, job gen.ProductionJob) map[
 		}
 		// Stored already normalised (migration 0079), and normalised again on
 		// the way in, so the two sides cannot drift.
-		out[personalise.NormaliseKey(r.PropertyKey)] = true
+		key := personalise.NormaliseKey(r.PropertyKey)
+		out[key] = true
+		if r.MaxRunes != nil && *r.MaxRunes > 0 {
+			caps[key] = int(*r.MaxRunes)
+		}
 	}
-	return out
+	return out, caps
 }
 
 // --- the request --------------------------------------------------------------
@@ -421,8 +453,8 @@ func applyCustomerEdit(
 		if strings.TrimSpace(value) == "" {
 			return nil, false, errBlankField(p.Name)
 		}
-		if utf8.RuneCountInString(value) > rules.maxRunes {
-			return nil, false, errFieldTooLong(p.Name, rules.maxRunes)
+		if limit := rules.limitFor(p.Name); utf8.RuneCountInString(value) > limit {
+			return nil, false, errFieldTooLong(p.Name, limit)
 		}
 		// Letters and spaces on anything that holds a name. The page strips
 		// the rest as it is typed, so a customer never reaches this - but the

@@ -101,3 +101,8 @@ SELECT count(*) AS items,
        count(*) FILTER (WHERE coalesce(code, '') = '') AS without_code,
        coalesce(sum(unit_price * quantity) FILTER (WHERE unit_price IS NOT NULL), 0)::float8 AS total_value
 FROM inventory_items;
+
+-- name: GetInventoryItem :one
+-- One part by id, for the paths that need to know how it is made before
+-- acting on it.
+SELECT * FROM inventory_items WHERE id = sqlc.arg('id');

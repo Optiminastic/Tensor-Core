@@ -16,20 +16,63 @@
 # and never baked into an image. Only the values that CANNOT be right on both
 # sides are overridden per service below.
 #
-# The database (Neon), object storage (AWS) and BambuBuddy are all reachable
-# from inside these containers as they are from the host - BambuBuddy included,
-# over its tailnet name, because Docker Desktop routes container traffic through
-# the host's network stack and so through Tailscale.
+# The database runs HERE, in the postgres service below. It used to be a hosted
+# Neon branch, which worked until the free tier's compute quota ran out and
+# every connection - the API's, the workers', psql's - was refused at once with
+# SQLSTATE 53000. A development database that can stop answering because a
+# meter somewhere ran down is a development database that will do it again, on
+# a day when somebody is trying to ship.
+#
+# Object storage (AWS) and BambuBuddy are still reachable from inside these
+# containers as they are from the host - BambuBuddy included, over its tailnet
+# name, because Docker Desktop routes container traffic through the host's
+# network stack and so through Tailscale.
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tensor-postgres-local
+    environment:
+      POSTGRES_USER: tensor
+      POSTGRES_PASSWORD: tensor
+      POSTGRES_DB: tensor
+    # Published, because the host runs things against it too: `go run ./cmd/api`,
+    # goose, psql, and the frontend's own Better Auth pool. Containers reach it
+    # as postgres:5432; the host as localhost:5433.
+    #
+    # 5433, not 5432: a developer with Postgres already installed has 5432
+    # taken, and the failure - "port is already allocated", or worse, silently
+    # talking to the wrong database - is not worth the tidier number.
+    ports: ['5433:5432']
+    volumes:
+      # A NAMED VOLUME, so the data survives `docker compose down`. A bind
+      # mount onto a Windows filesystem is the other option and it is slower
+      # and breaks on file permissions.
+      - tensor-pgdata:/var/lib/postgresql/data
+    # The API refuses to start if its schema did not apply, so it must not be
+    # started before Postgres is actually accepting connections - "the
+    # container is running" is not the same thing.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tensor -d tensor']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
   api:
     build:
       context: .
       dockerfile: Dockerfile
     image: tensor-api
     env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
     ports: ["8001:8001"]
     environment:
+      # env/local.env points at localhost:5433, which is the HOST's address
+      # for the postgres service. In here that is this container's own
+      # loopback and there is nothing on it, so the same database has to be
+      # named by its service. Same story as OPENSCAD_BIN below.
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
       # OFF, pinned here rather than left to env/local.env. The API runs the
       # whole pipeline itself when RUN_PRODUCTION_WORKERS is not false, so it
       # can mint a customer's link and send it exactly as the worker can. See
@@ -43,7 +86,14 @@ services:
       dockerfile: productionworker.Dockerfile
     image: tensor-production-worker
     env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
     environment:
+      # env/local.env points at localhost:5433, which is the HOST's address
+      # for the postgres service. In here that is this container's own
+      # loopback and there is nothing on it, so the same database has to be
+      # named by its service. Same story as OPENSCAD_BIN below.
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
       # env/local.env points at the Windows OpenSCAD for host runs. In here it
       # is the extracted AppImage, and getting this wrong is quiet: the worker
       # reports model generation disabled at startup and every personalised job
@@ -82,7 +132,14 @@ services:
       dockerfile: sliceworker.Dockerfile
     image: tensor-slice-worker
     env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
     environment:
+      # env/local.env points at localhost:5433, which is the HOST's address
+      # for the postgres service. In here that is this container's own
+      # loopback and there is nothing on it, so the same database has to be
+      # named by its service. Same story as OPENSCAD_BIN below.
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
       # The whole point of running this in a container. env/local.env sets
       # FAKE_SLICE=true because a Windows host cannot run Bambu Studio; here it
       # can, so fabricated metrics would waste a working slicer.
@@ -108,7 +165,14 @@ services:
       dockerfile: winbackworker.Dockerfile
     image: tensor-winback-worker
     env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
     environment:
+      # env/local.env points at localhost:5433, which is the HOST's address
+      # for the postgres service. In here that is this container's own
+      # loopback and there is nothing on it, so the same database has to be
+      # named by its service. Same story as OPENSCAD_BIN below.
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
       # BOTH channels off. Each is consent, not configuration, and they
       # are separate because a call interrupts somebody and a message
       # waits for them - a shop that wants one must not get the other
@@ -120,3 +184,8 @@ services:
     deploy:
       resources:
         limits: {cpus: "0.5", memory: 256M}
+
+volumes:
+  # Survives `docker compose down`. Removing the database means saying so:
+  # `docker compose down -v`.
+  tensor-pgdata:

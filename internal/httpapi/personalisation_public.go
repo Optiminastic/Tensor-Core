@@ -20,12 +20,14 @@ package httpapi
 //     guessed token must learn as little as possible beyond that.
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
@@ -61,6 +63,14 @@ type publicFieldResponse struct {
 	// count is not a parameter - it selects a different model file - so
 	// letting it be edited would quietly change which product is made.
 	Editable bool `json:"editable"`
+	// MaxLength is how many characters this product's design fits here.
+	//
+	// SENT, rather than left to the page, because it differs per product:
+	// the plank fits twelve and the lotus holder sixteen, and the page had
+	// the plank's number typed into it. A box that lets somebody type what
+	// the server will refuse is a form that fails on Save for no visible
+	// reason.
+	MaxLength int `json:"max_length"`
 }
 
 type publicItemResponse struct {
@@ -161,7 +171,7 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 		OrderNumber:  order.OrderNumber,
 		CustomerName: deref(order.CustomerName),
 		Confirmed:    link.Status == "confirmed",
-		Colours:      s.sellableColours(),
+		Colours:      s.colourChoicesFor(ctx, jobs),
 		Items:        make([]publicItemResponse, 0, len(jobs)),
 	}
 	if link.ExpiresAt.Valid {
@@ -177,10 +187,25 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 		}
 		out.Items = append(out.Items, publicItem(
 			j, s.fieldRulesFor(ctx, j),
-			s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName))))
+			s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)),
+			s.shownModelFor(ctx, j)))
 	}
 	numberSiblings(out.Items)
 	c.JSON(http.StatusOK, out)
+}
+
+// shownModelFor is the file this job's picture is drawn from, or nil when
+// there is nothing to show yet.
+//
+// The preview model first and the print model second, which is exactly the
+// order previewModelFor reads them in - so what the page SAYS is ready is
+// what the picture route will actually serve.
+func (s *Server) shownModelFor(ctx context.Context, j gen.ProductionJob) *uuid.UUID {
+	if prev, err := s.store.Q.GetProductionJobPreviewFile(ctx, j.ID); err == nil {
+		id := prev.ID
+		return &id
+	}
+	return j.PrintFileID
 }
 
 // numberSiblings labels repeats of the same product "1 of 3".
@@ -225,7 +250,21 @@ func numberSiblings(items []publicItemResponse) {
 	}
 }
 
-func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicItemResponse {
+// publicItem is one of the order's items as the customer's page reads it.
+//
+// shown is the file the picture will actually be drawn from: the preview
+// model where the product has one, and the print model otherwise. It decides
+// BOTH whether there is anything to show yet and which version is showing.
+//
+// It must not be j.PrintFileID, and that is not a detail. A product with a
+// personalisation preview deliberately withholds its print model until the
+// window closes, so reading that field leaves model_ready false for the whole
+// thirty minutes - the page says "Building your preview..." and never stops,
+// while the picture it is waiting for has been ready since before the message
+// was sent.
+func publicItem(
+	j gen.ProductionJob, rules fieldRules, hasPreview bool, shown *uuid.UUID,
+) publicItemResponse {
 	item := publicItemResponse{
 		JobID:        j.ID.String(),
 		JobNumber:    j.JobNumber,
@@ -233,8 +272,8 @@ func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicIt
 		Quantity:     int(j.Quantity),
 		Colour:       deref(j.PersonalisationColour),
 		HasPreview:   hasPreview,
-		ModelReady:   j.PrintFileID != nil,
-		ModelVersion: deref(uuidPtrStr(j.PrintFileID)),
+		ModelReady:   shown != nil,
+		ModelVersion: deref(uuidPtrStr(shown)),
 		Part:         partLabel(j),
 		// The one state the edit path accepts. Anything else means the job
 		// has moved on, whatever the clock at the top of the page says.
@@ -264,10 +303,67 @@ func publicItem(j gen.ProductionJob, rules fieldRules, hasPreview bool) publicIt
 			Label: p.Name, Value: p.Value,
 			// Both have to be true: the field has to be one a customer may
 			// set, and the job has to be one that can still accept a write.
-			Editable: item.Editable && rules.canEdit(p.Name, p.Value),
+			Editable:  item.Editable && rules.canEdit(p.Name, p.Value),
+			MaxLength: rules.limitFor(p.Name),
 		})
 	}
 	return item
+}
+
+// colourChoicesFor is the colour list THIS order's products actually sell.
+//
+// The picker used to offer the shop's whole palette whatever was on the page,
+// so a Royal diya holder - which Shopify sells in purple, red and green -
+// offered fifteen, and a customer could pick one that has never existed as a
+// product. They would be choosing something the shop cannot send them.
+//
+// The variants answer it: PDHR-P, PDHR-R and PDHR-G are named Purple, Red and
+// Green in the registry, and those names are the colourway. Falls back to the
+// configured list for a product the registry does not describe, or whose
+// variants are named something other than a colour - the plank's are "2
+// hearts, With light" - so nothing that works today narrows.
+func (s *Server) colourChoicesFor(
+	ctx context.Context, jobs []gen.ProductionJob,
+) []publicColourResponse {
+	// One list for the page, so a two-item order does not show two pickers
+	// disagreeing. The first job whose product names real colours wins; an
+	// order mixing two such products is not a shape the storefront sells.
+	for _, j := range jobs {
+		sku := strings.TrimSpace(deref(j.Sku))
+		if sku == "" {
+			continue
+		}
+		product, err := s.store.Q.FindProductBySKU(ctx, sku)
+		if err != nil {
+			continue
+		}
+		variants, err := s.store.Q.ListVariantsForProduct(ctx, product.ID)
+		if err != nil {
+			continue
+		}
+		out := make([]publicColourResponse, 0, len(variants))
+		seen := map[string]bool{}
+		for _, v := range variants {
+			if v.Status == "retired" {
+				continue
+			}
+			// Only a name the renderer can resolve to a swatch. A variant
+			// called "2 hearts, With light" is not a colourway, and offering
+			// it would hold the job at "no swatch for ..." - a choice that
+			// looks accepted and stops the order.
+			name := strings.ToUpper(strings.TrimSpace(v.Name))
+			hex := colourHexFor(name)
+			if hex == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, publicColourResponse{Name: name, Hex: hex})
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return s.sellableColours()
 }
 
 // sellableColours is the list the picker offers.
@@ -345,7 +441,8 @@ func (s *Server) publicPersonalisationItem(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, publicItem(
 		job, s.fieldRulesFor(ctx, job),
-		s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName))))
+		s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)),
+		s.shownModelFor(ctx, job)))
 }
 
 // --- the model ----------------------------------------------------------------
@@ -381,17 +478,33 @@ func (s *Server) previewModelFor(
 	if !ok {
 		return nil, job, row, false
 	}
-	if job.PrintFileID == nil {
-		// Still rendering. 404 rather than an error: the page polls, and this
-		// is the ordinary first answer.
-		detail(c, http.StatusNotFound, "This preview is still being built.")
-		return nil, job, row, false
-	}
 	if !s.filesReady(c) {
 		return nil, job, row, false
 	}
 
-	row, err := s.store.Q.GetFileAsset(ctx, *job.PrintFileID)
+	// THE PICTURE'S OWN MODEL FIRST, when the product has one.
+	//
+	// The lotus holder's plate and its picture are different models: the diya
+	// cup is a separate print, so the plate that goes to batching does not
+	// carry it and the picture does, standing on the plate where the customer
+	// will push it. Falling back to the print model is every other product,
+	// whose picture has always been a picture of what prints.
+	//
+	// ASKED BEFORE THE PRINT FILE IS REQUIRED, not after. A product with a
+	// preview withholds its print model for the whole thirty minutes, so a
+	// guard on print_file_id ahead of this answers "still being built" to
+	// every request for a picture that has been ready since before the
+	// customer was messaged.
+	shown := s.shownModelFor(ctx, job)
+	if shown == nil {
+		// Genuinely still rendering. 404 rather than an error: the page
+		// polls, and this is the ordinary first answer.
+		detail(c, http.StatusNotFound, "This preview is still being built.")
+		return nil, job, row, false
+	}
+	fileID := *shown
+
+	row, err := s.store.Q.GetFileAsset(ctx, fileID)
 	if err != nil {
 		detail(c, http.StatusNotFound, "This preview is still being built.")
 		return nil, job, row, false
@@ -432,7 +545,14 @@ func (s *Server) previewModelFor(
 		obs.FromContext(ctx).Warn("personalisation: the preview kept no heart",
 			"job", job.ID, "hearts", hearts, "content_type", row.ContentType)
 	}
-	return withHearts, job, row, true
+	// AND THE REST OF THE PRODUCT.
+	//
+	// The hearts are a piece of the plank; the foot and the cup are pieces of
+	// a diya holder, printed from their own files and attached at the bench.
+	// Neither has ever reached the picture, so the customer approved an arch
+	// plate with nothing to stand on. Same seam, same rule: composed on the
+	// way out, and the file on disk is untouched.
+	return s.assembledPreview(ctx, job, withHearts), job, row, true
 }
 
 // --- confirming ----------------------------------------------------------------

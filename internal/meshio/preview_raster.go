@@ -49,15 +49,37 @@ type camera struct {
 func cameraFor(lo, hi orientation.Vec3, w, h int, view PreviewView) camera {
 	centre := orientation.Vec3{X: (lo.X + hi.X) / 2, Y: (lo.Y + hi.Y) / 2, Z: (lo.Z + hi.Z) / 2}
 
-	// Three quarters on and above, from one side or the other. Z is up, as
-	// everywhere else in the pipeline.
-	forward := unitVec(orientation.Vec3{X: -0.55, Y: 0.72, Z: -0.42})
+	// The camera is placed off the model's own FACE, not off a fixed world
+	// direction.
+	//
+	// It used to look along a constant (-0.55, 0.72, -0.42): three quarters
+	// on and above, which is how a plank standing on a desk is photographed.
+	// Every product Tensor renders is in fact a flat plate lying in XY with
+	// its relief raised in +Z, so that direction looked ACROSS the face at
+	// about 25 degrees. A plank's lettering is large enough to survive it; a
+	// lotus holder's 61mm name block on a 156mm plate is foreshortened into
+	// something the customer reads as the wrong typeface, and reported as one.
+	//
+	// So: find the face, then stand in front of it and a little above.
+	right, up, normal := faceAxes(lo, hi)
+	// Enough tilt that thickness and anything standing off the plate still
+	// read as depth, little enough that the face is still close to flat on.
+	const elevation = 32 * math.Pi / 180
+	// A yaw either side gives the two views a reason to differ, and puts the
+	// light somewhere other than straight down the barrel.
+	yaw := -20 * math.Pi / 180
 	if view == ViewFromRight {
-		forward = unitVec(orientation.Vec3{X: 0.55, Y: 0.72, Z: -0.42})
+		yaw = -yaw
 	}
-	worldUp := orientation.Vec3{X: 0, Y: 0, Z: 1}
-	right := unitVec(cross(forward, worldUp))
-	up := unitVec(cross(right, forward))
+	// Where the camera stands, in the face's own frame: off the face, up, and
+	// round to one side. Looking back at the centre is the opposite of that.
+	eye := add(add(
+		scaleVec(normal, math.Cos(elevation)*math.Cos(yaw)),
+		scaleVec(up, math.Sin(elevation))),
+		scaleVec(right, math.Cos(elevation)*math.Sin(yaw)))
+	forward := unitVec(scaleVec(eye, -1))
+	right = unitVec(cross(forward, up))
+	up = unitVec(cross(right, forward))
 
 	// The extent of the box once projected, so nothing is clipped whatever
 	// shape it is.
@@ -204,6 +226,47 @@ func corners(lo, hi orientation.Vec3) [8]orientation.Vec3 {
 		{X: lo.X, Y: lo.Y, Z: hi.Z}, {X: hi.X, Y: lo.Y, Z: hi.Z},
 		{X: lo.X, Y: hi.Y, Z: hi.Z}, {X: hi.X, Y: hi.Y, Z: hi.Z},
 	}
+}
+
+// faceAxes is the model's own frame: which way its face points, and which way
+// is across and up ON that face.
+//
+// THE FACE IS THE THINNEST DIRECTION. Everything the shop prints is a plate
+// with its design raised out of one side, so the shortest side of the
+// bounding box is the one nobody looks at, and the two long sides are the
+// picture. Derived rather than configured because the answer is already in
+// the geometry, and a product that had to declare it would be a product
+// somebody forgets to declare it for.
+//
+// Across beats up, so the wider of the two remaining directions becomes the
+// screen's horizontal - which on every one of these products is the direction
+// the lettering runs.
+//
+// Ties fall back to the old world frame (face +Z, up +Y) so a cube, or a
+// model with no extent at all, still gets a camera rather than a zero vector.
+func faceAxes(lo, hi orientation.Vec3) (right, up, normal orientation.Vec3) {
+	ex := [3]float64{hi.X - lo.X, hi.Y - lo.Y, hi.Z - lo.Z}
+	axes := [3]orientation.Vec3{{X: 1}, {Y: 1}, {Z: 1}}
+
+	thin := 2
+	for i := 0; i < 3; i++ {
+		if ex[i] < ex[thin] {
+			thin = i
+		}
+	}
+	a, b := (thin+1)%3, (thin+2)%3
+	if ex[b] > ex[a] {
+		a, b = b, a
+	}
+	return axes[a], axes[b], axes[thin]
+}
+
+func add(a, b orientation.Vec3) orientation.Vec3 {
+	return orientation.Vec3{X: a.X + b.X, Y: a.Y + b.Y, Z: a.Z + b.Z}
+}
+
+func scaleVec(v orientation.Vec3, k float64) orientation.Vec3 {
+	return orientation.Vec3{X: v.X * k, Y: v.Y * k, Z: v.Z * k}
 }
 
 func sub(a, b orientation.Vec3) orientation.Vec3 {

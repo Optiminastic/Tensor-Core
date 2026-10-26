@@ -17,12 +17,15 @@ package httpapi
 // parts configured renders exactly as it did before.
 
 import (
+	"github.com/google/uuid"
+
 	"context"
 	"fmt"
 	"strings"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/personalise"
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // colourPart is one piece of a model: what to ask the template for, and what
@@ -68,18 +71,131 @@ func (s *Server) colourPartsForJob(ctx context.Context, job gen.ProductionJob) [
 	if err != nil {
 		return defaultColourParts()
 	}
-	rows, err := s.store.Q.ListDesignColourParts(ctx, gen.ListDesignColourPartsParams{
-		ProductID: product.ID, Role: partRoleOf(job),
-	})
-	if err != nil || len(rows) == 0 {
-		return defaultColourParts()
+
+	role := partRoleOf(job)
+
+	// The VARIANT's own scheme first, because a product may paint each
+	// colourway differently. A SKU that resolves to a product but not to a
+	// variant cannot happen - FindProductBySKU reaches the product THROUGH the
+	// variant on identical terms - and a lookup that fails here simply leaves
+	// the variant with no scheme, which falls back to the product's.
+	var own []colourPart
+	if variantID := s.variantForColourway(ctx, product.ID, sku, job); variantID != nil {
+		rows, err := s.store.Q.ListColourPartsForVariant(ctx,
+			gen.ListColourPartsForVariantParams{VariantID: variantID, Role: role})
+		if err == nil {
+			own = toColourParts(rows)
+		}
 	}
 
+	rows, err := s.store.Q.ListDesignColourParts(ctx, gen.ListDesignColourPartsParams{
+		ProductID: product.ID, Role: role,
+	})
+	var shared []colourPart
+	if err == nil {
+		shared = toColourParts(rows)
+	}
+
+	parts := resolveScheme(own, shared)
+	if len(parts) == 0 {
+		return defaultColourParts()
+	}
+	return parts
+}
+
+// variantForColourway is the variant whose palette this job should print in.
+//
+// THE COLOUR THE CUSTOMER WILL RECEIVE, NOT THE ONE THEY BOUGHT.
+//
+// A per-variant scheme is a colourway: the Lotus is purple-with-pink, or
+// red-with-gold, or white-with-gold. Looking it up by SKU was right only while
+// nobody could change their mind - and the personalisation link exists so they
+// can. A customer who bought PWDH-P and chose WHITE had the purple scheme
+// rendered anyway, because the SKU still said purple. The model came back
+// purple-and-pink with a gold name on it, and nothing anywhere disagreed.
+//
+// So the chosen colour picks the variant, and the SKU is only the fallback for
+// a job nobody has changed.
+func (s *Server) variantForColourway(
+	ctx context.Context, productID uuid.UUID, sku string, job gen.ProductionJob,
+) *uuid.UUID {
+	bySKU, skuErr := s.store.Q.FindVariantBySKU(ctx, sku)
+
+	chosen := strings.TrimSpace(deref(job.PersonalisationColour))
+	if chosen == "" {
+		// Unchanged: the variant they bought is the colourway they get.
+		if skuErr != nil {
+			return nil
+		}
+		return &bySKU.ID
+	}
+
+	variants, err := s.store.Q.ListVariantsForProduct(ctx, productID)
+	if err == nil {
+		if match := matchVariantByColour(variants, chosen); match != nil {
+			return match
+		}
+	}
+	// A colour this product does not sell as a variant - which the picker no
+	// longer offers, but an older job may carry. The bought variant's scheme
+	// is a better answer than none: its pieces are at least the right shape,
+	// and the piece that follows the customer still takes their colour.
+	if skuErr != nil {
+		return nil
+	}
+	return &bySKU.ID
+}
+
+// matchVariantByColour finds the variant named for a colour, or nil.
+//
+// Canonicalised on both sides, because "SKY BLUE" and "Blue" are one spool and
+// the storefront is not consistent about case.
+func matchVariantByColour(
+	variants []gen.ListVariantsForProductRow, chosen string,
+) *uuid.UUID {
+	want := production.CanonicalColourName(chosen)
+	if want == "" {
+		return nil
+	}
+	for i := range variants {
+		if variants[i].Status == "retired" {
+			continue
+		}
+		if production.CanonicalColourName(variants[i].Name) == want {
+			return &variants[i].ID
+		}
+	}
+	return nil
+}
+
+// toColourParts is the stored rows as the renderer's pieces.
+func toColourParts(rows []gen.DesignColourPart) []colourPart {
 	parts := make([]colourPart, 0, len(rows))
 	for _, r := range rows {
 		parts = append(parts, colourPart{Name: r.PartName, Hex: deref(r.ColourHex)})
 	}
 	return parts
+}
+
+// resolveScheme picks the scheme one variant prints from.
+//
+// ALL OR NOTHING, and that is the whole rule. A variant that declares a scheme
+// declares every piece of it; the product's scheme is what a variant that
+// declares nothing falls back to.
+//
+// The tempting alternative is to merge - take the variant's pieces and fill the
+// gaps from the product - and it is wrong in the one way that does not announce
+// itself. The lotus holder's purple scheme names a pink outline and a gold
+// text; its red scheme names a gold outline and a yellow text. A variant that
+// named only its outline would be completed from whichever scheme happened to
+// sit on the product, print a palette that exists in neither design, and slice
+// and print without complaint. Replacing outright means a half-written scheme
+// is visibly half-written.
+func resolveScheme(own, shared []colourPart) []colourPart {
+	if len(own) > 0 {
+		return own
+	}
+	return shared
 }
 
 // needsCustomerColour reports whether any piece takes its colour off the order.

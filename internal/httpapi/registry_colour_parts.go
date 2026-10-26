@@ -32,6 +32,10 @@ func (s *Server) registerRegistryColourParts(g *gin.RouterGroup, read, manage gi
 	// POST, not PUT: the body is a FILE, and the response is what Tensor read
 	// out of it rather than what the caller sent.
 	g.POST("/products/:code/colour-parts/:role", manage, s.uploadColourReference)
+	// PUT, because the body IS the scheme: the pieces and their colours typed
+	// out, for a design file nobody has exported a reference 3MF for and for a
+	// product whose palette differs per colourway.
+	g.PUT("/products/:code/colour-parts/:role", manage, s.putColourScheme)
 	g.DELETE("/products/:code/colour-parts/:role", manage, s.clearColourParts)
 	g.PATCH("/colour-parts/:id", manage, s.updateColourPart)
 }
@@ -45,6 +49,10 @@ type colourPartResponse struct {
 	// that is either always a colour or absent.
 	ColourHex string `json:"colour_hex"`
 	Position  int32  `json:"position"`
+	// VariantSKU names the colourway this piece belongs to, or is empty for
+	// the product's own scheme - the one every variant that declares nothing
+	// of its own prints from.
+	VariantSKU string `json:"variant_sku"`
 }
 
 func toColourPartResponse(r gen.DesignColourPart) colourPartResponse {
@@ -67,7 +75,11 @@ func (s *Server) listColourParts(c *gin.Context) {
 	}
 	out := make([]colourPartResponse, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toColourPartResponse(r))
+		out = append(out, colourPartResponse{
+			ID: r.ID.String(), Role: r.Role, PartName: r.PartName,
+			ColourHex: deref(r.ColourHex), Position: r.Position,
+			VariantSKU: deref(r.VariantSku),
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
 }
@@ -122,8 +134,11 @@ func (s *Server) uploadColourReference(c *gin.Context) {
 		return
 	}
 
+	// The PRODUCT's scheme: a reference 3MF describes the design file, which
+	// every colourway shares. A variant that paints it differently says so
+	// through putColourScheme.
 	if err := s.store.Q.ClearDesignColourParts(ctx, gen.ClearDesignColourPartsParams{
-		ProductID: product.ID, Role: role,
+		ProductID: product.ID, Role: role, VariantID: nil,
 	}); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not replace the colour parts.")
 		return
@@ -139,6 +154,7 @@ func (s *Server) uploadColourReference(c *gin.Context) {
 		row, err := s.store.Q.InsertDesignColourPart(ctx, gen.InsertDesignColourPartParams{
 			ID: uuid.New(), ProductID: product.ID, Role: role,
 			PartName: p.Name, ColourHex: hex, Position: int32(i),
+			VariantID: nil,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError,
@@ -191,13 +207,27 @@ func readUploadedModel(c *gin.Context) ([]byte, bool) {
 func (s *Server) verifyPartsRender(
 	ctx context.Context, productID uuid.UUID, role string, parts []colourPart,
 ) string {
-	if s.renderer == nil || !s.renderer.Available() {
-		return ""
-	}
 	template, ok := s.templateKeyForRole(ctx, productID, role)
 	if !ok {
 		// No .scad yet. Configuring colours before uploading the file is a
 		// reasonable order to work in, and the pieces are still worth storing.
+		return ""
+	}
+	return s.verifyPartsRenderFrom(ctx, template, parts)
+}
+
+// verifyPartsRenderFrom is verifyPartsRender against a NAMED template.
+//
+// Split out for the one case where the template is not yet the stored answer:
+// assigning a new preview file has to check the pieces against the file being
+// assigned, not against the one it is replacing. Without that, changing the
+// file after the pieces were configured checks nothing, and a file that does
+// not branch on "diya_placed" renders an empty cup on every order - which
+// slices, prints and is simply missing a part.
+func (s *Server) verifyPartsRenderFrom(
+	ctx context.Context, template string, parts []colourPart,
+) string {
+	if s.renderer == nil || !s.renderer.Available() {
 		return ""
 	}
 	for _, p := range parts {
@@ -258,9 +288,27 @@ func (s *Server) clearColourParts(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := s.store.Q.ClearDesignColourParts(c.Request.Context(),
+	ctx := c.Request.Context()
+
+	// ?variant_sku= clears ONE colourway's override, leaving the product's own
+	// scheme - which that variant then falls back to - in place. Without it,
+	// the only way to undo a per-variant scheme would be to clear the product
+	// and rebuild every other variant from memory.
+	var variantID *uuid.UUID
+	if sku := strings.TrimSpace(c.Query("variant_sku")); sku != "" {
+		variant, err := s.store.Q.FindVariantBySKU(ctx, sku)
+		if err != nil || variant.ProductID != product.ID {
+			detail(c, http.StatusUnprocessableEntity,
+				"That SKU is not an active variant of this product.")
+			return
+		}
+		variantID = &variant.ID
+	}
+
+	if err := s.store.Q.ClearDesignColourParts(ctx,
 		gen.ClearDesignColourPartsParams{
 			ProductID: product.ID, Role: strings.TrimSpace(c.Param("role")),
+			VariantID: variantID,
 		}); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not clear the colour parts.")
 		return

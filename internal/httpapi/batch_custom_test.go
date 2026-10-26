@@ -441,11 +441,33 @@ func TestTheSKUIsNotPartOfTheCompatibilityKey(t *testing.T) {
 		t.Error("two gold planks were refused one bed because their SKUs differ")
 	}
 
-	// A job carrying no SKU at all joins them too - there is nothing left for
-	// an absent SKU to disagree with.
+	// A PLANK CARRYING NO SKU JOINS THEM, by its name.
+	//
+	// Nine live plank variants lost their SKU in the catalogue, and they are
+	// planks: the family falls back to the product name for exactly this,
+	// which is the same pair IsGeneratedProduct reads. Five such jobs exist on
+	// this database today.
 	noSku := batchableJobRow("JOB-3", `["GOLD"]`)
+	plankName := "Dual Name Plank - GOLD / NO LIGHT"
+	noSku.ProductName = &plankName
 	if compatibilityKeyOf(noSku) != compatibilityKeyOf(plank) {
-		t.Error("a job with no SKU was split from one that has a SKU")
+		t.Error("a plank with no SKU was split from one that has a SKU")
+	}
+
+	// A JOB NOTHING IDENTIFIES DOES NOT JOIN A PLANK BED, and this is the one
+	// assertion that changed when the family entered the key.
+	//
+	// It used to: an absent SKU had nothing to disagree with, so an
+	// unidentifiable job went onto whatever bed matched its colour. The shop's
+	// rule is now that a bed carrying planks carries only planks, and a job
+	// that cannot say what it is cannot say it is one.
+	//
+	// It costs nothing real. No job on this database has neither a SKU nor a
+	// product name - the count is zero - so this separates a row that does not
+	// exist, while closing the one way something unknown could reach a plate.
+	anonymous := batchableJobRow("JOB-5", `["GOLD"]`)
+	if compatibilityKeyOf(anonymous) == compatibilityKeyOf(plank) {
+		t.Error("a job with nothing identifying it was put on a plank bed")
 	}
 
 	// Colour still separates them, which is the rule that remains.

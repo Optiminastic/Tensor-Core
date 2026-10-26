@@ -1344,3 +1344,30 @@ FROM production_jobs j;
 -- row per job - for Go to classify with IsGeneratedProduct.
 SELECT DISTINCT coalesce(sku, '')::text AS sku, coalesce(product_name, '')::text AS product_name
 FROM production_jobs;
+
+-- name: SetProductionJobPreviewFile :exec
+-- Attaches the model the customer is shown, for a product whose picture
+-- differs from its print.
+--
+-- Separate from SetProductionJobPrintFile rather than folded into it because
+-- it answers no issue reason and makes no job batchable: a preview is a
+-- picture, and a job whose only new file is a picture is exactly as ready to
+-- print as it was before.
+INSERT INTO job_preview_models (job_id, file_id)
+VALUES (sqlc.arg('job_id'), sqlc.arg('file_id'))
+ON CONFLICT (job_id) DO UPDATE
+SET file_id = EXCLUDED.file_id, updated_at = now();
+
+-- name: ClearProductionJobPreviewFile :exec
+-- Drops the picture's own model, for a job that no longer has one - a product
+-- whose preview-only pieces were removed, re-rendered into a single model.
+-- Leaving the old row would keep showing a cup the design no longer has.
+DELETE FROM job_preview_models WHERE job_id = sqlc.arg('job_id');
+
+-- name: GetProductionJobPreviewFile :one
+-- The picture's model for one job, or no row when the picture is a picture of
+-- the print model.
+SELECT f.id, f.storage_key, f.filename, f.content_type, f.size_bytes
+FROM job_preview_models p
+JOIN file_assets f ON f.id = p.file_id
+WHERE p.job_id = sqlc.arg('job_id');

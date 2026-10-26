@@ -26,9 +26,11 @@ package httpapi
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -68,6 +70,19 @@ func (s *Server) bedUnitFloor() int {
 		return s.cfg.BatchMinUnitsPerBed
 	}
 	return production.MinBedUnits
+}
+
+// bedAgeOut is how long an under-filled bed waits for company before it is
+// printed short.
+//
+// Twenty-four hours, the shop's own number. It is a deadline, not a target:
+// almost every bed fills long before it, and the ones that do not are the
+// slow colourways nobody would otherwise notice were stuck.
+func (s *Server) bedAgeOut() time.Duration {
+	if s.cfg.BatchAgeOutHours > 0 {
+		return time.Duration(s.cfg.BatchAgeOutHours) * time.Hour
+	}
+	return 24 * time.Hour
 }
 
 // unitsOnBed counts the products on a bed, quantity included: one job for three
@@ -203,7 +218,21 @@ func (s *Server) readyToLock(ctx context.Context, b gen.Batch, snap *fleetSnapsh
 		return false
 	}
 	if units := unitsOf(jobs); units < s.bedUnitFloor() {
-		return false
+		// A THIN BED STILL GOES, EVENTUALLY.
+		//
+		// The floor exists because a plate with one plank costs the same
+		// machine-hour as a plate with five, so a half-empty bed waits for
+		// company. That is right until the company never arrives: a slow
+		// colourway, or a family that sells three a week, would otherwise sit
+		// for days while the customer waits on a print nobody refused.
+		//
+		// After the age-out it is printed short, deliberately. A wasted half
+		// plate is cheaper than an order nobody can explain.
+		if age := time.Since(db.Time(b.CreatedAt)); age < s.bedAgeOut() {
+			return false
+		}
+		log.Info("bed under the floor has waited long enough; locking it short",
+			"batch", b.BatchNumber, "units", units, "floor", s.bedUnitFloor())
 	}
 	machineID, ok, why := s.bedHasFreePrinter(ctx, b, snap)
 	if !ok {

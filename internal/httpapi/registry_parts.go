@@ -147,6 +147,21 @@ func sortedKeys(set map[string]bool) []string {
 // defaults - one identical model for every customer - and a job that prints
 // the wrong thing is worse than a job that was never made, because it reaches
 // a bed looking finished.
+//
+// AND THE PREVIEW ROLE IS LEFT OUT BY NAME, whatever it maps.
+//
+// That file is the assembled product - a Lotus with its diya cup standing on
+// it, a Royal with its foot and its cup - drawn so the customer can approve
+// what they will receive. It is not a thing anybody prints: the cup is a
+// separate print that pushes on afterwards, and the assembled model put on a
+// bed would fuse it to the plate at ninety degrees.
+//
+// The mapping rule above happens to exclude it today, because the preview
+// borrows the body's mapping and declares none of its own. That is an
+// accident, not a guarantee - the day somebody maps a field to the preview
+// role it would start making a job per order with nothing to say so. So it is
+// refused here explicitly as well, and a test maps a field to it and asserts
+// it still makes no job.
 func (s *Server) partRolesForRender(ctx context.Context, productID uuid.UUID) []string {
 	rows, err := s.store.Q.ListAllProductFieldMaps(ctx, productID)
 	if err != nil {
@@ -160,11 +175,20 @@ func (s *Server) partRolesForRender(ctx context.Context, productID uuid.UUID) []
 	roles := s.designRolesForProduct(ctx, productID)
 	out := make([]string, 0, len(roles))
 	for _, role := range roles {
+		if isPreviewRole(role) {
+			continue
+		}
 		if mapped[strings.ToLower(role)] {
 			out = append(out, role)
 		}
 	}
 	return out
+}
+
+// isPreviewRole reports whether this role is drawn for the customer rather
+// than printed. See designRolePreview.
+func isPreviewRole(role string) bool {
+	return strings.EqualFold(strings.TrimSpace(role), designRolePreview)
 }
 
 // partRolesForSKU is partRolesForRender by the SKU an order carries.

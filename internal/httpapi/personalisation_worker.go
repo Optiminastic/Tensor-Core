@@ -262,12 +262,54 @@ func (s *Server) personalisationEligible(
 		}
 	}
 
+	// 5. The product's own switch. A SKU may be configured not to ask at all -
+	//    a design that cannot change after it is bought, or one whose preview
+	//    is not ready - and then there is nothing to interrupt the customer
+	//    for. One enabled SKU on the order is enough, because an order is the
+	//    unit a link covers.
+	if !s.orderAsksTheCustomer(ctx, order) {
+		return "", "every personalised SKU on this order has its link switched off"
+	}
+
 	// 4. Somewhere to send it.
 	phone = normaliseIndianMobile(deref(order.CustomerPhone))
 	if phone == "" {
 		return "", "the order carries no usable phone number"
 	}
 	return phone, ""
+}
+
+// orderAsksTheCustomer reports whether any personalised SKU on this order
+// still has its personalisation link switched on.
+//
+// FAILS OPEN, unlike the watermark above. The watermark fails closed because
+// not knowing when watching began could message a month of customers at once;
+// this is a per-product preference, and a database hiccup turning it into
+// "ask nobody" would quietly stop every customer being asked to check their
+// own name. Asking somebody who did not need asking is recoverable.
+func (s *Server) orderAsksTheCustomer(ctx context.Context, order gen.Order) bool {
+	skus := make([]string, 0, 2)
+	for _, li := range orderLineItems(order) {
+		if !lineIsPersonalised(li) {
+			continue
+		}
+		if sku := strings.ToLower(strings.TrimSpace(deref(li.SKU))); sku != "" {
+			skus = append(skus, sku)
+		}
+	}
+	if len(skus) == 0 {
+		return true
+	}
+	asks, err := s.store.Q.AnySKUAsksTheCustomer(ctx, skus)
+	if err != nil {
+		obs.FromContext(ctx).Warn(
+			"personalisation: could not read the SKUs' link setting, asking anyway",
+			"order", order.OrderNumber, "error", err)
+		return true
+	}
+	// A nullable bool from EXISTS ... OR NOT EXISTS: null cannot happen, and
+	// if it ever did, the fail-open rule above is the one to follow.
+	return asks == nil || *asks
 }
 
 // ask mints the link, claims the order and sends it.
@@ -739,6 +781,17 @@ func (w *PersonalisationLinkWorker) unrenderedJobs(
 		if !w.server.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)) {
 			continue
 		}
+		// A JOB WHOSE PICTURE IS READY IS NOT STILL RENDERING.
+		//
+		// A product with a personalisation preview file has its print model
+		// deliberately withheld until the window closes, so print_file_id
+		// alone would read as "still rendering" forever - and this worker
+		// would never send the link that opens the window that releases it.
+		// What the customer's page actually needs is the picture, and the
+		// picture is here.
+		if _, err := w.server.store.Q.GetProductionJobPreviewFile(ctx, j.ID); err == nil {
+			continue
+		}
 		pending++
 	}
 	return pending, nil
@@ -872,7 +925,73 @@ func (s *Server) closePersonalisationWindow(ctx context.Context, orderID uuid.UU
 			"order", orderID, "error", err)
 		return
 	}
+
+	// THE MODEL IS BUILT NOW, from what the customer finally said.
+	//
+	// While the window was open the render deliberately did not attach a
+	// print file - see windowIsOpenFor - because a model attached then is a
+	// model built from values that could still move. The window has closed,
+	// so the values are final and this is the first moment the model can be
+	// right.
+	//
+	// AFTER the release, not before. Releasing is a single statement over the
+	// order's jobs; rendering is minutes of OpenSCAD per job, enqueued. Doing
+	// it first would leave the jobs held if the enqueue failed, which is the
+	// state nothing sweeps up. A released job with no model is simply not
+	// batchable yet, which is a state the floor already understands.
+	s.renderReleasedJobs(ctx, orderID)
+
 	s.flagStaleDesignFiles(ctx, orderID)
+}
+
+// renderReleasedJobs builds the models for an order whose window has closed.
+//
+// Only the ones Tensor renders and only the ones still without a file: a job
+// whose render beat the link already has its model, and re-rendering it would
+// spend minutes of OpenSCAD to produce the same bytes.
+//
+// Best effort and logged. The window has closed either way, and a job left
+// without a model is visibly not batchable rather than silently wrong - the
+// design queue and the job's own issue reason both say so.
+func (s *Server) renderReleasedJobs(ctx context.Context, orderID uuid.UUID) {
+	log := obs.FromContext(ctx)
+	jobs, err := s.store.Q.ListProductionJobsForOrder(ctx, &orderID)
+	if err != nil {
+		log.Error("personalisation: could not read the order's jobs to render them",
+			"order", orderID, "error", err)
+		return
+	}
+	pending := make([]gen.ProductionJob, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PrintFileID != nil {
+			continue
+		}
+		pending = append(pending, gen.ProductionJob(j))
+	}
+	if len(pending) == 0 || s.modelEnqueuer == nil {
+		return
+	}
+	log.Info("personalisation: the window closed, building the final models",
+		"order", orderID, "jobs", len(pending))
+
+	// AT MOST ONE RENDER PER JOB, however many times this runs.
+	//
+	// A window can end twice in the same second: the customer presses Confirm
+	// exactly as the expiry sweep reaches their link. Both endings are
+	// correct and both ask for the order's models, and without this that is
+	// two OpenSCAD runs per job writing the same bytes to the same storage
+	// key and racing to attach them.
+	for _, j := range pending {
+		if !s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)) {
+			continue
+		}
+		if err := s.modelEnqueuer.EnqueueOnce(ctx, j.ID); err != nil {
+			log.Error("personalisation: could not schedule the final model",
+				"job", j.JobNumber, "error", err)
+			continue
+		}
+		log.Info("final model scheduled", "job", j.JobNumber, "sku", deref(j.Sku))
+	}
 }
 
 // flagStaleDesignFiles marks the order's hand-made items whose design file no

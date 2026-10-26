@@ -72,6 +72,7 @@ func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	g.GET("", s.guards.RequirePermission(auth.ConfigRead.Key()), s.listDesignTemplates)
 	g.GET("/:key/history", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateHistory)
 	g.GET("/:key/params", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateParams)
+	g.GET("/:key/file", s.guards.RequirePermission(auth.ConfigRead.Key()), s.downloadDesignTemplate)
 	g.POST("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.uploadDesignTemplate)
 }
 
@@ -159,6 +160,52 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 // Resolved through the renderer rather than by reading the upload directly,
 // so the answer is the file a render would actually use: the uploaded
 // override when one exists, the embedded copy otherwise.
+// downloadDesignTemplate serves the .scad a key renders from.
+//
+// WHAT THE RENDERER WOULD USE, not what was last uploaded: Source resolves the
+// override where there is one and the embedded copy otherwise, so a key nobody
+// has replaced still downloads. Reading the upload directly would answer for
+// an overridden key and 404 for every other - which is most of them, and the
+// ones somebody most needs a copy of to start editing.
+//
+// Guarded on ConfigRead, matching the rest of this router: a template is shop
+// configuration, and the people who may read it are the people who may read
+// the mapping written against it.
+func (s *Server) downloadDesignTemplate(c *gin.Context) {
+	key := strings.ToLower(strings.TrimSpace(c.Param("key")))
+	if key == "" {
+		detail(c, http.StatusUnprocessableEntity, "Name the template.")
+		return
+	}
+	if s.renderer == nil {
+		detail(c, http.StatusServiceUnavailable,
+			"Model generation is not configured on this service, so templates cannot be read here.")
+		return
+	}
+
+	source, err := s.renderer.Source(c.Request.Context(), key)
+	if errors.Is(err, personalise.ErrNoTemplate) {
+		detail(c, http.StatusNotFound, "No template is registered under that name.")
+		return
+	}
+	if err != nil {
+		obs.FromContext(c.Request.Context()).Error("could not read template source",
+			"template", key, "error", err)
+		detail(c, http.StatusInternalServerError, "Could not read that template.")
+		return
+	}
+
+	// Named for the key, which is what it is called everywhere else - in the
+	// registry, in a job's render params and in this router's own paths. A
+	// browser default of "file" would leave a folder of downloads nobody can
+	// tell apart.
+	c.Header("Content-Disposition", `attachment; filename="`+key+`.scad"`)
+	// text/plain rather than a made-up x-openscad type: browsers download it
+	// on the Content-Disposition either way, and a type they recognise is one
+	// they will also let somebody preview.
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", source)
+}
+
 func (s *Server) templateParams(c *gin.Context) {
 	key := strings.ToLower(strings.TrimSpace(c.Param("key")))
 	if key == "" {
@@ -215,14 +262,12 @@ func (s *Server) templateHistory(c *gin.Context) {
 }
 
 // alwaysPassedParams is what the renderer sets on EVERY render, whatever the
-// product.
+// product. Exactly one thing: PART.
 //
-// Exactly one thing: PART. renderColouredPlank runs the template twice, once
-// with PART="base" and once with PART="text", and writes the two results into
-// one 3MF as separately coloured objects. A template that ignores PART renders
-// the identical solid both times, so the model comes out doubled - the same
-// geometry twice, overlapping, in two colours. It slices, it prints, and it is
-// wrong.
+// Kept as a name here because the upload handler reads it, but the list itself
+// lives in personalise beside the two plank vocabularies - one package decides
+// what a template under a given key must declare, so this gate and
+// cmd/loadtemplates cannot disagree about it.
 //
 // OUT_X/Y/Z are NOT here, though they were, and demanding them was a mistake
 // that refused the first real product anybody tried to add. They come from
@@ -231,21 +276,17 @@ func (s *Server) templateHistory(c *gin.Context) {
 // gate has no business demanding variables the renderer does not pass - a
 // template is free to declare them and have a mapping fill them, or to size
 // itself and never mention them.
-var alwaysPassedParams = []string{"PART"}
+var alwaysPassedParams = personalise.AlwaysPassedTemplateParams
 
 // requiredParamsFor says what a template under this key must declare.
+//
+// A plank key is driven by the DNP path, which passes the names too, and WHICH
+// names depends on the key: the joinery template took over from the three
+// per-heart-count files and is driven in its own vocabulary, so the gate asks
+// it for the variables it actually has rather than the ones its predecessors
+// had. Any other key is a registry product, driven by its field mapping.
 func requiredParamsFor(key string) []string {
-	for _, embedded := range embeddedTemplateKeys {
-		if key == embedded {
-			// A plank, driven by the DNP path, which passes the names too.
-			// WHICH names depends on the key: the joinery template took over
-			// from the three per-heart-count files and is driven in its own
-			// vocabulary, so the gate asks it for the variables it actually
-			// has rather than the ones its predecessors had.
-			return personalise.RequiredParamsForTemplate(key)
-		}
-	}
-	return alwaysPassedParams
+	return personalise.RequiredParamsForTemplate(key)
 }
 
 // uploadDesignTemplate stores a new .scad and makes it the one that renders.

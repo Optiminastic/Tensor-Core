@@ -554,7 +554,12 @@ func (s *Server) approveBatch(c *gin.Context) {
 // same gold now share a bed, and which process the plate slices with is
 // settled at slice time by mappedPipelineFor.
 func compatibilityKeyOf(j gen.ProductionJob) production.CompatibilityKey {
-	return production.CompatibilityKey{Colour: jobColourKey(j)}
+	return production.CompatibilityKey{
+		Colour: jobColourKey(j),
+		// The manual add-jobs path has to reach the SAME answer the planner
+		// does, or the two would disagree about which jobs may share a plate.
+		Family: production.ProductFamily(deref(j.Sku), deref(j.ProductName)),
+	}
 }
 
 // jobColourKey is a job's canonical colour set.
@@ -1377,6 +1382,10 @@ func (s *Server) planJobsFor(ctx context.Context, jobs []gen.ProductionJob) ([]p
 		out = append(out, production.PlanJob{
 			ID: j.ID.String(), JobNumber: j.JobNumber, ShopifyCustomerID: j.ShopifyCustomerID,
 			Material: deref(j.Material), Colours: decodeColours(j.Colours),
+			// Which product may share this bed. The SKU answers it where there
+			// is one; nine live plank variants carry none, so the name is the
+			// fallback - the same pair IsGeneratedProduct reads.
+			Family:     production.ProductFamily(deref(j.Sku), deref(j.ProductName)),
 			NozzleLeft: numAsString(j.LeftNozzleMm), NozzleRight: numAsString(j.RightNozzleMm),
 			QualityMM: numAsString(j.QualityMm), MachineFamily: deref(j.MachineFamily),
 			SupportUsed: j.SupportUsed != nil && *j.SupportUsed,

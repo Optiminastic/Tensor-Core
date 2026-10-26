@@ -20,11 +20,18 @@ const (
 	// packaging_qc role: it records QC/assembly/packaging but never advances a job
 	// directly (no production:update) and never sees costs.
 	RolePackagingQc RoleName = "PACKAGING_QC"
+
+	// RoleCustomerSupport answers customers: the Agent area and Shipping, and
+	// nothing else. It holds no production, design, costing or configuration
+	// permission at all - someone chasing a damaged parcel has no business
+	// advancing a print job or reading a margin.
+	RoleCustomerSupport RoleName = "CUSTOMER_SUPPORT"
 )
 
 // AllRoles lists every role in a stable order.
 var AllRoles = []RoleName{
 	RoleAdmin, RoleDesigner, RoleProjectLead, RolePerformanceMarketer, RoleOperator, RolePackagingQc,
+	RoleCustomerSupport,
 }
 
 // Valid reports whether r is one of the known roles.
@@ -120,6 +127,22 @@ var (
 	BulkOrderRead   = PermissionSpec{"bulk_order", "read", "View bulk orders and their quotations"}
 	BulkOrderManage = PermissionSpec{"bulk_order", "manage", "Create, edit and approve bulk orders"}
 
+	// DamageResolve decides what happens to a damaged parcel - reprint it at
+	// our cost, or offer the customer the Rs 100 reverse pickup - and books
+	// the courier once the money is in.
+	//
+	// ADMIN ONLY, at the shop's instruction, by the same construction as the
+	// bulk-order pair above: granted to no role, and ADMIN holds every
+	// permission anyway.
+	//
+	// NOT whatsapp:reply, which is what the rest of the damage board runs on
+	// and which CUSTOMER_SUPPORT holds. Support confirms that a payment
+	// arrived, and that is as far as their authority goes; the two steps that
+	// commit the shop to money - choosing the outcome, and sending a courier
+	// to somebody's door - are a different decision and deliberately a
+	// different permission.
+	DamageResolve = PermissionSpec{"damage", "resolve", "Decide a damaged order's outcome and book its pickup"}
+
 	ShopifyPublish = PermissionSpec{"shopify", "publish", "Publish an approved SKU to Shopify"}
 
 	// The production pipeline (ported from print-queue-be). production:read is the
@@ -168,7 +191,7 @@ var (
 	AuditRead = PermissionSpec{"audit", "read", "Read the audit trail"}
 )
 
-// AllPermissions is the full catalog in seed order (38 permissions).
+// AllPermissions is the full catalog in seed order.
 var AllPermissions = []PermissionSpec{
 	DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit, DesignApprove, DesignReject,
 	DesignJobRead, DesignJobSupply,
@@ -180,6 +203,7 @@ var AllPermissions = []PermissionSpec{
 	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
 	OrderRead,
 	WhatsAppRead, WhatsAppReply,
+	DamageResolve,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
 	QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
@@ -285,6 +309,47 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		ProductionRead, QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
 		BrandRead,
 	},
+	// Customer support: the Agent area and Shipping, whole, and nothing else.
+	//
+	// Four grants, and each one is a nav gate in nav-config.ts rather than a
+	// guess at what the role might want:
+	//
+	//   - order:read puts BOTH areas in the nav. The Agent section and the
+	//     Shipping section are gated on it, and so are the endpoints behind
+	//     them: abandoned-checkouts, call-logs, message-logs, shipments and
+	//     the order drawer a damage report opens.
+	//   - whatsapp:read is Damaged Products and Bot Messages, the two Agent
+	//     leaves that carry a narrower gate than the section - a damage report
+	//     holds a customer's photographs and their number.
+	//   - whatsapp:reply is what makes the role able to DO the job rather than
+	//     watch it: PATCH on a damage report is how new -> in_review ->
+	//     resolved happens. A support role that cannot move a report along
+	//     would be shown a queue it can only stare at.
+	//   - brand:read, like every role, because every one of these pages lives
+	//     under /dashboard/<brand>/ and reaching them means first listing the
+	//     brands you may work in.
+	//
+	// NOTE that whatsapp:reply also carries PUT on the bot's own content - the
+	// FAQ answers and menu the Bot Messages page edits. That is one permission
+	// covering two things, and if the shop wants support to resolve reports
+	// WITHOUT rewriting what the bot says, that permission has to be split
+	// first; it cannot be expressed in this table as it stands.
+	//
+	// Nothing production-shaped, deliberately: no production:read, so the
+	// Production area and every page under it stays out of the nav, and the
+	// job endpoints refuse them.
+	//   - damage:resolve decides a damaged order's outcome: reprint it at our
+	//     cost, or offer the customer the Rs 100 reverse pickup. Held by
+	//     support as well as admin at the shop's instruction - the person
+	//     reading the report is the person who should be able to act on it,
+	//     and a queue where every row needs an admin before anything happens
+	//     is a queue that waits.
+	RoleCustomerSupport: {
+		OrderRead,
+		WhatsAppRead, WhatsAppReply,
+		DamageResolve,
+		BrandRead,
+	},
 }
 
 // RoleDescriptions is the one-line description of each role.
@@ -295,6 +360,7 @@ var RoleDescriptions = map[RoleName]string{
 	RolePerformanceMarketer: "Reads pricing and margins to plan ad spend",
 	RoleOperator:            "Runs production jobs and machines; cannot see cost assumptions",
 	RolePackagingQc:         "Runs the QC and packaging stations; cannot see cost assumptions",
+	RoleCustomerSupport:     "Answers customers: the Agent area and Shipping, and nothing else",
 }
 
 // GrantsFor returns the permission specs granted to a role (nil for unknown).

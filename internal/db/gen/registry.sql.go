@@ -30,22 +30,60 @@ func (q *Queries) AddVariantOptionValue(ctx context.Context, arg AddVariantOptio
 	return err
 }
 
+const anySKUAsksTheCustomer = `-- name: AnySKUAsksTheCustomer :one
+SELECT EXISTS (
+    SELECT 1 FROM product_variants v
+    WHERE lower(v.sku) = ANY ($1::text[])
+      AND v.personalisation_link_enabled
+) OR NOT EXISTS (
+    SELECT 1 FROM product_variants v
+    WHERE lower(v.sku) = ANY ($1::text[])
+) AS asks
+`
+
+// Whether ANY of these SKUs still asks its customer to confirm.
+//
+// An order is the unit a link is sent for, so one enabled SKU on it is enough
+// to open a window. A SKU the registry has never seen counts as enabled: the
+// plank range is not in the registry at all and must keep behaving exactly as
+// it does today.
+func (q *Queries) AnySKUAsksTheCustomer(ctx context.Context, skus []string) (*bool, error) {
+	row := q.db.QueryRow(ctx, anySKUAsksTheCustomer, skus)
+	var asks *bool
+	err := row.Scan(&asks)
+	return asks, err
+}
+
 const clearDesignColourParts = `-- name: ClearDesignColourParts :exec
 DELETE FROM design_colour_parts
 WHERE product_id = $1
   AND lower(role) = lower($2::text)
+  AND variant_id IS NOT DISTINCT FROM $3::uuid
 `
 
 type ClearDesignColourPartsParams struct {
 	ProductID uuid.UUID
 	Role      string
+	VariantID *uuid.UUID
 }
 
 // Removes one role's pieces, so a re-uploaded reference 3MF replaces rather
 // than merges. A part that disappeared from the file has disappeared from the
 // product, and leaving it behind would render a piece the design no longer has.
 func (q *Queries) ClearDesignColourParts(ctx context.Context, arg ClearDesignColourPartsParams) error {
-	_, err := q.db.Exec(ctx, clearDesignColourParts, arg.ProductID, arg.Role)
+	_, err := q.db.Exec(ctx, clearDesignColourParts, arg.ProductID, arg.Role, arg.VariantID)
+	return err
+}
+
+const clearProductBom = `-- name: ClearProductBom :exec
+DELETE FROM product_bom WHERE product_id = $1
+`
+
+// Empties a product's bill of materials so it can be written whole, exactly as
+// ClearVariantBom does. Paired with ReplaceProductBomItem inside one
+// transaction.
+func (q *Queries) ClearProductBom(ctx context.Context, productID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearProductBom, productID)
 	return err
 }
 
@@ -99,6 +137,39 @@ func (q *Queries) ClearVariantOptions(ctx context.Context, variantID uuid.UUID) 
 	return err
 }
 
+const countPlatesForItems = `-- name: CountPlatesForItems :many
+SELECT inventory_item_id, count(*)::int AS plates
+FROM component_plates
+WHERE inventory_item_id = ANY ($1::uuid[])
+GROUP BY inventory_item_id
+`
+
+type CountPlatesForItemsRow struct {
+	InventoryItemID uuid.UUID
+	Plates          int32
+}
+
+// How many plates each component carries, for the Components table.
+func (q *Queries) CountPlatesForItems(ctx context.Context, itemIds []uuid.UUID) ([]CountPlatesForItemsRow, error) {
+	rows, err := q.db.Query(ctx, countPlatesForItems, itemIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountPlatesForItemsRow{}
+	for rows.Next() {
+		var i CountPlatesForItemsRow
+		if err := rows.Scan(&i.InventoryItemID, &i.Plates); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countSKUPipelinesTable = `-- name: CountSKUPipelinesTable :one
 WITH known AS (
     SELECT lower(v.sku)::text AS sku, v.sku AS display, p.code AS product_code,
@@ -113,6 +184,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 ),
 skus AS (
     SELECT k.sku,
@@ -164,6 +239,29 @@ func (q *Queries) CountVariantsForProduct(ctx context.Context, productID uuid.UU
 	return i, err
 }
 
+const deleteComponentPlate = `-- name: DeleteComponentPlate :execrows
+DELETE FROM component_plates
+WHERE inventory_item_id = $1
+  AND lower(sku) = lower($2::text)
+  AND upper(machine_family) = upper($3::text)
+`
+
+type DeleteComponentPlateParams struct {
+	InventoryItemID uuid.UUID
+	Sku             string
+	MachineFamily   string
+}
+
+// Removing a plate returns the component to being sliced per run, which is a
+// real choice and not an absence of one - hence a delete rather than a null.
+func (q *Queries) DeleteComponentPlate(ctx context.Context, arg DeleteComponentPlateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteComponentPlate, arg.InventoryItemID, arg.Sku, arg.MachineFamily)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteOptionValue = `-- name: DeleteOptionValue :exec
 DELETE FROM product_option_values WHERE id = $1
 `
@@ -203,6 +301,22 @@ func (q *Queries) DeleteProductOption(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const deleteProductPipeline = `-- name: DeleteProductPipeline :exec
+DELETE FROM sku_slicer_pipelines
+WHERE product_id = $1
+  AND upper(machine_family) = upper($2::text)
+`
+
+type DeleteProductPipelineParams struct {
+	ProductID     *uuid.UUID
+	MachineFamily string
+}
+
+func (q *Queries) DeleteProductPipeline(ctx context.Context, arg DeleteProductPipelineParams) error {
+	_, err := q.db.Exec(ctx, deleteProductPipeline, arg.ProductID, arg.MachineFamily)
+	return err
+}
+
 const deleteSKUPipeline = `-- name: DeleteSKUPipeline :exec
 DELETE FROM sku_slicer_pipelines
 WHERE lower(sku) = lower($1::text)
@@ -218,6 +332,22 @@ type DeleteSKUPipelineParams struct {
 // choice and not an absence of one - hence a delete rather than a null.
 func (q *Queries) DeleteSKUPipeline(ctx context.Context, arg DeleteSKUPipelineParams) error {
 	_, err := q.db.Exec(ctx, deleteSKUPipeline, arg.Sku, arg.MachineFamily)
+	return err
+}
+
+const deleteShopifyProductPipeline = `-- name: DeleteShopifyProductPipeline :exec
+DELETE FROM sku_slicer_pipelines
+WHERE shopify_product_id = $1
+  AND upper(machine_family) = upper($2::text)
+`
+
+type DeleteShopifyProductPipelineParams struct {
+	ShopifyProductID *string
+	MachineFamily    string
+}
+
+func (q *Queries) DeleteShopifyProductPipeline(ctx context.Context, arg DeleteShopifyProductPipelineParams) error {
+	_, err := q.db.Exec(ctx, deleteShopifyProductPipeline, arg.ShopifyProductID, arg.MachineFamily)
 	return err
 }
 
@@ -269,6 +399,39 @@ func (q *Queries) FindProductBySKU(ctx context.Context, sku string) (Product, er
 	return i, err
 }
 
+const findVariantBySKU = `-- name: FindVariantBySKU :one
+SELECT v.id, v.product_id, v.sku, v.name, v.status, v.personalisation_link_enabled, v.created_at, v.updated_at
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE lower(v.sku) = lower($1)
+  AND v.status = 'active'
+  AND p.status = 'active'
+LIMIT 1
+`
+
+// The VARIANT an order line belongs to, found by its SKU.
+//
+// FindProductBySKU's sibling, and matched on exactly the same terms so the two
+// cannot disagree about which SKUs the registry describes. The product answers
+// "which template and which field mapping"; the variant answers "which
+// colourway", which is a different question as soon as a product's palette
+// changes between variants.
+func (q *Queries) FindVariantBySKU(ctx context.Context, sku string) (ProductVariant, error) {
+	row := q.db.QueryRow(ctx, findVariantBySKU, sku)
+	var i ProductVariant
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Sku,
+		&i.Name,
+		&i.Status,
+		&i.PersonalisationLinkEnabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getOptionValueProduct = `-- name: GetOptionValueProduct :one
 SELECT o.product_id
 FROM product_option_values v
@@ -285,9 +448,46 @@ func (q *Queries) GetOptionValueProduct(ctx context.Context, id uuid.UUID) (uuid
 	return product_id, err
 }
 
+const getPipelineForProductOfSKU = `-- name: GetPipelineForProductOfSKU :one
+SELECT sp.id, sp.sku, sp.product_id, sp.shopify_product_id, sp.machine_family, sp.pipeline_id, sp.pipeline_name, sp.created_at, sp.updated_at FROM sku_slicer_pipelines sp
+JOIN products p ON p.id = sp.product_id
+JOIN product_variants v ON v.product_id = p.id
+WHERE lower(v.sku) = lower($1::text)
+  AND v.status = 'active' AND p.status = 'active'
+  AND upper(sp.machine_family) = upper($2::text)
+LIMIT 1
+`
+
+type GetPipelineForProductOfSKUParams struct {
+	Sku           string
+	MachineFamily string
+}
+
+// The pipeline a SKU inherits from the product it belongs to.
+//
+// Asked only when the SKU has no rule of its own, so the common path stays one
+// query. resolvePipeline is where the preference between the two lives.
+func (q *Queries) GetPipelineForProductOfSKU(ctx context.Context, arg GetPipelineForProductOfSKUParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, getPipelineForProductOfSKU, arg.Sku, arg.MachineFamily)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPipelineForSKU = `-- name: GetPipelineForSKU :one
-SELECT id, sku, machine_family, pipeline_id, pipeline_name, created_at, updated_at FROM sku_slicer_pipelines
-WHERE lower(sku) = lower($1::text)
+SELECT id, sku, product_id, shopify_product_id, machine_family, pipeline_id, pipeline_name, created_at, updated_at FROM sku_slicer_pipelines
+WHERE sku IS NOT NULL
+  AND lower(sku) = lower($1::text)
   AND upper(machine_family) = upper($2::text)
 `
 
@@ -305,6 +505,50 @@ func (q *Queries) GetPipelineForSKU(ctx context.Context, arg GetPipelineForSKUPa
 	err := row.Scan(
 		&i.ID,
 		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getPipelineForShopifyProductOfSKU = `-- name: GetPipelineForShopifyProductOfSKU :one
+SELECT sp.id, sp.sku, sp.product_id, sp.shopify_product_id, sp.machine_family, sp.pipeline_id, sp.pipeline_name, sp.created_at, sp.updated_at FROM sku_slicer_pipelines sp
+WHERE sp.shopify_product_id IS NOT NULL
+  AND upper(sp.machine_family) = upper($1::text)
+  AND sp.shopify_product_id = (
+      SELECT li->>'product_id'
+      FROM orders o, jsonb_array_elements(o.line_items) li
+      WHERE lower(li->>'sku') = lower($2::text)
+        AND li->>'product_id' IS NOT NULL
+      ORDER BY o.placed_at DESC NULLS LAST
+      LIMIT 1
+  )
+LIMIT 1
+`
+
+type GetPipelineForShopifyProductOfSKUParams struct {
+	MachineFamily string
+	Sku           string
+}
+
+// The pipeline a SKU inherits from the Shopify product it was sold under.
+//
+// Asked last, and only when the SKU has no rule of its own and belongs to no
+// registry product - so the hot path pays for it once per unmapped job, never
+// for one already answered.
+func (q *Queries) GetPipelineForShopifyProductOfSKU(ctx context.Context, arg GetPipelineForShopifyProductOfSKUParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, getPipelineForShopifyProductOfSKU, arg.MachineFamily, arg.Sku)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
 		&i.MachineFamily,
 		&i.PipelineID,
 		&i.PipelineName,
@@ -335,7 +579,7 @@ func (q *Queries) GetProductByCode(ctx context.Context, code string) (Product, e
 }
 
 const getVariant = `-- name: GetVariant :one
-SELECT id, product_id, sku, name, status, created_at, updated_at FROM product_variants WHERE id = $1
+SELECT id, product_id, sku, name, status, personalisation_link_enabled, created_at, updated_at FROM product_variants WHERE id = $1
 `
 
 func (q *Queries) GetVariant(ctx context.Context, id uuid.UUID) (ProductVariant, error) {
@@ -347,6 +591,7 @@ func (q *Queries) GetVariant(ctx context.Context, id uuid.UUID) (ProductVariant,
 		&i.Sku,
 		&i.Name,
 		&i.Status,
+		&i.PersonalisationLinkEnabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -382,10 +627,11 @@ func (q *Queries) GetVariantProduct(ctx context.Context, id uuid.UUID) (GetVaria
 }
 
 const insertDesignColourPart = `-- name: InsertDesignColourPart :one
-INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position)
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id)
 VALUES ($1, $2, $3,
-        $4, $5, $6)
-RETURNING id, product_id, role, part_name, colour_hex, position, created_at
+        $4, $5, $6,
+        $7)
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id
 `
 
 type InsertDesignColourPartParams struct {
@@ -395,6 +641,7 @@ type InsertDesignColourPartParams struct {
 	PartName  string
 	ColourHex *string
 	Position  int32
+	VariantID *uuid.UUID
 }
 
 func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignColourPartParams) (DesignColourPart, error) {
@@ -405,6 +652,7 @@ func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignCo
 		arg.PartName,
 		arg.ColourHex,
 		arg.Position,
+		arg.VariantID,
 	)
 	var i DesignColourPart
 	err := row.Scan(
@@ -415,6 +663,7 @@ func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignCo
 		&i.ColourHex,
 		&i.Position,
 		&i.CreatedAt,
+		&i.VariantID,
 	)
 	return i, err
 }
@@ -496,19 +745,20 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 const insertProductFieldMap = `-- name: InsertProductFieldMap :exec
 INSERT INTO product_field_maps (
     id, product_id, property_key, scad_variable, value_type, role, required,
-    fixed_value, default_value, position
+    fixed_value, default_value, max_runes, position
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8, $9,
-    $10
+    $10, $11
 )
-ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
+ON CONFLICT (product_id, role, lower(scad_variable)) WHERE variant_id IS NULL DO UPDATE
 SET property_key  = EXCLUDED.property_key,
     value_type    = EXCLUDED.value_type,
     required      = EXCLUDED.required,
     fixed_value   = EXCLUDED.fixed_value,
     default_value = EXCLUDED.default_value,
+    max_runes     = EXCLUDED.max_runes,
     position      = EXCLUDED.position
 `
 
@@ -522,6 +772,7 @@ type InsertProductFieldMapParams struct {
 	Required     bool
 	FixedValue   *string
 	DefaultValue *string
+	MaxRunes     *int32
 	Position     int32
 }
 
@@ -533,6 +784,12 @@ type InsertProductFieldMapParams struct {
 // command line - so the model would depend on iteration order, which is to
 // say on nothing. Across two files they are different variables in different
 // scripts and both are kept.
+// The WHERE is NOT optional. uq_product_field_map_variable became partial
+// in migration 0129, when a variant gained the right to override a
+// product's mapping, and Postgres matches an ON CONFLICT target against a
+// partial index only when the predicate is repeated. Without it every call
+// fails with 42P10 - "no unique or exclusion constraint matching the ON
+// CONFLICT specification" - which names neither the index nor the reason.
 func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFieldMapParams) error {
 	_, err := q.db.Exec(ctx, insertProductFieldMap,
 		arg.ID,
@@ -544,6 +801,7 @@ func (q *Queries) InsertProductFieldMap(ctx context.Context, arg InsertProductFi
 		arg.Required,
 		arg.FixedValue,
 		arg.DefaultValue,
+		arg.MaxRunes,
 		arg.Position,
 	)
 	return err
@@ -588,7 +846,7 @@ const insertVariant = `-- name: InsertVariant :one
 INSERT INTO product_variants (id, product_id, sku, name, status)
 VALUES ($1, $2, $3,
         $4, $5)
-RETURNING id, product_id, sku, name, status, created_at, updated_at
+RETURNING id, product_id, sku, name, status, personalisation_link_enabled, created_at, updated_at
 `
 
 type InsertVariantParams struct {
@@ -614,6 +872,7 @@ func (q *Queries) InsertVariant(ctx context.Context, arg InsertVariantParams) (P
 		&i.Sku,
 		&i.Name,
 		&i.Status,
+		&i.PersonalisationLinkEnabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -663,21 +922,37 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 }
 
 const listAllDesignColourParts = `-- name: ListAllDesignColourParts :many
-SELECT id, product_id, role, part_name, colour_hex, position, created_at FROM design_colour_parts
-WHERE product_id = $1
-ORDER BY lower(role), position, lower(part_name)
+SELECT dcp.id, dcp.product_id, dcp.role, dcp.part_name, dcp.colour_hex, dcp.position, dcp.created_at, dcp.variant_id, v.sku AS variant_sku
+FROM design_colour_parts dcp
+LEFT JOIN product_variants v ON v.id = dcp.variant_id
+WHERE dcp.product_id = $1
+ORDER BY lower(dcp.role), v.sku NULLS FIRST, dcp.position, lower(dcp.part_name)
 `
 
-// Every coloured piece of one product, across all its roles, for the editor.
-func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.UUID) ([]DesignColourPart, error) {
+type ListAllDesignColourPartsRow struct {
+	ID         uuid.UUID
+	ProductID  uuid.UUID
+	Role       string
+	PartName   string
+	ColourHex  *string
+	Position   int32
+	CreatedAt  pgtype.Timestamptz
+	VariantID  *uuid.UUID
+	VariantSku *string
+}
+
+// Every coloured piece of one product, across all its roles AND variants, for
+// the editor. The SKU comes along so the editor can group by colourway without
+// a second query; it is NULL on the product's own scheme.
+func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.UUID) ([]ListAllDesignColourPartsRow, error) {
 	rows, err := q.db.Query(ctx, listAllDesignColourParts, productID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []DesignColourPart{}
+	items := []ListAllDesignColourPartsRow{}
 	for rows.Next() {
-		var i DesignColourPart
+		var i ListAllDesignColourPartsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ProductID,
@@ -686,6 +961,8 @@ func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.U
 			&i.ColourHex,
 			&i.Position,
 			&i.CreatedAt,
+			&i.VariantID,
+			&i.VariantSku,
 		); err != nil {
 			return nil, err
 		}
@@ -700,6 +977,7 @@ func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.U
 const listAllPipelineMappings = `-- name: ListAllPipelineMappings :many
 SELECT lower(sku)::text AS sku, machine_family, pipeline_id
 FROM sku_slicer_pipelines
+WHERE sku IS NOT NULL
 ORDER BY lower(sku), upper(machine_family)
 `
 
@@ -735,7 +1013,7 @@ func (q *Queries) ListAllPipelineMappings(ctx context.Context) ([]ListAllPipelin
 }
 
 const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, max_runes, variant_id, position, created_at FROM product_field_maps
 WHERE product_id = $1
 ORDER BY role, position, lower(scad_variable)
 `
@@ -764,6 +1042,8 @@ func (q *Queries) ListAllProductFieldMaps(ctx context.Context, productID uuid.UU
 			&i.Required,
 			&i.FixedValue,
 			&i.DefaultValue,
+			&i.MaxRunes,
+			&i.VariantID,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {
@@ -879,10 +1159,115 @@ func (q *Queries) ListBomForVariants(ctx context.Context, variantIds []uuid.UUID
 	return items, nil
 }
 
+const listColourPartsForVariant = `-- name: ListColourPartsForVariant :many
+SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id FROM design_colour_parts
+WHERE variant_id = $1
+  AND lower(role) = lower($2::text)
+ORDER BY position, lower(part_name)
+`
+
+type ListColourPartsForVariantParams struct {
+	VariantID *uuid.UUID
+	Role      string
+}
+
+// The pieces ONE VARIANT declares of its own, or none.
+//
+// The fallback to the product's scheme is resolveScheme's, in Go, where the
+// rule it enforces can be tested and stated: a variant that declares a scheme
+// declares the WHOLE scheme. Expressed here as a UNION it was correct and
+// unreadable, and nothing could assert it without a database.
+func (q *Queries) ListColourPartsForVariant(ctx context.Context, arg ListColourPartsForVariantParams) ([]DesignColourPart, error) {
+	rows, err := q.db.Query(ctx, listColourPartsForVariant, arg.VariantID, arg.Role)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DesignColourPart{}
+	for rows.Next() {
+		var i DesignColourPart
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Role,
+			&i.PartName,
+			&i.ColourHex,
+			&i.Position,
+			&i.CreatedAt,
+			&i.VariantID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listComponentPlates = `-- name: ListComponentPlates :many
+SELECT p.id, p.inventory_item_id, p.sku, p.machine_family, p.file_id, p.notes, p.uploaded_by, p.created_at, p.updated_at, f.filename, f.size_bytes, f.storage_key
+FROM component_plates p
+JOIN file_assets f ON f.id = p.file_id
+WHERE p.inventory_item_id = $1
+ORDER BY lower(p.sku), upper(p.machine_family)
+`
+
+type ListComponentPlatesRow struct {
+	ID              uuid.UUID
+	InventoryItemID uuid.UUID
+	Sku             string
+	MachineFamily   string
+	FileID          uuid.UUID
+	Notes           *string
+	UploadedBy      string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+	Filename        string
+	SizeBytes       int64
+	StorageKey      string
+}
+
+// Every ready-made plate a component carries: one per SKU per machine class.
+func (q *Queries) ListComponentPlates(ctx context.Context, inventoryItemID uuid.UUID) ([]ListComponentPlatesRow, error) {
+	rows, err := q.db.Query(ctx, listComponentPlates, inventoryItemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListComponentPlatesRow{}
+	for rows.Next() {
+		var i ListComponentPlatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.InventoryItemID,
+			&i.Sku,
+			&i.MachineFamily,
+			&i.FileID,
+			&i.Notes,
+			&i.UploadedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Filename,
+			&i.SizeBytes,
+			&i.StorageKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDesignColourParts = `-- name: ListDesignColourParts :many
-SELECT id, product_id, role, part_name, colour_hex, position, created_at FROM design_colour_parts
+SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id FROM design_colour_parts
 WHERE product_id = $1
   AND lower(role) = lower($2::text)
+  AND variant_id IS NULL
 ORDER BY position, lower(part_name)
 `
 
@@ -893,6 +1278,9 @@ type ListDesignColourPartsParams struct {
 
 // The coloured pieces one design file prints as, in the order they were read
 // from the reference 3MF.
+//
+// The PRODUCT's scheme only - rows no variant has overridden. A render asks
+// ListColourPartsForVariant instead, which falls back to this.
 //
 // Empty is the normal answer for every product configured before this existed,
 // and the renderer treats it as "use the two-pass plank behaviour" rather than
@@ -914,6 +1302,7 @@ func (q *Queries) ListDesignColourParts(ctx context.Context, arg ListDesignColou
 			&i.ColourHex,
 			&i.Position,
 			&i.CreatedAt,
+			&i.VariantID,
 		); err != nil {
 			return nil, err
 		}
@@ -926,7 +1315,7 @@ func (q *Queries) ListDesignColourParts(ctx context.Context, arg ListDesignColou
 }
 
 const listDesignsForProduct = `-- name: ListDesignsForProduct :many
-SELECT d.variant_id, d.role, d.template_key, d.design_id, d.version
+SELECT d.variant_id, v.sku, d.role, d.template_key, d.design_id, d.version
 FROM variant_designs d
 JOIN product_variants v ON v.id = d.variant_id
 WHERE v.product_id = $1 AND d.status = 'active'
@@ -935,6 +1324,7 @@ ORDER BY d.role
 
 type ListDesignsForProductRow struct {
 	VariantID   uuid.UUID
+	Sku         *string
 	Role        string
 	TemplateKey *string
 	DesignID    *uuid.UUID
@@ -954,6 +1344,7 @@ func (q *Queries) ListDesignsForProduct(ctx context.Context, productID uuid.UUID
 		var i ListDesignsForProductRow
 		if err := rows.Scan(
 			&i.VariantID,
+			&i.Sku,
 			&i.Role,
 			&i.TemplateKey,
 			&i.DesignID,
@@ -970,7 +1361,7 @@ func (q *Queries) ListDesignsForProduct(ctx context.Context, productID uuid.UUID
 }
 
 const listFieldMapsForProducts = `-- name: ListFieldMapsForProducts :many
-SELECT f.id, f.product_id, f.property_key, f.scad_variable, f.value_type, f.role, f.required, f.fixed_value, f.default_value, f.position, f.created_at, p.code AS product_code, p.name AS product_name
+SELECT f.id, f.product_id, f.property_key, f.scad_variable, f.value_type, f.role, f.required, f.fixed_value, f.default_value, f.max_runes, f.variant_id, f.position, f.created_at, p.code AS product_code, p.name AS product_name
 FROM product_field_maps f
 JOIN products p ON p.id = f.product_id
 WHERE f.product_id = ANY($1::uuid[])
@@ -989,6 +1380,8 @@ type ListFieldMapsForProductsRow struct {
 	Required     bool
 	FixedValue   *string
 	DefaultValue *string
+	MaxRunes     *int32
+	VariantID    *uuid.UUID
 	Position     int32
 	CreatedAt    pgtype.Timestamptz
 	ProductCode  string
@@ -1025,6 +1418,8 @@ func (q *Queries) ListFieldMapsForProducts(ctx context.Context, productIds []uui
 			&i.Required,
 			&i.FixedValue,
 			&i.DefaultValue,
+			&i.MaxRunes,
+			&i.VariantID,
 			&i.Position,
 			&i.CreatedAt,
 			&i.ProductCode,
@@ -1090,10 +1485,261 @@ func (q *Queries) ListOptionValues(ctx context.Context, productID uuid.UUID) ([]
 	return items, nil
 }
 
+const listOrphanSKUPipelines = `-- name: ListOrphanSKUPipelines :many
+WITH printing AS (
+    SELECT DISTINCT lower(j.sku)::text AS sku, j.sku AS display
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+      AND NOT EXISTS (
+          SELECT 1 FROM product_variants v
+          JOIN products p ON p.id = v.product_id
+          WHERE lower(v.sku) = lower(j.sku) AND v.status <> 'retired' AND p.status <> 'retired'
+      )
+    UNION
+    SELECT DISTINCT lower(sp.sku)::text, sp.sku
+    FROM sku_slicer_pipelines sp
+    WHERE sp.sku IS NOT NULL
+)
+SELECT k.sku, max(k.display)::text AS display_sku,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM printing k
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = k.sku
+GROUP BY k.sku, sp.machine_family, sp.pipeline_id, sp.pipeline_name
+ORDER BY k.sku, upper(sp.machine_family)
+`
+
+type ListOrphanSKUPipelinesRow struct {
+	Sku           string
+	DisplaySku    string
+	MachineFamily *string
+	PipelineID    *int32
+	PipelineName  *string
+}
+
+// SKUs that print but belong to no registry product, with their own mappings.
+//
+// They cannot be reached by assigning a parent, because they have none: of the
+// SKUs printing on this floor, most match no variant row. Listing them
+// individually is the only way they can be mapped at all, and dropping them
+// would quietly un-map the highest-volume product in the shop.
+func (q *Queries) ListOrphanSKUPipelines(ctx context.Context) ([]ListOrphanSKUPipelinesRow, error) {
+	rows, err := q.db.Query(ctx, listOrphanSKUPipelines)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOrphanSKUPipelinesRow{}
+	for rows.Next() {
+		var i ListOrphanSKUPipelinesRow
+		if err := rows.Scan(
+			&i.Sku,
+			&i.DisplaySku,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPreviewComponentsForSKU = `-- name: ListPreviewComponentsForSKU :many
+SELECT i.id, i.name, i.model_file_id, i.preview_colour, i.preview_position,
+       f.storage_key, f.filename
+FROM inventory_items i
+JOIN file_assets f ON f.id = i.model_file_id
+WHERE i.source = 'printed'
+  AND i.model_file_id IS NOT NULL
+  AND (
+      i.id IN (
+          SELECT b.inventory_item_id FROM variant_bom b
+          JOIN product_variants v ON v.id = b.variant_id
+          WHERE lower(v.sku) = lower($1::text)
+      )
+      OR (
+          NOT EXISTS (
+              SELECT 1 FROM variant_bom b
+              JOIN product_variants v ON v.id = b.variant_id
+              WHERE lower(v.sku) = lower($1::text)
+          )
+          AND i.id IN (
+              SELECT pb.inventory_item_id FROM product_bom pb
+              JOIN products p ON p.id = pb.product_id
+              JOIN product_variants v ON v.product_id = p.id
+              WHERE lower(v.sku) = lower($1::text)
+          )
+      )
+  )
+ORDER BY i.preview_position, lower(i.name)
+`
+
+type ListPreviewComponentsForSKURow struct {
+	ID              uuid.UUID
+	Name            string
+	ModelFileID     *uuid.UUID
+	PreviewColour   *string
+	PreviewPosition int32
+	StorageKey      string
+	Filename        string
+}
+
+// The printed pieces that belong in a SKU's assembled picture.
+//
+// Every component the SKU's product carries that Tensor can draw: printed
+// here, with a mesh of its own. A bought-in part has no model and a part with
+// only a .scad template is not a fixed mesh, so neither is returned - the
+// picture shows what can actually be drawn rather than a gap where a box
+// should be.
+//
+// Through the bill of materials, so the pieces follow whatever the product is
+// actually built from. A variant's own list wins where it has one, exactly as
+// resolveBom decides it.
+func (q *Queries) ListPreviewComponentsForSKU(ctx context.Context, sku string) ([]ListPreviewComponentsForSKURow, error) {
+	rows, err := q.db.Query(ctx, listPreviewComponentsForSKU, sku)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPreviewComponentsForSKURow{}
+	for rows.Next() {
+		var i ListPreviewComponentsForSKURow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ModelFileID,
+			&i.PreviewColour,
+			&i.PreviewPosition,
+			&i.StorageKey,
+			&i.Filename,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProductBom = `-- name: ListProductBom :many
+SELECT b.id, b.product_id, b.quantity, b.created_at,
+       i.id AS item_id, i.name AS item_name, i.code AS item_code, i.unit,
+       i.unit_price, i.quantity AS stock_quantity, i.source
+FROM product_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.product_id = $1
+ORDER BY lower(i.name)
+`
+
+type ListProductBomRow struct {
+	ID            uuid.UUID
+	ProductID     uuid.UUID
+	Quantity      pgtype.Numeric
+	CreatedAt     pgtype.Timestamptz
+	ItemID        uuid.UUID
+	ItemName      string
+	ItemCode      *string
+	Unit          string
+	UnitPrice     pgtype.Numeric
+	StockQuantity pgtype.Numeric
+	Source        string
+}
+
+// The bill of materials every variant of a product inherits.
+//
+// The same columns ListVariantBom returns, so a caller folding the two does
+// not have to reshape one of them.
+func (q *Queries) ListProductBom(ctx context.Context, productID uuid.UUID) ([]ListProductBomRow, error) {
+	rows, err := q.db.Query(ctx, listProductBom, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductBomRow{}
+	for rows.Next() {
+		var i ListProductBomRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Quantity,
+			&i.CreatedAt,
+			&i.ItemID,
+			&i.ItemName,
+			&i.ItemCode,
+			&i.Unit,
+			&i.UnitPrice,
+			&i.StockQuantity,
+			&i.Source,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProductBomForProducts = `-- name: ListProductBomForProducts :many
+SELECT b.product_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM product_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.product_id = ANY ($1::uuid[])
+ORDER BY lower(i.name)
+`
+
+type ListProductBomForProductsRow struct {
+	ProductID uuid.UUID
+	Quantity  pgtype.Numeric
+	ItemID    uuid.UUID
+	ItemName  string
+	ItemCode  *string
+	Unit      string
+	UnitPrice pgtype.Numeric
+}
+
+// Every product-level line for a set of products, for the list page.
+func (q *Queries) ListProductBomForProducts(ctx context.Context, productIds []uuid.UUID) ([]ListProductBomForProductsRow, error) {
+	rows, err := q.db.Query(ctx, listProductBomForProducts, productIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductBomForProductsRow{}
+	for rows.Next() {
+		var i ListProductBomForProductsRow
+		if err := rows.Scan(
+			&i.ProductID,
+			&i.Quantity,
+			&i.ItemID,
+			&i.ItemName,
+			&i.ItemCode,
+			&i.Unit,
+			&i.UnitPrice,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductFieldMaps = `-- name: ListProductFieldMaps :many
-SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, position, created_at FROM product_field_maps
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, max_runes, variant_id, position, created_at FROM product_field_maps
 WHERE product_id = $1
   AND role = $2
+  AND variant_id IS NULL
 ORDER BY position, lower(scad_variable)
 `
 
@@ -1129,6 +1775,8 @@ func (q *Queries) ListProductFieldMaps(ctx context.Context, arg ListProductField
 			&i.Required,
 			&i.FixedValue,
 			&i.DefaultValue,
+			&i.MaxRunes,
+			&i.VariantID,
 			&i.Position,
 			&i.CreatedAt,
 		); err != nil {
@@ -1165,6 +1813,62 @@ func (q *Queries) ListProductOptions(ctx context.Context, productID uuid.UUID) (
 			&i.Label,
 			&i.Position,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProductPipelines = `-- name: ListProductPipelines :many
+SELECT p.id AS product_id, p.code AS product_code, p.name AS product_name,
+       (SELECT count(*) FROM product_variants v
+         WHERE v.product_id = p.id AND v.status <> 'retired'
+           AND v.sku IS NOT NULL AND btrim(v.sku) <> '')::int AS sku_count,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM products p
+LEFT JOIN sku_slicer_pipelines sp ON sp.product_id = p.id
+WHERE p.status <> 'retired'
+ORDER BY lower(p.code), upper(sp.machine_family)
+`
+
+type ListProductPipelinesRow struct {
+	ProductID     uuid.UUID
+	ProductCode   string
+	ProductName   string
+	SkuCount      int32
+	MachineFamily *string
+	PipelineID    *int32
+	PipelineName  *string
+}
+
+// Every registry product with its slicer mapping, one row per product per
+// machine class it has been given.
+//
+// The PARENT is what gets assigned: the Lotus sells in three colourways and
+// the plank will have forty-four, and every one prints with the same settings.
+// A mapping per SKU is the same answer typed out once per colour.
+func (q *Queries) ListProductPipelines(ctx context.Context) ([]ListProductPipelinesRow, error) {
+	rows, err := q.db.Query(ctx, listProductPipelines)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductPipelinesRow{}
+	for rows.Next() {
+		var i ListProductPipelinesRow
+		if err := rows.Scan(
+			&i.ProductID,
+			&i.ProductCode,
+			&i.ProductName,
+			&i.SkuCount,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
 		); err != nil {
 			return nil, err
 		}
@@ -1247,6 +1951,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 )
 SELECT k.sku,
        max(k.display)::text      AS display_sku,
@@ -1321,6 +2029,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 ),
 skus AS (
     SELECT k.sku,
@@ -1446,6 +2158,82 @@ func (q *Queries) ListSellableVariants(ctx context.Context) ([]ListSellableVaria
 	return items, nil
 }
 
+const listShopifyProductPipelines = `-- name: ListShopifyProductPipelines :many
+WITH lines AS (
+    SELECT DISTINCT
+           (li->>'product_id')::text AS shopify_product_id,
+           lower(li->>'sku')::text AS sku,
+           li->>'sku' AS display_sku,
+           coalesce(li->>'product_name', '') AS line_name
+    FROM orders o, jsonb_array_elements(o.line_items) li
+    WHERE li->>'product_id' IS NOT NULL
+      AND li->>'sku' IS NOT NULL AND btrim(li->>'sku') <> ''
+),
+printing AS (
+    SELECT l.shopify_product_id, l.sku, l.display_sku, l.line_name FROM lines l
+    WHERE EXISTS (SELECT 1 FROM production_jobs j WHERE lower(j.sku) = l.sku)
+),
+parents AS (
+    SELECT shopify_product_id,
+           count(DISTINCT sku)::int AS sku_count,
+           (array_agg(line_name ORDER BY length(line_name), line_name))[1] AS name
+    FROM printing
+    GROUP BY shopify_product_id
+)
+SELECT p.shopify_product_id::text AS shopify_product_id,
+       p.name::text AS name, p.sku_count,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM parents p
+LEFT JOIN sku_slicer_pipelines sp ON sp.shopify_product_id = p.shopify_product_id
+ORDER BY lower(p.name), upper(sp.machine_family)
+`
+
+type ListShopifyProductPipelinesRow struct {
+	ShopifyProductID string
+	Name             string
+	SkuCount         int32
+	MachineFamily    *string
+	PipelineID       *int32
+	PipelineName     *string
+}
+
+// Every Shopify product that actually prints, with its slicer mapping.
+//
+// THE PARENT EVERY SKU ALREADY HAS. The plank's twenty variants sit under one
+// Shopify product; the registry knows about two products in all. Deriving the
+// parent from order lines rather than from the registry means the list covers
+// what the floor prints today, not what has been imported.
+//
+// product_name is the LINE's name - "Dual Name Plank - BLUE / NO LIGHT" - so
+// the shortest one under a product id is the closest thing to the parent's own
+// title without asking Shopify for it.
+func (q *Queries) ListShopifyProductPipelines(ctx context.Context) ([]ListShopifyProductPipelinesRow, error) {
+	rows, err := q.db.Query(ctx, listShopifyProductPipelines)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListShopifyProductPipelinesRow{}
+	for rows.Next() {
+		var i ListShopifyProductPipelinesRow
+		if err := rows.Scan(
+			&i.ShopifyProductID,
+			&i.Name,
+			&i.SkuCount,
+			&i.MachineFamily,
+			&i.PipelineID,
+			&i.PipelineName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVariantBom = `-- name: ListVariantBom :many
 SELECT b.id, b.variant_id, b.inventory_item_id, b.quantity, b.created_at, i.name AS item_name, i.code AS item_code, i.unit,
        i.unit_price, i.quantity AS stock_quantity
@@ -1539,8 +2327,62 @@ func (q *Queries) ListVariantDesigns(ctx context.Context, variantID uuid.UUID) (
 	return items, nil
 }
 
+const listVariantFieldMaps = `-- name: ListVariantFieldMaps :many
+SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, max_runes, variant_id, position, created_at FROM product_field_maps
+WHERE variant_id = $1
+  AND role = $2
+ORDER BY position, lower(scad_variable)
+`
+
+type ListVariantFieldMapsParams struct {
+	VariantID *uuid.UUID
+	Role      string
+}
+
+// The mapping ONE colourway declares of its own, or none.
+//
+// The fallback to the product's is in Go, beside resolveScheme, where the
+// rule it enforces can be stated and tested: a variant that maps anything
+// maps everything. Merging the two would fill a gap in a variant's mapping
+// from the product's and drive a file with a variable it does not declare -
+// which OpenSCAD accepts silently, so the model would simply come out with
+// no name on it.
+func (q *Queries) ListVariantFieldMaps(ctx context.Context, arg ListVariantFieldMapsParams) ([]ProductFieldMap, error) {
+	rows, err := q.db.Query(ctx, listVariantFieldMaps, arg.VariantID, arg.Role)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductFieldMap{}
+	for rows.Next() {
+		var i ProductFieldMap
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.PropertyKey,
+			&i.ScadVariable,
+			&i.ValueType,
+			&i.Role,
+			&i.Required,
+			&i.FixedValue,
+			&i.DefaultValue,
+			&i.MaxRunes,
+			&i.VariantID,
+			&i.Position,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVariantsForProduct = `-- name: ListVariantsForProduct :many
-SELECT v.id, v.product_id, v.sku, v.name, v.status, v.created_at, v.updated_at,
+SELECT v.id, v.product_id, v.sku, v.name, v.status, v.personalisation_link_enabled, v.created_at, v.updated_at,
        (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
           FROM product_variant_options pvo
           JOIN product_option_values ov ON ov.id = pvo.option_value_id
@@ -1553,15 +2395,16 @@ ORDER BY lower(v.name)
 `
 
 type ListVariantsForProductRow struct {
-	ID          uuid.UUID
-	ProductID   uuid.UUID
-	Sku         *string
-	Name        string
-	Status      string
-	CreatedAt   pgtype.Timestamptz
-	UpdatedAt   pgtype.Timestamptz
-	OptionCodes []byte
-	PartCount   int64
+	ID                         uuid.UUID
+	ProductID                  uuid.UUID
+	Sku                        *string
+	Name                       string
+	Status                     string
+	PersonalisationLinkEnabled bool
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	OptionCodes                []byte
+	PartCount                  int64
 }
 
 // One product's variants, with what each resolves to.
@@ -1584,6 +2427,7 @@ func (q *Queries) ListVariantsForProduct(ctx context.Context, productID uuid.UUI
 			&i.Sku,
 			&i.Name,
 			&i.Status,
+			&i.PersonalisationLinkEnabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.OptionCodes,
@@ -1600,7 +2444,7 @@ func (q *Queries) ListVariantsForProduct(ctx context.Context, productID uuid.UUI
 }
 
 const listVariantsForProductPage = `-- name: ListVariantsForProductPage :many
-SELECT v.id, v.product_id, v.sku, v.name, v.status, v.created_at, v.updated_at,
+SELECT v.id, v.product_id, v.sku, v.name, v.status, v.personalisation_link_enabled, v.created_at, v.updated_at,
        (SELECT string_agg(o.code || '=' || ov.code, ',' ORDER BY o.position, o.code)
           FROM product_variant_options pvo
           JOIN product_option_values ov ON ov.id = pvo.option_value_id
@@ -1620,15 +2464,16 @@ type ListVariantsForProductPageParams struct {
 }
 
 type ListVariantsForProductPageRow struct {
-	ID          uuid.UUID
-	ProductID   uuid.UUID
-	Sku         *string
-	Name        string
-	Status      string
-	CreatedAt   pgtype.Timestamptz
-	UpdatedAt   pgtype.Timestamptz
-	OptionCodes []byte
-	PartCount   int64
+	ID                         uuid.UUID
+	ProductID                  uuid.UUID
+	Sku                        *string
+	Name                       string
+	Status                     string
+	PersonalisationLinkEnabled bool
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
+	OptionCodes                []byte
+	PartCount                  int64
 }
 
 // One page of a product's variants: ListVariantsForProduct's columns and order,
@@ -1648,6 +2493,7 @@ func (q *Queries) ListVariantsForProductPage(ctx context.Context, arg ListVarian
 			&i.Sku,
 			&i.Name,
 			&i.Status,
+			&i.PersonalisationLinkEnabled,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.OptionCodes,
@@ -1661,6 +2507,63 @@ func (q *Queries) ListVariantsForProductPage(ctx context.Context, arg ListVarian
 		return nil, err
 	}
 	return items, nil
+}
+
+const listVariantsWithOwnBom = `-- name: ListVariantsWithOwnBom :many
+SELECT DISTINCT b.variant_id
+FROM variant_bom b
+JOIN product_variants v ON v.id = b.variant_id
+WHERE v.product_id = $1
+`
+
+// Which variants of a product declare a bill of materials of their own.
+//
+// Asked because inheritance is ALL OR NOTHING: a variant with any line of its
+// own uses only its own, so "does it have any" is the whole question and
+// counting them would invite a caller that merges.
+func (q *Queries) ListVariantsWithOwnBom(ctx context.Context, productID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listVariantsWithOwnBom, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var variant_id uuid.UUID
+		if err := rows.Scan(&variant_id); err != nil {
+			return nil, err
+		}
+		items = append(items, variant_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const replaceProductBomItem = `-- name: ReplaceProductBomItem :exec
+INSERT INTO product_bom (id, product_id, inventory_item_id, quantity)
+VALUES ($1, $2, $3,
+        $4::float8)
+ON CONFLICT (product_id, inventory_item_id) DO UPDATE
+SET quantity = EXCLUDED.quantity
+`
+
+type ReplaceProductBomItemParams struct {
+	ID              uuid.UUID
+	ProductID       uuid.UUID
+	InventoryItemID uuid.UUID
+	Quantity        float64
+}
+
+func (q *Queries) ReplaceProductBomItem(ctx context.Context, arg ReplaceProductBomItemParams) error {
+	_, err := q.db.Exec(ctx, replaceProductBomItem,
+		arg.ID,
+		arg.ProductID,
+		arg.InventoryItemID,
+		arg.Quantity,
+	)
+	return err
 }
 
 const replaceVariantBomItem = `-- name: ReplaceVariantBomItem :exec
@@ -1723,7 +2626,7 @@ const setDesignColourPartColour = `-- name: SetDesignColourPartColour :one
 UPDATE design_colour_parts
 SET colour_hex = $1
 WHERE id = $2
-RETURNING id, product_id, role, part_name, colour_hex, position, created_at
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id
 `
 
 type SetDesignColourPartColourParams struct {
@@ -1747,6 +2650,101 @@ func (q *Queries) SetDesignColourPartColour(ctx context.Context, arg SetDesignCo
 		&i.ColourHex,
 		&i.Position,
 		&i.CreatedAt,
+		&i.VariantID,
+	)
+	return i, err
+}
+
+const setInventoryItemSource = `-- name: SetInventoryItemSource :one
+UPDATE inventory_items SET
+    source              = $1,
+    template_key        = $2,
+    model_file_id       = $3,
+    shopify_product_gid = coalesce($4, shopify_product_gid),
+    plate_scope         = coalesce($5, plate_scope),
+    shopify_product_title = coalesce($6, shopify_product_title),
+    updated_at          = now()
+WHERE id = $7
+RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at
+`
+
+type SetInventoryItemSourceParams struct {
+	Source              string
+	TemplateKey         *string
+	ModelFileID         *uuid.UUID
+	ShopifyProductGid   *string
+	PlateScope          *string
+	ShopifyProductTitle *string
+	ID                  uuid.UUID
+}
+
+// Declares how a component is made, and what prints it when the shop does.
+//
+// Separate from UpdateInventoryItem because that one is the shelf - a name, a
+// count, a price - and is guarded by filament:manage, the permission for
+// loading spools. Binding a design file to a part is a configuration act.
+func (q *Queries) SetInventoryItemSource(ctx context.Context, arg SetInventoryItemSourceParams) (InventoryItem, error) {
+	row := q.db.QueryRow(ctx, setInventoryItemSource,
+		arg.Source,
+		arg.TemplateKey,
+		arg.ModelFileID,
+		arg.ShopifyProductGid,
+		arg.PlateScope,
+		arg.ShopifyProductTitle,
+		arg.ID,
+	)
+	var i InventoryItem
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Quantity,
+		&i.Unit,
+		&i.UnitPrice,
+		&i.Source,
+		&i.TemplateKey,
+		&i.ModelFileID,
+		&i.ShopifyProductGid,
+		&i.ShopifyProductTitle,
+		&i.PlateScope,
+		&i.PreviewColour,
+		&i.PreviewPosition,
+		&i.Code,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setVariantPersonalisationLink = `-- name: SetVariantPersonalisationLink :one
+UPDATE product_variants
+SET personalisation_link_enabled = $1,
+    updated_at = now()
+WHERE id = $2
+RETURNING id, product_id, sku, name, status, personalisation_link_enabled, created_at, updated_at
+`
+
+type SetVariantPersonalisationLinkParams struct {
+	Enabled bool
+	ID      uuid.UUID
+}
+
+// Turns one SKU's personalisation link on or off.
+//
+// Off means the customer is not asked and the thirty-minute hold does not
+// happen, so the job renders and batches straight away - which is what a
+// product nobody needs to ask about should do.
+func (q *Queries) SetVariantPersonalisationLink(ctx context.Context, arg SetVariantPersonalisationLinkParams) (ProductVariant, error) {
+	row := q.db.QueryRow(ctx, setVariantPersonalisationLink, arg.Enabled, arg.ID)
+	var i ProductVariant
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Sku,
+		&i.Name,
+		&i.Status,
+		&i.PersonalisationLinkEnabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -1892,7 +2890,7 @@ UPDATE product_variants
 SET sku = $1, name = $2,
     status = $3, updated_at = now()
 WHERE id = $4
-RETURNING id, product_id, sku, name, status, created_at, updated_at
+RETURNING id, product_id, sku, name, status, personalisation_link_enabled, created_at, updated_at
 `
 
 type UpdateVariantParams struct {
@@ -1916,6 +2914,59 @@ func (q *Queries) UpdateVariant(ctx context.Context, arg UpdateVariantParams) (P
 		&i.Sku,
 		&i.Name,
 		&i.Status,
+		&i.PersonalisationLinkEnabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertComponentPlate = `-- name: UpsertComponentPlate :one
+INSERT INTO component_plates (
+    id, inventory_item_id, sku, machine_family, file_id, notes, uploaded_by
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7
+)
+ON CONFLICT (inventory_item_id, lower(sku), upper(machine_family)) DO UPDATE SET
+    file_id     = EXCLUDED.file_id,
+    notes       = EXCLUDED.notes,
+    uploaded_by = EXCLUDED.uploaded_by,
+    updated_at  = now()
+RETURNING id, inventory_item_id, sku, machine_family, file_id, notes, uploaded_by, created_at, updated_at
+`
+
+type UpsertComponentPlateParams struct {
+	ID              uuid.UUID
+	InventoryItemID uuid.UUID
+	Sku             string
+	MachineFamily   string
+	FileID          uuid.UUID
+	Notes           *string
+	UploadedBy      string
+}
+
+// The file IS the whole answer: one SKU, one machine class, one plate.
+func (q *Queries) UpsertComponentPlate(ctx context.Context, arg UpsertComponentPlateParams) (ComponentPlate, error) {
+	row := q.db.QueryRow(ctx, upsertComponentPlate,
+		arg.ID,
+		arg.InventoryItemID,
+		arg.Sku,
+		arg.MachineFamily,
+		arg.FileID,
+		arg.Notes,
+		arg.UploadedBy,
+	)
+	var i ComponentPlate
+	err := row.Scan(
+		&i.ID,
+		&i.InventoryItemID,
+		&i.Sku,
+		&i.MachineFamily,
+		&i.FileID,
+		&i.Notes,
+		&i.UploadedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -1973,27 +3024,72 @@ func (q *Queries) UpsertProductByCode(ctx context.Context, arg UpsertProductByCo
 	return i, err
 }
 
+const upsertProductPipeline = `-- name: UpsertProductPipeline :one
+INSERT INTO sku_slicer_pipelines (id, product_id, machine_family, pipeline_id, pipeline_name)
+VALUES ($1, $2, $3,
+        $4, $5)
+ON CONFLICT (product_id, upper(machine_family)) WHERE product_id IS NOT NULL DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING id, sku, product_id, shopify_product_id, machine_family, pipeline_id, pipeline_name, created_at, updated_at
+`
+
+type UpsertProductPipelineParams struct {
+	ID            uuid.UUID
+	ProductID     *uuid.UUID
+	MachineFamily string
+	PipelineID    int32
+	PipelineName  string
+}
+
+func (q *Queries) UpsertProductPipeline(ctx context.Context, arg UpsertProductPipelineParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, upsertProductPipeline,
+		arg.ID,
+		arg.ProductID,
+		arg.MachineFamily,
+		arg.PipelineID,
+		arg.PipelineName,
+	)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const upsertSKUPipeline = `-- name: UpsertSKUPipeline :one
 INSERT INTO sku_slicer_pipelines (id, sku, machine_family, pipeline_id, pipeline_name)
 VALUES (
     $1, $2, $3,
     $4, $5
 )
-ON CONFLICT (lower(sku), upper(machine_family)) DO UPDATE SET
+ON CONFLICT (lower(sku), upper(machine_family)) WHERE sku IS NOT NULL DO UPDATE SET
     pipeline_id   = EXCLUDED.pipeline_id,
     pipeline_name = EXCLUDED.pipeline_name,
     updated_at    = now()
-RETURNING id, sku, machine_family, pipeline_id, pipeline_name, created_at, updated_at
+RETURNING id, sku, product_id, shopify_product_id, machine_family, pipeline_id, pipeline_name, created_at, updated_at
 `
 
 type UpsertSKUPipelineParams struct {
 	ID            uuid.UUID
-	Sku           string
+	Sku           *string
 	MachineFamily string
 	PipelineID    int32
 	PipelineName  string
 }
 
+// The WHERE repeats the index's, because uq_sku_pipeline_family is PARTIAL
+// now that a product's mapping carries no SKU. Postgres infers the arbiter
+// index from this clause and finds none without it.
 func (q *Queries) UpsertSKUPipeline(ctx context.Context, arg UpsertSKUPipelineParams) (SkuSlicerPipeline, error) {
 	row := q.db.QueryRow(ctx, upsertSKUPipeline,
 		arg.ID,
@@ -2006,6 +3102,51 @@ func (q *Queries) UpsertSKUPipeline(ctx context.Context, arg UpsertSKUPipelinePa
 	err := row.Scan(
 		&i.ID,
 		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
+		&i.MachineFamily,
+		&i.PipelineID,
+		&i.PipelineName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertShopifyProductPipeline = `-- name: UpsertShopifyProductPipeline :one
+INSERT INTO sku_slicer_pipelines (id, shopify_product_id, machine_family, pipeline_id, pipeline_name)
+VALUES ($1, $2, $3,
+        $4, $5)
+ON CONFLICT (shopify_product_id, upper(machine_family))
+    WHERE shopify_product_id IS NOT NULL DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING id, sku, product_id, shopify_product_id, machine_family, pipeline_id, pipeline_name, created_at, updated_at
+`
+
+type UpsertShopifyProductPipelineParams struct {
+	ID               uuid.UUID
+	ShopifyProductID *string
+	MachineFamily    string
+	PipelineID       int32
+	PipelineName     string
+}
+
+func (q *Queries) UpsertShopifyProductPipeline(ctx context.Context, arg UpsertShopifyProductPipelineParams) (SkuSlicerPipeline, error) {
+	row := q.db.QueryRow(ctx, upsertShopifyProductPipeline,
+		arg.ID,
+		arg.ShopifyProductID,
+		arg.MachineFamily,
+		arg.PipelineID,
+		arg.PipelineName,
+	)
+	var i SkuSlicerPipeline
+	err := row.Scan(
+		&i.ID,
+		&i.Sku,
+		&i.ProductID,
+		&i.ShopifyProductID,
 		&i.MachineFamily,
 		&i.PipelineID,
 		&i.PipelineName,

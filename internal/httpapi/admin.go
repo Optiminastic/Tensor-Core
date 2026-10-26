@@ -26,7 +26,7 @@ func (s *Server) registerAdmin(r *gin.Engine) {
 
 type inviteCreateRequest struct {
 	Email string `json:"email" binding:"required,email"`
-	Role  string `json:"role" binding:"required,oneof=ADMIN DESIGNER PROJECT_LEAD PERFORMANCE_MARKETER OPERATOR PACKAGING_QC"`
+	Role  string `json:"role" binding:"required,oneof=ADMIN DESIGNER PROJECT_LEAD PERFORMANCE_MARKETER OPERATOR PACKAGING_QC CUSTOMER_SUPPORT"`
 }
 
 type inviteCreatedResponse struct {
