@@ -84,29 +84,23 @@ func onCustomer(c Conversation, ev Event, now time.Time) (Conversation, []Action
 		return c, nil
 	}
 
+	// THE BOT ALWAYS ANSWERS A CUSTOMER, at the shop's instruction.
+	//
+	// It used to go quiet once a chat was handed to a person, for a day, so
+	// it could not talk over whoever was handling it - and the only way out
+	// was typing MENU, which nobody tells a customer. The shop would rather
+	// a customer who writes anything at all gets the menu back than one who
+	// writes three times and hears nothing, so a handoff no longer silences
+	// the next message.
+	//
+	// WHAT A HANDOFF STILL DOES is recorded: HumanSince and LastStaffAt are
+	// written either way, so the board can still show a chat a person took
+	// over. It just no longer gags the bot.
+	//
+	// STOP IS NOT THIS. Opting out stays absolute above - that is somebody
+	// asking not to be messaged by a machine, and it is not a dead end to be
+	// fixed.
 	if c.State == StateHuman {
-		if word != menuKeyword && !humanExpired(c, now) {
-			// A TAP IS ANSWERED; TYPING IS NOT.
-			//
-			// The silence exists so the bot does not talk over the person now
-			// handling the chat, and for anything the customer TYPES that is
-			// still right - they are mid-conversation with a human.
-			//
-			// A tap is different. It is the customer pressing the bot's own
-			// button and getting nothing at all, which reads as broken rather
-			// than as "somebody is on it" - and leaves them with no way back,
-			// because the escape is a typed word and a tap carries no words.
-			// So this says who has it and how to reopen the menu.
-			//
-			// THE STATE DOES NOT MOVE. The human still has the chat; this is
-			// a signpost, not a handback.
-			if _, tapped := ev.(ButtonIn); tapped {
-				return c, []Action{SendText{
-					Text: content.HandedOverTap, Key: KeyHandedOverTap,
-				}}
-			}
-			return c, nil
-		}
 		c = reset(c)
 	}
 
@@ -317,14 +311,6 @@ func reset(c Conversation) Conversation {
 	c.State = StateIdle
 	c.Ctx = Context{}
 	return c
-}
-
-func humanExpired(c Conversation, now time.Time) bool {
-	last := c.HumanSince
-	if c.LastStaffAt != nil && (last == nil || c.LastStaffAt.After(*last)) {
-		last = c.LastStaffAt
-	}
-	return last == nil || now.Sub(*last) > HumanIdleTimeout
 }
 
 func stateFor(Purpose) State { return StateAwaitTrackOrder }

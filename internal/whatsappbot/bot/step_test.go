@@ -268,11 +268,13 @@ func human(since time.Time) Conversation {
 	return c
 }
 
-func TestHumanModeIsSilent(t *testing.T) {
+// The bot used to be silent here for a day. It answers now, at the shop's
+// instruction: a customer who writes to a handed-over chat was getting
+// nothing at all, and the only escape was typing MENU, which nobody tells
+// them.
+func TestHumanModeStillAnswersTheCustomer(t *testing.T) {
 	c, actions := Step(human(now.Add(-time.Hour)), TextIn{Text: "hi"}, now)
-	if c.State != StateHuman || len(actions) != 0 {
-		t.Fatalf("bot spoke in human mode: %v", texts(actions))
-	}
+	assertMenu(t, c, actions)
 }
 
 func TestHumanModeResumesAfterIdleTimeout(t *testing.T) {
@@ -280,13 +282,16 @@ func TestHumanModeResumesAfterIdleTimeout(t *testing.T) {
 	assertMenu(t, c, actions)
 }
 
-// A chat a person is still working stays theirs for the whole window: a
-// customer chasing an update must reach the colleague handling it, not a menu.
-func TestHumanModeHoldsInsideTheWindow(t *testing.T) {
+// WHAT THIS TRADES AWAY, written down so the next person meets the decision
+// rather than the surprise.
+//
+// This test used to assert the opposite: a chat a person was working stayed
+// theirs for the whole window, so a customer chasing an update reached the
+// colleague handling it rather than a menu. The shop chose the other way -
+// a menu is a worse answer than a human, and both are better than silence.
+func TestHumanModeAnswersEvenInsideTheWindow(t *testing.T) {
 	c, actions := Step(human(now.Add(-HumanIdleTimeout/2)), TextIn{Text: "any update?"}, now)
-	if c.State != StateHuman || len(actions) != 0 {
-		t.Fatalf("the bot spoke inside the handover window: %s %v", c.State, texts(actions))
-	}
+	assertMenu(t, c, actions)
 }
 
 // Being thanked is not a reason to reopen a conversation somebody has just
@@ -319,14 +324,22 @@ func TestAClosingWordInALongerMessageStillGetsTheMenu(t *testing.T) {
 	}
 }
 
-func TestRecentStaffActivityKeepsHumanMode(t *testing.T) {
+// THE SHARPEST EDGE OF THE CHANGE. A colleague replied an hour ago and the
+// bot still answers the customer's next message. That is the cost of never
+// leaving somebody in silence, and it is the behaviour to revisit first if
+// the floor finds the bot talking over them.
+//
+// The handover is still RECORDED - LastStaffAt and HumanSince are written
+// either way - so a board can show which chats a person took over.
+func TestTheBotAnswersEvenAfterARecentStaffReply(t *testing.T) {
 	c := human(now.Add(-20 * time.Hour))
 	staff := now.Add(-time.Hour)
 	c.LastStaffAt = &staff
-	c, actions := Step(c, TextIn{Text: "hello"}, now)
-	if c.State != StateHuman || len(actions) != 0 {
-		t.Fatalf("resumed despite recent staff reply")
+	after, actions := Step(c, TextIn{Text: "hello"}, now)
+	if len(actions) == 0 {
+		t.Fatal("the customer got nothing back")
 	}
+	assertMenu(t, after, actions)
 }
 
 func TestMenuExitsHumanMode(t *testing.T) {
@@ -420,48 +433,56 @@ func TestChangeTextKeywordsAreTreatedAsDetails(t *testing.T) {
 	}
 }
 
-// A button pressed while a person has the chat.
+// THE BOT ALWAYS ANSWERS A CUSTOMER, at the shop's instruction.
 //
-// THE SILENCE IS DELIBERATE AND STAYS, for anything the customer TYPES: they
-// are mid-conversation with a human and the bot must not talk over them. A
-// TAP is the other case - the customer pressing the bot's own button and
-// getting nothing, which reads as broken and leaves no way back, because the
-// escape is a typed word and a tap carries no words.
-func TestATapIsAnsweredWhileAPersonHasTheChat(t *testing.T) {
-	// Handed over by choosing Feedback.
-	c, _ := Step(idle(), ButtonIn{ID: content.OptionFeedback}, now)
-	if c.State != StateHuman {
-		t.Fatalf("feedback left the chat in %s", c.State)
+// It used to go quiet for a day once a chat was handed to a person, and the
+// only way out was typing MENU - which nobody tells a customer. A customer
+// who writes anything at all now gets the menu back.
+func TestAHandedOverChatStillAnswersTheCustomer(t *testing.T) {
+	handed, _ := Step(idle(), ButtonIn{ID: content.OptionFeedback}, now)
+	if handed.State != StateHuman {
+		t.Fatalf("feedback left the chat in %s", handed.State)
 	}
 
-	// A TAP gets the signpost, and the human keeps the chat.
-	after, actions := Step(c, ButtonIn{ID: content.OptionOther}, now)
+	// Plain text - the case that used to be silent.
+	back, actions := Step(handed, TextIn{Text: "hello?"}, now)
+	if len(actions) == 0 {
+		t.Fatal("a customer who wrote to a handed-over chat got nothing back")
+	}
+	assertMenu(t, back, actions)
+
+	// And a tap is answered by doing what the option says, not by a signpost.
+	after, actions := Step(handed, ButtonIn{ID: content.OptionDamage}, now)
 	if len(actions) != 1 {
-		t.Fatalf("a tap produced %d actions, want one reply", len(actions))
+		t.Fatalf("a tap produced %d actions", len(actions))
 	}
-	sent, ok := actions[0].(SendText)
-	if !ok || sent.Text != content.HandedOverTap {
-		t.Errorf("a tap was answered with %#v", actions[0])
+	if _, ok := actions[0].(SendDamageLink); !ok {
+		t.Errorf("a tap on Damage did %#v, want the damage form", actions[0])
 	}
-	if sent.Key != KeyHandedOverTap {
-		t.Errorf("the reply is not editable: key %q", sent.Key)
+	if after.State == StateHuman {
+		t.Error("the chat is still held by a person after the bot answered")
 	}
-	if after.State != StateHuman {
-		t.Errorf("answering a tap took the chat back from the person: %s", after.State)
-	}
+}
 
-	// TYPING STILL GETS NOTHING. This is the half that must not regress.
-	quiet, actions := Step(c, TextIn{Text: "my parcel is late"}, now)
-	if len(actions) != 0 {
-		t.Errorf("the bot talked over a person handling the chat: %#v", actions)
+// STOP IS NOT A DEAD END TO BE FIXED. Opting out is somebody asking not to be
+// messaged by a machine, and it stays absolute - this is the one silence left.
+func TestOptingOutStillSilencesEverything(t *testing.T) {
+	out, _ := Step(idle(), TextIn{Text: "STOP"}, now)
+	if !out.OptedOut {
+		t.Fatal("STOP did not opt the customer out")
 	}
-	if quiet.State != StateHuman {
-		t.Errorf("state = %s", quiet.State)
+	for _, ev := range []Event{
+		TextIn{Text: "hello?"},
+		TextIn{Text: "MENU"},
+		ButtonIn{ID: content.OptionDamage},
+	} {
+		if _, actions := Step(out, ev, now); len(actions) != 0 {
+			t.Errorf("an opted-out customer was sent %#v", actions)
+		}
 	}
-
-	// And MENU still wakes it, which is what the reply tells them to do.
-	back, actions := Step(c, TextIn{Text: "MENU"}, now)
-	if back.State != StateIdle || len(actions) == 0 {
-		t.Errorf("MENU did not bring the bot back: %s %#v", back.State, actions)
+	// START brings them back.
+	in, actions := Step(out, TextIn{Text: "START"}, now)
+	if in.OptedOut || len(actions) == 0 {
+		t.Error("START did not opt the customer back in")
 	}
 }

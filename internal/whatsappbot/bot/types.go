@@ -212,5 +212,4 @@ const (
 	KeyAskChangeTextAgain = "ask_change_text_again"
 	KeyChangeReceived     = "change_received"
 	KeyFeedbackThanks     = "feedback_thanks"
-	KeyHandedOverTap      = "handed_over_tap"
 )

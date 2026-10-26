@@ -250,14 +250,6 @@ const (
 
 	Handoff = "Thanks! Our team will reply to you here shortly. 🙂"
 
-	// HandedOverTap answers a button pressed while a person has the chat.
-	//
-	// IT DOES NOT APOLOGISE AND DOES NOT PROMISE A TIME. It says who has it
-	// and gives the one way back, because the escape is a typed word and the
-	// customer has just demonstrated they are tapping, not typing.
-	HandedOverTap = "Our team has this one and will reply here. 🙂\n\n" +
-		"Type *MENU* if you would like the options again."
-
 	StopAck = "You won't receive any more automated messages from us. Type *START* to turn them back on."
 
 	ConfirmThanks = "Thank you for confirming! ✅ We'll start crafting order %s now."

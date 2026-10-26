@@ -130,13 +130,6 @@ func Notices() []Notice {
 			Default: FeedbackThanks, Limit: bodyLimit,
 		},
 		{
-			Key: "handed_over_tap", Label: "Tapped while a person has the chat",
-			Group: GroupConversation,
-			Help: "Sent when somebody taps a button after the chat was handed to a person. " +
-				"Typing still gets silence, so the bot does not talk over your team.",
-			Default: HandedOverTap, Limit: bodyLimit,
-		},
-		{
 			Key: "stop_ack", Label: "Opted out", Group: GroupConversation,
 			Help:    "Sent when somebody replies STOP.",
 			Default: StopAck, Limit: bodyLimit,

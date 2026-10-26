@@ -24,7 +24,7 @@ func botKeys() []string {
 	return []string{
 		bot.KeyStopAck, bot.KeyHandoff, bot.KeyMenuHint, bot.KeyAskOrderNumber,
 		bot.KeyConfirmThanks, bot.KeyAskChangeText, bot.KeyAskChangeTextAgain,
-		bot.KeyChangeReceived, bot.KeyFeedbackThanks, bot.KeyHandedOverTap,
+		bot.KeyChangeReceived, bot.KeyFeedbackThanks,
 	}
 }
 
