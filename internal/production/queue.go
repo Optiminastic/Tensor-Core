@@ -283,6 +283,33 @@ func (e *ModelGenEnqueuer) Enqueue(ctx context.Context, jobID uuid.UUID) error {
 	return err
 }
 
+// EnqueueOnce schedules a floor render, at most one pending per job.
+//
+// Enqueue, beside this, deliberately does not deduplicate: an operator asking
+// for a rebuild wants the rebuild, even if one is already queued.
+//
+// This is for the paths that can fire twice for reasons nobody chose. A
+// customer pressing Confirm in the same second the expiry sweep reaches their
+// link ends the window twice, and each ending asks for the order's models -
+// two OpenSCAD runs of 20-45 seconds each, writing the same bytes to the same
+// storage key and racing to attach them. Deduplicated across every pending
+// state, like the preview queue above and for the same reason: the last run
+// would win anyway, because each render reads the job as it is when it runs
+// rather than when it was queued.
+func (e *ModelGenEnqueuer) EnqueueOnce(ctx context.Context, jobID uuid.UUID) error {
+	_, err := e.client.Insert(ctx, GenerateModelArgs{JobID: jobID}, &river.InsertOpts{
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending, rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable, rivertype.JobStateRunning,
+				rivertype.JobStateRetryable,
+			},
+		},
+	})
+	return err
+}
+
 // PersonalisationPreviewQueueName carries renders a customer is waiting on.
 //
 // THE SAME WORK ON A DIFFERENT QUEUE. River routes a job to a worker by kind

@@ -29,6 +29,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
+	"github.com/Optiminastic/tensor-core/internal/damage"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/storage"
@@ -124,12 +125,76 @@ func (w *WhatsAppMediaWorker) Work(ctx context.Context, job *river.Job[productio
 		return fmt.Errorf("attach the file to the message: %w", err)
 	}
 
+	// A PICTURE FROM SOMEBODY WE ASKED FOR MONEY is probably the payment
+	// screenshot, so it is linked to their reverse report rather than left in
+	// a conversation nobody opens.
+	w.maybeAttachPaymentProof(ctx, msg, fileID, found.MimeType)
+
 	// The customer's number is masked: this line is about a file, and the
 	// message id finds the conversation.
 	w.logger.Info("whatsapp attachment stored",
 		"brand", msg.BrandSlug, "wa", phone.Mask(msg.WaID),
 		"kind", msg.Kind, "bytes", size)
 	return nil
+}
+
+// maybeAttachPaymentProof links an inbound image to the reverse report the
+// customer is in the middle of, if there is one.
+//
+// THIS IS THE ONLY WAY payment_claimed IS EVER REACHED. Without it that state
+// is unreachable, the drawer never shows "they sent a screenshot", and support
+// has to go and find the picture in WhatsApp on their phone.
+//
+// A GUESS, AND DELIBERATELY A CHEAP ONE. Nothing in an inbound image says what
+// it is: the customer could be sending another photograph of the breakage.
+// What makes the guess safe is that it decides NOTHING - the money is still
+// confirmed by a person looking at it, and GetOpenReverseReportForWaID only
+// matches a report the shop is actively waiting on. The cost of being wrong is
+// a picture filed in the wrong box; the cost of not trying is a step of the
+// flow that never happens.
+//
+// BEST-EFFORT. The file is already stored and attached to its message, and the
+// job must not retry - and re-download - because a report could not be found.
+func (w *WhatsAppMediaWorker) maybeAttachPaymentProof(
+	ctx context.Context, msg gen.WhatsappMessage, fileID uuid.UUID, mimeType string,
+) {
+	// Images only. A video or a PDF is not a UPI receipt, and treating one as
+	// the proof would move a report on the strength of an unrelated file.
+	if !strings.HasPrefix(mimeType, "image/") {
+		return
+	}
+	report, err := w.server.store.Q.GetOpenReverseReportForWaID(ctx,
+		gen.GetOpenReverseReportForWaIDParams{BrandSlug: msg.BrandSlug, WaID: msg.WaID})
+	if err != nil {
+		// No open reverse report is the ordinary case - most pictures
+		// customers send have nothing to do with a payment - so it is not
+		// worth a line in the log.
+		return
+	}
+	if _, _, err := damage.Advance(
+		damage.Report{Kind: damage.Kind(report.ResolutionKind),
+			Reverse: damage.ReverseState(report.ReverseState)},
+		damage.EventPaymentClaimed,
+	); err != nil {
+		return
+	}
+
+	updated, err := w.server.store.Q.AttachDamagePaymentProof(ctx,
+		gen.AttachDamagePaymentProofParams{
+			ID: report.ID, BrandSlug: msg.BrandSlug, PaymentProofFileID: &fileID,
+		})
+	if err != nil {
+		w.logger.Warn("whatsapp media: could not attach a payment screenshot",
+			"brand", msg.BrandSlug, "report", report.ID, "error", err)
+		return
+	}
+	// NO ACTOR. Nobody at the shop did this; the customer did, and an actor
+	// here would put a staff name against a step they never took.
+	w.server.recordStage(ctx, msg.BrandSlug, updated.ID,
+		damage.StagePaymentClaimed, damage.StateDone,
+		"Customer sent a payment screenshot", "")
+	w.logger.Info("whatsapp: a payment screenshot was filed against a reverse report",
+		"brand", msg.BrandSlug, "report", updated.ID)
 }
 
 // spoolAndStore writes the body to a temp file and uploads it.

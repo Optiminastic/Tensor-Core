@@ -14,8 +14,10 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	// granted to no other role, design:job_read/job_supply give a designer
 	// the production jobs waiting for a 3MF without giving them production:*,
 	// and whatsapp:read/reply added the inbox. See catalog.go.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 45 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 45 each", len(admin), len(AllPermissions))
+	// 46 with damage:resolve, which is admin-only by being granted to no
+	// other role - the same construction as the bulk-order pair.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 46 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 46 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -201,8 +203,16 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 108: design:job_read and design:job_supply each go to DESIGNER,
 	// PROJECT_LEAD and ADMIN; whatsapp:read and whatsapp:reply each go to
 	// ADMIN, PROJECT_LEAD and OPERATOR.
-	if total != 108 {
-		t.Fatalf("total grants = %d, want 108", total)
+	//
+	// 112 with CUSTOMER_SUPPORT, which adds four and no new permission:
+	// order:read, whatsapp:read, whatsapp:reply and brand:read. A role that
+	// needed a permission nobody else had would be a wider change than a row
+	// in this table, and this number is how that shows up.
+	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
+	// holder of it would show up here before it showed up on anybody's
+	// screen, which is the point of counting rather than spot-checking.
+	if total != 114 {
+		t.Fatalf("total grants = %d, want 114", total)
 	}
 }
 
@@ -226,7 +236,9 @@ func TestDesignerSuppliesDesignFilesWithoutProductionAccess(t *testing.T) {
 }
 
 func TestWhatsAppInboxGoesToTheRolesThatSeeOrders(t *testing.T) {
-	for _, role := range []RoleName{RoleAdmin, RoleProjectLead, RoleOperator} {
+	for _, role := range []RoleName{
+		RoleAdmin, RoleProjectLead, RoleOperator, RoleCustomerSupport,
+	} {
 		perms := PermissionsFor(role)
 		if !has(perms, WhatsAppRead.Key()) || !has(perms, WhatsAppReply.Key()) {
 			t.Errorf("%s cannot use the WhatsApp inbox", role)
@@ -236,5 +248,54 @@ func TestWhatsAppInboxGoesToTheRolesThatSeeOrders(t *testing.T) {
 		if has(PermissionsFor(role), WhatsAppRead.Key()) {
 			t.Errorf("%s must not read customer chats", role)
 		}
+	}
+}
+
+// Customer support sees the Agent area and Shipping, and nothing else.
+//
+// Asserted BOTH WAYS, because the second half is the whole point of a narrow
+// role: a grant that quietly widened this one would otherwise pass every test
+// in this file. The permissions listed are the nav gates from the frontend's
+// nav-config.ts, so "sees the page" and "may load its data" stay the same
+// claim - the thing the comment on roleGrants warns about.
+func TestCustomerSupportSeesAgentAndShippingOnly(t *testing.T) {
+	perms := PermissionsFor(RoleCustomerSupport)
+
+	// Both areas are gated on order:read, and so is every endpoint behind
+	// them - abandoned checkouts, call logs, message logs, shipments, and the
+	// order a damage report opens in its drawer.
+	// damage:resolve is here at the shop's instruction: the person reading a
+	// damage report is the person who should be able to decide its outcome,
+	// and a queue where every row waits for an admin is a queue that waits.
+	for _, need := range []PermissionSpec{
+		OrderRead, WhatsAppRead, WhatsAppReply, DamageResolve, BrandRead,
+	} {
+		if !has(perms, need.Key()) {
+			t.Errorf("customer support cannot use %s, so part of the Agent or "+
+				"Shipping area is closed to it", need.Key())
+		}
+	}
+
+	// Nothing production-shaped. production:read alone would put the whole
+	// Production area in the nav - Overview, Jobs, Packaging - which is not
+	// this role's job and was never asked for.
+	for _, denied := range []PermissionSpec{
+		ProductionRead, ProductionUpdate, ProductionFail,
+		BatchRead, MachineRead, FilamentRead, RegistryRead,
+		QcSubmit, PackagingSubmit, AssemblySubmit,
+		DesignRead, PricingRead, ConfigRead, AuditRead,
+		UserRead, BrandManage, DispatchRead, BulkOrderRead,
+	} {
+		if has(perms, denied.Key()) {
+			t.Errorf("customer support holds %s; this role is the Agent area and "+
+				"Shipping, and nothing else", denied.Key())
+		}
+	}
+
+	// Four and only four. A count rather than a spot check: the loop above can
+	// only name permissions somebody thought to list, and this catches the one
+	// nobody did.
+	if n := len(GrantsFor(RoleCustomerSupport)); n != 5 {
+		t.Errorf("customer support holds %d permissions, want 5", n)
 	}
 }

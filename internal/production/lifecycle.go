@@ -190,6 +190,12 @@ type CompatibilityKey struct {
 	// refusing a bed before anyone could see it; enforcing them there means
 	// one plate is sliced one way and the log says which.
 	Colour string
+	// Family is the product family, from ProductFamily, added after the
+	// removals above and not one of them: those each split ONE product against
+	// itself, while this keeps two different products off one plate. A bed
+	// carrying planks carries only planks. Empty does not force its own
+	// bucket - unset means unknown, not different.
+	Family string
 }
 
 // ValidBatchStatusTarget reports whether s is a PATCH-settable batch status.

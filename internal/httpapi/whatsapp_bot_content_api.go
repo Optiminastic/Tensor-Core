@@ -237,7 +237,7 @@ func validateOption(
 		if utf8.RuneCountInString(strings.TrimSpace(o.ButtonLabel)) > maxButtonTitle {
 			return "The link button for “" + title + "” is longer than 20 characters."
 		}
-	case content.ActionDamage, content.ActionTrack, content.ActionTeam:
+	case content.ActionDamage, content.ActionTrack, content.ActionTeam, content.ActionFeedback:
 		// The state machine recognises these by id, so the id is not the
 		// shop's to choose - the page sets it when the action is picked.
 		if key != content.CodeActionID(action) {

@@ -75,6 +75,10 @@ type variantResponse struct {
 	// has no recorded price - a total that silently treated unknown as zero
 	// would read as a real figure.
 	PartsCost *float64 `json:"parts_cost"`
+	// PersonalisationLink is whether this SKU's customer is asked to confirm
+	// what will be made. False skips the link AND the thirty-minute hold, so
+	// the job renders and batches straight away.
+	PersonalisationLink bool `json:"personalisation_link"`
 }
 
 type bomLineResponse struct {
@@ -135,10 +139,19 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	g.POST("/products", manage, s.createRegistryProduct)
 	g.GET("/products/:code", read, s.getRegistryProduct)
 	g.GET("/products/:code/variants", read, s.listRegistryVariantsTable)
+	// What each SKU still needs before an order can be made from it - see
+	// registry_readiness.go.
+	g.GET("/products/:code/readiness", read, s.productReadiness)
 	g.PATCH("/products/:code", manage, s.updateRegistryProduct)
 	g.DELETE("/products/:code", manage, s.deleteRegistryProduct)
 	g.GET("/variants/:id/bom", read, s.getVariantBom)
 	g.PUT("/variants/:id/bom", manage, s.putVariantBom)
+	// Whether this SKU's customer is asked to confirm before it prints.
+	g.PATCH("/variants/:id/personalisation-link", manage, s.setVariantPersonalisationLink)
+	// The product-level list every variant inherits. A variant that declares
+	// one of its own replaces it whole - see resolveBom.
+	g.GET("/products/:code/bom", read, s.getProductBom)
+	g.PUT("/products/:code/bom", manage, s.putProductBom)
 	// Which order field feeds which OpenSCAD variable, and what the customers
 	// have actually been sending - see registry_field_maps.go.
 	s.registerRegistryFieldMaps(g, read, manage)
@@ -148,6 +161,11 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// Which slicer pipeline each SKU prints with, per machine class - see
 	// registry_pipelines.go.
 	s.registerRegistryPipelines(g, read, manage)
+	s.registerRegistryComponents(g, read, manage)
+	// Which assembled file the customer's personalisation link is drawn from -
+	// see registry_preview_design.go. Its PIECES go through the colour-scheme
+	// route above with role "preview"; this is only which file they come from.
+	s.registerRegistryPreviewDesign(g, read, manage)
 }
 
 func (s *Server) listRegistryProducts(c *gin.Context) {
@@ -271,7 +289,19 @@ func (s *Server) getRegistryProduct(c *gin.Context) {
 			ID: o.ID.String(), Code: o.Code, Label: o.Label, Values: values,
 		})
 	}
-	out.Variants = variantRows(variants, boms, designs, showCosts)
+	// The product's own bill of materials, inherited by every variant that
+	// declares none of its own. Read here rather than per variant: it is one
+	// list however many SKUs the product has.
+	sharedBom, err := s.store.Q.ListProductBomForProducts(ctx, []uuid.UUID{product.ID})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the bill of materials.")
+		return
+	}
+
+	out.Variants = variantRows(variantRowsInput{
+		variants: variants, boms: boms, shared: sharedBom,
+		designs: designs, showCosts: showCosts,
+	})
 	if tally != nil {
 		out.VariantCount = tally.VariantCount
 		out.VariantPartCount = &tally.PartCount
@@ -519,10 +549,21 @@ func stripBomCosts(lines []bomLineResponse) {
 // variantRows shapes a product's variants with their parts, what one kit
 // costs, and the design their body prints from. Shared by the product detail
 // and the paged variant table, so both say the same thing about a variant.
-func variantRows(
-	variants []gen.ListVariantsForProductRow, boms []gen.ListBomForProductRow,
-	designs []gen.ListDesignsForProductRow, showCosts bool,
-) []variantResponse {
+// variantRowsInput is what shaping a product's variants needs. A struct
+// because the product's own bill of materials joined the list and four
+// positional slices were already one too many to call correctly.
+type variantRowsInput struct {
+	variants []gen.ListVariantsForProductRow
+	boms     []gen.ListBomForProductRow
+	// shared is the product-level bill of materials, inherited by every
+	// variant that declares none of its own.
+	shared    []gen.ListProductBomForProductsRow
+	designs   []gen.ListDesignsForProductRow
+	showCosts bool
+}
+
+func variantRows(in variantRowsInput) []variantResponse {
+	variants, boms, designs, showCosts := in.variants, in.boms, in.designs, in.showCosts
 	partsByVariant := map[uuid.UUID][]bomLineResponse{}
 	// Null once ANY part on the variant has no price, rather than summing what
 	// is known: a partial total is indistinguishable from a complete one on
@@ -549,6 +590,29 @@ func variantRows(
 		partsByVariant[b.VariantID] = append(partsByVariant[b.VariantID], line)
 	}
 
+	// The product's own lines, costed once: every variant that declares none
+	// of its own shows exactly these, so computing them per variant would be
+	// the same arithmetic forty-four times.
+	sharedLines := make([]bomLineResponse, 0, len(in.shared))
+	sharedCost := 0.0
+	sharedKnown := true
+	for _, b := range in.shared {
+		qty := db.NumFloat(b.Quantity)
+		line := bomLineResponse{
+			ItemID: b.ItemID.String(), ItemCode: b.ItemCode,
+			ItemName: b.ItemName, Unit: b.Unit, Quantity: qty,
+		}
+		if price := db.NumFloatPtr(b.UnitPrice); price != nil {
+			line.UnitPrice = price
+			cost := *price * qty
+			line.LineCost = &cost
+			sharedCost += cost
+		} else {
+			sharedKnown = false
+		}
+		sharedLines = append(sharedLines, line)
+	}
+
 	designByVariant := map[uuid.UUID]variantDesignResponse{}
 	for _, d := range designs {
 		if d.Role != "body" {
@@ -564,20 +628,35 @@ func variantRows(
 
 	rows := make([]variantResponse, 0, len(variants))
 	for _, v := range variants {
-		parts := partsByVariant[v.ID]
+		// ALL OR NOTHING, the rule resolveBom states: a variant listing any
+		// part of its own lists all of them, and one listing none inherits the
+		// product's whole list rather than a merge of the two.
+		own := partsByVariant[v.ID]
+		parts := resolveBom(own, sharedLines)
 		if parts == nil {
 			parts = []bomLineResponse{}
 		}
+		count := v.PartCount
+		if len(own) == 0 {
+			count = int64(len(sharedLines))
+		}
 		row := variantResponse{
 			ID: v.ID.String(), SKU: v.Sku, Name: v.Name, Status: v.Status,
-			Options: string(v.OptionCodes), PartCount: v.PartCount,
-			Parts: parts,
+			Options: string(v.OptionCodes), PartCount: count,
+			Parts:               parts,
+			PersonalisationLink: v.PersonalisationLinkEnabled,
 		}
 		if d, ok := designByVariant[v.ID]; ok {
 			row.Design = &d
 		}
-		if known, seen := costKnown[v.ID]; seen && known {
-			cost := costByVariant[v.ID]
+		switch {
+		case len(own) > 0:
+			if known, seen := costKnown[v.ID]; seen && known {
+				cost := costByVariant[v.ID]
+				row.PartsCost = &cost
+			}
+		case len(sharedLines) > 0 && sharedKnown:
+			cost := sharedCost
 			row.PartsCost = &cost
 		}
 		// Withheld from a caller without config:read. The parts, quantities and
@@ -646,6 +725,18 @@ func (s *Server) listRegistryVariantsTable(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not load the variants' designs.")
 		return
 	}
+	// The product's own bill of materials, inherited by every variant that
+	// declares none of its own. Read here rather than per variant: it is one
+	// list however many SKUs the product has.
+	sharedBom, err := s.store.Q.ListProductBomForProducts(ctx, []uuid.UUID{product.ID})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not load the bill of materials.")
+		return
+	}
+
 	c.JSON(http.StatusOK, newPageEnvelope(
-		variantRows(variants, boms, designs, costsVisibleTo(c)), tally.VariantCount, p))
+		variantRows(variantRowsInput{
+			variants: variants, boms: boms, shared: sharedBom,
+			designs: designs, showCosts: costsVisibleTo(c),
+		}), tally.VariantCount, p))
 }

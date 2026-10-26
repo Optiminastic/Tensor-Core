@@ -47,6 +47,42 @@ func (c *Client) SendText(ctx context.Context, to, text string) (SendResult, err
 	})
 }
 
+// SendImage sends a picture with a caption under it.
+//
+// BY URL, not by upload. Meta accepts either a media id it already holds or a
+// `link` it fetches itself, and the link is the one with no expiry: an
+// uploaded media id lapses after about thirty days, which would mean a cache,
+// a refresh and a failure mode that only appears a month after anybody last
+// looked at it. A link costs one fetch from Meta per send and cannot go stale.
+//
+// The URL has to be reachable from Meta's own servers, so it is a public route
+// on this service rather than anything behind the session.
+//
+// The caption travels WITH the image rather than as a message before it: a
+// caption cannot be scrolled away from the thing it explains, and a separate
+// message can arrive second.
+//
+// The same 24-hour rule as SendText applies.
+func (c *Client) SendImage(ctx context.Context, to, imageURL, caption string) (SendResult, error) {
+	if !c.Configured() {
+		return SendResult{}, fmt.Errorf("WhatsApp is not configured")
+	}
+	if strings.TrimSpace(imageURL) == "" {
+		return SendResult{}, fmt.Errorf("no image to send")
+	}
+	image := map[string]any{"link": strings.TrimSpace(imageURL)}
+	// Optional, and omitted rather than sent empty: an empty caption draws a
+	// blank line under the picture in the chat.
+	if caption = strings.TrimSpace(caption); caption != "" {
+		image["caption"] = caption
+	}
+	return c.post(ctx, map[string]any{
+		"to":    strings.TrimPrefix(strings.TrimSpace(to), "+"),
+		"type":  "image",
+		"image": image,
+	})
+}
+
 // SendButtons sends text with up to three reply buttons shown right under it.
 // The same 24-hour rule as SendText applies.
 func (c *Client) SendButtons(ctx context.Context, to, body string, buttons []Button) (SendResult, error) {

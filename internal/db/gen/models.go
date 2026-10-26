@@ -150,6 +150,18 @@ type ColourMap struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type ComponentPlate struct {
+	ID              uuid.UUID
+	InventoryItemID uuid.UUID
+	Sku             string
+	MachineFamily   string
+	FileID          uuid.UUID
+	Notes           *string
+	UploadedBy      string
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
 type CostAssumptionSet struct {
 	ID                     uuid.UUID
 	Name                   string
@@ -191,23 +203,45 @@ type DamageLink struct {
 }
 
 type DamageReport struct {
-	ID              uuid.UUID
-	BrandSlug       string
-	WaID            string
-	ShopifyOrderGid string
-	OrderNumber     string
-	OrderID         *uuid.UUID
-	CustomerName    string
-	PhotoCount      int32
-	Status          string
-	ResolutionNote  string
-	WaMessageID     *string
-	LinkID          *uuid.UUID
-	ReportedAt      pgtype.Timestamptz
-	StatusChangedAt pgtype.Timestamptz
-	StatusChangedBy *string
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                 uuid.UUID
+	BrandSlug          string
+	WaID               string
+	ShopifyOrderGid    string
+	OrderNumber        string
+	OrderID            *uuid.UUID
+	CustomerName       string
+	PhotoCount         int32
+	Status             string
+	ResolutionNote     string
+	WaMessageID        *string
+	LinkID             *uuid.UUID
+	ReportedAt         pgtype.Timestamptz
+	StatusChangedAt    pgtype.Timestamptz
+	StatusChangedBy    *string
+	ResolutionKind     string
+	ReverseState       string
+	OfferedAt          pgtype.Timestamptz
+	AgreedAt           pgtype.Timestamptz
+	PaymentClaimedAt   pgtype.Timestamptz
+	PaymentConfirmedAt pgtype.Timestamptz
+	PaymentConfirmedBy *string
+	PickupBookedAt     pgtype.Timestamptz
+	PickupBookedBy     *string
+	PaymentProofFileID *uuid.UUID
+	PickupWaybill      string
+	Stage              string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
+type DamageStage struct {
+	ID       uuid.UUID
+	ReportID uuid.UUID
+	Stage    string
+	State    string
+	Detail   string
+	Actor    *string
+	At       pgtype.Timestamptz
 }
 
 type Design struct {
@@ -237,6 +271,7 @@ type DesignColourPart struct {
 	ColourHex *string
 	Position  int32
 	CreatedAt pgtype.Timestamptz
+	VariantID *uuid.UUID
 }
 
 type DesignPricing struct {
@@ -319,12 +354,27 @@ type IntegrationSetting struct {
 }
 
 type InventoryItem struct {
-	ID        uuid.UUID
-	Name      string
-	Quantity  pgtype.Numeric
-	Unit      string
-	UnitPrice pgtype.Numeric
-	Code      *string
+	ID                  uuid.UUID
+	Name                string
+	Quantity            pgtype.Numeric
+	Unit                string
+	UnitPrice           pgtype.Numeric
+	Source              string
+	TemplateKey         *string
+	ModelFileID         *uuid.UUID
+	ShopifyProductGid   *string
+	ShopifyProductTitle *string
+	PlateScope          string
+	PreviewColour       *string
+	PreviewPosition     int32
+	Code                *string
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+}
+
+type JobPreviewModel struct {
+	JobID     uuid.UUID
+	FileID    uuid.UUID
 	CreatedAt pgtype.Timestamptz
 	UpdatedAt pgtype.Timestamptz
 }
@@ -504,6 +554,14 @@ type Product struct {
 	UpdatedAt pgtype.Timestamptz
 }
 
+type ProductBom struct {
+	ID              uuid.UUID
+	ProductID       uuid.UUID
+	InventoryItemID uuid.UUID
+	Quantity        pgtype.Numeric
+	CreatedAt       pgtype.Timestamptz
+}
+
 type ProductFieldMap struct {
 	ID           uuid.UUID
 	ProductID    uuid.UUID
@@ -514,6 +572,8 @@ type ProductFieldMap struct {
 	Required     bool
 	FixedValue   *string
 	DefaultValue *string
+	MaxRunes     *int32
+	VariantID    *uuid.UUID
 	Position     int32
 	CreatedAt    pgtype.Timestamptz
 }
@@ -537,13 +597,14 @@ type ProductOptionValue struct {
 }
 
 type ProductVariant struct {
-	ID        uuid.UUID
-	ProductID uuid.UUID
-	Sku       *string
-	Name      string
-	Status    string
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
+	ID                         uuid.UUID
+	ProductID                  uuid.UUID
+	Sku                        *string
+	Name                       string
+	Status                     string
+	PersonalisationLinkEnabled bool
+	CreatedAt                  pgtype.Timestamptz
+	UpdatedAt                  pgtype.Timestamptz
 }
 
 type ProductVariantOption struct {
@@ -760,13 +821,15 @@ type ShopifyProduct struct {
 }
 
 type SkuSlicerPipeline struct {
-	ID            uuid.UUID
-	Sku           string
-	MachineFamily string
-	PipelineID    int32
-	PipelineName  string
-	CreatedAt     pgtype.Timestamptz
-	UpdatedAt     pgtype.Timestamptz
+	ID               uuid.UUID
+	Sku              *string
+	ProductID        *uuid.UUID
+	ShopifyProductID *string
+	MachineFamily    string
+	PipelineID       int32
+	PipelineName     string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
 }
 
 type SliceJob struct {
@@ -845,6 +908,15 @@ type VariantDesign struct {
 	Version     int32
 	Status      string
 	CreatedAt   pgtype.Timestamptz
+}
+
+type WhatsappBotMessage struct {
+	BrandSlug  string
+	MessageKey string
+	Body       string
+	UpdatedBy  *string
+	UpdatedAt  pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
 }
 
 type WhatsappBotNode struct {

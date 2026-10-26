@@ -38,6 +38,9 @@ const (
 	waVerifyToken = "test-verify-token"
 	waCustomer    = "919876543210"
 	waFrontendURL = "https://tensor.test"
+	// The SERVICE's own address, not the frontend's: the payment QR is served
+	// by this binary and Meta fetches it from here.
+	waPublicBaseURL = "https://core.tensor.test"
 )
 
 // metaSend is one message Tensor posted to the fake Graph API.
@@ -86,6 +89,10 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 				} `json:"parameters"`
 			} `json:"action"`
 		} `json:"interactive"`
+		Image struct {
+			Link    string `json:"link"`
+			Caption string `json:"caption"`
+		} `json:"image"`
 		Template struct {
 			Name       string `json:"name"`
 			Components []struct {
@@ -106,6 +113,13 @@ func (f *fakeMeta) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := metaSend{To: m.To, Type: m.Type, Text: m.Text.Body, Template: m.Template.Name}
+	// An image's CAPTION is its text, and the link is what Meta fetches. The
+	// reverse-pickup ask is one of these - the whole message rides on the QR -
+	// so a recorder blind to images would see it as nothing sent at all.
+	if m.Type == "image" {
+		s.Text = m.Image.Caption
+		s.URL = m.Image.Link
+	}
 	if m.Type == "interactive" {
 		s.Text = m.Interactive.Body.Text
 		s.Buttons = len(m.Interactive.Action.Buttons)
@@ -229,6 +243,12 @@ func newWAHarness(t *testing.T, settings map[string]string) *waHarness {
 		Environment: "development", AuthAudience: "tensor-core",
 		WhatsAppBaseURL: metaSrv.URL, ShopifyBaseURL: shopSrv.URL, ShopifyAPIVersion: "2024-10",
 		FrontendURL: waFrontendURL,
+		// Set so the reverse-pickup ask takes its real path: the payment QR is
+		// served by THIS binary and Meta fetches it by URL, so a blank base URL
+		// would quietly test the text-only fallback instead of what ships.
+		// Harmless elsewhere - ShopifyImportConfigured also wants a client id,
+		// a secret and an encryption key, none of which this harness sets.
+		PublicBaseURL: waPublicBaseURL,
 	}
 	server := NewServer(cfg, store, auth.NewGuards(minter.verifier, ""), nil)
 
@@ -349,12 +369,20 @@ func TestIntegrationWhatsAppWebhook(t *testing.T) {
 func TestIntegrationWhatsAppMenuAndOrderLookup(t *testing.T) {
 	h := newWAHarness(t, nil)
 
+	// THE FIRST MESSAGE ASKS WHO THEY ARE, in two buttons. The things the
+	// bot can do are one tap further in.
 	h.say(t, "hi")
-	if s := h.meta.last(t); s.Type != "interactive" || s.Buttons != 3 || s.To != waCustomer {
+	if s := h.meta.last(t); s.Type != "interactive" || s.Buttons != 2 || s.To != waCustomer {
 		t.Fatalf("greeting = %+v", s)
 	}
 
-	// "Other" opens the questions as a LIST, not buttons: nine answers do
+	// Either answer opens the same menu of three.
+	h.tap(t, content.OptionReturning)
+	if s := h.meta.last(t); s.Type != "interactive" || s.Buttons != 3 {
+		t.Fatalf("menu after the customer answered = %+v", s)
+	}
+
+	// "Other" opens the questions as a LIST, not buttons: ten answers do
 	// not fit in three. A list row comes back as an ordinary button id,
 	// which is what lets the bot answer both with one branch.
 	//
@@ -598,7 +626,9 @@ func TestIntegrationBotTreeDrivesTheBot(t *testing.T) {
 		} `json:"limits"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &tree)
-	if rr.Code != http.StatusOK || !tree.FromCode || len(tree.Nodes) != 2 {
+	// THREE messages now: the new/returning question, the menu it opens, and
+	// the questions list behind Other.
+	if rr.Code != http.StatusOK || !tree.FromCode || len(tree.Nodes) != 3 {
 		t.Fatalf("default tree = %d %s", rr.Code, rr.Body.String())
 	}
 	if tree.Limits.Buttons != content.MaxButtons || tree.Root != content.RootNode {

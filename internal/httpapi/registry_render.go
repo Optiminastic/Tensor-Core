@@ -123,36 +123,31 @@ func (s *Server) resolveRenderPlan(
 
 	role := partRoleOf(job)
 
-	template, ok := s.templateKeyForRole(ctx, product.ID, role)
+	// THE VARIANT'S OWN FILE, falling back to the product's.
+	//
+	// templateKeyForRole, which this used to call, answers for the PRODUCT and
+	// refuses outright when two variants name different keys. That was right
+	// while every colourway of a product printed from one file. It is now the
+	// thing that makes a file per child SKU impossible, and it fails the worst
+	// way available: the product stops rendering and says only that it "names
+	// no template", which is the same message as having uploaded nothing.
+	template, ok := s.templateForVariant(ctx, product.ID, sku, role)
 	if !ok {
 		// Half-configured: a product with a mapping and no template cannot
 		// render, and a product with neither is simply not this system's yet.
 		return renderPlan{}, fmt.Errorf(
-			"%w: %s names no template", errNoRegistryPlan, product.Code)
+			"%w: %s names no template for %s", errNoRegistryPlan, product.Code, role)
 	}
 
-	rows, err := s.store.Q.ListProductFieldMaps(ctx, gen.ListProductFieldMapsParams{
-		ProductID: product.ID, Role: role,
-	})
-	if err != nil {
-		return renderPlan{}, fmt.Errorf("read the field mapping for %s: %w", product.Code, err)
-	}
+	// This VARIANT's mapping, falling back to the product's - the same rule
+	// that chose the file above, so a child SKU with its own drawing may name
+	// the customer's text whatever that drawing calls it.
+	rows := s.fieldMapsFor(ctx, product.ID, sku, role)
 	if len(rows) == 0 {
 		return renderPlan{}, fmt.Errorf(
 			"%w: %s maps no fields for %s", errNoRegistryPlan, product.Code, role)
 	}
-
-	maps := make([]personalise.FieldMap, 0, len(rows))
-	for _, r := range rows {
-		maps = append(maps, personalise.FieldMap{
-			PropertyKey:  r.PropertyKey,
-			ScadVariable: r.ScadVariable,
-			Kind:         personalise.KindFor(r.ValueType),
-			Optional:     !r.Required,
-			Fixed:        deref(r.FixedValue),
-			Default:      deref(r.DefaultValue),
-		})
-	}
+	maps := toFieldMaps(rows)
 
 	// Past this point the product IS configured, so every failure is the
 	// order's or the configuration's and none of them fall back.
@@ -236,6 +231,15 @@ func (s *Server) registryRendersSKU(ctx context.Context, sku string) bool {
 // defaults to it, so "one file" is the zero case of "several" rather than a
 // separate path.
 const designRoleBody = "body"
+
+// designRolePreview is the role of a file that is DRAWN AND NEVER PRINTED:
+// the assembled product shown on the customer's personalisation link.
+//
+// Named rather than spelled out at each use because two things have to agree
+// about it and disagreeing is a bed of scrap: this is the role whose template
+// the preview renders from, and the role partRolesForRender refuses so that
+// it can never become a production job.
+const designRolePreview = "preview"
 
 // partRoleOf is which of its product's design files this job prints.
 func partRoleOf(job gen.ProductionJob) string {

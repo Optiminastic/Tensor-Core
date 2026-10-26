@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -167,7 +166,7 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 		return err
 	}
 
-	model, err := s.renderColouredPlank(ctx, job, plan)
+	model, preview, err := s.renderColouredPlank(ctx, job, plan)
 	if err != nil {
 		return err
 	}
@@ -177,11 +176,69 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 		return err
 	}
 
-	// Clears issue_reason when it is exactly 'stl_missing', which is what makes
-	// the job batchable without anyone touching it.
-	if _, err := s.store.Q.SetProductionJobPrintFile(ctx, gen.SetProductionJobPrintFileParams{
-		PrintFileID: &fileID, ID: jobID,
-	}); err != nil {
+	// The picture, when it is not a picture of the file above.
+	//
+	// Stored BEFORE the print file is attached, because attaching the print
+	// file is what makes the job batchable: a job that became batchable and
+	// then failed to store its preview would be on its way to a bed with the
+	// customer still looking at the old picture.
+	previewID, err := s.storeGeneratedPreview(ctx, job, plan, preview)
+	if err != nil {
+		return err
+	}
+	if previewID == nil {
+		// This render has no picture of its own, so any picture left from a
+		// previous one is now a picture of a design that no longer exists.
+		if err := s.store.Q.ClearProductionJobPreviewFile(ctx, jobID); err != nil {
+			return fmt.Errorf("drop the stale preview on job %s: %w", job.JobNumber, err)
+		}
+	} else if err := s.store.Q.SetProductionJobPreviewFile(ctx,
+		gen.SetProductionJobPreviewFileParams{JobID: jobID, FileID: *previewID},
+	); err != nil {
+		return fmt.Errorf("attach the preview to job %s: %w", job.JobNumber, err)
+	}
+
+	// WILL THIS JOB'S CUSTOMER BE ASKED? Decided ONCE, here, and used twice.
+	//
+	// Both the print file below and the personalisation status in
+	// confirmGeneratedPersonalisation turn on the same question, and they
+	// must not answer it separately. A link opening between two reads would
+	// give "no file, because they will be asked" and "validated, because they
+	// will not" - a job with no model, no window and nothing that ever comes
+	// back for it.
+	willAsk := s.personalisationWillAsk(ctx, jobID)
+
+	// THE PRINT FILE WAITS WHILE THE CUSTOMER STILL HAS A SAY - but ONLY
+	// when there is a picture to show them instead.
+	//
+	// Withholding it is not what keeps the job off a bed. ListBatchableJobs
+	// already requires personalisation_status IN ('validated',
+	// 'not_required'), and a held job is 'awaiting_customer', so it could
+	// not batch either way. What withholding does is keep a model built from
+	// values the customer can still change out of the file an operator might
+	// open.
+	//
+	// AND IT MUST NOT OUTLAST THE LINK. The link worker waits for every
+	// held job that has no model yet before it sends anything
+	// (unrenderedJobs), because the customer's page has to show them
+	// something. Holding the print file on a product with no preview file
+	// leaves that worker waiting for a model that was deliberately not
+	// attached: the link is never sent, so the window never opens, so it
+	// never closes, so the file is never attached. A silent deadlock, and
+	// every personalised order would sit in it.
+	//
+	// So the hold is conditional on the preview existing. Without one the
+	// file is attached exactly as before and the picture is a picture of
+	// what prints - which is what every product did before preview files
+	// existed.
+	if willAsk && previewID != nil {
+		obs.FromContext(ctx).Info("model built, waiting for the customer before it can print",
+			"job", job.JobNumber, "sku", deref(job.Sku))
+	} else if _, err := s.store.Q.SetProductionJobPrintFile(ctx,
+		// Clears issue_reason when it is exactly 'stl_missing', which is what
+		// makes the job batchable without anyone touching it.
+		gen.SetProductionJobPrintFileParams{PrintFileID: &fileID, ID: jobID},
+	); err != nil {
 		return fmt.Errorf("attach the model to job %s: %w", job.JobNumber, err)
 	}
 
@@ -205,7 +262,7 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 	// The render consumed the customer's exact input, so there is nothing left
 	// for a person to confirm about it. Not best-effort: a job left pending
 	// here never reaches a bed, which would make the whole render pointless.
-	if err := s.confirmGeneratedPersonalisation(ctx, jobID, plan); err != nil {
+	if err := s.confirmGeneratedPersonalisation(ctx, jobID, plan, willAsk); err != nil {
 		return err
 	}
 	return nil
@@ -235,9 +292,13 @@ func (s *Server) GenerateModelForJob(ctx context.Context, jobID uuid.UUID) error
 // A plank in one colour is a product somebody can still inspect and fix; a
 // plank in a colour nobody chose is scrap, and a job that failed outright
 // helps nobody when the geometry was fine.
+//
+// Returns the model the floor slices and, when the product has pieces that
+// exist only in the customer's picture, the picture's model as well - nil
+// when the two would be identical.
 func (s *Server) renderColouredPlank(
 	ctx context.Context, job gen.ProductionJob, plan renderPlan,
-) ([]byte, error) {
+) (model, preview []byte, err error) {
 	log := obs.FromContext(ctx)
 
 	// The variant title first, which is where a storefront job carries it -
@@ -281,95 +342,42 @@ func (s *Server) renderColouredPlank(
 		var err error
 		hex, err = s.resolveColourHexForParts(ctx, colour)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	// THE PIECES RENDER AT THE SAME TIME, not one after the other.
-	//
-	// They are independent OpenSCAD subprocesses - the renderer says so, and
-	// each works in its own temp directory - and neither reads the other's
-	// output. Run in sequence, a two-piece plank costs the sum of two CGAL
-	// passes; run together it costs the longer of them. Measured on this
-	// plank, from the customer pressing Save to the new picture arriving: 34
-	// seconds became 21.
-	//
-	// It cannot be avoided by rendering less. The base is
-	// `difference() { base_plate(); letters(); }`, so a name change really
-	// does change both pieces - there is no half of this work to skip, only
-	// time to overlap.
-	//
-	// Bounded by the number of pieces a product has, which is two or three.
-	// The queue's own MaxWorkers is what bounds how many jobs render at once,
-	// and that is where to turn this down if a box starts thrashing.
-	meshes := make([]meshio.Part, len(parts))
-	failures := make([]error, len(parts))
-	material := deref(job.Material)
-
-	var wg sync.WaitGroup
-	for i, part := range parts {
-		wg.Add(1)
-		go func(i int, part colourPart) {
-			defer wg.Done()
-
-			stl, err := s.renderer.RenderSTL(ctx, plan.Template, plan.argsForPart(part.Name))
-			if err != nil {
-				failures[i] = fmt.Errorf("render the %s: %w", part.Name, err)
-				return
-			}
-			mesh, err := meshFromSTL(stl)
-			if err != nil {
-				failures[i] = fmt.Errorf("read the %s: %w", part.Name, err)
-				return
-			}
-			// An empty piece is the silent failure this whole mechanism is
-			// exposed to: a template that declares PART and never branches on
-			// it answers every request with the same solid, and one that
-			// branches on names that do not match the configured pieces
-			// answers some with nothing. Both slice, both print, and both are
-			// wrong - so a piece that came back with no geometry holds the job
-			// and names itself.
-			if len(mesh.Triangles) == 0 {
-				failures[i] = fmt.Errorf(
-					"the template rendered nothing for part %q - check that %s branches on "+
-						"PART and spells this piece the same way",
-					part.Name, plan.Template)
-				return
-			}
-
-			partColour, partName := part.Hex, part.Name
-			if part.FollowsCustomer() {
-				partColour = hex
-				partName = colour + " " + part.Name
-			}
-			// Written to its own slot, so the pieces keep the order the design
-			// lists them in. Appending from goroutines would shuffle the
-			// slicer's object list between renders of the same plank.
-			meshes[i] = meshio.Part{
-				// Named for what it is, because this is what an operator sees
-				// in the slicer's object list.
-				Name: partName, Colour: partColour, Material: material,
-				Triangles: mesh.Triangles,
-			}
-		}(i, part)
-	}
-	wg.Wait()
-
-	// The FIRST failure in part order, not whichever goroutine happened to
-	// finish last - the same plank must fail the same way twice.
-	for _, err := range failures {
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	model, err := meshio.Write3MF(meshes)
+	// The model the floor slices: the product's own pieces, from its own file.
+	meshes, err := s.renderPieces(ctx, plan.Template, plan, parts, colour, hex, deref(job.Material))
 	if err != nil {
-		return nil, fmt.Errorf("assemble the coloured model: %w", err)
+		return nil, nil, err
 	}
+	printModel, err := meshio.Write3MF(meshes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("assemble the coloured model: %w", err)
+	}
+
+	// And the picture, when the product has a file for it.
+	//
+	// A SECOND FILE, not a second reading of the first. The lotus holder's
+	// cup happens to live in the same .scad as its plate, but a Royal diya
+	// holder's assembled form needs a foot and a cup its print file does not
+	// contain - so the picture is its own template, with its own pieces,
+	// driven by the SAME arguments the plate was built from. One mapping, two
+	// files, and no way for the name on the picture to differ from the name
+	// on the plate.
+	//
+	// Nil for every product that has not configured one, which is all of them
+	// but the Diwali pair: the caller then stores one file and the picture is
+	// a picture of what prints, exactly as it always was.
+	previewModel, err := s.renderPreviewModel(ctx, job, plan, colour, hex)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	log.Info("built a coloured model",
-		"job", job.JobNumber, "parts", len(meshes), "colour", colour, "hex", hex)
-	return model, nil
+		"job", job.JobNumber, "parts", len(meshes),
+		"preview", len(previewModel) > 0, "colour", colour, "hex", hex)
+	return printModel, previewModel, nil
 }
 
 // resolveColourHexForParts is resolveColourHex with the refusal that matters.
@@ -618,6 +626,57 @@ func (s *Server) storeGeneratedModel(
 	return fileID, nil
 }
 
+// storeGeneratedPreview stores the picture's model, or nothing.
+//
+// Nil in, nil out: a product whose picture is its print model has no second
+// file, and the preview column stays NULL so the picture keeps reading
+// print_file_id. That is every product but the lotus holder, so the common
+// path does no extra work and holds no extra bytes.
+//
+// It lands on its own storage key - "preview/" rather than "generated/" - so
+// that a person browsing the bucket, or a slicer pointed at a prefix, cannot
+// pick up a model that was never meant to go on a bed.
+func (s *Server) storeGeneratedPreview(
+	ctx context.Context, job gen.ProductionJob, plan renderPlan, preview []byte,
+) (*uuid.UUID, error) {
+	if len(preview) == 0 {
+		return nil, nil
+	}
+	ext, contentType := ".stl", "model/stl"
+	if isZip(preview) {
+		ext, contentType = ".3mf", "model/3mf"
+	}
+
+	key := fmt.Sprintf("preview/%s%s", job.ID, ext)
+	if err := s.storage.Put(
+		ctx, key, bytes.NewReader(preview), int64(len(preview)), contentType,
+	); err != nil {
+		return nil, fmt.Errorf("store the preview model: %w", err)
+	}
+
+	renderParams, err := json.Marshal(plan.Stored)
+	if err != nil {
+		return nil, fmt.Errorf("record what this preview was built from: %w", err)
+	}
+
+	// Not measured. The bounding box is there for the floor - what fits on a
+	// bed, what a plate costs to print - and a preview goes on neither, so
+	// measuring it would be a number nobody may act on.
+	fileID := uuid.New()
+	if _, err := s.store.Q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
+		ID:           fileID,
+		Filename:     fmt.Sprintf("%s-%s-preview%s", job.JobNumber, plan.Label, ext),
+		ContentType:  contentType,
+		SizeBytes:    int64(len(preview)),
+		StorageKey:   key,
+		UploadedBy:   "system",
+		RenderParams: renderParams,
+	}); err != nil {
+		return nil, fmt.Errorf("record the preview model: %w", err)
+	}
+	return &fileID, nil
+}
+
 // isZip reports whether the bytes are a zip archive, which is what a 3MF is.
 // Sniffed from the content rather than tracked alongside it: the writer decides
 // the format, and a flag passed separately is a flag that can disagree.
@@ -755,7 +814,7 @@ func (s *Server) enqueueModelGeneration(ctx context.Context, jobs []gen.Producti
 // Recorded as validated by "system" and written to the job history, so the
 // decision is auditable rather than invisible.
 func (s *Server) confirmGeneratedPersonalisation(
-	ctx context.Context, jobID uuid.UUID, plan renderPlan,
+	ctx context.Context, jobID uuid.UUID, plan renderPlan, willAsk bool,
 ) error {
 	now := time.Now().UTC()
 	by := "system"
@@ -783,7 +842,9 @@ func (s *Server) confirmGeneratedPersonalisation(
 		PersonalisationValidatedBy: &by,
 		PersonalisationValidatedAt: db.Timestamptz(&now),
 	}
-	if s.personalisationWillAsk(ctx, jobID) {
+	// Passed in rather than asked again: the caller already decided, and
+	// held this job's print file on the strength of it.
+	if willAsk {
 		params.PersonalisationStatus = production.PersonalisationAwaitingCustomer
 		// Left unstamped on purpose: nobody has validated this yet. Writing
 		// "system" here would make the job page claim it was checked at a

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -75,6 +76,16 @@ var errUnknownColour = errors.New("unknown colour")
 // #1560BD while every blue spool in this fleet reports #2850E0. Declaring the
 // catalogue value is what made BambuBuddy refuse plate after plate.
 func (s *Server) resolveColourHex(ctx context.Context, colour string) (string, error) {
+	return ResolveColourHex(ctx, s.store.Q, colour)
+}
+
+// ResolveColourHex is resolveColourHex without a Server.
+//
+// Exported so a command that configures the registry resolves colours exactly
+// as a render does. The alternative is a second copy of this precedence rule
+// in cmd/, which would be correct on the day it was written and would drift the
+// first time an operator confirms a spool.
+func ResolveColourHex(ctx context.Context, q *gen.Queries, colour string) (string, error) {
 	// Canonicalised first, so a colour the shop prints from another spool
 	// resolves to THAT spool's swatch: sky blue is the blue filament, and a
 	// model painted #87CEEB would describe a plank the shelf cannot print.
@@ -83,11 +94,11 @@ func (s *Server) resolveColourHex(ctx context.Context, colour string) (string, e
 		return "", errUnknownColour
 	}
 
-	mapped, err := s.mappedColourHex(ctx, name)
+	mapped, err := colourMapHex(ctx, q, name)
 	if err != nil {
 		return "", err
 	}
-	shelf, err := s.shelfColourHex(ctx, name)
+	shelf, err := shelfHex(ctx, q, name)
 	if err != nil {
 		return "", err
 	}
@@ -123,7 +134,11 @@ func pickColourHex(mapped, shelf *string, canonicalName string) (string, bool) {
 // mappedColourHex is the operator-confirmed swatch for a canonical colour name,
 // or nil when nobody has recorded one.
 func (s *Server) mappedColourHex(ctx context.Context, name string) (*string, error) {
-	hex, err := s.store.Q.GetColourMapPrimaryHex(ctx, name)
+	return colourMapHex(ctx, s.store.Q, name)
+}
+
+func colourMapHex(ctx context.Context, q *gen.Queries, name string) (*string, error) {
+	hex, err := q.GetColourMapPrimaryHex(ctx, name)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, nil
@@ -136,7 +151,11 @@ func (s *Server) mappedColourHex(ctx context.Context, name string) (*string, err
 // shelfColourHex is the synced filament shelf's swatch, or nil when the shelf
 // has no row or no hex for this colour.
 func (s *Server) shelfColourHex(ctx context.Context, name string) (*string, error) {
-	hex, err := s.store.Q.GetColourHexByName(ctx, name)
+	return shelfHex(ctx, s.store.Q, name)
+}
+
+func shelfHex(ctx context.Context, q *gen.Queries, name string) (*string, error) {
+	hex, err := q.GetColourHexByName(ctx, name)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, nil

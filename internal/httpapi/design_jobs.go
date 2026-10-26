@@ -56,12 +56,45 @@ func (s *Server) listDesignJobs(c *gin.Context) {
 		return
 	}
 
-	// The non-DNP rule stays in Go, where IsGeneratedProduct is, rather than
-	// being restated in SQL where the two could drift. Same split
+	// The "Tensor renders this one" rule stays in Go rather than being
+	// restated in SQL where the two could drift. Same split
 	// orderIDsWithNonGeneratedItems uses.
+	//
+	// rendersProduct, NOT IsGeneratedProduct. The second is the hard-coded
+	// SKU list - DNP, DNPWL, DNPF, PDNP, SC, SCWL - and it names no registry
+	// product, so PWDH and PDHR were never recognised as Tensor's own work.
+	// That cost nothing while their models were rendered the moment the job
+	// was created, because a job with a file is not in this queue anyway. It
+	// stops being free the moment a model waits for the customer's thirty
+	// minutes: every such order would appear here as "needs a 3MF from a
+	// person", for half an hour, for work nobody has to do.
+	// Memoised by SKU, because rendersProduct reads the registry and its own
+	// note warns against calling it once per row of a list. This queue is a
+	// handful of jobs rather than the hundreds the production queue carries,
+	// and an order's items repeat the same SKU, so one lookup per distinct
+	// SKU is the whole cost.
+	renders := map[string]bool{}
 	mine := make([]gen.ProductionJob, 0, len(rows))
 	for _, j := range rows {
-		if IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)) {
+		key := deref(j.Sku) + "|" + deref(j.ProductName)
+		isOurs, known := renders[key]
+		if !known {
+			isOurs = s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName))
+			renders[key] = isOurs
+		}
+		// A JOB WHOSE RENDER FAILED STAYS, even though Tensor renders it.
+		//
+		// Excluding every rendered product was too broad. A render that
+		// failed - a template replaced by one that does not branch on PART, a
+		// name OpenSCAD cannot lay out - leaves a job with no file and no way
+		// through, and uploading a 3MF by hand is exactly the way through. It
+		// is the one case where a designer genuinely has work to do on a
+		// product Tensor normally builds itself.
+		//
+		// What is excluded is the job that is merely WAITING: rendered
+		// products with no error, which during a customer's thirty minutes is
+		// every one of them.
+		if isOurs && strings.TrimSpace(deref(j.ModelError)) == "" {
 			continue
 		}
 		if isChargeLine(deref(j.ProductName)) {

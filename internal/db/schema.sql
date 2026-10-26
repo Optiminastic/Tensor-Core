@@ -616,12 +616,55 @@ CREATE TABLE inventory_items (
     quantity   numeric(12, 3) NOT NULL DEFAULT 0,
     unit       varchar(32) NOT NULL,
     unit_price numeric(12, 2),
+    -- 'bought' (it arrives from a supplier) or 'printed' (the shop makes it).
+    -- A printed component is a part of a product that nobody personalises -
+    -- the diya holder, the red heart, the box a lit plank sits in - and it is
+    -- an inventory item rather than a design role because one is shared by
+    -- every colourway and several products, while a role belongs to one.
+    source     varchar(16) NOT NULL DEFAULT 'bought',
+    -- What prints it, when it is printed here. A parameterised component names
+    -- a .scad already in the registry; a fixed mesh carries its own file,
+    -- because design_templates refuses anything but .scad.
+    --
+    -- Both are global, like this table. `designs` is brand scoped, so a link
+    -- to one would let a shared shelf item point at another brand's file.
+    template_key  varchar(64),
+    model_file_id uuid REFERENCES file_assets (id) ON DELETE RESTRICT,
+    -- Which Shopify product this component is a part of. A gid rather than a
+    -- products(id) FK because the picker lists the LIVE catalogue, which is
+    -- wider than the registry.
+    shopify_product_gid varchar(64),
+    -- Readable name for that product, snapshotted so the registry's component
+    -- picker can say what each part belongs to without a live Shopify call.
+    shopify_product_title varchar(255),
+    -- 'shared' - one set of plates for every SKU, for a part that does not
+    -- change with the colourway (the plank's red heart, identical on all
+    -- twenty). 'per_sku' - one set each, for a part whose filament follows the
+    -- variant (the Royal's diya cup). A shared plate is stored with sku = ''.
+    plate_scope varchar(16) NOT NULL DEFAULT 'per_sku',
+    -- How this piece is drawn in the assembled preview. NULL takes the colour
+    -- the customer chose (the foot); a hex pins it (the cup, gold on every
+    -- colourway). It describes the PICTURE, never the print.
+    preview_colour varchar(7),
+    preview_position integer NOT NULL DEFAULT 0,
     -- A stable handle a bill of materials points at, so a BOM line survives the
     -- shelf being renamed - see migration 0069. Nullable: a code is only needed
     -- once a part is actually used by a product.
     code       varchar(64),
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_inventory_item_source CHECK (source IN ('bought', 'printed')),
+    CONSTRAINT ck_inventory_item_plate_scope CHECK (plate_scope IN ('shared', 'per_sku')),
+    CONSTRAINT ck_inventory_item_preview_colour CHECK (
+        preview_colour IS NULL OR preview_colour ~ '^#[0-9A-Fa-f]{6}$'
+    ),
+    -- Shaped like ck_variant_design_target: a row naming both files is
+    -- ambiguous about which one prints, and one naming neither claims to be
+    -- made here with nothing to make it from.
+    CONSTRAINT ck_inventory_item_made CHECK (
+        (source = 'bought' AND template_key IS NULL AND model_file_id IS NULL)
+        OR (source = 'printed' AND num_nonnulls(template_key, model_file_id) = 1)
+    )
 );
 CREATE UNIQUE INDEX uq_inventory_item_name
     ON inventory_items (lower(name));
@@ -842,6 +885,10 @@ CREATE TABLE product_variants (
     sku        varchar(128),
     name       varchar(200) NOT NULL,
     status     varchar(16)  NOT NULL DEFAULT 'active',
+    -- Whether this SKU's customer is asked to confirm their personalisation.
+    -- False skips the link and the thirty-minute hold, so the job renders and
+    -- batches straight away - see migration 0128.
+    personalisation_link_enabled boolean NOT NULL DEFAULT true,
     created_at timestamptz  NOT NULL DEFAULT now(),
     updated_at timestamptz  NOT NULL DEFAULT now()
 );
@@ -883,6 +930,47 @@ CREATE TABLE variant_bom (
 );
 CREATE UNIQUE INDEX uq_variant_bom_item ON variant_bom (variant_id, inventory_item_id);
 
+-- A bill of materials belonging to the PRODUCT, inherited by every variant
+-- that does not declare one of its own.
+--
+-- variant_bom is right for a part only one colourway carries and wrong for
+-- every part they all do: a red heart goes on every plank, and declared per
+-- variant that is forty-four rows saying the same thing.
+CREATE TABLE IF NOT EXISTS product_bom (
+    id         uuid PRIMARY KEY,
+    product_id uuid NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    inventory_item_id uuid NOT NULL REFERENCES inventory_items (id) ON DELETE RESTRICT,
+    quantity   numeric(12, 3) NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_bom_item
+    ON product_bom (product_id, inventory_item_id);
+
+-- The ready-made plate a printed component is replenished from, per machine
+-- class. See migration 0118: pipeline_name, material and colour are recorded
+-- because a sliced plate is only valid for what it was sliced with, and a
+-- G-code file does not say so itself.
+CREATE TABLE IF NOT EXISTS component_plates (
+    id uuid PRIMARY KEY,
+    inventory_item_id uuid NOT NULL REFERENCES inventory_items (id) ON DELETE CASCADE,
+    -- The SKU this plate prints for. A sliced file has the filament baked into
+    -- it, so a plate of purple cups is not a plate of red ones - three SKUs on
+    -- three machine classes is nine files, not three.
+    --
+    -- The SKU STRING, like sku_slicer_pipelines and for migration 0085's
+    -- reason: the SKUs on the floor run ahead of the registry, and a component
+    -- may be declared for a product nobody has imported yet.
+    sku varchar(128) NOT NULL DEFAULT '',
+    machine_family varchar(16) NOT NULL,
+    file_id uuid NOT NULL REFERENCES file_assets (id) ON DELETE RESTRICT,
+    notes varchar(500),
+    uploaded_by varchar(64) NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_component_plate_sku_family
+    ON component_plates (inventory_item_id, lower(sku), upper(machine_family));
+
 -- Which order field feeds which OpenSCAD variable, per product - see migration
 -- 0079. Product-level, because NAME_L is the same for every colour and a
 -- per-variant mapping would be the same rows repeated with somewhere to
@@ -909,6 +997,14 @@ CREATE TABLE product_field_maps (
     -- template's own default of 1, and every plank sold without a heart option
     -- would have grown one.
     default_value varchar(120),
+    -- How many characters this product's design fits here. NULL is the
+    -- plank's twelve, which every product used to borrow - see migration
+    -- 0127. The lotus holder's box takes about sixteen.
+    max_runes     integer,
+    -- NULL is the PRODUCT's mapping, which every colourway falls back to. A
+    -- variant_id overrides it for that colourway alone, for a child SKU whose
+    -- own .scad names the customer's text differently - see migration 0129.
+    variant_id    uuid REFERENCES product_variants (id) ON DELETE CASCADE,
     position      integer      NOT NULL DEFAULT 0,
     created_at    timestamptz  NOT NULL DEFAULT now(),
     CONSTRAINT product_field_maps_value_type_check
@@ -919,8 +1015,15 @@ CREATE TABLE product_field_maps (
         fixed_value IS NOT NULL OR btrim(property_key) <> ''
     )
 );
+-- Both partial: a variant's rows must not collide with the product's on the
+-- same variable, and an upsert against either has to repeat its WHERE clause
+-- in ON CONFLICT or Postgres refuses with 42P10. See migration 0129.
 CREATE UNIQUE INDEX uq_product_field_map_variable
-    ON product_field_maps (product_id, role, lower(scad_variable));
+    ON product_field_maps (product_id, role, lower(scad_variable))
+    WHERE variant_id IS NULL;
+CREATE UNIQUE INDEX uq_variant_field_map_variable
+    ON product_field_maps (variant_id, role, lower(scad_variable))
+    WHERE variant_id IS NOT NULL;
 CREATE INDEX ix_product_field_maps_product
     ON product_field_maps (product_id, role, position);
 
@@ -933,15 +1036,33 @@ CREATE INDEX ix_product_field_maps_product
 -- built from the mapping so that those SKUs keep sharing a plate.
 CREATE TABLE sku_slicer_pipelines (
     id             uuid PRIMARY KEY,
-    sku            varchar(128) NOT NULL,
+    -- Exactly one of sku and product_id. A product row is the default every
+    -- one of its SKUs inherits; a SKU row overrides it for that colourway.
+    sku            varchar(128),
+    product_id     uuid REFERENCES products (id) ON DELETE CASCADE,
+    -- The Shopify product every printing SKU sits under, whether or not the
+    -- registry has caught up with it. An order line carries this id, so a job
+    -- reaches its parent without asking Shopify anything.
+    shopify_product_id varchar(64),
     machine_family varchar(16) NOT NULL,
     pipeline_id    integer NOT NULL,
     pipeline_name  varchar(200) NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now(),
-    updated_at     timestamptz NOT NULL DEFAULT now()
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_sku_pipeline_target
+        CHECK (num_nonnulls(sku, product_id, shopify_product_id) = 1)
 );
 CREATE UNIQUE INDEX uq_sku_pipeline_family
-    ON sku_slicer_pipelines (lower(sku), upper(machine_family));
+    ON sku_slicer_pipelines (lower(sku), upper(machine_family))
+    WHERE sku IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_product_pipeline_family
+    ON sku_slicer_pipelines (product_id, upper(machine_family))
+    WHERE product_id IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_shopify_product_pipeline_family
+    ON sku_slicer_pipelines (shopify_product_id, upper(machine_family))
+    WHERE shopify_product_id IS NOT NULL;
 
 -- An uploaded OpenSCAD template that overrides the embedded one - see migration
 -- 0071. No rows means the binary's own templates are used, which is how this
@@ -1033,6 +1154,21 @@ CREATE INDEX ix_bulk_order_lines_order ON bulk_order_lines (bulk_order_id, posit
 -- Products with no rows keep the two-pass behaviour exactly. This is additive
 -- in the same way the registry render path is: nothing printing today changes
 -- until somebody configures it.
+-- The model the CUSTOMER is shown, for a job whose picture is not a picture
+-- of the file that prints.
+--
+-- A side table rather than a column on production_jobs, which is where it
+-- naturally belongs, because that table is converted structurally between a
+-- dozen generated row types across the codebase and one more column breaks
+-- every one of them. The cost of the column is paid by code that has nothing
+-- to do with previews; the cost of the table is one join, here.
+CREATE TABLE IF NOT EXISTS job_preview_models (
+    job_id     uuid PRIMARY KEY REFERENCES production_jobs (id) ON DELETE CASCADE,
+    file_id    uuid NOT NULL REFERENCES file_assets (id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS design_colour_parts (
     id         uuid PRIMARY KEY,
     product_id uuid        NOT NULL REFERENCES products (id) ON DELETE CASCADE,
@@ -1041,6 +1177,11 @@ CREATE TABLE IF NOT EXISTS design_colour_parts (
     colour_hex varchar(7),
     position   integer     NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
+    -- NULL is the PRODUCT's scheme, used by every variant that does not
+    -- declare one of its own. A variant_id is that variant's override, for a
+    -- product whose palette is designed per colourway rather than being one
+    -- fixed piece and one that follows the order.
+    variant_id uuid REFERENCES product_variants (id) ON DELETE CASCADE,
     -- Rejected at the boundary AND here: a colour that is not #RRGGBB reaches
     -- Write3MF, which refuses it, and a job fails at render time for a typo
     -- made in a form weeks earlier.
@@ -1052,11 +1193,24 @@ CREATE TABLE IF NOT EXISTS design_colour_parts (
 -- One row per piece per role. Case-insensitive because OpenSCAD string
 -- comparison is not, and "Base" and "base" being two rows would render one
 -- piece twice and the other never.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_design_colour_part
-    ON design_colour_parts (product_id, lower(role), lower(part_name));
+--
+-- Two partial indexes rather than one over four columns: a NULL variant_id
+-- does not collide in a plain unique index, so the product-level row would
+-- stop being unique as soon as a variant declared the same piece.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_design_colour_part_product
+    ON design_colour_parts (product_id, lower(role), lower(part_name))
+    WHERE variant_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_design_colour_part_variant
+    ON design_colour_parts (variant_id, lower(role), lower(part_name))
+    WHERE variant_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ix_design_colour_parts_product
     ON design_colour_parts (product_id, role);
+
+CREATE INDEX IF NOT EXISTS ix_design_colour_parts_variant
+    ON design_colour_parts (variant_id, role)
+    WHERE variant_id IS NOT NULL;
 
 -- One row per abandoned checkout the win-back agent has rung, or tried to.
 --
@@ -1404,11 +1558,47 @@ CREATE TABLE IF NOT EXISTS damage_reports (
     reported_at       timestamptz NOT NULL DEFAULT now(),
     status_changed_at timestamptz,
     status_changed_by varchar(64),
+    -- What the shop decided and how far the reverse negotiation has got - see
+    -- migrations 0113 and 0130, and internal/damage. Both are CHECKed to a
+    -- closed set there: reprint/reverse/closed, and ''/offered/
+    -- payment_claimed/paid/pickup_booked.
+    resolution_kind       varchar(16) NOT NULL DEFAULT '',
+    reverse_state         varchar(24) NOT NULL DEFAULT '',
+    offered_at            timestamptz,
+    -- Vestigial since 0130. The ask and the QR became one message, so there
+    -- is no separate agreement to stamp; kept because dropping a column to
+    -- reclaim nothing is how a restore stops matching a backup.
+    agreed_at             timestamptz,
+    payment_claimed_at    timestamptz,
+    payment_confirmed_at  timestamptz,
+    payment_confirmed_by  varchar(64),
+    pickup_booked_at      timestamptz,
+    pickup_booked_by      varchar(64),
+    payment_proof_file_id uuid REFERENCES file_assets(id) ON DELETE SET NULL,
+    pickup_waybill        varchar(40) NOT NULL DEFAULT '',
+    -- The furthest step this report has reached - see migration 0114. A copy
+    -- of the last damage_stages row, denormalised so the board needs no join.
+    stage                 varchar(32) NOT NULL DEFAULT 'reported',
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_damage_reports_queue
     ON damage_reports (brand_slug, status, reported_at DESC);
+
+-- Every step a damaged order passed through - see migration 0114. Append-only:
+-- a failed attempt stays when a retry succeeds, because "the courier refused
+-- us twice" is what somebody needs to know later.
+CREATE TABLE damage_stages (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    report_id  uuid NOT NULL REFERENCES damage_reports(id) ON DELETE CASCADE,
+    stage      varchar(32) NOT NULL,
+    state      varchar(16) NOT NULL,
+    detail     text NOT NULL DEFAULT '',
+    actor      varchar(64),
+    at         timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_damage_stages_report
+    ON damage_stages (report_id, at);
 CREATE INDEX IF NOT EXISTS ix_damage_reports_order
     ON damage_reports (order_id) WHERE order_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_reports_link
@@ -1421,6 +1611,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_damage_reports_link
 -- actions stay in code - damage, track, team - because each changes the
 -- conversation's state, which belongs to the pure state machine; their
 -- option ids are reserved so it still recognises them.
+-- The shop's own wording for the bot's one-off messages - the lines it
+-- composes itself rather than the menu tree above. An overlay: a row REPLACES
+-- the constant in the binary, and no row means the binary's wording is used,
+-- so deleting a row undoes a bad edit without a deploy. See 0131.
+CREATE TABLE IF NOT EXISTS whatsapp_bot_messages (
+    brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    message_key varchar(64) NOT NULL,
+    body        text NOT NULL,
+    updated_by  text,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (brand_slug, message_key)
+);
+
 CREATE TABLE IF NOT EXISTS whatsapp_bot_nodes (
     brand_slug  varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
     node_key    varchar(64) NOT NULL,

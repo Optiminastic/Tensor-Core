@@ -114,7 +114,30 @@ func (LookupResult) isEvent()      {}
 // Action is a side effect for the caller to perform, in order.
 type Action interface{ isAction() }
 
-type SendText struct{ Text string }
+// SendText is one plain message.
+//
+// IT CARRIES BOTH THE WORDING AND WHERE THE WORDING CAME FROM. Text is always
+// set and always correct - it is the wording compiled into the binary, fully
+// composed - so a caller that ignores everything else still sends the right
+// thing, and every test that reads .Text keeps working.
+//
+// Key names an editable message when there is one, and that is what lets the
+// shop rewrite these from the Bot Messages page without this package reading a
+// database. Step stays pure: it says what it means and what the default words
+// are, and the caller substitutes the shop's words if it has any.
+type SendText struct {
+	// Text is the default wording, fully composed.
+	Text string
+	// Key is the editable message this came from, or "" when the wording is
+	// not the shop's to change (an answer resolved from their own tree, say).
+	Key string
+	// Args fill the placeholders in that wording - the order number, in
+	// practice. Already applied to Text.
+	Args []string
+	// WithMenuHint appends the "type MENU" line, which is itself editable.
+	// Already applied to Text.
+	WithMenuHint bool
+}
 
 // SendMenu sends the first message of the brand's tree.
 //
@@ -170,3 +193,24 @@ func (TagOrder) isAction()           {}
 func (AppendNote) isAction()         {}
 func (RecordConfirmation) isAction() {}
 func (SendDamageLink) isAction()     {}
+
+// The editable messages this package emits, named so a caller can look up the
+// shop's own wording for them.
+//
+// STRINGS, NOT A DEPENDENCY. They match content.Notices() by value rather than
+// by import, because this package is pure and the registry that knows how to
+// render and validate them lives next to the HTTP layer that reads a database.
+// A mismatch shows up as the default wording being sent, which is the safe
+// failure.
+const (
+	KeyStopAck            = "stop_ack"
+	KeyHandoff            = "handoff"
+	KeyMenuHint           = "menu_hint"
+	KeyAskOrderNumber     = "ask_order_number"
+	KeyConfirmThanks      = "confirm_thanks"
+	KeyAskChangeText      = "ask_change_text"
+	KeyAskChangeTextAgain = "ask_change_text_again"
+	KeyChangeReceived     = "change_received"
+	KeyFeedbackThanks     = "feedback_thanks"
+	KeyHandedOverTap      = "handed_over_tap"
+)

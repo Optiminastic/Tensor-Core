@@ -367,7 +367,13 @@ func TestConfirmationCorrect(t *testing.T) {
 	want := []Action{
 		RecordConfirmation{OrderID: "gid://shopify/Order/7", Status: ConfirmationConfirmed},
 		TagOrder{OrderID: "gid://shopify/Order/7", Tag: content.TagConfirmed},
-		SendText{Text: "Thank you for confirming! ✅ We'll start crafting order T3DPS-7 now."},
+		// The key and the args travel WITH the wording: they are what the
+		// caller re-renders the shop's own version from, and a key without
+		// its order number would send "%!s(MISSING)" to a customer.
+		SendText{
+			Text: "Thank you for confirming! ✅ We'll start crafting order T3DPS-7 now.",
+			Key:  KeyConfirmThanks, Args: []string{"T3DPS-7"},
+		},
 	}
 	if !reflect.DeepEqual(actions, want) || c.State != StateIdle {
 		t.Fatalf("got %s %#v", c.State, actions)
@@ -390,7 +396,11 @@ func TestConfirmationChange(t *testing.T) {
 		AppendNote{OrderID: "gid://shopify/Order/7", Note: "WhatsApp personalisation change requested: First name: RAHUL\nSecond: PRIYA"},
 		TagOrder{OrderID: "gid://shopify/Order/7", Tag: content.TagChangeRequested},
 		RecordConfirmation{OrderID: "gid://shopify/Order/7", Status: ConfirmationChangeRequested, ChangeText: "First name: RAHUL\nSecond: PRIYA"},
-		SendText{Text: "Thanks, we've noted your changes for order T3DPS-7. Our team will confirm them with you here before we start crafting."},
+		SendText{
+			Text: "Thanks, we've noted your changes for order T3DPS-7. Our team will " +
+				"confirm them with you here before we start crafting.",
+			Key: KeyChangeReceived, Args: []string{"T3DPS-7"},
+		},
 	}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("change actions %#v", actions)
@@ -407,5 +417,51 @@ func TestChangeTextKeywordsAreTreatedAsDetails(t *testing.T) {
 	c, _ = Step(c, TextIn{Text: "hi"}, now)
 	if c.State != StateHuman {
 		t.Fatalf("state = %s", c.State)
+	}
+}
+
+// A button pressed while a person has the chat.
+//
+// THE SILENCE IS DELIBERATE AND STAYS, for anything the customer TYPES: they
+// are mid-conversation with a human and the bot must not talk over them. A
+// TAP is the other case - the customer pressing the bot's own button and
+// getting nothing, which reads as broken and leaves no way back, because the
+// escape is a typed word and a tap carries no words.
+func TestATapIsAnsweredWhileAPersonHasTheChat(t *testing.T) {
+	// Handed over by choosing Feedback.
+	c, _ := Step(idle(), ButtonIn{ID: content.OptionFeedback}, now)
+	if c.State != StateHuman {
+		t.Fatalf("feedback left the chat in %s", c.State)
+	}
+
+	// A TAP gets the signpost, and the human keeps the chat.
+	after, actions := Step(c, ButtonIn{ID: content.OptionOther}, now)
+	if len(actions) != 1 {
+		t.Fatalf("a tap produced %d actions, want one reply", len(actions))
+	}
+	sent, ok := actions[0].(SendText)
+	if !ok || sent.Text != content.HandedOverTap {
+		t.Errorf("a tap was answered with %#v", actions[0])
+	}
+	if sent.Key != KeyHandedOverTap {
+		t.Errorf("the reply is not editable: key %q", sent.Key)
+	}
+	if after.State != StateHuman {
+		t.Errorf("answering a tap took the chat back from the person: %s", after.State)
+	}
+
+	// TYPING STILL GETS NOTHING. This is the half that must not regress.
+	quiet, actions := Step(c, TextIn{Text: "my parcel is late"}, now)
+	if len(actions) != 0 {
+		t.Errorf("the bot talked over a person handling the chat: %#v", actions)
+	}
+	if quiet.State != StateHuman {
+		t.Errorf("state = %s", quiet.State)
+	}
+
+	// And MENU still wakes it, which is what the reply tells them to do.
+	back, actions := Step(c, TextIn{Text: "MENU"}, now)
+	if back.State != StateIdle || len(actions) == 0 {
+		t.Errorf("MENU did not bring the bot back: %s %#v", back.State, actions)
 	}
 }

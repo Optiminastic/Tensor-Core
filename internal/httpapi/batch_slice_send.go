@@ -875,15 +875,13 @@ func (s *Server) mappedPipelineFor(
 		if sku == "" {
 			continue
 		}
-		row, err := s.store.Q.GetPipelineForSKU(ctx, gen.GetPipelineForSKUParams{
-			Sku: sku, MachineFamily: model,
-		})
-		if err != nil {
+		row := s.pipelineForSKU(ctx, sku, model)
+		if row == nil {
 			continue // no mapping for this SKU on this class
 		}
 		t, seen := byPipeline[row.PipelineID]
 		if !seen {
-			byPipeline[row.PipelineID] = &tally{row: row, units: int(jobQuantity(j.Quantity)), first: i}
+			byPipeline[row.PipelineID] = &tally{row: *row, units: int(jobQuantity(j.Quantity)), first: i}
 			continue
 		}
 		t.units += int(jobQuantity(j.Quantity))

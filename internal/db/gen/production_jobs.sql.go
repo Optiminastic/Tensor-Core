@@ -117,6 +117,18 @@ func (q *Queries) ClearJobModelRenderHold(ctx context.Context, id uuid.UUID) err
 	return err
 }
 
+const clearProductionJobPreviewFile = `-- name: ClearProductionJobPreviewFile :exec
+DELETE FROM job_preview_models WHERE job_id = $1
+`
+
+// Drops the picture's own model, for a job that no longer has one - a product
+// whose preview-only pieces were removed, re-rendered into a single model.
+// Leaving the old row would keep showing a cup the design no longer has.
+func (q *Queries) ClearProductionJobPreviewFile(ctx context.Context, jobID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, clearProductionJobPreviewFile, jobID)
+	return err
+}
+
 const clearStalledModelRenderHolds = `-- name: ClearStalledModelRenderHolds :execrows
 UPDATE production_jobs
 SET model_render_queued_at = NULL, updated_at = now()
@@ -793,6 +805,36 @@ func (q *Queries) GetProductionJobByNumber(ctx context.Context, jobNumber string
 		&i.UpdatedAt,
 		&i.BulkOrderID,
 		&i.ModelRenderQueuedAt,
+	)
+	return i, err
+}
+
+const getProductionJobPreviewFile = `-- name: GetProductionJobPreviewFile :one
+SELECT f.id, f.storage_key, f.filename, f.content_type, f.size_bytes
+FROM job_preview_models p
+JOIN file_assets f ON f.id = p.file_id
+WHERE p.job_id = $1
+`
+
+type GetProductionJobPreviewFileRow struct {
+	ID          uuid.UUID
+	StorageKey  string
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+}
+
+// The picture's model for one job, or no row when the picture is a picture of
+// the print model.
+func (q *Queries) GetProductionJobPreviewFile(ctx context.Context, jobID uuid.UUID) (GetProductionJobPreviewFileRow, error) {
+	row := q.db.QueryRow(ctx, getProductionJobPreviewFile, jobID)
+	var i GetProductionJobPreviewFileRow
+	err := row.Scan(
+		&i.ID,
+		&i.StorageKey,
+		&i.Filename,
+		&i.ContentType,
+		&i.SizeBytes,
 	)
 	return i, err
 }
@@ -3389,6 +3431,30 @@ type SetProductionJobPartRoleParams struct {
 // the registry already knows its pieces and the caller leaves those alone.
 func (q *Queries) SetProductionJobPartRole(ctx context.Context, arg SetProductionJobPartRoleParams) error {
 	_, err := q.db.Exec(ctx, setProductionJobPartRole, arg.PartRole, arg.ID)
+	return err
+}
+
+const setProductionJobPreviewFile = `-- name: SetProductionJobPreviewFile :exec
+INSERT INTO job_preview_models (job_id, file_id)
+VALUES ($1, $2)
+ON CONFLICT (job_id) DO UPDATE
+SET file_id = EXCLUDED.file_id, updated_at = now()
+`
+
+type SetProductionJobPreviewFileParams struct {
+	JobID  uuid.UUID
+	FileID uuid.UUID
+}
+
+// Attaches the model the customer is shown, for a product whose picture
+// differs from its print.
+//
+// Separate from SetProductionJobPrintFile rather than folded into it because
+// it answers no issue reason and makes no job batchable: a preview is a
+// picture, and a job whose only new file is a picture is exactly as ready to
+// print as it was before.
+func (q *Queries) SetProductionJobPreviewFile(ctx context.Context, arg SetProductionJobPreviewFileParams) error {
+	_, err := q.db.Exec(ctx, setProductionJobPreviewFile, arg.JobID, arg.FileID)
 	return err
 }
 

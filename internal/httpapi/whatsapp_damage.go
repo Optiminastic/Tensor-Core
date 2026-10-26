@@ -59,9 +59,15 @@ type damageReportJSON struct {
 	// FileCount is how many photographs and videos the report holds. It is
 	// counted from the files themselves rather than read off the row, so it
 	// cannot disagree with what the drawer then lists.
-	FileCount       int32      `json:"file_count"`
-	Status          string     `json:"status"`
-	ResolutionNote  string     `json:"resolution_note"`
+	FileCount      int32  `json:"file_count"`
+	Status         string `json:"status"`
+	ResolutionNote string `json:"resolution_note"`
+	// ResolutionKind is "", "reprint" or "reverse", and ReverseState is how
+	// far a reverse has got. Both reach the screen so the dropdown can show
+	// what was already decided rather than offering the choice again - the
+	// decision is made once, and the API refuses a second.
+	ResolutionKind  string     `json:"resolution_kind"`
+	ReverseState    string     `json:"reverse_state"`
 	ReportedAt      time.Time  `json:"reported_at"`
 	StatusChangedAt *time.Time `json:"status_changed_at"`
 	StatusChangedBy *string    `json:"status_changed_by"`
@@ -96,6 +102,11 @@ func (s *Server) registerDamageReports(r *gin.Engine) {
 	// would hand out any file in the database.
 	g.GET("/:id/files/:fileID", s.guards.RequirePermission(auth.WhatsAppRead.Key()), s.damageReportFile)
 	g.PATCH("/:id", s.guards.RequirePermission(auth.WhatsAppReply.Key()), s.updateDamageReport)
+	// Deciding the OUTCOME - reprint or reverse pickup - is its own
+	// permission, held by admin and support alike. See damage_resolution.go.
+	s.registerDamageResolution(g)
+	// Confirming the Rs 100 and booking the van - see damage_reverse.go.
+	s.registerDamageReverse(g)
 }
 
 func (s *Server) listDamageReports(c *gin.Context) {
@@ -146,7 +157,32 @@ func (s *Server) getDamageReport(c *gin.Context) {
 			})
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"report": damageJSON(row, int32(len(files))), "files": files})
+	// SEPARATE FROM files, on purpose. Those are the photographs of the
+	// breakage; this is a bank screenshot answering a different question, and
+	// in the photo grid it would sit among pictures of a cracked product
+	// looking like one of them.
+	var proof *damageFileJSON
+	if row.PaymentProofFileID != nil {
+		if f, err := s.store.Q.GetDamagePaymentProofFile(ctx,
+			gen.GetDamagePaymentProofFileParams{ReportID: id, BrandSlug: brand}); err == nil {
+			proof = &damageFileJSON{
+				ID: f.ID.String(), ContentType: f.ContentType,
+				SizeBytes: f.SizeBytes, CreatedAt: f.CreatedAt.Time,
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report": damageJSON(row, int32(len(files))),
+		"files":  files,
+		// null unless the customer sent one. The screen shows it beside the
+		// confirm button, which is the only place anybody needs it.
+		"payment_proof": proof,
+		// The whole sequence, done and not: a timeline of only completed
+		// steps reads "fine" right up until somebody notices it has been
+		// fine for four days.
+		"stages": s.damageTimeline(ctx, row),
+	})
 }
 
 // damageReportFile hands one photograph or video to the dashboard.
@@ -168,7 +204,25 @@ func (s *Server) damageReportFile(c *gin.Context) {
 	row, err := s.store.Q.GetDamageReportFile(ctx, gen.GetDamageReportFileParams{
 		ReportID: id, BrandSlug: brand, FileID: fileID,
 	})
-	if err != nil {
+	if isNoRows(err) {
+		// THE PAYMENT SCREENSHOT IS NOT IN damage_files. It arrived over
+		// WhatsApp rather than through the public form, so it hangs off the
+		// report's own column - and without this second look the one image
+		// support most needs to see is the one image this route refuses.
+		//
+		// Scoped exactly as tightly: the query joins report -> brand -> file,
+		// so a file id that is not THIS report's proof still does not resolve.
+		proof, perr := s.store.Q.GetDamagePaymentProofFile(ctx,
+			gen.GetDamagePaymentProofFileParams{ReportID: id, BrandSlug: brand})
+		if perr != nil || proof.ID != fileID {
+			detail(c, http.StatusNotFound, "That file is not on this report.")
+			return
+		}
+		row = gen.GetDamageReportFileRow{
+			ID: proof.ID, Filename: proof.Filename, ContentType: proof.ContentType,
+			SizeBytes: proof.SizeBytes, StorageKey: proof.StorageKey,
+		}
+	} else if err != nil {
 		dbError(c, err, "That file is not on this report.", "Could not load the file.")
 		return
 	}
@@ -193,6 +247,12 @@ func (s *Server) damageReportFile(c *gin.Context) {
 	// and they are one customer's photographs.
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=86400")
+	// NEVER SNIFFED. These are bytes a stranger uploaded through an
+	// unauthenticated form, served inline on the dashboard's own origin, and
+	// the type beside them is derived from the filename's extension rather
+	// than proven. Without this a .jpg full of markup can be sniffed as HTML
+	// and run as a page here.
+	c.Header("X-Content-Type-Options", "nosniff")
 	c.DataFromReader(http.StatusOK, obj.Size, row.ContentType, obj.Body, nil)
 }
 
@@ -243,6 +303,7 @@ func damageListJSON(row gen.ListDamageReportsRow) damageReportJSON {
 		OrderNumber: row.OrderNumber, ShopifyOrderGid: row.ShopifyOrderGid,
 		OrderID: row.OrderID, PhotoCount: row.PhotoCount, Status: row.Status,
 		ResolutionNote: row.ResolutionNote, ReportedAt: row.ReportedAt,
+		ResolutionKind: row.ResolutionKind, ReverseState: row.ReverseState,
 		StatusChangedAt: row.StatusChangedAt, StatusChangedBy: row.StatusChangedBy,
 	}, row.FileCount)
 }
@@ -252,6 +313,7 @@ func damageJSON(row gen.DamageReport, files int32) damageReportJSON {
 		ID: row.ID.String(), WaID: row.WaID, CustomerName: row.CustomerName,
 		OrderNumber: row.OrderNumber, ShopifyOrderGID: row.ShopifyOrderGid,
 		FileCount: files, Status: row.Status, ResolutionNote: row.ResolutionNote,
+		ResolutionKind: row.ResolutionKind, ReverseState: row.ReverseState,
 		ReportedAt: row.ReportedAt.Time, StatusChangedBy: row.StatusChangedBy,
 	}
 	if row.OrderID != nil {

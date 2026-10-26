@@ -172,6 +172,14 @@ type Settings struct {
 	// job, which locks alone.
 	BatchMinUnitsPerBed int
 
+	// BatchAgeOutHours is how long an under-filled bed waits for company
+	// before it is locked and printed short. Zero uses the built-in 24 hours.
+	//
+	// The floor without this is a bed that waits forever: a colourway selling
+	// two a week never reaches three, and the order behind it is late for a
+	// reason nobody can see on any screen.
+	BatchAgeOutHours int
+
 	// ModelGenConcurrency is how many personalised models render at once.
 	// Zero uses the worker's default. Each render is a single-threaded OpenSCAD
 	// process, so this is effectively "how many cores may renders use".
@@ -620,6 +628,19 @@ type Settings struct {
 	// data, so a production key pointed at it returns nothing rather than
 	// failing - which looks exactly like "no shipments".
 	DelhiveryBaseURL string
+	// DelhiveryPickupLocation is the FACILITY NAME of the warehouse, exactly as
+	// Delhivery's dashboard spells it: "Alt Optiminastic".
+	//
+	// Every manifestation call - a forward shipment for a reprint, a reverse
+	// pickup for a repair - references a registered pickup location BY NAME,
+	// and Delhivery matches it as a string. A typo is not a validation error
+	// at our end; it is a refusal at theirs, at the moment somebody is waiting
+	// for a courier.
+	//
+	// The return address on this location is the same as the pickup address,
+	// which is what makes a reverse pickup land back at the warehouse that
+	// sent the parcel.
+	DelhiveryPickupLocation string
 
 	// Shopify Admin API version used when publishing an approved design, and the
 	// per-request timeout for the outbound Admin API calls.
@@ -727,6 +748,7 @@ func Load() Settings {
 		BatchStrategy:                    envOr("BATCH_STRATEGY", ""),
 		BatchMaxUnitsPerBed:              intEnvOr("BATCH_MAX_UNITS_PER_BED", 0),
 		BatchMinUnitsPerBed:              intEnvOr("BATCH_MIN_UNITS_PER_BED", 0),
+		BatchAgeOutHours:                 intEnvOr("BATCH_AGE_OUT_HOURS", 0),
 		BambuBuddyWebhookSecret:          envOr("BAMBUBUDDY_WEBHOOK_SECRET", ""),
 		BatchIdleWaitMinutes:             floatEnvOr("BATCH_IDLE_WAIT_MINUTES", 10),
 		BambuBuddyURL:                    envOr("BAMBUBUDDY_URL", ""),
@@ -796,8 +818,9 @@ func Load() Settings {
 		WhatsAppTemplateName:        envOr("WHATSAPP_TEMPLATE_NAME", "cart_recovery_personalised"),
 		WhatsAppTemplateLanguage:    envOr("WHATSAPP_TEMPLATE_LANGUAGE", "en"),
 
-		DelhiveryAPIKey:  os.Getenv("DELHIVERY_API_KEY"),
-		DelhiveryBaseURL: envOr("DELHIVERY_BASE_URL", ""),
+		DelhiveryAPIKey:         os.Getenv("DELHIVERY_API_KEY"),
+		DelhiveryPickupLocation: strings.TrimSpace(os.Getenv("DELHIVERY_PICKUP_LOCATION")),
+		DelhiveryBaseURL:        envOr("DELHIVERY_BASE_URL", ""),
 
 		ShopifyAPIVersion: envOr("SHOPIFY_API_VERSION", "2024-10"),
 		ShopifyBaseURL:    envOr("SHOPIFY_BASE_URL", ""),

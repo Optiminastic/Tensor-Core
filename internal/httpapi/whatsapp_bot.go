@@ -131,6 +131,11 @@ type botTurn struct {
 	// tree is the brand's own menu, read once per turn rather than per
 	// action: a message and the option tapped on it are one conversation.
 	tree *botTree
+	// said is the brand's rewritten one-off messages, read once per turn for
+	// the same reason. Per TURN, not per process: an edit on the Bot Messages
+	// page has to reach the very next conversation, which is what the page
+	// promises.
+	said *notices
 }
 
 // menu reads the brand's tree, once.
@@ -140,6 +145,15 @@ func (t *botTurn) menu(ctx context.Context) botTree {
 		t.tree = &resolved
 	}
 	return *t.tree
+}
+
+// notices reads the brand's rewritten messages, once.
+func (t *botTurn) notices(ctx context.Context) notices {
+	if t.said == nil {
+		resolved := t.server.noticesFor(ctx, t.brand)
+		t.said = &resolved
+	}
+	return *t.said
 }
 
 func (s *Server) newBotTurn(ctx context.Context, brand, waID string, logger *slog.Logger) *botTurn {
@@ -175,11 +189,46 @@ func (t *botTurn) run(ctx context.Context, q *gen.Queries, c bot.Conversation, e
 	return c, nil
 }
 
+// say is the wording to send for one of the machine's messages: the shop's if
+// they have rewritten it, the binary's if not.
+//
+// THE DEFAULT IS ALREADY COMPOSED, which is what makes this safe. v.Text is
+// correct on its own - placeholders filled, menu hint appended - so every
+// path through here that finds no rewritten wording returns exactly what the
+// bot sent before any of this existed.
+func (t *botTurn) say(ctx context.Context, v bot.SendText) string {
+	if v.Key == "" && !v.WithMenuHint {
+		return v.Text
+	}
+	said := t.notices(ctx)
+
+	body := v.Text
+	if v.Key != "" {
+		// Re-rendered rather than patched: the order number goes wherever
+		// the shop put the placeholder, which is not where it was.
+		args := make([]any, 0, len(v.Args))
+		for _, a := range v.Args {
+			args = append(args, a)
+		}
+		body = said.format(v.Key, args...)
+	}
+	if v.WithMenuHint {
+		// The answer above the hint is the shop's own tree text and is
+		// already in v.Text; only the hint is swapped. Rebuilt from the
+		// answer rather than string-replaced, because an answer that happens
+		// to contain the old hint would otherwise be mangled.
+		answer := strings.TrimSuffix(v.Text, "\n\n"+content.MenuHint)
+		body = answer + "\n\n" + said.text(bot.KeyMenuHint)
+	}
+	return body
+}
+
 func (t *botTurn) perform(ctx context.Context, q *gen.Queries, a bot.Action) (bot.Event, error) {
 	switch v := a.(type) {
 	case bot.SendText:
-		res, err := t.wa.SendText(ctx, t.waID, v.Text)
-		return nil, t.recordSend(ctx, q, res, err, "text", v.Text)
+		body := t.say(ctx, v)
+		res, err := t.wa.SendText(ctx, t.waID, body)
+		return nil, t.recordSend(ctx, q, res, err, "text", body)
 	case bot.SendMenu:
 		root, ok := t.menu(ctx).root()
 		if !ok {

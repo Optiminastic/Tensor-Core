@@ -134,7 +134,7 @@ ORDER BY lower(i.name);
 -- name: ListDesignsForProduct :many
 -- Which file each of a product's variants prints from, in one read, for the
 -- same reason as ListBomForProduct.
-SELECT d.variant_id, d.role, d.template_key, d.design_id, d.version
+SELECT d.variant_id, v.sku, d.role, d.template_key, d.design_id, d.version
 FROM variant_designs d
 JOIN product_variants v ON v.id = d.variant_id
 WHERE v.product_id = sqlc.arg('product_id') AND d.status = 'active'
@@ -238,6 +238,7 @@ WHERE variant_id = sqlc.arg('variant_id')
 SELECT * FROM product_field_maps
 WHERE product_id = sqlc.arg('product_id')
   AND role = sqlc.arg('role')
+  AND variant_id IS NULL
 ORDER BY position, lower(scad_variable);
 
 -- name: ListAllProductFieldMaps :many
@@ -261,19 +262,26 @@ ORDER BY role, position, lower(scad_variable);
 -- scripts and both are kept.
 INSERT INTO product_field_maps (
     id, product_id, property_key, scad_variable, value_type, role, required,
-    fixed_value, default_value, position
+    fixed_value, default_value, max_runes, position
 ) VALUES (
     sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('property_key'),
     sqlc.arg('scad_variable'), sqlc.arg('value_type'), sqlc.arg('role'),
     sqlc.arg('required'), sqlc.narg('fixed_value'), sqlc.narg('default_value'),
-    sqlc.arg('position')
+    sqlc.narg('max_runes'), sqlc.arg('position')
 )
-ON CONFLICT (product_id, role, lower(scad_variable)) DO UPDATE
+-- The WHERE is NOT optional. uq_product_field_map_variable became partial
+-- in migration 0129, when a variant gained the right to override a
+-- product's mapping, and Postgres matches an ON CONFLICT target against a
+-- partial index only when the predicate is repeated. Without it every call
+-- fails with 42P10 - "no unique or exclusion constraint matching the ON
+-- CONFLICT specification" - which names neither the index nor the reason.
+ON CONFLICT (product_id, role, lower(scad_variable)) WHERE variant_id IS NULL DO UPDATE
 SET property_key  = EXCLUDED.property_key,
     value_type    = EXCLUDED.value_type,
     required      = EXCLUDED.required,
     fixed_value   = EXCLUDED.fixed_value,
     default_value = EXCLUDED.default_value,
+    max_runes     = EXCLUDED.max_runes,
     position      = EXCLUDED.position;
 
 -- name: ClearProductFieldMaps :exec
@@ -304,6 +312,22 @@ WHERE product_id = sqlc.arg('product_id')
 -- Retired variants are excluded: a SKU that has been withdrawn should stop
 -- rendering rather than keep printing from a configuration nobody maintains.
 SELECT p.*
+FROM product_variants v
+JOIN products p ON p.id = v.product_id
+WHERE lower(v.sku) = lower(sqlc.arg('sku'))
+  AND v.status = 'active'
+  AND p.status = 'active'
+LIMIT 1;
+
+-- name: FindVariantBySKU :one
+-- The VARIANT an order line belongs to, found by its SKU.
+--
+-- FindProductBySKU's sibling, and matched on exactly the same terms so the two
+-- cannot disagree about which SKUs the registry describes. The product answers
+-- "which template and which field mapping"; the variant answers "which
+-- colourway", which is a different question as soon as a product's palette
+-- changes between variants.
+SELECT v.*
 FROM product_variants v
 JOIN products p ON p.id = v.product_id
 WHERE lower(v.sku) = lower(sqlc.arg('sku'))
@@ -388,6 +412,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 )
 SELECT k.sku,
        max(k.display)::text      AS display_sku,
@@ -404,7 +432,8 @@ ORDER BY k.sku, sp.machine_family;
 -- lookup. Case-insensitive on both sides: a SKU typed into Shopify and one
 -- typed into Tensor disagree about case more often than anybody expects.
 SELECT * FROM sku_slicer_pipelines
-WHERE lower(sku) = lower(sqlc.arg('sku')::text)
+WHERE sku IS NOT NULL
+  AND lower(sku) = lower(sqlc.arg('sku')::text)
   AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
 
 -- name: ListAllPipelineMappings :many
@@ -415,6 +444,7 @@ WHERE lower(sku) = lower(sqlc.arg('sku')::text)
 -- hundreds of round trips to answer a question this table can answer in one.
 SELECT lower(sku)::text AS sku, machine_family, pipeline_id
 FROM sku_slicer_pipelines
+WHERE sku IS NOT NULL
 ORDER BY lower(sku), upper(machine_family);
 
 -- name: UpsertSKUPipeline :one
@@ -423,7 +453,10 @@ VALUES (
     sqlc.arg('id'), sqlc.arg('sku'), sqlc.arg('machine_family'),
     sqlc.arg('pipeline_id'), sqlc.arg('pipeline_name')
 )
-ON CONFLICT (lower(sku), upper(machine_family)) DO UPDATE SET
+-- The WHERE repeats the index's, because uq_sku_pipeline_family is PARTIAL
+-- now that a product's mapping carries no SKU. Postgres infers the arbiter
+-- index from this clause and finds none without it.
+ON CONFLICT (lower(sku), upper(machine_family)) WHERE sku IS NOT NULL DO UPDATE SET
     pipeline_id   = EXCLUDED.pipeline_id,
     pipeline_name = EXCLUDED.pipeline_name,
     updated_at    = now()
@@ -480,19 +513,39 @@ WHERE v.id = $1;
 -- The coloured pieces one design file prints as, in the order they were read
 -- from the reference 3MF.
 --
+-- The PRODUCT's scheme only - rows no variant has overridden. A render asks
+-- ListColourPartsForVariant instead, which falls back to this.
+--
 -- Empty is the normal answer for every product configured before this existed,
 -- and the renderer treats it as "use the two-pass plank behaviour" rather than
 -- as a misconfiguration.
 SELECT * FROM design_colour_parts
 WHERE product_id = sqlc.arg('product_id')
   AND lower(role) = lower(sqlc.arg('role')::text)
+  AND variant_id IS NULL
+ORDER BY position, lower(part_name);
+
+-- name: ListColourPartsForVariant :many
+-- The pieces ONE VARIANT declares of its own, or none.
+--
+-- The fallback to the product's scheme is resolveScheme's, in Go, where the
+-- rule it enforces can be tested and stated: a variant that declares a scheme
+-- declares the WHOLE scheme. Expressed here as a UNION it was correct and
+-- unreadable, and nothing could assert it without a database.
+SELECT * FROM design_colour_parts
+WHERE variant_id = sqlc.arg('variant_id')
+  AND lower(role) = lower(sqlc.arg('role')::text)
 ORDER BY position, lower(part_name);
 
 -- name: ListAllDesignColourParts :many
--- Every coloured piece of one product, across all its roles, for the editor.
-SELECT * FROM design_colour_parts
-WHERE product_id = sqlc.arg('product_id')
-ORDER BY lower(role), position, lower(part_name);
+-- Every coloured piece of one product, across all its roles AND variants, for
+-- the editor. The SKU comes along so the editor can group by colourway without
+-- a second query; it is NULL on the product's own scheme.
+SELECT dcp.*, v.sku AS variant_sku
+FROM design_colour_parts dcp
+LEFT JOIN product_variants v ON v.id = dcp.variant_id
+WHERE dcp.product_id = sqlc.arg('product_id')
+ORDER BY lower(dcp.role), v.sku NULLS FIRST, dcp.position, lower(dcp.part_name);
 
 -- name: ClearDesignColourParts :exec
 -- Removes one role's pieces, so a re-uploaded reference 3MF replaces rather
@@ -500,12 +553,14 @@ ORDER BY lower(role), position, lower(part_name);
 -- product, and leaving it behind would render a piece the design no longer has.
 DELETE FROM design_colour_parts
 WHERE product_id = sqlc.arg('product_id')
-  AND lower(role) = lower(sqlc.arg('role')::text);
+  AND lower(role) = lower(sqlc.arg('role')::text)
+  AND variant_id IS NOT DISTINCT FROM sqlc.narg('variant_id')::uuid;
 
 -- name: InsertDesignColourPart :one
-INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position)
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('role'),
-        sqlc.arg('part_name'), sqlc.narg('colour_hex'), sqlc.arg('position'))
+        sqlc.arg('part_name'), sqlc.narg('colour_hex'), sqlc.arg('position'),
+        sqlc.narg('variant_id'))
 RETURNING *;
 
 -- name: SetDesignColourPartColour :one
@@ -535,6 +590,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 ),
 skus AS (
     SELECT k.sku,
@@ -570,6 +629,10 @@ WITH known AS (
     UNION
     SELECT lower(sp.sku)::text, sp.sku, ''::varchar, ''::varchar
     FROM sku_slicer_pipelines sp
+    -- A PRODUCT's mapping carries no SKU, and this list is of SKUs. Without
+    -- this it arrives as a row whose sku is null - a phantom entry that is
+    -- neither a product nor anything that prints.
+    WHERE sp.sku IS NOT NULL
 ),
 skus AS (
     SELECT k.sku,
@@ -630,3 +693,334 @@ FROM variant_bom b
 JOIN inventory_items i ON i.id = b.inventory_item_id
 WHERE b.variant_id = ANY(sqlc.arg('variant_ids')::uuid[])
 ORDER BY lower(i.name);
+
+-- name: ListProductBom :many
+-- The bill of materials every variant of a product inherits.
+--
+-- The same columns ListVariantBom returns, so a caller folding the two does
+-- not have to reshape one of them.
+SELECT b.id, b.product_id, b.quantity, b.created_at,
+       i.id AS item_id, i.name AS item_name, i.code AS item_code, i.unit,
+       i.unit_price, i.quantity AS stock_quantity, i.source
+FROM product_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.product_id = sqlc.arg('product_id')
+ORDER BY lower(i.name);
+
+-- name: ReplaceProductBomItem :exec
+INSERT INTO product_bom (id, product_id, inventory_item_id, quantity)
+VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('inventory_item_id'),
+        sqlc.arg('quantity')::float8)
+ON CONFLICT (product_id, inventory_item_id) DO UPDATE
+SET quantity = EXCLUDED.quantity;
+
+-- name: ClearProductBom :exec
+-- Empties a product's bill of materials so it can be written whole, exactly as
+-- ClearVariantBom does. Paired with ReplaceProductBomItem inside one
+-- transaction.
+DELETE FROM product_bom WHERE product_id = sqlc.arg('product_id');
+
+-- name: ListProductBomForProducts :many
+-- Every product-level line for a set of products, for the list page.
+SELECT b.product_id, b.quantity, i.id AS item_id, i.name AS item_name,
+       i.code AS item_code, i.unit, i.unit_price
+FROM product_bom b
+JOIN inventory_items i ON i.id = b.inventory_item_id
+WHERE b.product_id = ANY (sqlc.arg('product_ids')::uuid[])
+ORDER BY lower(i.name);
+
+-- name: ListVariantsWithOwnBom :many
+-- Which variants of a product declare a bill of materials of their own.
+--
+-- Asked because inheritance is ALL OR NOTHING: a variant with any line of its
+-- own uses only its own, so "does it have any" is the whole question and
+-- counting them would invite a caller that merges.
+SELECT DISTINCT b.variant_id
+FROM variant_bom b
+JOIN product_variants v ON v.id = b.variant_id
+WHERE v.product_id = sqlc.arg('product_id');
+
+-- name: SetInventoryItemSource :one
+-- Declares how a component is made, and what prints it when the shop does.
+--
+-- Separate from UpdateInventoryItem because that one is the shelf - a name, a
+-- count, a price - and is guarded by filament:manage, the permission for
+-- loading spools. Binding a design file to a part is a configuration act.
+UPDATE inventory_items SET
+    source              = sqlc.arg('source'),
+    template_key        = sqlc.narg('template_key'),
+    model_file_id       = sqlc.narg('model_file_id'),
+    shopify_product_gid = coalesce(sqlc.narg('shopify_product_gid'), shopify_product_gid),
+    plate_scope         = coalesce(sqlc.narg('plate_scope'), plate_scope),
+    shopify_product_title = coalesce(sqlc.narg('shopify_product_title'), shopify_product_title),
+    updated_at          = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: ListComponentPlates :many
+-- Every ready-made plate a component carries: one per SKU per machine class.
+SELECT p.*, f.filename, f.size_bytes, f.storage_key
+FROM component_plates p
+JOIN file_assets f ON f.id = p.file_id
+WHERE p.inventory_item_id = sqlc.arg('inventory_item_id')
+ORDER BY lower(p.sku), upper(p.machine_family);
+
+-- name: UpsertComponentPlate :one
+-- The file IS the whole answer: one SKU, one machine class, one plate.
+INSERT INTO component_plates (
+    id, inventory_item_id, sku, machine_family, file_id, notes, uploaded_by
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('inventory_item_id'), sqlc.arg('sku'),
+    sqlc.arg('machine_family'), sqlc.arg('file_id'), sqlc.narg('notes'),
+    sqlc.arg('uploaded_by')
+)
+ON CONFLICT (inventory_item_id, lower(sku), upper(machine_family)) DO UPDATE SET
+    file_id     = EXCLUDED.file_id,
+    notes       = EXCLUDED.notes,
+    uploaded_by = EXCLUDED.uploaded_by,
+    updated_at  = now()
+RETURNING *;
+
+-- name: DeleteComponentPlate :execrows
+-- Removing a plate returns the component to being sliced per run, which is a
+-- real choice and not an absence of one - hence a delete rather than a null.
+DELETE FROM component_plates
+WHERE inventory_item_id = sqlc.arg('inventory_item_id')
+  AND lower(sku) = lower(sqlc.arg('sku')::text)
+  AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
+
+-- name: CountPlatesForItems :many
+-- How many plates each component carries, for the Components table.
+SELECT inventory_item_id, count(*)::int AS plates
+FROM component_plates
+WHERE inventory_item_id = ANY (sqlc.arg('item_ids')::uuid[])
+GROUP BY inventory_item_id;
+
+-- name: ListProductPipelines :many
+-- Every registry product with its slicer mapping, one row per product per
+-- machine class it has been given.
+--
+-- The PARENT is what gets assigned: the Lotus sells in three colourways and
+-- the plank will have forty-four, and every one prints with the same settings.
+-- A mapping per SKU is the same answer typed out once per colour.
+SELECT p.id AS product_id, p.code AS product_code, p.name AS product_name,
+       (SELECT count(*) FROM product_variants v
+         WHERE v.product_id = p.id AND v.status <> 'retired'
+           AND v.sku IS NOT NULL AND btrim(v.sku) <> '')::int AS sku_count,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM products p
+LEFT JOIN sku_slicer_pipelines sp ON sp.product_id = p.id
+WHERE p.status <> 'retired'
+ORDER BY lower(p.code), upper(sp.machine_family);
+
+-- name: ListOrphanSKUPipelines :many
+-- SKUs that print but belong to no registry product, with their own mappings.
+--
+-- They cannot be reached by assigning a parent, because they have none: of the
+-- SKUs printing on this floor, most match no variant row. Listing them
+-- individually is the only way they can be mapped at all, and dropping them
+-- would quietly un-map the highest-volume product in the shop.
+WITH printing AS (
+    SELECT DISTINCT lower(j.sku)::text AS sku, j.sku AS display
+    FROM production_jobs j
+    WHERE j.sku IS NOT NULL AND btrim(j.sku) <> ''
+      AND NOT EXISTS (
+          SELECT 1 FROM product_variants v
+          JOIN products p ON p.id = v.product_id
+          WHERE lower(v.sku) = lower(j.sku) AND v.status <> 'retired' AND p.status <> 'retired'
+      )
+    UNION
+    SELECT DISTINCT lower(sp.sku)::text, sp.sku
+    FROM sku_slicer_pipelines sp
+    WHERE sp.sku IS NOT NULL
+)
+SELECT k.sku, max(k.display)::text AS display_sku,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM printing k
+LEFT JOIN sku_slicer_pipelines sp ON lower(sp.sku) = k.sku
+GROUP BY k.sku, sp.machine_family, sp.pipeline_id, sp.pipeline_name
+ORDER BY k.sku, upper(sp.machine_family);
+
+-- name: UpsertProductPipeline :one
+INSERT INTO sku_slicer_pipelines (id, product_id, machine_family, pipeline_id, pipeline_name)
+VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('machine_family'),
+        sqlc.arg('pipeline_id'), sqlc.arg('pipeline_name'))
+ON CONFLICT (product_id, upper(machine_family)) WHERE product_id IS NOT NULL DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING *;
+
+-- name: DeleteProductPipeline :exec
+DELETE FROM sku_slicer_pipelines
+WHERE product_id = sqlc.arg('product_id')
+  AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
+
+-- name: GetPipelineForProductOfSKU :one
+-- The pipeline a SKU inherits from the product it belongs to.
+--
+-- Asked only when the SKU has no rule of its own, so the common path stays one
+-- query. resolvePipeline is where the preference between the two lives.
+SELECT sp.* FROM sku_slicer_pipelines sp
+JOIN products p ON p.id = sp.product_id
+JOIN product_variants v ON v.product_id = p.id
+WHERE lower(v.sku) = lower(sqlc.arg('sku')::text)
+  AND v.status = 'active' AND p.status = 'active'
+  AND upper(sp.machine_family) = upper(sqlc.arg('machine_family')::text)
+LIMIT 1;
+
+-- name: ListShopifyProductPipelines :many
+-- Every Shopify product that actually prints, with its slicer mapping.
+--
+-- THE PARENT EVERY SKU ALREADY HAS. The plank's twenty variants sit under one
+-- Shopify product; the registry knows about two products in all. Deriving the
+-- parent from order lines rather than from the registry means the list covers
+-- what the floor prints today, not what has been imported.
+--
+-- product_name is the LINE's name - "Dual Name Plank - BLUE / NO LIGHT" - so
+-- the shortest one under a product id is the closest thing to the parent's own
+-- title without asking Shopify for it.
+WITH lines AS (
+    SELECT DISTINCT
+           (li->>'product_id')::text AS shopify_product_id,
+           lower(li->>'sku')::text AS sku,
+           li->>'sku' AS display_sku,
+           coalesce(li->>'product_name', '') AS line_name
+    FROM orders o, jsonb_array_elements(o.line_items) li
+    WHERE li->>'product_id' IS NOT NULL
+      AND li->>'sku' IS NOT NULL AND btrim(li->>'sku') <> ''
+),
+printing AS (
+    SELECT l.* FROM lines l
+    WHERE EXISTS (SELECT 1 FROM production_jobs j WHERE lower(j.sku) = l.sku)
+),
+parents AS (
+    SELECT shopify_product_id,
+           count(DISTINCT sku)::int AS sku_count,
+           (array_agg(line_name ORDER BY length(line_name), line_name))[1] AS name
+    FROM printing
+    GROUP BY shopify_product_id
+)
+SELECT p.shopify_product_id::text AS shopify_product_id,
+       p.name::text AS name, p.sku_count,
+       sp.machine_family, sp.pipeline_id, sp.pipeline_name
+FROM parents p
+LEFT JOIN sku_slicer_pipelines sp ON sp.shopify_product_id = p.shopify_product_id
+ORDER BY lower(p.name), upper(sp.machine_family);
+
+-- name: UpsertShopifyProductPipeline :one
+INSERT INTO sku_slicer_pipelines (id, shopify_product_id, machine_family, pipeline_id, pipeline_name)
+VALUES (sqlc.arg('id'), sqlc.arg('shopify_product_id'), sqlc.arg('machine_family'),
+        sqlc.arg('pipeline_id'), sqlc.arg('pipeline_name'))
+ON CONFLICT (shopify_product_id, upper(machine_family))
+    WHERE shopify_product_id IS NOT NULL DO UPDATE SET
+    pipeline_id   = EXCLUDED.pipeline_id,
+    pipeline_name = EXCLUDED.pipeline_name,
+    updated_at    = now()
+RETURNING *;
+
+-- name: DeleteShopifyProductPipeline :exec
+DELETE FROM sku_slicer_pipelines
+WHERE shopify_product_id = sqlc.arg('shopify_product_id')
+  AND upper(machine_family) = upper(sqlc.arg('machine_family')::text);
+
+-- name: GetPipelineForShopifyProductOfSKU :one
+-- The pipeline a SKU inherits from the Shopify product it was sold under.
+--
+-- Asked last, and only when the SKU has no rule of its own and belongs to no
+-- registry product - so the hot path pays for it once per unmapped job, never
+-- for one already answered.
+SELECT sp.* FROM sku_slicer_pipelines sp
+WHERE sp.shopify_product_id IS NOT NULL
+  AND upper(sp.machine_family) = upper(sqlc.arg('machine_family')::text)
+  AND sp.shopify_product_id = (
+      SELECT li->>'product_id'
+      FROM orders o, jsonb_array_elements(o.line_items) li
+      WHERE lower(li->>'sku') = lower(sqlc.arg('sku')::text)
+        AND li->>'product_id' IS NOT NULL
+      ORDER BY o.placed_at DESC NULLS LAST
+      LIMIT 1
+  )
+LIMIT 1;
+
+-- name: ListPreviewComponentsForSKU :many
+-- The printed pieces that belong in a SKU's assembled picture.
+--
+-- Every component the SKU's product carries that Tensor can draw: printed
+-- here, with a mesh of its own. A bought-in part has no model and a part with
+-- only a .scad template is not a fixed mesh, so neither is returned - the
+-- picture shows what can actually be drawn rather than a gap where a box
+-- should be.
+--
+-- Through the bill of materials, so the pieces follow whatever the product is
+-- actually built from. A variant's own list wins where it has one, exactly as
+-- resolveBom decides it.
+SELECT i.id, i.name, i.model_file_id, i.preview_colour, i.preview_position,
+       f.storage_key, f.filename
+FROM inventory_items i
+JOIN file_assets f ON f.id = i.model_file_id
+WHERE i.source = 'printed'
+  AND i.model_file_id IS NOT NULL
+  AND (
+      i.id IN (
+          SELECT b.inventory_item_id FROM variant_bom b
+          JOIN product_variants v ON v.id = b.variant_id
+          WHERE lower(v.sku) = lower(sqlc.arg('sku')::text)
+      )
+      OR (
+          NOT EXISTS (
+              SELECT 1 FROM variant_bom b
+              JOIN product_variants v ON v.id = b.variant_id
+              WHERE lower(v.sku) = lower(sqlc.arg('sku')::text)
+          )
+          AND i.id IN (
+              SELECT pb.inventory_item_id FROM product_bom pb
+              JOIN products p ON p.id = pb.product_id
+              JOIN product_variants v ON v.product_id = p.id
+              WHERE lower(v.sku) = lower(sqlc.arg('sku')::text)
+          )
+      )
+  )
+ORDER BY i.preview_position, lower(i.name);
+
+-- name: AnySKUAsksTheCustomer :one
+-- Whether ANY of these SKUs still asks its customer to confirm.
+--
+-- An order is the unit a link is sent for, so one enabled SKU on it is enough
+-- to open a window. A SKU the registry has never seen counts as enabled: the
+-- plank range is not in the registry at all and must keep behaving exactly as
+-- it does today.
+SELECT EXISTS (
+    SELECT 1 FROM product_variants v
+    WHERE lower(v.sku) = ANY (sqlc.arg('skus')::text[])
+      AND v.personalisation_link_enabled
+) OR NOT EXISTS (
+    SELECT 1 FROM product_variants v
+    WHERE lower(v.sku) = ANY (sqlc.arg('skus')::text[])
+) AS asks;
+
+-- name: ListVariantFieldMaps :many
+-- The mapping ONE colourway declares of its own, or none.
+--
+-- The fallback to the product's is in Go, beside resolveScheme, where the
+-- rule it enforces can be stated and tested: a variant that maps anything
+-- maps everything. Merging the two would fill a gap in a variant's mapping
+-- from the product's and drive a file with a variable it does not declare -
+-- which OpenSCAD accepts silently, so the model would simply come out with
+-- no name on it.
+SELECT * FROM product_field_maps
+WHERE variant_id = sqlc.arg('variant_id')
+  AND role = sqlc.arg('role')
+ORDER BY position, lower(scad_variable);
+
+-- name: SetVariantPersonalisationLink :one
+-- Turns one SKU's personalisation link on or off.
+--
+-- Off means the customer is not asked and the thirty-minute hold does not
+-- happen, so the job renders and batches straight away - which is what a
+-- product nobody needs to ask about should do.
+UPDATE product_variants
+SET personalisation_link_enabled = sqlc.arg('enabled'),
+    updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;

@@ -9,6 +9,26 @@ import (
 	"context"
 )
 
+const deleteBotMessage = `-- name: DeleteBotMessage :exec
+DELETE FROM whatsapp_bot_messages
+WHERE brand_slug = $1 AND message_key = $2
+`
+
+type DeleteBotMessageParams struct {
+	BrandSlug  string
+	MessageKey string
+}
+
+// Puts one message back to the wording in the binary.
+//
+// A DELETE, NOT A COPY OF THE DEFAULT. Storing the default as a row would
+// freeze it: a later improvement to the shipped wording would never reach a
+// brand that had once pressed "reset".
+func (q *Queries) DeleteBotMessage(ctx context.Context, arg DeleteBotMessageParams) error {
+	_, err := q.db.Exec(ctx, deleteBotMessage, arg.BrandSlug, arg.MessageKey)
+	return err
+}
+
 const deleteWhatsAppBotTree = `-- name: DeleteWhatsAppBotTree :exec
 DELETE FROM whatsapp_bot_nodes WHERE brand_slug = $1
 `
@@ -22,6 +42,42 @@ DELETE FROM whatsapp_bot_nodes WHERE brand_slug = $1
 func (q *Queries) DeleteWhatsAppBotTree(ctx context.Context, brandSlug string) error {
 	_, err := q.db.Exec(ctx, deleteWhatsAppBotTree, brandSlug)
 	return err
+}
+
+const listBotMessages = `-- name: ListBotMessages :many
+SELECT message_key, body FROM whatsapp_bot_messages
+WHERE brand_slug = $1
+`
+
+type ListBotMessagesRow struct {
+	MessageKey string
+	Body       string
+}
+
+// This brand's rewritten one-off messages.
+//
+// READ ON EVERY SEND, deliberately. The table holds a handful of rows behind
+// its primary key, and the alternative - a cache - is how an edit saved on the
+// Bot Messages page keeps sending the old wording until somebody restarts the
+// API. "Changes apply to the next message" is the promise the page makes.
+func (q *Queries) ListBotMessages(ctx context.Context, brandSlug string) ([]ListBotMessagesRow, error) {
+	rows, err := q.db.Query(ctx, listBotMessages, brandSlug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBotMessagesRow{}
+	for rows.Next() {
+		var i ListBotMessagesRow
+		if err := rows.Scan(&i.MessageKey, &i.Body); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listWhatsAppBotNodes = `-- name: ListWhatsAppBotNodes :many
@@ -104,6 +160,33 @@ func (q *Queries) ListWhatsAppBotOptions(ctx context.Context, brandSlug string) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertBotMessage = `-- name: UpsertBotMessage :exec
+INSERT INTO whatsapp_bot_messages (brand_slug, message_key, body, updated_by)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (brand_slug, message_key) DO UPDATE
+SET body       = excluded.body,
+    updated_by = excluded.updated_by,
+    updated_at = now()
+`
+
+type UpsertBotMessageParams struct {
+	BrandSlug  string
+	MessageKey string
+	Body       string
+	UpdatedBy  *string
+}
+
+// Stores one rewritten message, replacing whatever was there.
+func (q *Queries) UpsertBotMessage(ctx context.Context, arg UpsertBotMessageParams) error {
+	_, err := q.db.Exec(ctx, upsertBotMessage,
+		arg.BrandSlug,
+		arg.MessageKey,
+		arg.Body,
+		arg.UpdatedBy,
+	)
+	return err
 }
 
 const upsertWhatsAppBotNode = `-- name: UpsertWhatsAppBotNode :exec

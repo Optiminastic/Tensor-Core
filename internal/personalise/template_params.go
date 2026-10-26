@@ -24,13 +24,52 @@ var JoineryTemplateParams = []string{
 	"PART",
 }
 
+// AlwaysPassedTemplateParams is the only thing EVERY template is driven with,
+// whatever vocabulary it speaks.
+//
+// Exactly one variable: PART. The renderer runs a template once per coloured
+// piece and writes the results into one 3MF as separately coloured objects. A
+// template that ignores PART renders the identical solid every time, so the
+// model comes out doubled - the same geometry overlapping itself in two
+// colours. It slices, it prints, and it is wrong.
+var AlwaysPassedTemplateParams = []string{"PART"}
+
+// plankTemplateKeys are the keys the DNP path drives, and the only keys whose
+// files Tensor passes names and finished sizes to.
+//
+// Everything else is a REGISTRY product: its arguments are built from the
+// product's own field mapping, so the renderer never sets NAME_L or OUT_X and
+// has no business demanding them.
+var plankTemplateKeys = []string{
+	templateJoinery,
+	templateTwoHeart, templateOneHeart, templateNoHeart, templateFrame,
+}
+
 // RequiredParamsForTemplate is what a template stored under this key must
 // declare, decided by which vocabulary Tensor will drive it in.
+//
+// THREE vocabularies, not two. The joinery file speaks name1/side_hearts; the
+// planks it replaced speak NAME_L/OUT_X; and a registry product speaks
+// whatever its field mapping says, which this package cannot know and must not
+// guess.
+//
+// Returning the plank's list for every unrecognised key was a real refusal,
+// not a theoretical one: `cmd/loadtemplates` turned away the shop's own
+// complete lotus-holder file for "does not declare NAME_L, NAME_R, OUT_X,
+// OUT_Y, OUT_Z" - variables a lotus holder has never had and never will -
+// while the same file uploaded cleanly through the Designs tab, which applied
+// this rule correctly. Two gates on one door disagreeing about what is allowed
+// through is worse than either gate alone.
 func RequiredParamsForTemplate(key string) []string {
 	if key == templateJoinery {
 		return JoineryTemplateParams
 	}
-	return RequiredTemplateParams
+	for _, plank := range plankTemplateKeys {
+		if key == plank {
+			return RequiredTemplateParams
+		}
+	}
+	return AlwaysPassedTemplateParams
 }
 
 // MissingTemplateParams names the required variables a template does not

@@ -222,6 +222,22 @@ func colourBedKey(j PlanJob) (string, bool) {
 	if key == "" {
 		return "", false
 	}
+	// THE PRODUCT FAMILY, added after the colour and for a different reason.
+	//
+	// A plate is one filament load - that is why colour is here - but it is
+	// also one GEOMETRY, packed once. Two products that happen to be red are
+	// still two things to lay out, and the shop's rule is that a bed carrying
+	// planks carries only planks.
+	//
+	// It cannot re-create the splits this key has already shed. Those came
+	// from technical attributes - the slicer token, the machine family, the
+	// nozzle - which divided ONE product against itself. This divides one
+	// product from another, and the whole plank range is deliberately a single
+	// family so DNP-GLD and DNPWL-GLD still share the bed they always have.
+	// A job no family names keeps today's behaviour exactly.
+	if family := j.Family; family != "" {
+		key = family + "/" + key
+	}
 	// THE COLOUR. That is the whole key.
 	//
 	// A bed is a filament load, and which printer loads it is decided later -

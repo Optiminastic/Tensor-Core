@@ -43,6 +43,19 @@ const UrgentPriority = urgentPriority
 // still share a bed as long as the running total stays at or under this.
 const maxGroupColours = 2
 
+// MaxBedColours is maxGroupColours for callers outside this package.
+//
+// Exported so a screen can say what the rule IS rather than restating the
+// number and drifting from it. The rule itself stays here.
+//
+// IT COUNTS WHAT JOBS DECLARE, not what their models contain. A job carries
+// the colour the customer bought - "Purple" - and a design whose plate is
+// purple, pink and gold in three layer bands still declares one. The cap is
+// therefore blind to a multi-colour plate, which is a real gap and not one
+// this constant can close: see registry_readiness.go, which says so on the
+// product's own page.
+const MaxBedColours = maxGroupColours
+
 // TargetBedUtilisationPercent is the floor bed-footprint fill (X*Y area of
 // placed parts / bed area) a batch should clear before it's accepted as
 // final - the top-priority packing goal, per the user's explicit "more than
@@ -79,20 +92,23 @@ type PlanJob struct {
 	// cluster together (see sameCustomerOnBed/customerCohesionCount).
 	ShopifyCustomerID *int64
 	Material          string
-	Colours           []string
-	NozzleLeft        string
-	NozzleRight       string
-	QualityMM         string
-	MachineFamily     string
-	SupportUsed       bool
-	InfillPct         float64
-	Priority          int
-	Quantity          int
-	EstimatedMinutes  *int
-	DueDate           *time.Time
-	CreatedAt         time.Time
-	FilamentGrams     float64
-	Footprint         bedpack.UnitFootprint
+	// Family is the product family this job may share a bed with, from
+	// ProductFamily. Empty keeps today's behaviour: grouped by colour alone.
+	Family           string
+	Colours          []string
+	NozzleLeft       string
+	NozzleRight      string
+	QualityMM        string
+	MachineFamily    string
+	SupportUsed      bool
+	InfillPct        float64
+	Priority         int
+	Quantity         int
+	EstimatedMinutes *int
+	DueDate          *time.Time
+	CreatedAt        time.Time
+	FilamentGrams    float64
+	Footprint        bedpack.UnitFootprint
 	// InDraft marks a job that is already sitting in a pending_approval batch.
 	// The planning window always keeps these (see selectWindow): dropping one
 	// would stop the run reproducing that Draft's job set, dissolving a batch

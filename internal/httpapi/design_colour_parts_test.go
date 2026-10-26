@@ -53,6 +53,10 @@ func TestTheReferenceModelNamesThePiecesAndTheirColours(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read parts: %v", err)
 	}
+	// A reference 3MF describes the file that PRINTS. The assembled picture
+	// is a separate design role with its own pieces - see
+	// personalisation_preview_design.go - so nothing read out of here needs
+	// to say which of the two it belongs to.
 	want := []colourPart{
 		{Name: "body", Hex: "#FFFFFF"},
 		{Name: "letters"},

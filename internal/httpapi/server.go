@@ -278,6 +278,9 @@ func (s *Server) Router() *gin.Engine {
 	// Also unauthenticated, and the only route in Tensor that accepts a file
 	// from a stranger. See damage_public.go.
 	s.registerDamagePublic(r)
+	// Also unauthenticated, because the caller is Meta: a WhatsApp image
+	// message is sent as a link Meta fetches for itself. See pay_qr_public.go.
+	s.registerPayQRPublic(r)
 	s.registerShipments(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)
@@ -289,6 +292,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerWhatsAppMedia(r)
 	s.registerDamageReports(r)
 	s.registerWhatsAppBotContent(r)
+	s.registerWhatsAppBotNotices(r)
 	s.registerInternal(r)
 
 	return r
