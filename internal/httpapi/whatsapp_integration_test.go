@@ -428,10 +428,18 @@ func TestIntegrationWhatsAppPhoneMismatchHandsOff(t *testing.T) {
 	if s := h.meta.last(t); s.Text != content.Handoff {
 		t.Fatalf("second mismatch = %q", s.Text)
 	}
+	// AND THEN IT ANSWERS AGAIN, which is the change the shop asked for.
+	//
+	// This used to assert silence: a chat handed to a person stayed theirs
+	// for a day, and the customer's next message got nothing. The only way
+	// back was typing MENU, which nobody tells a customer - so somebody who
+	// wrote "hello?" was simply ignored.
+	//
+	// The handoff is still RECORDED. It just no longer gags the bot.
 	before := h.meta.count()
 	h.say(t, "hello?")
-	if h.meta.count() != before {
-		t.Fatal("the bot spoke while a human has the chat")
+	if h.meta.count() == before {
+		t.Fatal("a customer writing to a handed-over chat got nothing back")
 	}
 }
 
