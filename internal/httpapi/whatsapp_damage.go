@@ -107,6 +107,7 @@ func (s *Server) registerDamageReports(r *gin.Engine) {
 	s.registerDamageResolution(g)
 	// Confirming the Rs 100 and booking the van - see damage_reverse.go.
 	s.registerDamageReverse(g)
+	s.registerDamageDelete(g)
 }
 
 func (s *Server) listDamageReports(c *gin.Context) {

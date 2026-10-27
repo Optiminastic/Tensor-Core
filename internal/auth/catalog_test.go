@@ -16,8 +16,8 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	// and whatsapp:read/reply added the inbox. See catalog.go.
 	// 46 with damage:resolve, which is admin-only by being granted to no
 	// other role - the same construction as the bulk-order pair.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 46 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 46 each", len(admin), len(AllPermissions))
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 47 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 47 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -211,8 +211,8 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
 	// holder of it would show up here before it showed up on anybody's
 	// screen, which is the point of counting rather than spot-checking.
-	if total != 114 {
-		t.Fatalf("total grants = %d, want 114", total)
+	if total != 115 {
+		t.Fatalf("total grants = %d, want 115", total)
 	}
 }
 

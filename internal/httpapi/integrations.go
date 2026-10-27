@@ -124,6 +124,37 @@ var integrationSpecs = []integrationSpec{
 				Default: delhivery.DefaultBaseURL,
 				Help: "The production tracking host. Change it only to point at Delhivery's " +
 					"staging host, which has its own keys and returns nothing to a production one."},
+
+			// DELHIVERY ONE, a SECOND credential for the same account.
+			//
+			// The API key above reads tracking, which says where a parcel got
+			// to and nothing about whose decision it is waiting on. The words
+			// "Need Action", "Auto Re-attempt" and "Return Recommendation"
+			// exist only in Delhivery One, behind this machine credential.
+			// All four are needed together or the NDR page stays on the
+			// tracking view; none of them replaces the API key.
+			{Key: "ucp_client_id", Label: "Delhivery One client ID", Required: false,
+				Help: "From Delhivery One under API credentials. This is a machine credential, " +
+					"not your dashboard login. Without all four One fields the NDR page falls " +
+					"back to raw tracking, which cannot show Delhivery's tabs."},
+			{Key: "ucp_client_secret", Label: "Delhivery One client secret", Secret: true, Required: false,
+				Help: "Issued with the client ID and shown once. A wrong one fails at sign-in " +
+					"with Delhivery's own words rather than returning an empty queue."},
+			{Key: "ucp_realm", Label: "Delhivery One realm", Required: false,
+				Help: "Account-specific, in the form ucp-XXXXXXXXXXX. It is part of the sign-in " +
+					"URL, so a wrong realm is refused rather than silently reading another account."},
+			{Key: "ucp_client_uuid", Label: "Delhivery One client UUID", Required: false,
+				Help: "In the form cms::client::<uuid>. It selects the account on every request " +
+					"and must belong to the same account as the realm."},
+			{Key: "ucp_gateway_url", Label: "Delhivery One gateway URL", Required: false,
+				Help: "The whole URL from the generated MCP config's D1_MCP_URL, ending in /mcp. " +
+					"It is per account and there is no default. NOT one.delhivery.com: that host " +
+					"serves the dashboard and refuses every write before the request reaches " +
+					"Delhivery at all."},
+			{Key: "ucp_user_email", Label: "Delhivery One user email", Required: false,
+				Help: "Stamped on every action so Delhivery's audit trail names somebody. " +
+					"Left blank it sends \"--\", which Delhivery accepts and which reads as " +
+					"\"a machine did this\"."},
 		},
 		Available: true,
 	},
@@ -692,4 +723,50 @@ func (s *Server) delhiveryFor(ctx context.Context, brandSlug string) *delhivery.
 		}
 	}
 	return delhivery.New(cfg)
+}
+
+// delhiveryUCPFor builds the Delhivery One client for one brand.
+//
+// BRAND SETTINGS ONLY, with no environment fallback - unlike delhiveryFor.
+// The tracking key has a legacy env var because it predates the settings
+// screen; this credential never did, and an environment fallback here would
+// let one brand's page quietly read another brand's exception queue.
+//
+// Nil when any required part is missing, which is the normal case for a brand
+// that has only ever had the tracking key. The gateway URL counts: without it
+// there is nowhere to send a request, and there is no default to fall back on.
+func (s *Server) delhiveryUCPFor(ctx context.Context, brandSlug string) *delhivery.UCPClient {
+	var cfg delhivery.UCPConfig
+
+	rows, err := s.store.Q.ListIntegrationSettings(ctx, gen.ListIntegrationSettingsParams{
+		BrandSlug: brandSlug, Provider: providerDelhivery,
+	})
+	if err != nil {
+		return nil
+	}
+	for _, row := range rows {
+		value := row.SettingValue
+		if row.IsSecret {
+			opened, openErr := s.secrets.Open(value)
+			if openErr != nil {
+				continue
+			}
+			value = opened
+		}
+		switch row.SettingKey {
+		case "ucp_client_id":
+			cfg.ClientID = value
+		case "ucp_client_secret":
+			cfg.ClientSecret = value
+		case "ucp_realm":
+			cfg.Realm = value
+		case "ucp_client_uuid":
+			cfg.HQClientID = value
+		case "ucp_gateway_url":
+			cfg.GatewayURL = value
+		case "ucp_user_email":
+			cfg.UserEmail = value
+		}
+	}
+	return delhivery.NewUCP(cfg)
 }

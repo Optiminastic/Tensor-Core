@@ -171,6 +171,42 @@ type ScanDetail struct {
 	ScannedLocation Text  `json:"ScannedLocation"`
 	Instructions    Text  `json:"Instructions"`
 	StatusCode      Text  `json:"StatusCode"`
+
+	// WHAT THE DRIVER CAN SHOW FOR IT. A failed delivery is the carrier's
+	// word against the customer's, and these two fields are the only
+	// evidence either way: where the van actually was, and whether anybody
+	// rang. They decide whether a re-attempt is worth paying for or the
+	// address was simply wrong, so they are worth surfacing even though
+	// Delhivery documents neither.
+	GeoLocation  *GeoPoint `json:"geo_location"`
+	CallDuration *float64  `json:"call_duration"`
+}
+
+// GeoPoint is where the van was when the scan happened.
+type GeoPoint struct {
+	Lat  float64 `json:"lat"`
+	Long float64 `json:"long"`
+}
+
+// Recorded reports whether the point carries a real position. Delhivery sends
+// a zeroed pair rather than omitting the field when it has nothing, and 0,0 is
+// in the Atlantic.
+func (g *GeoPoint) Recorded() bool {
+	return g != nil && (g.Lat != 0 || g.Long != 0)
+}
+
+// CallAttempted reports whether anybody rang the customer before giving up.
+//
+// A ZERO-SECOND CALL IS STILL A CALL ATTEMPTED - it is a number that rang out.
+// The field being absent is what means nobody tried.
+func (s ScanDetail) CallAttempted() bool { return s.CallDuration != nil }
+
+// CallSeconds is how long that call lasted, 0 when there was none.
+func (s ScanDetail) CallSeconds() int {
+	if s.CallDuration == nil {
+		return 0
+	}
+	return int(*s.CallDuration)
 }
 
 type scanEnvelope struct {

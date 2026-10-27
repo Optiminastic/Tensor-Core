@@ -323,6 +323,34 @@ func (q *Queries) CountDamageReportsByStatus(ctx context.Context, brandSlug stri
 	return items, nil
 }
 
+const deleteDamageReport = `-- name: DeleteDamageReport :execrows
+DELETE FROM damage_reports
+WHERE id = $1 AND brand_slug = $2
+`
+
+type DeleteDamageReportParams struct {
+	ID        uuid.UUID
+	BrandSlug string
+}
+
+// Removes one report from the board.
+//
+// ITS TIMELINE GOES WITH IT, by damage_stages.report_id ON DELETE CASCADE.
+//
+// THE PHOTOGRAPHS DO NOT. They hang off the damage_link, not the report, and
+// that link expires on its own - so deleting a report does not reach into
+// object storage and does not race anything still uploading to the form.
+//
+// Brand-scoped like every other read here: a report id on its own is not
+// authority to delete somebody else's row.
+func (q *Queries) DeleteDamageReport(ctx context.Context, arg DeleteDamageReportParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDamageReport, arg.ID, arg.BrandSlug)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const findOrderByNumber = `-- name: FindOrderByNumber :one
 SELECT id, customer_name FROM orders
 WHERE order_number = $1

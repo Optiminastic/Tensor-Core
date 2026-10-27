@@ -83,6 +83,9 @@ func (s *Server) registerShipments(r *gin.Engine) {
 	// phone number; the roles that may see orders are exactly the ones who
 	// would ring somebody about a failed delivery.
 	g.GET("", s.guards.RequirePermission(auth.OrderRead.Key()), s.listShipments)
+	// Acting on a stuck parcel is a heavier permission than reading about
+	// one - see shipments_ndr.go.
+	s.registerShipmentNDR(g)
 }
 
 type shipmentScanResponse struct {
@@ -92,6 +95,20 @@ type shipmentScanResponse struct {
 	Location    string `json:"location"`
 	StatusCode  string `json:"status_code"`
 	ScanType    string `json:"scan_type"`
+
+	// WHAT THE DRIVER CAN SHOW FOR A FAILED DELIVERY. The carrier's word
+	// against the customer's, and these are the only evidence: whether the
+	// van was actually there, and whether anybody rang. They are what an
+	// operator weighs before paying for another attempt.
+	Geofence     *shipmentGeoResponse `json:"geofence,omitempty"`
+	CallAttempt  bool                 `json:"call_attempted"`
+	CallDuration int                  `json:"call_seconds"`
+}
+
+// shipmentGeoResponse is where the van was, for a map link.
+type shipmentGeoResponse struct {
+	Lat  float64 `json:"lat"`
+	Long float64 `json:"long"`
 }
 
 type shipmentRowResponse struct {
@@ -482,14 +499,24 @@ func shipmentRow(
 	}
 
 	for _, scan := range carrierView.History() {
-		row.Scans = append(row.Scans, shipmentScanResponse{
+		mapped := shipmentScanResponse{
 			At:          stamp(scan.ScanDateTime),
 			Status:      scan.Scan.String(),
 			Instruction: scan.Instructions.String(),
 			Location:    scan.ScannedLocation.String(),
 			StatusCode:  scan.StatusCode.String(),
 			ScanType:    scan.ScanType.String(),
-		})
+			CallAttempt: scan.CallAttempted(),
+			// Zero when nobody rang, and zero when the phone rang out. The
+			// flag above is what tells those apart.
+			CallDuration: scan.CallSeconds(),
+		}
+		if scan.GeoLocation.Recorded() {
+			mapped.Geofence = &shipmentGeoResponse{
+				Lat: scan.GeoLocation.Lat, Long: scan.GeoLocation.Long,
+			}
+		}
+		row.Scans = append(row.Scans, mapped)
 	}
 	// Newest scan first in the detail panel - the opposite of the row order,
 	// deliberately. On a list you look for the oldest problem; inside one

@@ -143,6 +143,15 @@ var (
 	// different permission.
 	DamageResolve = PermissionSpec{"damage", "resolve", "Decide a damaged order's outcome and book its pickup"}
 
+	// DamageDelete removes a damage report from the board entirely.
+	//
+	// ADMIN ONLY, and deliberately NOT held by support who hold
+	// damage:resolve. Deciding what the shop does about a complaint and
+	// erasing the record that a customer ever complained are different acts:
+	// the first is the job, the second removes the evidence of it. Granted to
+	// no role below, so only ADMIN - which holds the whole catalog - has it.
+	DamageDelete = PermissionSpec{"damage", "delete", "Delete a damage report and its history"}
+
 	ShopifyPublish = PermissionSpec{"shopify", "publish", "Publish an approved SKU to Shopify"}
 
 	// The production pipeline (ported from print-queue-be). production:read is the
@@ -204,6 +213,7 @@ var AllPermissions = []PermissionSpec{
 	OrderRead,
 	WhatsAppRead, WhatsAppReply,
 	DamageResolve,
+	DamageDelete,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
 	QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,

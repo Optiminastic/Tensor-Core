@@ -336,3 +336,17 @@ FROM damage_reports r
 JOIN file_assets f ON f.id = r.payment_proof_file_id
 WHERE r.id = sqlc.arg('report_id')
   AND r.brand_slug = sqlc.arg('brand_slug');
+
+-- name: DeleteDamageReport :execrows
+-- Removes one report from the board.
+--
+-- ITS TIMELINE GOES WITH IT, by damage_stages.report_id ON DELETE CASCADE.
+--
+-- THE PHOTOGRAPHS DO NOT. They hang off the damage_link, not the report, and
+-- that link expires on its own - so deleting a report does not reach into
+-- object storage and does not race anything still uploading to the form.
+--
+-- Brand-scoped like every other read here: a report id on its own is not
+-- authority to delete somebody else's row.
+DELETE FROM damage_reports
+WHERE id = sqlc.arg('id') AND brand_slug = sqlc.arg('brand_slug');

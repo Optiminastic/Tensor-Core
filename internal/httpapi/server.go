@@ -282,6 +282,7 @@ func (s *Server) Router() *gin.Engine {
 	// message is sent as a link Meta fetches for itself. See pay_qr_public.go.
 	s.registerPayQRPublic(r)
 	s.registerShipments(r)
+	s.registerShipmentExceptions(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)
