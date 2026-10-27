@@ -147,6 +147,15 @@ func (s *Server) DispatchReadyBatches(ctx context.Context) DispatchOutcome {
 		max = defaultAutoDispatchMax
 	}
 
+	// BEFORE ANYTHING IS CONSIDERED, take departed jobs off their Draft beds.
+	//
+	// A bed whose job has left the queue can never be approved - the guard in
+	// unprintableJob refuses it - and nothing else removes that job, so the
+	// bed is retried and refused on every pass for ever. Run here rather than
+	// in the planner because this is the pass that suffers it, and because it
+	// must happen even when planning is idle.
+	s.clearDepartedDraftJobs(ctx)
+
 	// One fleet read for the pass. The lock gate asks whether a printer is free
 	// for each Draft it sees, and a backlog of Drafts would otherwise mean a
 	// BambuBuddy queue read per bed.
@@ -285,4 +294,43 @@ func reasonOf(err error) string {
 		return se.msg
 	}
 	return "Tensor could not send this bed to a printer."
+}
+
+// clearDepartedDraftJobs unwedges Draft beds holding a job that has left the
+// queue, and removes any bed that leaves empty.
+//
+// LOUD ON PURPOSE. Taking a job off a bed changes what the floor is about to
+// print, so each one is named. In steady state this logs nothing at all: it
+// only fires when a job was cancelled, re-queued or started by hand while a
+// Draft still held it.
+//
+// Best effort, and deliberately not fatal. A failure here means the pass
+// proceeds exactly as it did before this existed - some beds refused - rather
+// than no dispatch happening at all.
+func (s *Server) clearDepartedDraftJobs(ctx context.Context) {
+	log := obs.FromContext(ctx)
+
+	detached, err := s.store.Q.DetachDepartedJobsFromDrafts(ctx)
+	if err != nil {
+		log.Warn("could not take departed jobs off their draft beds", "error", err)
+		return
+	}
+	for _, j := range detached {
+		log.Info("took a job off a draft bed because it is no longer queued",
+			"job", j.JobNumber, "job_status", j.Status, "batch", j.BatchNumber)
+	}
+
+	// Only worth asking when something moved: an empty Draft cannot appear on
+	// its own, and this saves a query on every idle pass.
+	if len(detached) == 0 {
+		return
+	}
+	emptied, err := s.store.Q.DeleteEmptyDraftBatches(ctx)
+	if err != nil {
+		log.Warn("could not remove draft beds left empty", "error", err)
+		return
+	}
+	for _, b := range emptied {
+		log.Info("removed a draft bed left with nothing on it", "batch", b.BatchNumber)
+	}
 }

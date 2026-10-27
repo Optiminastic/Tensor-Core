@@ -236,6 +236,50 @@ RETURNING *;
 -- Every Draft batch, for the planner to dissolve and reform.
 SELECT id FROM batches WHERE status = 'pending_approval' ORDER BY created_at ASC, id ASC;
 
+-- name: DetachDepartedJobsFromDrafts :many
+-- Takes jobs that have left the queue off the Draft beds still holding them.
+--
+-- WHY THIS EXISTS. A bed can only be approved if every job on it is still
+-- queued - unprintableJob refuses otherwise, with "A job in this batch is no
+-- longer queued." Nothing used to remove such a job, and under colour batching
+-- the planner keeps a Draft it reproduces rather than dissolving it, so the
+-- bed was retried and refused on every dispatch pass for ever. Measured on
+-- production 2026-10-27: BATCH-1001248 failed that way every two minutes while
+-- the floor waited on it.
+--
+-- SAFE BECAUSE IT IS DRAFT-ONLY. A Draft has no reserved filament and no
+-- sliced plate, so its composition is still free to change; an approved bed's
+-- is not, and changing one there would strand a plate a machine is about to
+-- print. The status predicate is the guard, not decoration.
+--
+-- A job that left the queue is gone from this bed for good - it is printing,
+-- cancelled or done - so detaching it is the whole repair. Jobs that are
+-- merely held, flagged or awaiting a customer are NOT touched: those come
+-- back, and the bed should keep waiting for them.
+UPDATE production_jobs j
+SET batch_id = NULL, updated_at = now()
+FROM batches b
+WHERE j.batch_id = b.id
+  AND b.status = 'pending_approval'
+  AND j.status <> 'queued'
+RETURNING j.id, j.job_number, j.status, b.batch_number;
+
+-- name: DeleteEmptyDraftBatches :many
+-- Removes Draft beds left with nothing on them.
+--
+-- Detaching a departed job can empty a bed, and an empty Draft is worse than
+-- no bed at all: every job on it is queued (vacuously), so unprintableJob
+-- passes and dispatch would approve a plate with nothing to print.
+--
+-- manual = false for the same reason DeleteDraftBatches has it: a hand-built
+-- bed is a person's work, and an operator who has emptied one themselves is
+-- entitled to keep the bed and refill it.
+DELETE FROM batches b
+WHERE b.status = 'pending_approval'
+  AND b.manual = false
+  AND NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.batch_id = b.id)
+RETURNING b.id, b.batch_number;
+
 -- name: DeleteDraftBatches :exec
 -- Removes dissolved Drafts. The status predicate is the real guard, not
 -- decoration: it makes a stale or wrong id list incapable of deleting an

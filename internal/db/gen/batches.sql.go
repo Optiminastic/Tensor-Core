@@ -494,6 +494,109 @@ func (q *Queries) DeleteDraftBatches(ctx context.Context, batchIds []uuid.UUID) 
 	return err
 }
 
+const deleteEmptyDraftBatches = `-- name: DeleteEmptyDraftBatches :many
+DELETE FROM batches b
+WHERE b.status = 'pending_approval'
+  AND b.manual = false
+  AND NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.batch_id = b.id)
+RETURNING b.id, b.batch_number
+`
+
+type DeleteEmptyDraftBatchesRow struct {
+	ID          uuid.UUID
+	BatchNumber string
+}
+
+// Removes Draft beds left with nothing on them.
+//
+// Detaching a departed job can empty a bed, and an empty Draft is worse than
+// no bed at all: every job on it is queued (vacuously), so unprintableJob
+// passes and dispatch would approve a plate with nothing to print.
+//
+// manual = false for the same reason DeleteDraftBatches has it: a hand-built
+// bed is a person's work, and an operator who has emptied one themselves is
+// entitled to keep the bed and refill it.
+func (q *Queries) DeleteEmptyDraftBatches(ctx context.Context) ([]DeleteEmptyDraftBatchesRow, error) {
+	rows, err := q.db.Query(ctx, deleteEmptyDraftBatches)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DeleteEmptyDraftBatchesRow{}
+	for rows.Next() {
+		var i DeleteEmptyDraftBatchesRow
+		if err := rows.Scan(&i.ID, &i.BatchNumber); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const detachDepartedJobsFromDrafts = `-- name: DetachDepartedJobsFromDrafts :many
+UPDATE production_jobs j
+SET batch_id = NULL, updated_at = now()
+FROM batches b
+WHERE j.batch_id = b.id
+  AND b.status = 'pending_approval'
+  AND j.status <> 'queued'
+RETURNING j.id, j.job_number, j.status, b.batch_number
+`
+
+type DetachDepartedJobsFromDraftsRow struct {
+	ID          uuid.UUID
+	JobNumber   string
+	Status      string
+	BatchNumber string
+}
+
+// Takes jobs that have left the queue off the Draft beds still holding them.
+//
+// WHY THIS EXISTS. A bed can only be approved if every job on it is still
+// queued - unprintableJob refuses otherwise, with "A job in this batch is no
+// longer queued." Nothing used to remove such a job, and under colour batching
+// the planner keeps a Draft it reproduces rather than dissolving it, so the
+// bed was retried and refused on every dispatch pass for ever. Measured on
+// production 2026-10-27: BATCH-1001248 failed that way every two minutes while
+// the floor waited on it.
+//
+// SAFE BECAUSE IT IS DRAFT-ONLY. A Draft has no reserved filament and no
+// sliced plate, so its composition is still free to change; an approved bed's
+// is not, and changing one there would strand a plate a machine is about to
+// print. The status predicate is the guard, not decoration.
+//
+// A job that left the queue is gone from this bed for good - it is printing,
+// cancelled or done - so detaching it is the whole repair. Jobs that are
+// merely held, flagged or awaiting a customer are NOT touched: those come
+// back, and the bed should keep waiting for them.
+func (q *Queries) DetachDepartedJobsFromDrafts(ctx context.Context) ([]DetachDepartedJobsFromDraftsRow, error) {
+	rows, err := q.db.Query(ctx, detachDepartedJobsFromDrafts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DetachDepartedJobsFromDraftsRow{}
+	for rows.Next() {
+		var i DetachDepartedJobsFromDraftsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobNumber,
+			&i.Status,
+			&i.BatchNumber,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getBatchByID = `-- name: GetBatchByID :one
 SELECT id, batch_number, machine_id, status, approved_by, approved_at, material_shortage, merged_file_id, preview_file_id, units_per_bed, machine_family, total_print_time_minutes, effective_time_per_unit_minutes, total_filament_grams, bed_utilization_percent, packing_strategy, filament_reserved, manual, plate_sliced_at, plate_slice_error, print_error, print_error_at, queue_item_id, total_layers, support_grams, purge_grams, colour_changes, filament_by_colour, created_at, updated_at, pipeline_run_id, bambu_slice_job_id, fleet_machine_id, archive_id, print_outcome, print_started_at, print_finished_at, actual_print_time_minutes, actual_filament_grams FROM batches WHERE id = $1
 `

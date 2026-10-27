@@ -3035,12 +3035,14 @@ func (q *Queries) ReleaseOrderPersonalisationToPrint(ctx context.Context, arg Re
 const releaseStrandedPersonalisationHolds = `-- name: ReleaseStrandedPersonalisationHolds :execrows
 UPDATE production_jobs j
 SET personalisation_status       = 'validated',
-    personalisation_validated_by = 'system (never asked)',
+    personalisation_validated_by = 'system (window closed)',
     personalisation_validated_at = now()
 WHERE j.personalisation_status = 'awaiting_customer'
   AND j.updated_at < now() - $1::interval
   AND NOT EXISTS (
-      SELECT 1 FROM personalisation_links l WHERE l.order_id = j.order_id
+      SELECT 1 FROM personalisation_links l
+      WHERE l.order_id = j.order_id
+        AND l.status IN ('pending', 'sent', 'opened')
   )
 `
 
@@ -3052,13 +3054,31 @@ WHERE j.personalisation_status = 'awaiting_customer'
 // job waiting for a customer who was never asked - and the expiry sweep walks
 // LINKS, so it would never see it.
 //
-// Scoped to jobs whose order has no link at all. A job whose link exists is
-// the expiry sweep's business, whether that link is open or already closed;
-// this only takes the ones nothing else can reach.
+// Scoped to jobs with no OPEN link, which is not the same as no link at all.
 //
-// The age bound is what keeps it from racing the sender: a model lands, the
-// job is held, and the send is queued behind it. Anything still stranded well
-// after that was never going to be asked.
+// It WAS "no link at all", on the stated reasoning that a job whose link
+// exists is the expiry sweep's business "whether that link is open or already
+// closed". That second half was false. The sweep walks links with status
+// 'sent' or 'opened'; once a link is 'confirmed' or 'expired' the sweep never
+// looks at it again. So a job still awaiting_customer behind a CLOSED link was
+// reachable by nothing: not the sweep, which had moved on, and not this, which
+// saw a link and stepped aside.
+//
+// That is not hypothetical. The sweep releases a job and then closes its link,
+// and the release is fire-and-forget - its error is logged and the link is
+// marked 'expired' regardless. One failed release therefore stranded a job for
+// good. Measured on production 2026-10-27: 31 queued jobs excluded from every
+// planning run, no new batch for hours, while the links they were waiting on
+// had closed long before.
+//
+// 'pending' counts as open so this cannot race a send that has been claimed
+// but not yet delivered; that case has its own path in
+// ReleaseStalePersonalisationClaims.
+//
+// The age bound still keeps it off the sender's heels: a model lands, the job
+// is held, and the send is queued behind it. Anything still stranded well
+// after that was never going to be asked - or was asked and nothing came back
+// for it.
 func (q *Queries) ReleaseStrandedPersonalisationHolds(ctx context.Context, strandedAfter pgtype.Interval) (int64, error) {
 	result, err := q.db.Exec(ctx, releaseStrandedPersonalisationHolds, strandedAfter)
 	if err != nil {
