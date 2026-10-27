@@ -52,8 +52,21 @@ func (s *Server) servePayQR(c *gin.Context) {
 func (s *Server) payQRURL() string {
 	// Already trimmed of a trailing slash at load (config.Load), so joining
 	// is a concatenation rather than a path-building exercise.
-	if s.cfg.PublicBaseURL == "" {
+	// PAY_QR_BASE_URL FIRST, because PublicBaseURL is not free to be this
+	// binary's address: it also builds the Shopify OAuth redirect, which must
+	// match what is registered with Shopify, and on this deployment that is
+	// the frontend. The frontend does not serve this image.
+	//
+	// WHEN THAT IS WRONG, NOTHING SAYS SO. Meta accepts a send whose media
+	// link it cannot fetch, so the API call succeeds, the timeline records
+	// that the customer was asked, and the customer receives nothing at all.
+	// Seen on production on 2026-10-27.
+	base := s.cfg.PayQRBaseURL
+	if base == "" {
+		base = s.cfg.PublicBaseURL
+	}
+	if base == "" {
 		return ""
 	}
-	return s.cfg.PublicBaseURL + payQRPath
+	return base + payQRPath
 }

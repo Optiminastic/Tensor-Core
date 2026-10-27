@@ -657,7 +657,20 @@ type Settings struct {
 	ShopifyClientID     string
 	ShopifyClientSecret string
 	PublicBaseURL       string
-	FrontendURL         string
+	// PayQRBaseURL is where the Rs 100 payment QR is served from, for Meta to
+	// fetch.
+	//
+	// ITS OWN SETTING BECAUSE ONE HOST CANNOT SERVE BOTH USES. PublicBaseURL
+	// also builds the Shopify OAuth redirect, which has to be a URL
+	// REGISTERED WITH SHOPIFY - on this deployment that is the frontend. The
+	// QR is served by this binary and nothing else, so the frontend answers
+	// 404 for it. Meta then accepts the send and quietly delivers nothing:
+	// the timeline says the customer was asked and the customer was not.
+	//
+	// Falls back to PublicBaseURL, which is correct wherever the API is its
+	// own public host.
+	PayQRBaseURL string
+	FrontendURL  string
 	// CustomerLinkURL is the address customers are sent, and it is
 	// deliberately separate from FrontendURL.
 	//
@@ -829,6 +842,7 @@ func Load() Settings {
 		ShopifyClientID:     os.Getenv("SHOPIFY_CLIENT_ID"),
 		ShopifyClientSecret: os.Getenv("SHOPIFY_CLIENT_SECRET"),
 		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		PayQRBaseURL:        strings.TrimRight(os.Getenv("PAY_QR_BASE_URL"), "/"),
 		FrontendURL:         strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3001"), "/"),
 		CustomerLinkURL:     strings.TrimRight(os.Getenv("CUSTOMER_LINK_URL"), "/"),
 		TokenEncryptionKey:  os.Getenv("TOKEN_ENCRYPTION_KEY"),
