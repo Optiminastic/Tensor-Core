@@ -1828,6 +1828,63 @@ func (q *Queries) ListJobsNeedingDesignFile(ctx context.Context) ([]ProductionJo
 	return items, nil
 }
 
+const listLatestStationIssues = `-- name: ListLatestStationIssues :many
+SELECT DISTINCT ON (e.job_id)
+       e.job_id, e.stage, e.reason, e.comment, e.actor_id, e.created_at
+FROM production_job_events e
+WHERE e.job_id = ANY($1::uuid[])
+  AND e.event_type LIKE '%.issue'
+ORDER BY e.job_id, e.seq DESC
+`
+
+type ListLatestStationIssuesRow struct {
+	JobID     uuid.UUID
+	Stage     *string
+	Reason    *string
+	Comment   *string
+	ActorID   string
+	CreatedAt pgtype.Timestamptz
+}
+
+// The most recent problem somebody RAISED at a station, per job.
+//
+// NOT issue_reason, and the difference matters. issue_reason is the pre-print
+// validation taxonomy - missing catalogue data - and setting it excludes a job
+// from batching, which is useless and actively harmful for a part somebody is
+// holding. A station issue is a physical defect found after printing, and it
+// is recorded as an EVENT, leaving the job in its queue where the next person
+// can see it. So the two live in different places on purpose, and a screen
+// that wants "what did somebody flag" has to come here.
+//
+// DISTINCT ON takes the newest per job: a job can be flagged more than once,
+// and the current state of it is the last thing somebody said.
+func (q *Queries) ListLatestStationIssues(ctx context.Context, jobIds []uuid.UUID) ([]ListLatestStationIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listLatestStationIssues, jobIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLatestStationIssuesRow{}
+	for rows.Next() {
+		var i ListLatestStationIssuesRow
+		if err := rows.Scan(
+			&i.JobID,
+			&i.Stage,
+			&i.Reason,
+			&i.Comment,
+			&i.ActorID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductionJobs = `-- name: ListProductionJobs :many
 SELECT id, job_number, order_id, batch_id, description, quantity, status, assembly_status,
        finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour,

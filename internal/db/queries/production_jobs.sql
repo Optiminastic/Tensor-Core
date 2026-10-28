@@ -1434,3 +1434,23 @@ SET assembly_status  = CASE WHEN assembly_status  = 'pending' THEN 'completed' E
     packaging_status = CASE WHEN packaging_status = 'pending' THEN 'packaged'  ELSE packaging_status END,
     updated_at = now()
 WHERE id = sqlc.arg('id');
+
+-- name: ListLatestStationIssues :many
+-- The most recent problem somebody RAISED at a station, per job.
+--
+-- NOT issue_reason, and the difference matters. issue_reason is the pre-print
+-- validation taxonomy - missing catalogue data - and setting it excludes a job
+-- from batching, which is useless and actively harmful for a part somebody is
+-- holding. A station issue is a physical defect found after printing, and it
+-- is recorded as an EVENT, leaving the job in its queue where the next person
+-- can see it. So the two live in different places on purpose, and a screen
+-- that wants "what did somebody flag" has to come here.
+--
+-- DISTINCT ON takes the newest per job: a job can be flagged more than once,
+-- and the current state of it is the last thing somebody said.
+SELECT DISTINCT ON (e.job_id)
+       e.job_id, e.stage, e.reason, e.comment, e.actor_id, e.created_at
+FROM production_job_events e
+WHERE e.job_id = ANY(sqlc.arg('job_ids')::uuid[])
+  AND e.event_type LIKE '%.issue'
+ORDER BY e.job_id, e.seq DESC;
