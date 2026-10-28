@@ -43,6 +43,11 @@ type fieldMapResponse struct {
 	PropertyKey  string `json:"property_key"`
 	ScadVariable string `json:"scad_variable"`
 	ValueType    string `json:"value_type"`
+	// MaxRunes is how many characters this product's text box fits, or null
+	// when the design states no limit. Read by the personalisation page, which
+	// refuses a longer name in the form rather than in a render half a minute
+	// later - see personalisation_edit.go.
+	MaxRunes *int32 `json:"max_runes,omitempty"`
 	// DefaultValue is what an OPTIONAL field passes when the order is silent.
 	// Distinct from fixed_value, which ignores the order entirely.
 	DefaultValue string `json:"default_value"`
@@ -66,6 +71,20 @@ type fieldMapWriteRequest struct {
 		// DefaultValue is used only when an optional field is unanswered, so
 		// unlike FixedValue the order is still consulted first.
 		DefaultValue string `json:"default_value"`
+		// MaxRunes is how many characters the design's text box fits. Absent
+		// leaves it unset, which means no limit.
+		//
+		// WRITABLE because this route CLEARS the mapping and writes it again:
+		// a limit it did not carry was deleted by every save. The column has
+		// existed since migration 0127 and the personalisation page has
+		// enforced it all along, so the only way to set one was by hand in
+		// SQL - and the only way to lose one was to edit the mapping in the
+		// page built for editing it.
+		//
+		// Bounded by the same 1..120 the table's check constraint uses, so a
+		// bad number is refused with a sentence rather than as a constraint
+		// violation.
+		MaxRunes *int32 `json:"max_runes" binding:"omitempty,min=1,max=120"`
 	} `json:"maps"`
 }
 
@@ -112,6 +131,7 @@ func (s *Server) listProductFieldMaps(c *gin.Context) {
 			PropertyKey: r.PropertyKey, ScadVariable: r.ScadVariable,
 			ValueType: r.ValueType, Position: r.Position,
 			FixedValue: deref(r.FixedValue), DefaultValue: deref(r.DefaultValue),
+			MaxRunes: r.MaxRunes,
 		})
 	}
 	c.JSON(http.StatusOK, out)
@@ -127,6 +147,8 @@ type fieldMapEntry struct {
 	// fixed is a value that does not come from the order. When set, key is
 	// unused - see migration 0082.
 	fixed string
+	// maxRunes is the character limit, nil for none.
+	maxRunes *int32
 }
 
 // putProductFieldMaps replaces a product's whole mapping.
@@ -187,9 +209,20 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 					"Mark it optional, or drop the default.", variable))
 			return
 		}
+		// A limit on a field whose value never comes from the order is a limit
+		// on nothing: fixed_value is written by this page, not typed by a
+		// customer, so the personalisation form has no box to enforce it in.
+		if m.MaxRunes != nil && fixed != "" {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s carries a fixed value, so no customer types into it and a "+
+					"character limit would never be applied. Drop the limit, or "+
+					"let the order fill it.", variable))
+			return
+		}
 		entries = append(entries, fieldMapEntry{
 			key: key, variable: variable, valueType: m.ValueType,
 			required: !m.Optional, fixed: fixed, deflt: deflt,
+			maxRunes: m.MaxRunes,
 		})
 	}
 
@@ -226,7 +259,7 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 				ID: uuid.New(), ProductID: product.ID, PropertyKey: e.key,
 				ScadVariable: e.variable, ValueType: e.valueType,
 				Role: role, Required: e.required, FixedValue: fixed,
-				DefaultValue: deflt, Position: int32(i),
+				DefaultValue: deflt, MaxRunes: e.maxRunes, Position: int32(i),
 			}); err != nil {
 				return err
 			}
