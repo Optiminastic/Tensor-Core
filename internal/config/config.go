@@ -419,6 +419,20 @@ type Settings struct {
 	// the queues instead.
 	RunProductionWorkers bool
 
+	// RunPersonalisationWorkers decides whether the production pipeline also
+	// consumes the CUSTOMER'S queues - the link send, the preview render and
+	// the window sweep - or leaves them to cmd/personalisationworker.
+	//
+	// TRUE BY DEFAULT, and that default is the safe cutover. Removing these
+	// queues from the pipeline before the dedicated worker is deployed would
+	// stop links being sent AND stop them expiring, which is precisely the
+	// outage this separation is meant to prevent: orders held for a customer
+	// who was never asked, invisible on every screen. So the pipeline keeps
+	// consuming them until somebody says otherwise, both processes may run at
+	// once - River locks each job to one worker - and the flip to false is a
+	// single env var on the pipeline, reversible without a code change.
+	RunPersonalisationWorkers bool
+
 	// OrderSyncIntervalMinutes drives the periodic pull of every connected
 	// store's Shopify orders. Until this existed the only path an order took
 	// into Tensor was somebody pressing "Sync from Shopify", so an order placed
@@ -776,20 +790,21 @@ func Load() Settings {
 		PersonalisationTestRecipient:     envOr("PERSONALISATION_TEST_RECIPIENT", ""),
 		PersonalisationColours: csvEnvOr("PERSONALISATION_COLOURS",
 			[]string{"PINK", "BLUE", "BLACK", "GOLD", "YELLOW", "GREEN", "RED", "WHITE"}),
-		WinbackLinkHost:          envOr("WINBACK_LINK_HOST", ""),
-		OpenSCADBin:              envOr("OPENSCAD_BIN", ""),
-		OpenSCADAssetDir:         envOr("OPENSCAD_ASSET_DIR", ""),
-		BambuStatusTTL:           secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
-		BambuPrinterIndexTTL:     secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
-		BambuErrorTTL:            secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
-		FleetSyncIntervalSeconds: intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
-		FleetSyncTimeoutMinutes:  intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
-		RunMigrations:            boolEnvOr("RUN_MIGRATIONS", true),
-		RunSeed:                  boolEnvOr("RUN_SEED", true),
-		RunProductionWorkers:     boolEnvOr("RUN_PRODUCTION_WORKERS", true),
-		OrderSyncIntervalMinutes: intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
-		OrderSyncTimeoutMinutes:  intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
-		BambuBuddyTimeoutSeconds: intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
+		WinbackLinkHost:           envOr("WINBACK_LINK_HOST", ""),
+		OpenSCADBin:               envOr("OPENSCAD_BIN", ""),
+		OpenSCADAssetDir:          envOr("OPENSCAD_ASSET_DIR", ""),
+		BambuStatusTTL:            secondsEnvOr("BAMBU_STATUS_TTL_SECONDS", 5),
+		BambuPrinterIndexTTL:      secondsEnvOr("BAMBU_PRINTER_INDEX_TTL_SECONDS", 300),
+		BambuErrorTTL:             secondsEnvOr("BAMBU_ERROR_TTL_SECONDS", 5),
+		FleetSyncIntervalSeconds:  intEnvOr("FLEET_SYNC_INTERVAL_SECONDS", 60),
+		FleetSyncTimeoutMinutes:   intEnvOr("FLEET_SYNC_TIMEOUT_MINUTES", 2),
+		RunMigrations:             boolEnvOr("RUN_MIGRATIONS", true),
+		RunSeed:                   boolEnvOr("RUN_SEED", true),
+		RunProductionWorkers:      boolEnvOr("RUN_PRODUCTION_WORKERS", true),
+		RunPersonalisationWorkers: boolEnvOr("RUN_PERSONALISATION_WORKERS", true),
+		OrderSyncIntervalMinutes:  intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
+		OrderSyncTimeoutMinutes:   intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
+		BambuBuddyTimeoutSeconds:  intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),
 		MachineColourMatchBonusMinutes:      floatEnvOr("MACHINE_COLOUR_MATCH_BONUS_MINUTES", 15),

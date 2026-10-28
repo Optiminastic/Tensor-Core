@@ -24,6 +24,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 # rerender ships beside the worker because it only ENQUEUES model_gen jobs -
 # the worker is what actually runs OpenSCAD, so this is the one host where
 # "re-render everything after a template or font change" can be run at all.
+# The customer's worker ships in THIS image rather than one of its own: it
+# renders previews, so it needs the same pinned OpenSCAD, the same scadassets
+# and the same fonts. A second image would be a second place for the renderer
+# to drift - and a renderer that differs between the preview a customer
+# approves and the plate that prints is the worst drift available.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/personalisationworker ./cmd/personalisationworker
+
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/rerender ./cmd/rerender
 # replate carries a finished re-render onto the beds: a merged plate is a
@@ -140,6 +148,7 @@ COPY scadassets/ /opt/tensor/scadassets/
 ENV OPENSCAD_ASSET_DIR=/opt/tensor/scadassets
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
+COPY --from=build /out/personalisationworker /usr/local/bin/personalisationworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
 COPY --from=build /out/replate /usr/local/bin/replate
 COPY --from=build /out/backfillpriority /usr/local/bin/backfillpriority

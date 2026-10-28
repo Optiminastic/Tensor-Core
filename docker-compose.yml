@@ -126,6 +126,40 @@ services:
       resources:
         limits: {cpus: "4", memory: 2G}
 
+  # The customer's half of the pipeline: the link, the preview and the window
+  # sweep. Same image as productionworker - it renders, so it needs the same
+  # OpenSCAD - with a different command.
+  #
+  # Running this alongside productionworker changes nothing by itself: River
+  # locks each job to one worker, and productionworker keeps consuming these
+  # queues until RUN_PERSONALISATION_WORKERS=false is set on it. Flip that
+  # only once this service is up. The other order stops links being sent AND
+  # stops them expiring, which holds every personalised order invisibly.
+  personalisationworker:
+    build:
+      context: .
+      dockerfile: productionworker.Dockerfile
+    image: tensor-production-worker
+    command: ["personalisationworker"]
+    env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
+      OPENSCAD_BIN: /usr/local/bin/openscad
+      OPENSCAD_ASSET_DIR: /opt/tensor/scadassets
+      # Consent, not configuration - the same reasoning as productionworker's
+      # copy of this. Turning it on mints a public link per order and sends it
+      # to the number on the order, which is a real customer's phone unless
+      # PERSONALISATION_TEST_RECIPIENT is also set.
+      PERSONALISATION_CHECK_ENABLED: "false"
+    restart: unless-stopped
+    deploy:
+      resources:
+        # Lighter than productionworker: two preview renders at a time rather
+        # than the floor's whole render pool.
+        limits: {cpus: "2", memory: 1G}
+
   sliceworker:
     build:
       context: .

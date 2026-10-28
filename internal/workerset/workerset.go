@@ -80,9 +80,53 @@ func (r *Runner) Stop(ctx context.Context) error {
 // roles - except for slicing, which deliberately has no worker registered here
 // (no Bambu Studio in this process) and so needs an insert-only client of its
 // own; a consuming client rejects an insert whose kind it cannot work.
+// Role is which half of the pipeline a process consumes.
+//
+// THE SPLIT IS BY WHO IS WAITING. RoleProduction is the floor's work - job
+// creation, renders for printing, planning, dispatch, the Shopify pull - and
+// none of it has anybody watching a timer. RolePersonalisation is the
+// customer's: the link, the preview they are editing right now, and the window
+// that must close on time or their order never reaches a bed.
+//
+// Running them in one process means a backlog of plate renders or a long
+// Shopify pull sits in front of a customer's thirty-minute window. Splitting
+// them means the window closes on schedule whatever the floor is doing.
+type Role string
+
+const (
+	// RoleProduction is the floor's queues, plus the customer's while
+	// RUN_PERSONALISATION_WORKERS is true.
+	RoleProduction Role = "production"
+	// RolePersonalisation is the customer's queues and nothing else.
+	RolePersonalisation Role = "personalisation"
+)
+
+// Start runs the production pipeline, and the personalisation queues with it
+// unless they have been handed to cmd/personalisationworker.
 func Start(
 	ctx context.Context, server *httpapi.Server, store *db.Store,
 	cfg config.Settings, logger *slog.Logger,
+) (*Runner, error) {
+	return start(ctx, server, store, cfg, logger, RoleProduction)
+}
+
+// StartPersonalisation runs ONLY the customer's queues: the link send, the
+// preview render and the window sweep.
+//
+// Deliberately no periodic jobs. River runs those on the elected leader alone,
+// and this process must never become the leader for the floor's replan or
+// dispatch - it does not consume those queues, so the tick would be swallowed
+// by a process that cannot act on it.
+func StartPersonalisation(
+	ctx context.Context, server *httpapi.Server, store *db.Store,
+	cfg config.Settings, logger *slog.Logger,
+) (*Runner, error) {
+	return start(ctx, server, store, cfg, logger, RolePersonalisation)
+}
+
+func start(
+	ctx context.Context, server *httpapi.Server, store *db.Store,
+	cfg config.Settings, logger *slog.Logger, role Role,
 ) (*Runner, error) {
 	concurrency := cfg.ProductionConcurrency
 	if concurrency < 1 {
@@ -171,47 +215,48 @@ func Start(
 	}
 
 	debounce := time.Duration(cfg.BatchPlanDebounceSeconds) * time.Second
+	// WHICH QUEUES THIS PROCESS CONSUMES. Registering a worker is not the
+	// same as consuming its queue: the bundle above holds every worker so that
+	// either process can ENQUEUE any job - River validates an insert against
+	// the Workers bundle, not against this map - while only the queues named
+	// here are actually worked.
+	queues := map[string]river.QueueConfig{}
+	if role == RoleProduction {
+		for name, qc := range productionQueues(cfg, concurrency) {
+			queues[name] = qc
+		}
+	}
+	// The customer's queues run here too until a dedicated worker takes them.
+	ownsPersonalisation := role == RolePersonalisation ||
+		(role == RoleProduction && cfg.RunPersonalisationWorkers)
+	if ownsPersonalisation {
+		for name, qc := range personalisationQueues() {
+			queues[name] = qc
+		}
+	}
+	if len(queues) == 0 {
+		// Reachable only by running the pipeline with both halves switched
+		// off, which is a deployment that consumes nothing while looking
+		// healthy - the failure this whole file keeps having.
+		return nil, fmt.Errorf(
+			"this process would consume no queues: role=%s, RUN_PERSONALISATION_WORKERS=%v",
+			role, cfg.RunPersonalisationWorkers)
+	}
+
+	// No periodic jobs outside the pipeline. River elects ONE leader across
+	// every client on the database and runs them there; a personalisation
+	// process winning that election would swallow the floor's replan and
+	// dispatch ticks without consuming either queue.
+	var periodic []*river.PeriodicJob
+	if role == RoleProduction {
+		periodic = periodicJobs(cfg, debounce, fleetSync)
+	}
+
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
-		Queues: map[string]river.QueueConfig{
-			production.JobCreationQueueName: {MaxWorkers: concurrency},
-			production.BatchPlanQueueName:   {MaxWorkers: 1},
-			// Its own queue, and one at a time: a refresh waits on a printer
-			// host that may be asleep, and must never hold the single
-			// batch-plan slot while it does.
-			production.FleetSyncQueueName: {MaxWorkers: 1},
-			// OpenSCAD is CPU-bound for 20-45 seconds per plank. Bounded rather
-			// than unlimited: renders are pure CPU and the box also runs the
-			// API, the database and Docker.
-			production.ModelGenQueueName: {MaxWorkers: modelGenConcurrency(cfg)},
-			// One at a time, and off the planning queue: a pass spends its time
-			// uploading multi-megabyte plates over the printer host's link, and
-			// two passes at once would race to approve the same bed.
-			production.DispatchBatchQueueName: {MaxWorkers: 1},
-			// Pins waiting on a slice. More than one at a time because each
-			// spends its life asleep between retries, and two operators sending
-			// two beds must not queue behind each other.
-			production.QueuePinQueueName: {MaxWorkers: 2},
-			// One at a time: a pull is minutes of Shopify round trips and order
-			// upserts, and two running together would race to write the same
-			// rows for no gain - Shopify is the bottleneck, not Tensor.
-			production.OrderSyncQueueName: {MaxWorkers: 1},
-			// One at a time. This queue messages customers, and the cost of
-			// getting concurrency wrong is several strangers' phones buzzing
-			// at once from a burst nobody intended.
-			production.PersonalisationLinkQueueName: {MaxWorkers: 1},
-			// Renders a customer is waiting on, kept off the floor's own pool
-			// so neither can starve the other. Two at a time: enough that a
-			// second customer editing is not stuck behind the first, few
-			// enough that OpenSCAD does not take the box.
-			production.PersonalisationPreviewQueueName: {MaxWorkers: 2},
-			// One at a time, so a customer's messages are answered in the
-			// order they arrived. See WhatsAppInboundQueueName.
-			production.WhatsAppInboundQueueName: {MaxWorkers: 1},
-			production.WhatsAppQueueName:        {MaxWorkers: 2},
-		},
+		Queues:       queues,
 		Workers:      workers,
 		Logger:       logger,
-		PeriodicJobs: periodicJobs(cfg, debounce, fleetSync),
+		PeriodicJobs: periodic,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build river client: %w", err)
@@ -247,7 +292,14 @@ func Start(
 		"auto_dispatch", cfg.BatchAutoDispatch,
 		"order_sync_minutes", cfg.OrderSyncIntervalMinutes)
 	tickerCtx, stopTickers := context.WithCancel(context.WithoutCancel(ctx))
-	startWindowSweep(tickerCtx, client, logger)
+	// ONLY WHERE THE QUEUE IS CONSUMED. The sweep enqueues onto
+	// personalisation_links; ticking it from a process that does not work that
+	// queue would pile up jobs nobody runs, and the unique-by-state insert
+	// would then skip every later tick - the sweep would look alive and do
+	// nothing. That is the shape of the original bug.
+	if ownsPersonalisation {
+		startWindowSweep(tickerCtx, client, logger)
+	}
 	markPersonalisationStart(ctx, store, cfg, logger)
 
 	return &Runner{client: client, stopTickers: stopTickers}, nil
@@ -351,6 +403,59 @@ func modelGenConcurrency(cfg config.Settings) int {
 		return cfg.ModelGenConcurrency
 	}
 	return defaultModelGenConcurrency
+}
+
+// productionQueues is the floor's work: nobody is watching a clock.
+func productionQueues(cfg config.Settings, concurrency int) map[string]river.QueueConfig {
+	return map[string]river.QueueConfig{
+		production.JobCreationQueueName: {MaxWorkers: concurrency},
+		production.BatchPlanQueueName:   {MaxWorkers: 1},
+		// Its own queue, and one at a time: a refresh waits on a printer
+		// host that may be asleep, and must never hold the single
+		// batch-plan slot while it does.
+		production.FleetSyncQueueName: {MaxWorkers: 1},
+		// OpenSCAD is CPU-bound for 20-45 seconds per plank. Bounded rather
+		// than unlimited: renders are pure CPU and the box also runs the
+		// API, the database and Docker.
+		production.ModelGenQueueName: {MaxWorkers: modelGenConcurrency(cfg)},
+		// One at a time, and off the planning queue: a pass spends its time
+		// uploading multi-megabyte plates over the printer host's link, and
+		// two passes at once would race to approve the same bed.
+		production.DispatchBatchQueueName: {MaxWorkers: 1},
+		// Pins waiting on a slice. More than one at a time because each
+		// spends its life asleep between retries, and two operators sending
+		// two beds must not queue behind each other.
+		production.QueuePinQueueName: {MaxWorkers: 2},
+		// One at a time: a pull is minutes of Shopify round trips and order
+		// upserts, and two running together would race to write the same
+		// rows for no gain - Shopify is the bottleneck, not Tensor.
+		production.OrderSyncQueueName: {MaxWorkers: 1},
+		// One at a time, so a customer's messages are answered in the
+		// order they arrived. See WhatsAppInboundQueueName.
+		production.WhatsAppInboundQueueName: {MaxWorkers: 1},
+		production.WhatsAppQueueName:        {MaxWorkers: 2},
+	}
+}
+
+// personalisationQueues is the customer's work, and all of it is on a clock.
+//
+// SEPARABLE BECAUSE IT IS URGENT, not because it is big. A thirty-minute
+// window that closes late is an order that misses its bed; a plate render that
+// runs late is a plate that renders later. Behind one process the second
+// delays the first, and the customer's timer is the one that cannot wait.
+func personalisationQueues() map[string]river.QueueConfig {
+	return map[string]river.QueueConfig{
+		// One at a time. This queue messages customers, and the cost of
+		// getting concurrency wrong is several strangers' phones buzzing
+		// at once from a burst nobody intended. It also carries the window
+		// sweep, which is why that cannot be starved by a render.
+		production.PersonalisationLinkQueueName: {MaxWorkers: 1},
+		// Renders a customer is waiting on, kept off the floor's own pool
+		// so neither can starve the other. Two at a time: enough that a
+		// second customer editing is not stuck behind the first, few
+		// enough that OpenSCAD does not take the box.
+		production.PersonalisationPreviewQueueName: {MaxWorkers: 2},
+	}
 }
 
 // periodicJobs assembles the scheduled work the pipeline owns.
