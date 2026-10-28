@@ -152,6 +152,15 @@ var (
 	// no role below, so only ADMIN - which holds the whole catalog - has it.
 	DamageDelete = PermissionSpec{"damage", "delete", "Delete a damage report and its history"}
 
+	// AccountsManage covers the daily sales register: who it is mailed to,
+	// the tax rate it asserts, and sending one by hand.
+	//
+	// ADMIN ONLY. The recipient list is an outbound channel for the shop's
+	// complete sales figures - adding an address to it is exfiltration with
+	// one text box - and the GST rate is an assertion the business files on.
+	// Neither belongs to anybody who merely runs the floor.
+	AccountsManage = PermissionSpec{"accounts", "manage", "Configure and send the daily sales register"}
+
 	ShopifyPublish = PermissionSpec{"shopify", "publish", "Publish an approved SKU to Shopify"}
 
 	// The production pipeline (ported from print-queue-be). production:read is the
@@ -214,6 +223,7 @@ var AllPermissions = []PermissionSpec{
 	WhatsAppRead, WhatsAppReply,
 	DamageResolve,
 	DamageDelete,
+	AccountsManage,
 	BatchRead, BatchManage,
 	DispatchRead, DispatchManage,
 	QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,

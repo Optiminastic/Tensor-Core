@@ -28,6 +28,23 @@ type AbandonedCheckoutCall struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+type AccountsReportSetting struct {
+	BrandSlug     string
+	Enabled       bool
+	ToAddresses   []string
+	CcAddresses   []string
+	BccAddresses  []string
+	GstPercent    pgtype.Numeric
+	SellerState   string
+	LastWindowEnd pgtype.Timestamptz
+	LastSentAt    pgtype.Timestamptz
+	LastRowCount  *int32
+	LastError     *string
+	UpdatedBy     *string
+	UpdatedAt     pgtype.Timestamptz
+	CreatedAt     pgtype.Timestamptz
+}
+
 type Batch struct {
 	ID                          uuid.UUID
 	BatchNumber                 string

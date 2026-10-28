@@ -283,6 +283,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerPayQRPublic(r)
 	s.registerShipments(r)
 	s.registerShipmentExceptions(r)
+	s.registerAccountsReport(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)

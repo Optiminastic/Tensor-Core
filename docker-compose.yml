@@ -193,6 +193,30 @@ services:
   # WINBACK_CALLS_ENABLED is false here. The sweep still runs every rule and
   # logs who it WOULD ring; switching calls on is a deliberate act, never a
   # side effect of a restart.
+  # The daily sales register. Its own container for blast radius, like the
+  # win-back worker below: stopping it stops the report and nothing else.
+  #
+  # SMTP credentials come from env/local.env, which is gitignored. Without
+  # them the worker logs that it will send nothing and then sends nothing -
+  # it does not fail, because a developer running the stack has no business
+  # emailing an accountant.
+  accountsreportworker:
+    build:
+      context: .
+      dockerfile: accountsreportworker.Dockerfile
+    image: tensor-accounts-report-worker
+    env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
+    restart: unless-stopped
+    deploy:
+      resources:
+        # It reads a day of orders and writes a spreadsheet in memory. A day
+        # of this shop's orders is a few hundred rows.
+        limits: {cpus: "1", memory: 512M}
+
   winbackworker:
     build:
       context: .

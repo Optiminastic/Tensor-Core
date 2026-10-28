@@ -433,6 +433,23 @@ type Settings struct {
 	// single env var on the pipeline, reversible without a code change.
 	RunPersonalisationWorkers bool
 
+	// SMTP is the mailbox the daily sales register goes out from.
+	//
+	// ENVIRONMENT, NOT THE SETTINGS SCREEN, and deliberately: this is one
+	// shared company mailbox used by several services on this host, not a
+	// per-brand integration somebody connects. The recipients ARE per brand
+	// and live in the database where the page can edit them.
+	//
+	// Gmail needs an APP PASSWORD here, not the account password - an ordinary
+	// one is refused with "Username and Password not accepted", which reads
+	// like a typo rather than a policy.
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPFromName string
+
 	// OrderSyncIntervalMinutes drives the periodic pull of every connected
 	// store's Shopify orders. Until this existed the only path an order took
 	// into Tensor was somebody pressing "Sync from Shopify", so an order placed
@@ -802,6 +819,12 @@ func Load() Settings {
 		RunSeed:                   boolEnvOr("RUN_SEED", true),
 		RunProductionWorkers:      boolEnvOr("RUN_PRODUCTION_WORKERS", true),
 		RunPersonalisationWorkers: boolEnvOr("RUN_PERSONALISATION_WORKERS", true),
+		SMTPHost:                  envOr("SMTP_HOST", ""),
+		SMTPPort:                  intEnvOr("SMTP_PORT", 587),
+		SMTPUsername:              envOr("SMTP_USERNAME", envOr("SMTP_USER", "")),
+		SMTPPassword:              envOr("SMTP_PASSWORD", ""),
+		SMTPFrom:                  envOr("SMTP_FROM", envOr("SMTP_FROM_EMAIL", envOr("EMAIL_FROM", ""))),
+		SMTPFromName:              envOr("SMTP_FROM_NAME", envOr("EMAIL_FROM_NAME", "Tensor")),
 		OrderSyncIntervalMinutes:  intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
 		OrderSyncTimeoutMinutes:   intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
 		BambuBuddyTimeoutSeconds:  intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),

@@ -1662,3 +1662,21 @@ CREATE TABLE IF NOT EXISTS whatsapp_bot_options (
 );
 CREATE INDEX IF NOT EXISTS ix_whatsapp_bot_options_order
     ON whatsapp_bot_options (brand_slug, node_key, position);
+
+-- The daily sales register's recipients and send history. See migration 0132.
+CREATE TABLE IF NOT EXISTS accounts_report_settings (
+    brand_slug   varchar(64) PRIMARY KEY REFERENCES brands(slug) ON DELETE CASCADE,
+    enabled      boolean NOT NULL DEFAULT false,
+    to_addresses  text[] NOT NULL DEFAULT '{}',
+    cc_addresses  text[] NOT NULL DEFAULT '{}',
+    bcc_addresses text[] NOT NULL DEFAULT '{}',
+    gst_percent  numeric(5, 2) NOT NULL DEFAULT 18.00,
+    seller_state varchar(64) NOT NULL DEFAULT 'Maharashtra',
+    last_window_end timestamptz,
+    last_sent_at    timestamptz,
+    last_row_count  integer,
+    last_error      text,
+    updated_by   text,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
