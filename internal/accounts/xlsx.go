@@ -71,6 +71,21 @@ func WriteXLSX(rows []Row, loc *time.Location) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("date style: %w", err)
 	}
+	totalStyle, err := f.NewStyle(&excelize.Style{
+		Font:   &excelize.Font{Bold: true},
+		NumFmt: 2,
+		Border: []excelize.Border{{Type: "top", Color: "#7F7F7F", Style: 2}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("total style: %w", err)
+	}
+	totalLabelStyle, err := f.NewStyle(&excelize.Style{
+		Font:   &excelize.Font{Bold: true},
+		Border: []excelize.Border{{Type: "top", Color: "#7F7F7F", Style: 2}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("total label style: %w", err)
+	}
 
 	for i, h := range headers {
 		cell, cellErr := excelize.CoordinatesToCellName(i+1, 1)
@@ -115,11 +130,70 @@ func WriteXLSX(rows []Row, loc *time.Location) ([]byte, error) {
 		_ = f.SetCellStyle(SheetName, cellAt(7, row), cellAt(13, row), moneyStyle)
 	}
 
+	if err := writeTotals(f, rows, totalStyle, totalLabelStyle); err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	if err := f.Write(&buf); err != nil {
 		return nil, fmt.Errorf("write workbook: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// writeTotals closes the sheet with a bold summed row.
+//
+// NOT EVERY COLUMN IS SUMMED, and the two gaps are deliberate. Rate is a
+// PER-UNIT figure, so adding rates together produces a number that means
+// nothing; GST % is a rate too, and a column of 18s summing to 990 would look
+// like a figure somebody should reconcile. Both are left blank rather than
+// filled with something arithmetically valid and semantically wrong.
+//
+// STATIC VALUES, NOT FORMULAS. The sheet is imported by whatever the
+// accountant uses, and a reader that does not evaluate formulas would see an
+// empty total - which is worse than no total row at all. These are computed
+// from the same rows the sheet was built from, so they cannot disagree with
+// what is above them.
+func writeTotals(f *excelize.File, rows []Row, numberStyle, labelStyle int) error {
+	if len(rows) == 0 {
+		// A quiet day gets no totals line: a row of zeroes under no rows at
+		// all reads as a broken report rather than an empty one.
+		return nil
+	}
+	row := len(rows) + 2
+
+	var qty int
+	var taxable, cgst, sgst, igst, total float64
+	for _, r := range rows {
+		qty += r.Qty
+		taxable += r.Taxable
+		cgst += r.CGST
+		sgst += r.SGST
+		igst += r.IGST
+		total += r.Total
+	}
+
+	if err := f.SetCellValue(SheetName, cellAt(1, row), "TOTAL"); err != nil {
+		return err
+	}
+	if err := f.SetCellValue(SheetName, cellAt(6, row), qty); err != nil {
+		return err
+	}
+	for col, value := range map[int]float64{
+		8: round2(taxable), 10: round2(cgst), 11: round2(sgst),
+		12: round2(igst), 13: round2(total),
+	} {
+		if err := f.SetCellValue(SheetName, cellAt(col, row), value); err != nil {
+			return err
+		}
+	}
+
+	// The label and the empty cells carry the rule above them so the row
+	// reads as one band rather than scattered bold numbers.
+	_ = f.SetCellStyle(SheetName, cellAt(1, row), cellAt(6, row), labelStyle)
+	_ = f.SetCellStyle(SheetName, cellAt(7, row), cellAt(13, row), numberStyle)
+	_ = f.SetCellStyle(SheetName, cellAt(14, row), cellAt(14, row), labelStyle)
+	return nil
 }
 
 // Filename is what the attachment is called, dated by the day the window

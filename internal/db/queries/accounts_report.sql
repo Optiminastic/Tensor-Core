@@ -70,24 +70,15 @@ UPDATE accounts_report_settings
 SET last_error = sqlc.arg('last_error')
 WHERE brand_slug = sqlc.arg('brand_slug');
 
--- name: ListOrdersForAccountsWindow :many
--- Every order a brand placed inside [from, to).
+-- The window's orders are NOT read from here.
 --
--- JUDGED ON placed_at, which is Shopify's own created_at, and never on
--- imported_at: an order placed at 11:58 and synced at 12:05 belongs to the
--- day it was placed, not the day Tensor heard about it.
+-- There was a ListOrdersForAccountsWindow query, and it was wrong in a way
+-- worth recording: orders.line_items stores production.LineItem, which carries
+-- product_name, sku, quantity and the personalisation fields and NO PRICE -
+-- the pipeline's line item describes what to print, not what was charged.
+-- A register built from it went out with every money column 0.00.
 --
--- Half-open, so an order placed exactly at noon belongs to the window that is
--- opening and is never counted on two reports.
---
--- Cancelled and unpaid orders are NOT filtered here - the register is a record
--- of what was invoiced, and deciding what counts as a sale is the caller's
--- business, where it can be read and changed.
-SELECT id, order_number, customer_name, placed_at, total_price, currency,
-       line_items, shipping_address, financial_status
-FROM orders
-WHERE brand_slug = sqlc.arg('brand_slug')
-  AND placed_at IS NOT NULL
-  AND placed_at >= sqlc.arg('window_start')
-  AND placed_at <  sqlc.arg('window_end')
-ORDER BY placed_at, order_number;
+-- The order's own total is there, but apportioning one total across lines that
+-- cost different amounts invents figures, and a sales register is the last
+-- place to do that. So the figures come from Shopify, which has them per line
+-- and after discount. See accountsOrdersInWindow.

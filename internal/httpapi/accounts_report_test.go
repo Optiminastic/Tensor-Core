@@ -1,15 +1,11 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
-
 	"github.com/Optiminastic/tensor-core/internal/accounts"
-	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
 )
 
@@ -80,24 +76,26 @@ func TestEmptyListIsFineAndNotAnError(t *testing.T) {
 func TestOrderConversionKeepsTheDiscountedPrice(t *testing.T) {
 	// A register built from list prices does not reconcile with the bank.
 	// LineTotal is after discount and must win.
-	lines, _ := json.Marshal([]shopify.OrderLineItem{{
-		Name: "Dual Name Plank", VariantTitle: "PURPLE", SKU: "DNPWL-PUR",
-		Quantity: 1, UnitPrice: "1298.00", DiscountedUnitPrice: "898.00",
-		LineTotal: "898.00",
-	}})
-	address, _ := json.Marshal(shopify.OrderAddress{Province: "Gujarat", City: "Surat"})
-
-	name := "Chiku Patel"
-	order := accountsOrderFrom(gen.ListOrdersForAccountsWindowRow{
-		OrderNumber: "T3DPS-116121", CustomerName: &name,
-		LineItems: lines, ShippingAddress: address,
-	})
+	placed := time.Date(2026, 10, 27, 18, 0, 0, 0, ReportZone())
+	order := accountsOrderFrom(shopify.OrderSummary{
+		Name:            "T3DPS-116121",
+		Customer:        &shopify.OrderCustomer{FirstName: "Chiku", LastName: "Patel"},
+		ShippingAddress: &shopify.OrderAddress{Province: "Gujarat", City: "Surat"},
+		LineItems: []shopify.OrderLineItem{{
+			Name: "Dual Name Plank", VariantTitle: "PURPLE", SKU: "DNPWL-PUR",
+			Quantity: 1, UnitPrice: "1298.00", DiscountedUnitPrice: "898.00",
+			LineTotal: "898.00",
+		}},
+	}, placed)
 
 	if len(order.Lines) != 1 {
 		t.Fatalf("got %d lines", len(order.Lines))
 	}
 	if order.Lines[0].Gross != 898 {
 		t.Errorf("gross = %.2f, want the discounted 898.00", order.Lines[0].Gross)
+	}
+	if order.Customer != "Chiku Patel" {
+		t.Errorf("customer = %q", order.Customer)
 	}
 	if order.State != "Gujarat" {
 		t.Errorf("state = %q; place of supply is where the goods went", order.State)
@@ -108,12 +106,73 @@ func TestOrderConversionKeepsTheDiscountedPrice(t *testing.T) {
 	}
 }
 
+func TestEveryColumnIsPopulatedFromARealisticOrder(t *testing.T) {
+	// THE REGRESSION. A first version read line items out of Tensor's own
+	// mirror, which stores production.LineItem - product_name, sku, quantity,
+	// and NO PRICE, because the pipeline's line item describes what to print
+	// rather than what was charged. Go's JSON matching is case-insensitive,
+	// so quantity decoded and nothing else did: a register went out with
+	// every item "(unnamed item)" and every money column 0.00.
+	//
+	// This asserts the three things that were wrong, together, because each
+	// one alone looked survivable.
+	placed := time.Date(2026, 10, 27, 18, 0, 0, 0, ReportZone())
+	order := accountsOrderFrom(shopify.OrderSummary{
+		Name:            "T3DPS-116200",
+		Customer:        &shopify.OrderCustomer{FirstName: "Saritha", LastName: "Ramala"},
+		ShippingAddress: &shopify.OrderAddress{Province: "Telangana"},
+		TotalPrice:      "649.00",
+		LineItems: []shopify.OrderLineItem{{
+			Name: "Personalised Diya Holder", SKU: "PDHR-P",
+			Quantity: 1, LineTotal: "649.00",
+		}},
+	}, placed)
+
+	line := order.Lines[0]
+	if line.Title == "(unnamed item)" || line.Title == "" {
+		t.Errorf("item name lost: %q", line.Title)
+	}
+	if line.Gross == 0 {
+		t.Error("gross is zero, so every money column on the sheet would be 0.00")
+	}
+	if line.Quantity != 1 {
+		t.Errorf("quantity = %d", line.Quantity)
+	}
+
+	// And the whole way through to a row, which is what anybody actually reads.
+	rows := accounts.Build([]accounts.Order{order}, accounts.Options{})
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	r := rows[0]
+	if r.Taxable == 0 || r.Total == 0 || r.IGST == 0 {
+		t.Errorf("a register row with zero money: taxable=%.2f total=%.2f igst=%.2f",
+			r.Taxable, r.Total, r.IGST)
+	}
+	if r.Party == "" || r.State == "" || r.Item == "" {
+		t.Errorf("an incomplete row: %+v", r)
+	}
+}
+
+func TestAGuestCheckoutStillHasAPartyName(t *testing.T) {
+	// No customer record, but a name on the shipping address. "Party Name" is
+	// a column an accountant reconciles against; blank is not acceptable.
+	order := accountsOrderFrom(shopify.OrderSummary{
+		Name:            "T3DPS-1",
+		ShippingAddress: &shopify.OrderAddress{Name: "Walk In", Province: "Kerala"},
+		LineItems:       []shopify.OrderLineItem{{Name: "Plank", Quantity: 1, LineTotal: "100"}},
+	}, time.Now())
+	if order.Customer != "Walk In" {
+		t.Errorf("party name = %q, want the shipping name", order.Customer)
+	}
+}
+
 func TestAnOrderWithNoLineItemsStillAppears(t *testing.T) {
 	// Wrong in detail beats missing entirely: a sale absent from the register
 	// is the one error nobody spots.
-	order := accountsOrderFrom(gen.ListOrdersForAccountsWindowRow{
-		OrderNumber: "T3DPS-1", TotalPrice: numericFrom(t, "649.00"),
-	})
+	order := accountsOrderFrom(shopify.OrderSummary{
+		Name: "T3DPS-1", TotalPrice: "649.00",
+	}, time.Now())
 	if len(order.Lines) != 1 {
 		t.Fatalf("got %d lines, want one standing in for the order", len(order.Lines))
 	}
@@ -150,14 +209,4 @@ func TestAQuietDaySaysSoInTheBody(t *testing.T) {
 	if !strings.Contains(body, "No orders") {
 		t.Errorf("a quiet day is not explained: %q", body)
 	}
-}
-
-// numericFrom builds a money column for a test row.
-func numericFrom(t *testing.T, v string) pgtype.Numeric {
-	t.Helper()
-	var n pgtype.Numeric
-	if err := n.Scan(v); err != nil {
-		t.Fatalf("numeric %q: %v", v, err)
-	}
-	return n
 }

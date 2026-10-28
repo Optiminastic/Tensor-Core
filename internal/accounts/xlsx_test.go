@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -93,8 +94,8 @@ func TestOneRowPerLineItemLandsOnTheSheet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rows: %v", err)
 	}
-	if len(got) != 3 { // header + two line items
-		t.Fatalf("sheet has %d rows, want header plus two", len(got))
+	if len(got) != 4 { // header + two line items + the totals row
+		t.Fatalf("sheet has %d rows, want header, two items and a total", len(got))
 	}
 	if got[1][4] != "One" || got[2][4] != "Two" {
 		t.Errorf("item column wrong: %q %q", got[1][4], got[2][4])
@@ -132,4 +133,95 @@ func TestFilenameIsDatedByTheWindowItCovers(t *testing.T) {
 	if got != "sales-register-2026-10-28.xlsx" {
 		t.Errorf("filename = %q", got)
 	}
+}
+
+func TestTheSheetEndsWithATotalsRow(t *testing.T) {
+	loc := ist(t)
+	rows := Build([]Order{
+		{
+			PlacedAt: time.Date(2026, 10, 27, 15, 0, 0, 0, loc),
+			Number:   "T3DPS-1", Customer: "A", State: "Gujarat",
+			Lines: []Line{{Title: "One", Quantity: 1, Gross: 898}},
+		},
+		{
+			PlacedAt: time.Date(2026, 10, 27, 16, 0, 0, 0, loc),
+			Number:   "T3DPS-2", Customer: "B", State: "Maharashtra",
+			Lines: []Line{{Title: "Two", Quantity: 3, Gross: 1098}},
+		},
+	}, Options{})
+
+	f := openWritten(t, rows, loc)
+	got, err := f.GetRows(SheetName)
+	if err != nil {
+		t.Fatalf("read rows: %v", err)
+	}
+	// header + two line items + totals
+	if len(got) != 4 {
+		t.Fatalf("sheet has %d rows, want header, two items and a total", len(got))
+	}
+	last := got[len(got)-1]
+	if last[0] != "TOTAL" {
+		t.Errorf("the last row is not labelled TOTAL: %q", last[0])
+	}
+
+	// Qty is a count and must add up.
+	if last[5] != "4" {
+		t.Errorf("qty total = %q, want 4", last[5])
+	}
+	// And the money columns must equal the rows above them, or the accountant
+	// has two different answers on one sheet.
+	var taxable, total float64
+	for _, r := range rows {
+		taxable += r.Taxable
+		total += r.Total
+	}
+	if !nearStr(last[7], taxable) {
+		t.Errorf("taxable total = %q, want %.2f", last[7], taxable)
+	}
+	if !nearStr(last[12], total) {
+		t.Errorf("value total = %q, want %.2f", last[12], total)
+	}
+}
+
+func TestRateAndGSTPercentAreNotSummed(t *testing.T) {
+	// Both are PER-UNIT rates. A column of 18s adding to 990 looks like a
+	// figure somebody should reconcile, and a sum of per-unit rates means
+	// nothing at all - blank is the honest cell.
+	loc := ist(t)
+	rows := Build([]Order{{
+		PlacedAt: time.Now().In(loc), Number: "T3DPS-1", Customer: "A", State: "Gujarat",
+		Lines: []Line{
+			{Title: "One", Quantity: 1, Gross: 898},
+			{Title: "Two", Quantity: 1, Gross: 649},
+		},
+	}}, Options{})
+
+	f := openWritten(t, rows, loc)
+	got, _ := f.GetRows(SheetName)
+	last := got[len(got)-1]
+	if len(last) > 6 && last[6] != "" {
+		t.Errorf("Rate was summed: %q", last[6])
+	}
+	if len(last) > 8 && last[8] != "" {
+		t.Errorf("GST %% was summed: %q", last[8])
+	}
+}
+
+func TestAQuietDayHasNoTotalsRow(t *testing.T) {
+	// A row of zeroes under no rows at all reads as a broken report rather
+	// than an empty one.
+	f := openWritten(t, nil, ist(t))
+	got, _ := f.GetRows(SheetName)
+	if len(got) != 1 {
+		t.Errorf("an empty report has %d rows, want the header alone", len(got))
+	}
+}
+
+func nearStr(got string, want float64) bool {
+	var v float64
+	if _, err := fmt.Sscanf(got, "%f", &v); err != nil {
+		return false
+	}
+	d := v - want
+	return d < 0.015 && d > -0.015
 }

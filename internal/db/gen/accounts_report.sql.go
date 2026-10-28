@@ -8,7 +8,6 @@ package gen
 import (
 	"context"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -85,77 +84,6 @@ func (q *Queries) ListDueAccountsReports(ctx context.Context, windowEnd pgtype.T
 			&i.UpdatedBy,
 			&i.UpdatedAt,
 			&i.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listOrdersForAccountsWindow = `-- name: ListOrdersForAccountsWindow :many
-SELECT id, order_number, customer_name, placed_at, total_price, currency,
-       line_items, shipping_address, financial_status
-FROM orders
-WHERE brand_slug = $1
-  AND placed_at IS NOT NULL
-  AND placed_at >= $2
-  AND placed_at <  $3
-ORDER BY placed_at, order_number
-`
-
-type ListOrdersForAccountsWindowParams struct {
-	BrandSlug   *string
-	WindowStart pgtype.Timestamptz
-	WindowEnd   pgtype.Timestamptz
-}
-
-type ListOrdersForAccountsWindowRow struct {
-	ID              uuid.UUID
-	OrderNumber     string
-	CustomerName    *string
-	PlacedAt        pgtype.Timestamptz
-	TotalPrice      pgtype.Numeric
-	Currency        string
-	LineItems       []byte
-	ShippingAddress []byte
-	FinancialStatus string
-}
-
-// Every order a brand placed inside [from, to).
-//
-// JUDGED ON placed_at, which is Shopify's own created_at, and never on
-// imported_at: an order placed at 11:58 and synced at 12:05 belongs to the
-// day it was placed, not the day Tensor heard about it.
-//
-// Half-open, so an order placed exactly at noon belongs to the window that is
-// opening and is never counted on two reports.
-//
-// Cancelled and unpaid orders are NOT filtered here - the register is a record
-// of what was invoiced, and deciding what counts as a sale is the caller's
-// business, where it can be read and changed.
-func (q *Queries) ListOrdersForAccountsWindow(ctx context.Context, arg ListOrdersForAccountsWindowParams) ([]ListOrdersForAccountsWindowRow, error) {
-	rows, err := q.db.Query(ctx, listOrdersForAccountsWindow, arg.BrandSlug, arg.WindowStart, arg.WindowEnd)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListOrdersForAccountsWindowRow{}
-	for rows.Next() {
-		var i ListOrdersForAccountsWindowRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.OrderNumber,
-			&i.CustomerName,
-			&i.PlacedAt,
-			&i.TotalPrice,
-			&i.Currency,
-			&i.LineItems,
-			&i.ShippingAddress,
-			&i.FinancialStatus,
 		); err != nil {
 			return nil, err
 		}

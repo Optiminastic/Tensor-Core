@@ -6,11 +6,20 @@ package httpapi
 // floor works past midnight, so a calendar day would split one evening's
 // trading across two reports.
 //
-// READ FROM TENSOR'S OWN MIRROR, not live from Shopify. Orders sync every ten
-// minutes and the register is judged on Shopify's created_at, so the mirror is
-// complete for a window that closed before the worker woke. Querying Shopify
-// again would re-fetch a day of orders to produce figures Tensor already has,
-// and would bring Shopify's rate limit onto a job nobody is watching.
+// READ LIVE FROM SHOPIFY, not from Tensor's own mirror, and that is not a
+// preference - it is the only place the figures exist.
+//
+// MEASURED, after a first version got this wrong and mailed a register of
+// zeroes. orders.line_items stores production.LineItem: product_name, sku,
+// quantity, variant_title, the personalisation fields. There is NO PRICE on it
+// anywhere, because the pipeline's line item describes what to PRINT, not what
+// was charged. The order carries a total, but apportioning one total across
+// lines that cost different amounts invents figures, and a sales register is
+// the last place to do that.
+//
+// So the money comes from Shopify, which has it per line and after discount.
+// A day is a few dozen orders; the cost is one API call on a job that runs
+// once.
 //
 // A QUIET DAY STILL SENDS. A report that silently does not arrive is
 // indistinguishable from one nobody generated, and that ambiguity is what let
@@ -19,7 +28,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,6 +37,7 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/integrations/email"
 	"github.com/Optiminastic/tensor-core/internal/integrations/shopify"
+	"github.com/Optiminastic/tensor-core/internal/obs"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -93,20 +102,11 @@ func (s *Server) SendAccountsReport(
 				"(set SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM)")
 	}
 
-	rows, err := s.store.Q.ListOrdersForAccountsWindow(ctx, gen.ListOrdersForAccountsWindowParams{
-		BrandSlug:   &settings.BrandSlug,
-		WindowStart: timestamptzAt(from),
-		WindowEnd:   timestamptzAt(to),
-	})
+	orders, err := s.AccountsOrdersInWindow(ctx, settings.BrandSlug, from, to)
 	if err != nil {
-		return out, fmt.Errorf("read the window's orders: %w", err)
+		return out, err
 	}
-	out.Orders = len(rows)
-
-	orders := make([]accounts.Order, 0, len(rows))
-	for _, r := range rows {
-		orders = append(orders, accountsOrderFrom(r))
-	}
+	out.Orders = len(orders)
 
 	register := accounts.Build(orders, accounts.Options{
 		GSTPercent:  numericToFloat(settings.GstPercent),
@@ -140,29 +140,73 @@ func (s *Server) SendAccountsReport(
 	return out, nil
 }
 
-// accountsOrderFrom narrows a stored order to what the register needs.
-func accountsOrderFrom(r gen.ListOrdersForAccountsWindowRow) accounts.Order {
-	order := accounts.Order{
-		Number:   r.OrderNumber,
-		Customer: stringOrEmpty(r.CustomerName),
+// accountsOrdersInWindow reads the window's orders from Shopify.
+//
+// FILTERED HERE, NOT IN THE QUERY. Shopify's order search takes a DATE, not a
+// timestamp, so the narrowest thing it will answer is "that calendar day
+// onwards". The register's day runs noon to noon and straddles two calendar
+// days, so this asks for both and keeps the ones that fall inside the window.
+func (s *Server) AccountsOrdersInWindow(
+	ctx context.Context, brand string, from, to time.Time,
+) ([]accounts.Order, error) {
+	conn, err := s.store.Q.GetConnectionWithToken(ctx,
+		gen.GetConnectionWithTokenParams{BrandSlug: brand, Provider: shopifyProvider})
+	shop, token, connected := shopifyCredentials(conn, err)
+	if !connected {
+		return nil, fmt.Errorf(
+			"this brand has no connected Shopify store, and Shopify is where the " +
+				"sale figures come from")
 	}
-	if r.PlacedAt.Valid {
-		order.PlacedAt = r.PlacedAt.Time
+	if s.shopify == nil {
+		return nil, fmt.Errorf("this service cannot reach Shopify")
 	}
 
+	// A day either side of the window, because the search is date-only and
+	// the window straddles midnight.
+	since := from.In(reportZone).AddDate(0, 0, -1)
+	summaries, err := s.shopify.ListRecentOrders(ctx, shop, token, accountsOrderLimit, since)
+	if err != nil {
+		return nil, fmt.Errorf("read the day's orders from Shopify: %w", err)
+	}
+
+	out := make([]accounts.Order, 0, len(summaries))
+	for _, summary := range summaries {
+		placed, parseErr := time.Parse(time.RFC3339, summary.CreatedAt)
+		if parseErr != nil {
+			// A row whose timestamp cannot be read cannot be placed in a
+			// window, and guessing would put a sale on the wrong day's
+			// register. Skipped loudly rather than silently included.
+			obs.FromContext(ctx).Warn("skipping an order with an unreadable created_at",
+				"order", summary.Name, "created_at", summary.CreatedAt)
+			continue
+		}
+		if !accounts.InWindow(placed, from, to) {
+			continue
+		}
+		out = append(out, accountsOrderFrom(summary, placed))
+	}
+	return out, nil
+}
+
+// accountsOrderLimit bounds one fetch. Two calendar days of this shop is a
+// few hundred orders; the cap is a guard against an unbounded pull, not a
+// limit anybody should reach.
+const accountsOrderLimit = 1000
+
+// accountsOrderFrom narrows a Shopify order to what the register needs.
+func accountsOrderFrom(summary shopify.OrderSummary, placed time.Time) accounts.Order {
+	order := accounts.Order{
+		PlacedAt: placed,
+		Number:   summary.Name,
+		Customer: customerName(summary),
+	}
 	// The shipping province decides CGST+SGST against IGST: place of supply
 	// is where the goods go, not where the card was billed.
-	var address shopify.OrderAddress
-	if len(r.ShippingAddress) > 0 {
-		_ = json.Unmarshal(r.ShippingAddress, &address)
+	if summary.ShippingAddress != nil {
+		order.State = summary.ShippingAddress.Province
 	}
-	order.State = address.Province
 
-	var lines []shopify.OrderLineItem
-	if len(r.LineItems) > 0 {
-		_ = json.Unmarshal(r.LineItems, &lines)
-	}
-	for _, line := range lines {
+	for _, line := range summary.LineItems {
 		order.Lines = append(order.Lines, accounts.Line{
 			Title:    lineTitle(line),
 			SKU:      line.SKU,
@@ -171,17 +215,32 @@ func accountsOrderFrom(r gen.ListOrdersForAccountsWindowRow) accounts.Order {
 		})
 	}
 
-	// An order whose line items did not survive the import would otherwise
-	// vanish from the register entirely. One row for the whole order is wrong
-	// in detail but right in total, and a missing sale is wrong in both.
+	// An order whose line items did not come back would otherwise vanish from
+	// the register entirely. One row for the whole order is wrong in detail
+	// but right in total, and a missing sale is wrong in both.
 	if len(order.Lines) == 0 {
 		order.Lines = []accounts.Line{{
 			Title:    "(line items unavailable)",
 			Quantity: 1,
-			Gross:    numericOrZero(r.TotalPrice),
+			Gross:    parseMoney(summary.TotalPrice),
 		}}
 	}
 	return order
+}
+
+// customerName prefers the customer record, falling back to the name on the
+// shipping address - a guest checkout has the second and not the first.
+func customerName(summary shopify.OrderSummary) string {
+	if c := summary.Customer; c != nil {
+		name := strings.TrimSpace(strings.TrimSpace(c.FirstName) + " " + strings.TrimSpace(c.LastName))
+		if name != "" {
+			return name
+		}
+	}
+	if a := summary.ShippingAddress; a != nil && strings.TrimSpace(a.Name) != "" {
+		return strings.TrimSpace(a.Name)
+	}
+	return "(no name)"
 }
 
 // lineTitle prefers the name the customer saw, variant and all.
