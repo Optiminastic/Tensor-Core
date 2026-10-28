@@ -43,6 +43,39 @@ func (q *Queries) GetDispatchByID(ctx context.Context, id uuid.UUID) (DispatchOr
 	return i, err
 }
 
+const insertCatchUpDispatch = `-- name: InsertCatchUpDispatch :execrows
+INSERT INTO dispatch_orders (id, order_id, status, dispatched_at)
+SELECT $1, $2, 'dispatched', now()
+WHERE NOT EXISTS (
+    SELECT 1 FROM dispatch_orders d WHERE d.order_id = $2
+)
+`
+
+type InsertCatchUpDispatchParams struct {
+	ID      uuid.UUID
+	OrderID uuid.UUID
+}
+
+// Records that an order already shipped, for the bulk catch-up.
+//
+// NO CARRIER AND NO TRACKING NUMBER, deliberately. Tensor never booked these
+// shipments - they went out before any of this was used - so it does not know
+// the waybill, and inventing one would be worse than leaving it blank. The
+// real tracking lives in Shopify's fulfilments and the Deliveries page reads
+// it live from the carrier.
+//
+// WHERE NOT EXISTS rather than ON CONFLICT: order_id carries no unique index
+// (an order may legitimately ship in more than one parcel), so the guard has
+// to be explicit. Running the catch-up twice must not double-record a
+// shipment.
+func (q *Queries) InsertCatchUpDispatch(ctx context.Context, arg InsertCatchUpDispatchParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertCatchUpDispatch, arg.ID, arg.OrderID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertDispatch = `-- name: InsertDispatch :one
 
 INSERT INTO dispatch_orders (id, order_id, carrier, tracking_number, status)

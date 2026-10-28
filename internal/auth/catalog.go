@@ -171,6 +171,17 @@ var (
 	ProductionUpdate = PermissionSpec{"production", "update", "Advance a production job through its lifecycle"}
 	ProductionFail   = PermissionSpec{"production", "fail", "Fail a production job and queue a reprint"}
 
+	// ProductionCatchUp declares a whole board's stations done without
+	// anybody having inspected anything.
+	//
+	// ADMIN ONLY, and deliberately NOT given to the station roles. A
+	// Packaging-QC holds qc:submit so they can record a check they
+	// performed; declaring a hundred jobs finished without performing
+	// anything is a different power, and it belongs with whoever answers for
+	// the shop when a customer asks who checked their order.
+	ProductionCatchUp = PermissionSpec{"production", "catchup",
+		"Mark station queues done in bulk for goods already shipped"}
+
 	OrderRead = PermissionSpec{"order", "read", "View imported Shopify orders"}
 
 	// The WhatsApp inbox. Read and reply are separate so a role can watch
@@ -218,7 +229,7 @@ var AllPermissions = []PermissionSpec{
 	RegistryRead,
 	BulkOrderRead, BulkOrderManage,
 	ShopifyPublish,
-	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
+	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail, ProductionCatchUp,
 	OrderRead,
 	WhatsAppRead, WhatsAppReply,
 	DamageResolve,

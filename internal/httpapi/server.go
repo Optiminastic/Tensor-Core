@@ -284,6 +284,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerShipments(r)
 	s.registerShipmentExceptions(r)
 	s.registerAccountsReport(r)
+	s.registerProductionCatchUp(r)
 	s.registerIntegrations(r)
 	s.registerJobEvents(r)
 	s.registerJobIssues(r)

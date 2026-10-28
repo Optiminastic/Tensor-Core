@@ -1391,3 +1391,46 @@ SELECT f.id, f.storage_key, f.filename, f.content_type, f.size_bytes
 FROM job_preview_models p
 JOIN file_assets f ON f.id = p.file_id
 WHERE p.job_id = sqlc.arg('job_id');
+
+-- name: ListJobsAwaitingStations :many
+-- Every printed job still sitting at one of the four station queues.
+--
+-- THE CATCH-UP'S INPUT. These are jobs whose goods have already shipped but
+-- whose stations were never clicked through in Tensor, so the board shows work
+-- that was done weeks ago. The four predicates are exactly the ones the
+-- packaging page's station queues use, so this selects precisely what is on
+-- those tabs and nothing else.
+--
+-- PRINTED ONLY. A job that has not come off a printer is not late paperwork,
+-- it is work still to do, and sweeping it to dispatch would lose a real order.
+SELECT id, job_number, order_id, batch_id, assembly_status, finishing_status,
+       qc_status, packaging_status
+FROM production_jobs j
+WHERE (j.status = 'completed'
+       OR EXISTS (SELECT 1 FROM batches b WHERE b.id = j.batch_id AND b.status = 'completed'))
+  AND j.held = false
+  AND (j.assembly_status = 'pending'
+       OR j.finishing_status = 'pending'
+       OR j.qc_status = 'pending'
+       OR j.packaging_status = 'pending')
+ORDER BY j.job_number;
+
+-- name: CatchUpJobStations :execrows
+-- Marks one printed job's remaining stations done, for goods already shipped.
+--
+-- NO CHECK ROWS ARE WRITTEN, and that is the whole point. A real station click
+-- inserts an assembly_checks or qc_checks row carrying the inspector's answers
+-- - parts combined, fit check, what they saw. Nobody inspected these, so
+-- inventing those answers would be a fabricated inspection record on goods
+-- that have already reached customers. The statuses move so the board matches
+-- reality; a job event records that it was a catch-up and who ran it.
+--
+-- A FAILED QC IS LEFT ALONE. 'passed' is only written over 'pending': a job
+-- somebody actually failed must not be quietly passed by a bulk sweep.
+UPDATE production_jobs
+SET assembly_status  = CASE WHEN assembly_status  = 'pending' THEN 'completed' ELSE assembly_status  END,
+    finishing_status = CASE WHEN finishing_status = 'pending' THEN 'completed' ELSE finishing_status END,
+    qc_status        = CASE WHEN qc_status        = 'pending' THEN 'passed'    ELSE qc_status        END,
+    packaging_status = CASE WHEN packaging_status = 'pending' THEN 'packaged'  ELSE packaging_status END,
+    updated_at = now()
+WHERE id = sqlc.arg('id');

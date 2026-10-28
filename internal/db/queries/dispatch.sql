@@ -39,3 +39,22 @@ SELECT count(*) FROM dispatch_orders;
 SELECT * FROM dispatch_orders
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg('page_limit') OFFSET sqlc.arg('page_offset');
+
+-- name: InsertCatchUpDispatch :execrows
+-- Records that an order already shipped, for the bulk catch-up.
+--
+-- NO CARRIER AND NO TRACKING NUMBER, deliberately. Tensor never booked these
+-- shipments - they went out before any of this was used - so it does not know
+-- the waybill, and inventing one would be worse than leaving it blank. The
+-- real tracking lives in Shopify's fulfilments and the Deliveries page reads
+-- it live from the carrier.
+--
+-- WHERE NOT EXISTS rather than ON CONFLICT: order_id carries no unique index
+-- (an order may legitimately ship in more than one parcel), so the guard has
+-- to be explicit. Running the catch-up twice must not double-record a
+-- shipment.
+INSERT INTO dispatch_orders (id, order_id, status, dispatched_at)
+SELECT sqlc.arg('id'), sqlc.arg('order_id'), 'dispatched', now()
+WHERE NOT EXISTS (
+    SELECT 1 FROM dispatch_orders d WHERE d.order_id = sqlc.arg('order_id')
+);

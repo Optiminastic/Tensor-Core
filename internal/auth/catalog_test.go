@@ -16,8 +16,8 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	// and whatsapp:read/reply added the inbox. See catalog.go.
 	// 46 with damage:resolve, which is admin-only by being granted to no
 	// other role - the same construction as the bulk-order pair.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 48 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 48 each", len(admin), len(AllPermissions))
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 49 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 49 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -155,6 +155,13 @@ func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
 		// floor from one upload. The shop asked for admin only, and this is
 		// where that is enforced rather than hoped for.
 		"bulk_order:read", "bulk_order:manage",
+		// Declaring a whole board's stations done without anybody inspecting
+		// anything. A Packaging-QC holds qc:submit so they can record a check
+		// they PERFORMED; this is the power to say a hundred jobs were
+		// checked when nobody checked them, and it belongs with whoever
+		// answers for the shop when a customer asks who inspected their
+		// order.
+		"production:catchup",
 	}
 	for _, role := range AllRoles {
 		if role == RoleAdmin {
@@ -211,8 +218,8 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
 	// holder of it would show up here before it showed up on anybody's
 	// screen, which is the point of counting rather than spot-checking.
-	if total != 116 {
-		t.Fatalf("total grants = %d, want 116", total)
+	if total != 117 {
+		t.Fatalf("total grants = %d, want 117", total)
 	}
 }
 
