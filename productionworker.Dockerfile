@@ -161,4 +161,18 @@ WORKDIR /app
 RUN chown worker:worker /app
 USER worker
 ENV HOME=/home/worker
-CMD ["productionworker"]
+# WHICH WORKER THIS CONTAINER RUNS, chosen by environment rather than by a
+# second Dockerfile.
+#
+# The image carries both binaries because both render and so both need this
+# exact pinned OpenSCAD, these scadassets and these fonts. A second Dockerfile
+# would be a second place for the renderer to drift, and drift between the
+# preview a customer approves and the plate that prints is the worst kind
+# available.
+#
+# Defaults to productionworker, so an existing deployment that sets nothing
+# behaves exactly as before. Set TENSOR_WORKER=personalisationworker on the
+# service that should run the customer's queues instead. exec so the binary
+# becomes PID 1 and receives SIGTERM for the graceful shutdown.
+ENV TENSOR_WORKER=productionworker
+CMD ["sh", "-c", "exec \"$TENSOR_WORKER\""]
