@@ -323,6 +323,13 @@ type DesignTemplate struct {
 	CreatedAt   pgtype.Timestamptz
 }
 
+type DesignTemplateSection struct {
+	TemplateKey string
+	Section     string
+	UpdatedBy   string
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type DispatchOrder struct {
 	ID             uuid.UUID
 	OrderID        uuid.UUID

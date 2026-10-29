@@ -162,6 +162,10 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// registry_pipelines.go.
 	s.registerRegistryPipelines(g, read, manage)
 	s.registerRegistryComponents(g, read, manage)
+	// Every stored part file at once, for the Designs tab's library view -
+	// see registry_part_files.go. Read-only: a part file is changed through
+	// the component it belongs to.
+	g.GET("/part-files", read, s.listPartFiles)
 	// Which assembled file the customer's personalisation link is drawn from -
 	// see registry_preview_design.go. Its PIECES go through the colour-scheme
 	// route above with role "preview"; this is only which file they come from.

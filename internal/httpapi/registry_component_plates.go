@@ -102,9 +102,13 @@ func (s *Server) uploadComponentPlate(c *gin.Context) {
 	if slot == "" {
 		slot = "shared"
 	}
-	key := fmt.Sprintf("components/%s/%s/%s%s", id, slot, fileID, plateExt(filename))
+	ext := plateExt(filename)
+	key := fmt.Sprintf("components/%s/%s/%s%s", id, slot, fileID, ext)
+	// The real type, not text/plain: a .3mf is a zip and a .stl may be binary,
+	// and a browser handed text/plain for either renders it as mojibake rather
+	// than downloading it.
 	if err := s.storage.Put(ctx, key, bytes.NewReader(data),
-		int64(len(data)), "text/plain"); err != nil {
+		int64(len(data)), plateContentType(ext)); err != nil {
 		detail(c, http.StatusBadGateway, "Could not store the plate file.")
 		return
 	}
@@ -113,7 +117,7 @@ func (s *Server) uploadComponentPlate(c *gin.Context) {
 	var row gen.ComponentPlate
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		if _, err := q.InsertFileAsset(ctx, gen.InsertFileAssetParams{
-			ID: fileID, Filename: filename, ContentType: "text/plain",
+			ID: fileID, Filename: filename, ContentType: plateContentType(ext),
 			SizeBytes: int64(len(data)), StorageKey: key, UploadedBy: who,
 			IsTemplate: false,
 		}); err != nil {
@@ -206,10 +210,23 @@ func readPlateUpload(c *gin.Context) ([]byte, string, bool) {
 		detail(c, http.StatusUnprocessableEntity, "Attach the sliced plate to upload.")
 		return nil, "", false
 	}
-	name := strings.ToLower(header.Filename)
-	if !strings.HasSuffix(name, ".gcode") && !strings.HasSuffix(name, ".3mf") {
+	// STORED, NEVER PROCESSED - which is what makes .stl legitimate here.
+	//
+	// Nothing in Tensor reads these files: the routes are upload, list and
+	// delete, and no dispatch path touches the table. The shop keeps the
+	// finished plate for a part so printing more of them is sending a saved
+	// file rather than arranging and slicing a bed again, and keeps the mesh
+	// it was sliced from beside it.
+	//
+	// An .stl among them is NOT printable as it stands - it has to be sliced
+	// first, and the grid's machine class says nothing about it. That is a
+	// true statement about a stored file, not a reason to refuse one: the
+	// alternative is the source mesh for a part living in somebody's
+	// downloads folder, which is where it was before this.
+	if !hasPlateExt(strings.ToLower(header.Filename)) {
 		detail(c, http.StatusUnprocessableEntity,
-			"A plate is the sliced .gcode the printer takes, or the .3mf it came from.")
+			"A part file is a sliced .gcode, the .3mf it came from, or the .stl it was "+
+				"modelled as. Tensor stores it and never opens it.")
 		return nil, "", false
 	}
 	if header.Size > maxComponentPlateBytes {
@@ -230,9 +247,38 @@ func readPlateUpload(c *gin.Context) ([]byte, string, bool) {
 	return data, header.Filename, true
 }
 
+// plateExtensions is what a stored part file may be. G-code last, because it
+// is the fallback plateExt returns for anything hasPlateExt already accepted.
+var plateExtensions = []string{".3mf", ".stl", ".gcode"}
+
+// plateContentType is what the stored object is served as.
+func plateContentType(ext string) string {
+	if ext == ".gcode" {
+		return "text/plain"
+	}
+	return contentTypeFor(ext)
+}
+
+func hasPlateExt(lowerName string) bool {
+	for _, ext := range plateExtensions {
+		if strings.HasSuffix(lowerName, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// plateExt is the extension the stored object keeps.
+//
+// IT MUST MATCH WHAT WAS UPLOADED. The object key is built from it, and a mesh
+// saved as .gcode is a file nothing downstream - and nobody downloading it -
+// can open.
 func plateExt(filename string) string {
-	if strings.HasSuffix(strings.ToLower(filename), ".3mf") {
-		return ".3mf"
+	lower := strings.ToLower(filename)
+	for _, ext := range plateExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return ext
+		}
 	}
 	return ".gcode"
 }

@@ -50,6 +50,32 @@ type templateResponse struct {
 	// once somebody has replaced it; "embedded" while it still comes from the
 	// binary. The distinction is the whole point of the page.
 	Source string `json:"source"`
+	// Section is the heading this file is filed under on the Designs tab, or
+	// empty when nobody has filed it - in which case the screen sorts it by
+	// what UsedBy says it is actually for.
+	//
+	// A LABEL. Nothing in the render path reads it; see migration 0134.
+	Section string `json:"section"`
+	// UsedBy is every product and role this file serves, empty for a file
+	// nothing links to.
+	//
+	// WITHOUT IT THE TAB IS A SHELF. A list of .scad files that does not say
+	// what each one is for cannot answer the only question somebody standing
+	// on it has - "is this the file that prints, or the one the customer is
+	// shown?" - and the answer is not a property of the file: the same lotus
+	// holder .scad is both, for the same product.
+	UsedBy []templateUseResponse `json:"used_by"`
+}
+
+// templateUseResponse is one product's use of one file.
+type templateUseResponse struct {
+	ProductCode string `json:"product_code"`
+	ProductName string `json:"product_name"`
+	// Role is "body" for the file that prints, "preview" for the one drawn
+	// into the customer's personalisation link and never put on a bed.
+	Role string `json:"role"`
+	// SKUs is how many of that product's colourways link it.
+	SKUs int64 `json:"skus"`
 }
 
 // embeddedTemplateKeys are the templates this binary ships with.
@@ -74,6 +100,13 @@ func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	g.GET("/:key/params", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateParams)
 	g.GET("/:key/file", s.guards.RequirePermission(auth.ConfigRead.Key()), s.downloadDesignTemplate)
 	g.POST("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.uploadDesignTemplate)
+	// Removing one - refused while any product still renders from it. See
+	// design_template_delete.go.
+	g.DELETE("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.deleteDesignTemplate)
+	// Which heading it is filed under on the Designs tab - a label, and
+	// nothing else reads it. See design_template_section.go.
+	g.PATCH("/:key/section", s.guards.RequirePermission(auth.ConfigManage.Key()),
+		s.setTemplateSection)
 }
 
 // uploadedTemplates is every template somebody has replaced, by lower-cased key.
@@ -117,11 +150,48 @@ func (s *Server) templatesForKeys(ctx context.Context, keys []string) ([]templat
 	return out, nil
 }
 
+// templateUsage is what every design file is used for, by lower-cased key.
+//
+// Keyed the way uploadedTemplates is, because the two are merged row by row
+// and a key that matched case-sensitively would leave "PWDH" and "pwdh"
+// looking like two files - which is exactly the confusion the unique index on
+// lower(template_key) exists to prevent.
+func (s *Server) templateUsage(ctx context.Context) (map[string][]templateUseResponse, error) {
+	rows, err := s.store.Q.ListTemplateUsage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]templateUseResponse, len(rows))
+	for _, r := range rows {
+		out[r.TemplateKey] = append(out[r.TemplateKey], templateUseResponse{
+			ProductCode: r.ProductCode, ProductName: r.ProductName,
+			Role: r.Role, SKUs: r.SkuCount,
+		})
+	}
+	return out, nil
+}
+
 func (s *Server) listDesignTemplates(c *gin.Context) {
-	uploaded, err := s.uploadedTemplates(c.Request.Context())
+	ctx := c.Request.Context()
+	uploaded, err := s.uploadedTemplates(ctx)
 	if err != nil {
 		detail(c, http.StatusInternalServerError, "Could not list design templates.")
 		return
+	}
+
+	// One read for the whole table rather than one per row: the usage is a
+	// grouped count over every active variant design, and the tab lists every
+	// template there is.
+	usage, err := s.templateUsage(ctx)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not read what the files are used for.")
+		return
+	}
+	sections := s.templateSectionsByKey(c)
+	for key, t := range uploaded {
+		t.UsedBy = usage[key]
+		t.Section = sections[key]
+		uploaded[key] = t
 	}
 
 	out := make([]templateResponse, 0, len(embeddedTemplateKeys)+len(uploaded))
@@ -131,7 +201,9 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 			delete(uploaded, key)
 			continue
 		}
-		out = append(out, templateResponse{Key: key, Source: "embedded"})
+		out = append(out, templateResponse{
+			Key: key, Source: "embedded", UsedBy: usage[key], Section: sections[key],
+		})
 	}
 	// An upload for a key this binary does not ship is still real and still
 	// used; hiding it would make a template render from a file the page denies

@@ -12,6 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearTemplateSection = `-- name: ClearTemplateSection :exec
+DELETE FROM design_template_sections
+WHERE template_key = lower($1::text)
+`
+
+// Unfiles a design file, so it falls back to the heading its use implies.
+func (q *Queries) ClearTemplateSection(ctx context.Context, templateKey string) error {
+	_, err := q.db.Exec(ctx, clearTemplateSection, templateKey)
+	return err
+}
+
 const getActiveTemplate = `-- name: GetActiveTemplate :one
 SELECT t.id, t.template_key, t.file_id, t.version, t.status, t.uploaded_by, t.notes, t.created_at, f.storage_key, f.filename
 FROM design_templates t
@@ -150,6 +161,46 @@ func (q *Queries) ListActiveTemplates(ctx context.Context) ([]ListActiveTemplate
 	return items, nil
 }
 
+const listProductsUsingTemplate = `-- name: ListProductsUsingTemplate :many
+SELECT DISTINCT p.code, d.role
+FROM variant_designs d
+JOIN product_variants v ON v.id = d.variant_id
+JOIN products p ON p.id = v.product_id
+WHERE d.status = 'active'
+  AND lower(d.template_key) = lower($1::text)
+ORDER BY p.code, d.role
+`
+
+type ListProductsUsingTemplateRow struct {
+	Code string
+	Role string
+}
+
+// Which products link a key, so deleting one can say what would break.
+//
+// Active designs only: a superseded design belongs to a variant that has since
+// been pointed somewhere else, and refusing a delete over it would make a key
+// undeletable forever on the strength of a link nothing reads.
+func (q *Queries) ListProductsUsingTemplate(ctx context.Context, templateKey string) ([]ListProductsUsingTemplateRow, error) {
+	rows, err := q.db.Query(ctx, listProductsUsingTemplate, templateKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProductsUsingTemplateRow{}
+	for rows.Next() {
+		var i ListProductsUsingTemplateRow
+		if err := rows.Scan(&i.Code, &i.Role); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTemplateHistory = `-- name: ListTemplateHistory :many
 SELECT t.id, t.template_key, t.file_id, t.version, t.status, t.uploaded_by, t.notes, t.created_at, f.storage_key, f.filename, f.size_bytes
 FROM design_templates t
@@ -206,6 +257,36 @@ func (q *Queries) ListTemplateHistory(ctx context.Context, templateKey string) (
 	return items, nil
 }
 
+const listTemplateSections = `-- name: ListTemplateSections :many
+SELECT template_key, section FROM design_template_sections
+`
+
+type ListTemplateSectionsRow struct {
+	TemplateKey string
+	Section     string
+}
+
+// Every filed label, for the Designs tab. A handful of rows; read whole.
+func (q *Queries) ListTemplateSections(ctx context.Context) ([]ListTemplateSectionsRow, error) {
+	rows, err := q.db.Query(ctx, listTemplateSections)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTemplateSectionsRow{}
+	for rows.Next() {
+		var i ListTemplateSectionsRow
+		if err := rows.Scan(&i.TemplateKey, &i.Section); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextTemplateVersion = `-- name: NextTemplateVersion :one
 SELECT coalesce(max(version), 0) + 1 AS next_version
 FROM design_templates
@@ -219,6 +300,52 @@ func (q *Queries) NextTemplateVersion(ctx context.Context, templateKey string) (
 	var next_version int32
 	err := row.Scan(&next_version)
 	return next_version, err
+}
+
+const retireTemplate = `-- name: RetireTemplate :execrows
+UPDATE design_templates SET status = 'retired'
+WHERE lower(template_key) = lower($1::text) AND status = 'active'
+`
+
+// Removes a key from the registry without losing what it printed.
+//
+// RETIRED, NOT DELETED, and for the same reason SupersedeTemplate is: the file
+// a retired key points at is what printed real orders, and "which file made
+// the thing this customer is holding" has to stay answerable after somebody
+// tidies up. The row leaves ListActiveTemplates, so the key disappears from
+// the Designs tab; its history does not move.
+//
+// Uploading the key again later makes a new active version, because
+// NextTemplateVersion counts every row rather than the active one.
+func (q *Queries) RetireTemplate(ctx context.Context, templateKey string) (int64, error) {
+	result, err := q.db.Exec(ctx, retireTemplate, templateKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setTemplateSection = `-- name: SetTemplateSection :exec
+INSERT INTO design_template_sections (template_key, section, updated_by, updated_at)
+VALUES (lower($1::text), $2, $3, now())
+ON CONFLICT (template_key) DO UPDATE
+SET section = EXCLUDED.section, updated_by = EXCLUDED.updated_by, updated_at = now()
+`
+
+type SetTemplateSectionParams struct {
+	TemplateKey string
+	Section     string
+	UpdatedBy   string
+}
+
+// Files a design file under a heading, or moves it to another one.
+//
+// Upsert rather than insert-or-update at the call site: the dropdown sends the
+// whole answer every time, and a key that has never been filed is the ordinary
+// case rather than an error.
+func (q *Queries) SetTemplateSection(ctx context.Context, arg SetTemplateSectionParams) error {
+	_, err := q.db.Exec(ctx, setTemplateSection, arg.TemplateKey, arg.Section, arg.UpdatedBy)
+	return err
 }
 
 const supersedeTemplate = `-- name: SupersedeTemplate :exec

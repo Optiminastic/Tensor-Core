@@ -1024,3 +1024,59 @@ SET personalisation_link_enabled = sqlc.arg('enabled'),
     updated_at = now()
 WHERE id = sqlc.arg('id')
 RETURNING *;
+
+-- name: ListTemplateUsage :many
+-- What every design file is used FOR, across the whole registry.
+--
+-- The Designs tab is a library of .scad files, and a library that does not say
+-- what each book is for is a shelf. One template usually prints several
+-- variants - swapping dnp_two_heart changes every two-heart variant at once -
+-- so the useful unit is the PRODUCT and the ROLE, not the variant: "PWDH
+-- prints from this, and draws its customer preview from it too".
+--
+-- A FILE CAN HOLD TWO ROLES AT ONCE, and this is why the role is carried
+-- rather than collapsed. lotus_diya_holder.scad draws both the plate that
+-- prints and the assembled picture the customer approves, so PWDH links it
+-- twice; a query that returned one row per (key, product) would have to pick
+-- one of those and would be wrong about the other.
+--
+-- Active designs only, and the SKU count with them: a template linked by three
+-- colourways of one product is one row saying three, not three rows.
+SELECT lower(d.template_key)::text AS template_key,
+       p.code                      AS product_code,
+       p.name                      AS product_name,
+       d.role                      AS role,
+       count(*)                    AS sku_count
+FROM variant_designs d
+JOIN product_variants v ON v.id = d.variant_id
+JOIN products p ON p.id = v.product_id
+WHERE d.status = 'active' AND d.template_key IS NOT NULL
+GROUP BY lower(d.template_key), p.code, p.name, d.role
+ORDER BY p.code, d.role;
+
+-- name: ListAllComponentPlates :many
+-- Every stored part file in the registry, with the part it belongs to.
+--
+-- The Designs tab's third section. These are NOT design templates - they are
+-- finished files kept against a component, and nothing in Tensor opens them -
+-- but they are files somebody uploaded into the registry, and a page that
+-- claims to show what files exist and silently omits a whole kind of them is
+-- worse than one that never claimed it.
+--
+-- The component's name comes along because the file alone says nothing: a
+-- G-code called plate.gcode is every G-code anybody ever exported.
+SELECT p.id,
+       p.sku,
+       p.machine_family,
+       p.notes,
+       p.uploaded_by,
+       p.created_at,
+       i.id   AS item_id,
+       i.name AS item_name,
+       i.code AS item_code,
+       f.filename,
+       f.size_bytes
+FROM component_plates p
+JOIN inventory_items i ON i.id = p.inventory_item_id
+JOIN file_assets f ON f.id = p.file_id
+ORDER BY lower(i.name), lower(p.sku), upper(p.machine_family);

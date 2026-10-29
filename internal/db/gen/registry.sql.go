@@ -921,6 +921,80 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 	return i, err
 }
 
+const listAllComponentPlates = `-- name: ListAllComponentPlates :many
+SELECT p.id,
+       p.sku,
+       p.machine_family,
+       p.notes,
+       p.uploaded_by,
+       p.created_at,
+       i.id   AS item_id,
+       i.name AS item_name,
+       i.code AS item_code,
+       f.filename,
+       f.size_bytes
+FROM component_plates p
+JOIN inventory_items i ON i.id = p.inventory_item_id
+JOIN file_assets f ON f.id = p.file_id
+ORDER BY lower(i.name), lower(p.sku), upper(p.machine_family)
+`
+
+type ListAllComponentPlatesRow struct {
+	ID            uuid.UUID
+	Sku           string
+	MachineFamily string
+	Notes         *string
+	UploadedBy    string
+	CreatedAt     pgtype.Timestamptz
+	ItemID        uuid.UUID
+	ItemName      string
+	ItemCode      *string
+	Filename      string
+	SizeBytes     int64
+}
+
+// Every stored part file in the registry, with the part it belongs to.
+//
+// The Designs tab's third section. These are NOT design templates - they are
+// finished files kept against a component, and nothing in Tensor opens them -
+// but they are files somebody uploaded into the registry, and a page that
+// claims to show what files exist and silently omits a whole kind of them is
+// worse than one that never claimed it.
+//
+// The component's name comes along because the file alone says nothing: a
+// G-code called plate.gcode is every G-code anybody ever exported.
+func (q *Queries) ListAllComponentPlates(ctx context.Context) ([]ListAllComponentPlatesRow, error) {
+	rows, err := q.db.Query(ctx, listAllComponentPlates)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAllComponentPlatesRow{}
+	for rows.Next() {
+		var i ListAllComponentPlatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Sku,
+			&i.MachineFamily,
+			&i.Notes,
+			&i.UploadedBy,
+			&i.CreatedAt,
+			&i.ItemID,
+			&i.ItemName,
+			&i.ItemCode,
+			&i.Filename,
+			&i.SizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAllDesignColourParts = `-- name: ListAllDesignColourParts :many
 SELECT dcp.id, dcp.product_id, dcp.role, dcp.part_name, dcp.colour_hex, dcp.position, dcp.created_at, dcp.variant_id, v.sku AS variant_sku
 FROM design_colour_parts dcp
@@ -2223,6 +2297,70 @@ func (q *Queries) ListShopifyProductPipelines(ctx context.Context) ([]ListShopif
 			&i.MachineFamily,
 			&i.PipelineID,
 			&i.PipelineName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTemplateUsage = `-- name: ListTemplateUsage :many
+SELECT lower(d.template_key)::text AS template_key,
+       p.code                      AS product_code,
+       p.name                      AS product_name,
+       d.role                      AS role,
+       count(*)                    AS sku_count
+FROM variant_designs d
+JOIN product_variants v ON v.id = d.variant_id
+JOIN products p ON p.id = v.product_id
+WHERE d.status = 'active' AND d.template_key IS NOT NULL
+GROUP BY lower(d.template_key), p.code, p.name, d.role
+ORDER BY p.code, d.role
+`
+
+type ListTemplateUsageRow struct {
+	TemplateKey string
+	ProductCode string
+	ProductName string
+	Role        string
+	SkuCount    int64
+}
+
+// What every design file is used FOR, across the whole registry.
+//
+// The Designs tab is a library of .scad files, and a library that does not say
+// what each book is for is a shelf. One template usually prints several
+// variants - swapping dnp_two_heart changes every two-heart variant at once -
+// so the useful unit is the PRODUCT and the ROLE, not the variant: "PWDH
+// prints from this, and draws its customer preview from it too".
+//
+// A FILE CAN HOLD TWO ROLES AT ONCE, and this is why the role is carried
+// rather than collapsed. lotus_diya_holder.scad draws both the plate that
+// prints and the assembled picture the customer approves, so PWDH links it
+// twice; a query that returned one row per (key, product) would have to pick
+// one of those and would be wrong about the other.
+//
+// Active designs only, and the SKU count with them: a template linked by three
+// colourways of one product is one row saying three, not three rows.
+func (q *Queries) ListTemplateUsage(ctx context.Context) ([]ListTemplateUsageRow, error) {
+	rows, err := q.db.Query(ctx, listTemplateUsage)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTemplateUsageRow{}
+	for rows.Next() {
+		var i ListTemplateUsageRow
+		if err := rows.Scan(
+			&i.TemplateKey,
+			&i.ProductCode,
+			&i.ProductName,
+			&i.Role,
+			&i.SkuCount,
 		); err != nil {
 			return nil, err
 		}

@@ -1680,3 +1680,14 @@ CREATE TABLE IF NOT EXISTS accounts_report_settings (
     updated_at   timestamptz NOT NULL DEFAULT now(),
     created_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- Which heading a design file is filed under on the Designs tab. A LABEL, and
+-- nothing else reads it - see migration 0134. Keyed on the template key rather
+-- than a design_templates row because that table is versioned and the embedded
+-- templates have no row at all.
+CREATE TABLE IF NOT EXISTS design_template_sections (
+    template_key varchar(64) PRIMARY KEY,
+    section      varchar(32) NOT NULL,
+    updated_by   varchar(64) NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
