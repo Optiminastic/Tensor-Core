@@ -300,9 +300,76 @@ func start(
 	if ownsPersonalisation {
 		startWindowSweep(tickerCtx, client, logger)
 	}
+	if orderSync := time.Duration(cfg.OrderSyncIntervalMinutes) * time.Minute; orderSync > 0 {
+		startOrderSyncTick(tickerCtx, client, orderSync, logger)
+	}
 	markPersonalisationStart(ctx, store, cfg, logger)
 
 	return &Runner{client: client, stopTickers: stopTickers}, nil
+}
+
+// startOrderSyncTick pulls every connected store's orders on a ticker THIS
+// PROCESS owns.
+//
+// NOT A RIVER PERIODIC JOB, which is what it used to be, and it failed the
+// same way the personalisation window sweep failed before it - the third time
+// this codebase has been bitten by the same thing. River runs periodic jobs on
+// the ELECTED LEADER ALONE. Four processes on this database run a River client
+// with queues: the production worker, the slice worker, the win-back worker
+// and the API when it runs the pipeline itself. Whichever takes the lease
+// first holds it, and only the jobs IT registered ever tick. The order sync is
+// registered by the production worker alone, so any of the other three holding
+// the lease means no store is pulled at all - and the slice worker has been
+// crash-looping, which hands the lease round and round.
+//
+// Nothing on any screen says so. The schedule is configured, the worker is
+// running, the log line at startup says "order_sync_minutes 10", and orders
+// still only arrive when somebody presses "Sync from Shopify" - which is
+// exactly the state this periodic job was written to end.
+//
+// Safe in every process at once, and that is the point rather than a caveat:
+// SyncOrdersArgs is inserted unique BY PERIOD, so K processes ticking the same
+// minute produce one pull between them rather than K stampeding one Shopify
+// store. A duplicate is the expected outcome, not an error.
+func startOrderSyncTick(
+	ctx context.Context, client *river.Client[pgx.Tx], every time.Duration, logger *slog.Logger,
+) {
+	go func() {
+		// RunOnStart, as the periodic job had: a deploy is the most likely
+		// moment for a backlog to exist, and waiting a full interval to find
+		// out is the overnight order all over again.
+		enqueueOrderSync(ctx, client, every, logger)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				enqueueOrderSync(ctx, client, every, logger)
+			}
+		}
+	}()
+}
+
+// enqueueOrderSync asks for one pull of every connected store.
+//
+// The insert options come from production.OrderSyncInsertOpts rather than
+// being written here, so the dedupe window cannot drift from the thing that
+// documents it.
+func enqueueOrderSync(
+	ctx context.Context, client *river.Client[pgx.Tx], every time.Duration, logger *slog.Logger,
+) {
+	res, err := client.Insert(ctx, production.SyncOrdersArgs{},
+		production.OrderSyncInsertOpts(every))
+	switch {
+	case err != nil:
+		// One missed pull, not a dead scheduler: the next tick tries again.
+		logger.Error("could not enqueue the Shopify order sync", "error", err)
+	case res.UniqueSkippedAsDuplicate:
+		// Ordinary when several processes tick: one of them wins.
+		logger.Debug("Shopify order sync already queued")
+	}
 }
 
 // markPersonalisationStart writes down that the shop began asking NOW.
@@ -498,13 +565,13 @@ func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*riv
 			&river.PeriodicJobOpts{RunOnStart: false},
 		))
 	}
-	if orderSync := time.Duration(cfg.OrderSyncIntervalMinutes) * time.Minute; orderSync > 0 {
-		jobs = append(jobs, river.NewPeriodicJob(
-			river.PeriodicInterval(orderSync),
-			production.PeriodicOrderSyncConstructor(orderSync),
-			&river.PeriodicJobOpts{RunOnStart: true},
-		))
-	}
+	// The order sync is deliberately absent, for the reason the win-back sweep
+	// and the window sweep are: River runs periodic jobs on the elected leader
+	// alone, and the lease on this database is held by whichever of four
+	// clients took it first. Registered here it ticked only when the
+	// production worker happened to be leader, which is why orders arrived
+	// only when somebody pressed the button. It ticks for itself now - see
+	// startOrderSyncTick.
 	// The win-back sweep is deliberately absent. River runs periodic jobs on
 	// the elected leader alone, and the leader is whichever River client took
 	// the lease first - normally this one. Scheduling the sweep from here

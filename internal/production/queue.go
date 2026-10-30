@@ -174,23 +174,21 @@ func PeriodicFleetSyncConstructor(period time.Duration) func() (river.JobArgs, *
 	}
 }
 
-// PeriodicOrderSyncConstructor builds the periodic pull of every connected
-// store's orders.
+// OrderSyncInsertOpts is how a pull of every connected store is enqueued.
 //
-// The empty BrandSlug is the worker's "all brands". Deduped over period like
-// the other periodic inserts, so K worker replicas produce one pull between
-// them rather than K stampeding the same Shopify store.
+// The empty BrandSlug on SyncOrdersArgs is the worker's "all brands". Unique
+// BY PERIOD, so K processes ticking the same minute produce one pull between
+// them rather than K stampeding the same Shopify store - which is what makes
+// it safe for every worker to tick for itself instead of relying on River's
+// leader-only periodic jobs. See startOrderSyncTick for why it must.
 //
-// This is the first thing that imports orders without somebody pressing a
-// button. It exists because pressing the button was the ONLY path, so an order
-// placed overnight simply was not in Tensor until an operator arrived and
-// noticed.
-func PeriodicOrderSyncConstructor(period time.Duration) func() (river.JobArgs, *river.InsertOpts) {
-	return func() (river.JobArgs, *river.InsertOpts) {
-		return SyncOrdersArgs{}, &river.InsertOpts{
-			Queue:      OrderSyncQueueName,
-			UniqueOpts: river.UniqueOpts{ByPeriod: period},
-		}
+// This is what imports orders without somebody pressing a button. It exists
+// because pressing the button was the ONLY path, so an order placed overnight
+// simply was not in Tensor until an operator arrived and noticed.
+func OrderSyncInsertOpts(period time.Duration) *river.InsertOpts {
+	return &river.InsertOpts{
+		Queue:      OrderSyncQueueName,
+		UniqueOpts: river.UniqueOpts{ByPeriod: period},
 	}
 }
 
