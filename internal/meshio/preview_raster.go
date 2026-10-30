@@ -46,7 +46,7 @@ type camera struct {
 // the near end for no gain in understanding. It also means the framing cannot
 // change with the model's size, so two units of the same order are drawn at
 // the same scale and can be compared.
-func cameraFor(lo, hi orientation.Vec3, w, h int, view PreviewView) camera {
+func cameraFor(lo, hi orientation.Vec3, w, h int, view PreviewView, facing float64) camera {
 	centre := orientation.Vec3{X: (lo.X + hi.X) / 2, Y: (lo.Y + hi.Y) / 2, Z: (lo.Z + hi.Z) / 2}
 
 	// The camera is placed off the model's own FACE, not off a fixed world
@@ -62,14 +62,29 @@ func cameraFor(lo, hi orientation.Vec3, w, h int, view PreviewView) camera {
 	//
 	// So: find the face, then stand in front of it and a little above.
 	right, up, normal := faceAxes(lo, hi)
+	// WHICH WAY ALONG THAT AXIS IS THE FRONT.
+	//
+	// faceAxes finds the face but not its side: it returns the positive unit
+	// vector of the thinnest axis, so the camera stood at +Y of a piece whose
+	// detail faces -Y and photographed the back of it. A plank got away with
+	// it because planks are modelled with their relief in +Z by convention,
+	// and a convention is exactly what a registry product cannot rely on.
+	normal = scaleVec(normal, facing)
 	// Enough tilt that thickness and anything standing off the plate still
 	// read as depth, little enough that the face is still close to flat on.
 	const elevation = 32 * math.Pi / 180
 	// A yaw either side gives the two views a reason to differ, and puts the
 	// light somewhere other than straight down the barrel.
+	// Square on for the front, a yaw either side for the other two. The
+	// plank's two views keep the angle they have always had: they exist to
+	// make one name per end readable, and widening them would foreshorten
+	// the lettering they were chosen to show.
 	yaw := -20 * math.Pi / 180
-	if view == ViewFromRight {
+	switch view {
+	case ViewFromRight:
 		yaw = -yaw
+	case ViewFront:
+		yaw = 0
 	}
 	// Where the camera stands, in the face's own frame: off the face, up, and
 	// round to one side. Looking back at the centre is the opposite of that.
@@ -259,6 +274,39 @@ func faceAxes(lo, hi orientation.Vec3) (right, up, normal orientation.Vec3) {
 		a, b = b, a
 	}
 	return axes[a], axes[b], axes[thin]
+}
+
+// frontSign is +1 when the face normal already points at the product's front,
+// and -1 when the front is the other way.
+//
+// DECIDED FROM THE MESH, because nothing else knows. The front of a product is
+// the side somebody put the detail on: a back plate is two triangles and a
+// face carrying a name, a border and an ornament is thousands. So the sides
+// are compared by how much geometry faces each way, and the busier one wins.
+//
+// Counted rather than measured by area: the two flat faces of a plate have
+// almost the same area whatever is engraved on one of them, while their
+// triangle counts differ by orders of magnitude. Only triangles that clearly
+// face one way or the other are counted - the rim of a plate faces neither
+// and would otherwise vote in whichever direction rounding sent it.
+//
+// Ties keep +1, which is the direction every model had before this existed,
+// so a shape this cannot read is drawn exactly as it was.
+func frontSign(tris []shadedTriangle, lo, hi orientation.Vec3) float64 {
+	_, _, normal := faceAxes(lo, hi)
+	var front, back int
+	for _, t := range tris {
+		switch d := dot(t.tri.Normal, normal); {
+		case d > 0.5:
+			front++
+		case d < -0.5:
+			back++
+		}
+	}
+	if back > front {
+		return -1
+	}
+	return 1
 }
 
 func add(a, b orientation.Vec3) orientation.Vec3 {

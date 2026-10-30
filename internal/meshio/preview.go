@@ -39,10 +39,19 @@ import (
 type PreviewView int
 
 const (
-	// ViewFromLeft is the default three-quarter view.
+	// ViewFromLeft is the three-quarter view from the left.
 	ViewFromLeft PreviewView = iota
 	// ViewFromRight is the same elevation from the other side.
 	ViewFromRight
+	// ViewFront is square on to the face, and is what a customer is shown
+	// first.
+	//
+	// The plank's two views answer "is my name spelled right", one name per
+	// end, and a three-quarter is the right shape for that. A wall piece's
+	// question is "is this the thing I bought", and the answer to that is the
+	// front of it - foreshortened at twenty degrees it reads as a shape
+	// rather than a product.
+	ViewFront
 )
 
 // PreviewOptions is how the picture is taken.
@@ -95,7 +104,7 @@ func RenderPreview(parts []Part, opts PreviewOptions) ([]byte, error) {
 		return encode(buf.downsample(w, h))
 	}
 
-	cam := cameraFor(lo, hi, sw, sh, opts.View)
+	cam := cameraFor(lo, hi, sw, sh, opts.View, frontSign(tris, lo, hi))
 	for _, t := range tris {
 		buf.triangle(cam, t)
 	}

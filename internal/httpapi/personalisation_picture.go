@@ -47,8 +47,14 @@ func (s *Server) publicPersonalisationPicture(c *gin.Context) {
 		return
 	}
 
-	view := meshio.ViewFromLeft
-	if c.Query("view") == "right" {
+	// FRONT IS THE DEFAULT, including for a request that names no view - a
+	// customer opening the page is asking "is this the thing I bought", and
+	// the answer to that is the front of it.
+	view := meshio.ViewFront
+	switch c.Query("view") {
+	case "left":
+		view = meshio.ViewFromLeft
+	case "right":
 		view = meshio.ViewFromRight
 	}
 	png, err := meshio.RenderPreview(parts, meshio.PreviewOptions{View: view})
