@@ -91,13 +91,25 @@ func TestIntegrationRoleScopesAtTheHTTPBoundary(t *testing.T) {
 		{auth.RoleOperator, "/config/materials", false, "an operator never sees costs"},
 		{auth.RoleOperator, "/admin/users", false, "the team is an admin's"},
 
-		// DESIGNER: Designs and Costing.
+		// DESIGNER: Designs, Costing and Production.
+		//
+		// The three refusals that used to sit here - production-jobs, batches
+		// and the registry - were written when the role was Designs and
+		// Costing and nothing else. The shop has since asked for a designer to
+		// run Designs and Production outright, so this says what the policy IS
+		// rather than what it was. See TestDesignerSeesDesignsCostingAndProduction
+		// in internal/auth, which is the same decision at the catalog level.
 		{auth.RoleDesigner, "/designs", true, "Designs"},
 		{auth.RoleDesigner, "/brands", true, "the brand switcher"},
-		// ...and nothing else.
-		{auth.RoleDesigner, "/production-jobs", false, "Production is not a designer's area"},
-		{auth.RoleDesigner, "/batches", false, "Production is not a designer's area"},
-		{auth.RoleDesigner, "/registry/products", false, "the Registry is a Production page"},
+		{auth.RoleDesigner, "/production-jobs", true, "Production Jobs"},
+		{auth.RoleDesigner, "/orders", true, "Orders"},
+		{auth.RoleDesigner, "/batches", true, "Batch Management"},
+		{auth.RoleDesigner, "/inventory-items", true, "Inventory"},
+		{auth.RoleDesigner, "/registry/products", true, "the Registry, under Designs"},
+		// ...and what is still not theirs is MONEY and the team. Costing is a
+		// read for this role; the cost assumptions the engine computes from
+		// are config:manage, which is also what writes the registry - the
+		// reason a designer can read that page and not save it.
 		{auth.RoleDesigner, "/config/cost-assumptions", false, "cost CONFIG is not costing"},
 		{auth.RoleDesigner, "/admin/users", false, "the team is an admin's"},
 

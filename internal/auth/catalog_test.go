@@ -70,26 +70,60 @@ func TestOperatorSeesAllOfProductionAndNoCosts(t *testing.T) {
 	}
 }
 
-// The designer's scope: Designs and Costing, and nothing else.
+// The designer's scope: Designs, Costing and Production - the last READ-ONLY.
 //
 // pricing:read is what puts Costing in the nav. It is a READ - a designer sees
 // what a model costs and cannot generate, override or approve a price.
-func TestDesignerSeesDesignsAndCosting(t *testing.T) {
+//
+// THE LINE MOVED, AND IT MOVED FROM AREAS TO VERBS. This list used to forbid
+// production:read, order:read, batch:read, machine:read and registry:read,
+// because the role was Designs and Costing and nothing else. The shop then
+// asked for a designer to see the Registry and the whole Production area -
+// the same way pricing:read moved out of the forbidden list when Costing was
+// put in their nav. What a designer still cannot do is CHANGE any of it, and
+// that is what the forbidden list now says.
+func TestDesignerSeesDesignsCostingAndProduction(t *testing.T) {
 	d := PermissionsFor(RoleDesigner)
 	for _, expected := range []string{
 		"design:read", "design:create", "design:update", "design:submit",
 		"pricing:read",
+		// Every one of these maps to a nav gate, so the areas are whole.
+		"registry:read", "production:read", "order:read", "batch:read",
+		"machine:read", "filament:read",
 	} {
 		if !has(d, expected) {
 			t.Errorf("designer should have %s", expected)
 		}
 	}
+	// Designs and Production are WORKED, not watched: a designer approves,
+	// deletes, publishes, advances a job, locks a bed, manages machines and
+	// the shelf, and signs off at every station.
+	for _, expected := range []string{
+		"design:delete", "design:approve", "design:reject", "shopify:publish",
+		"production:create", "production:update", "production:fail",
+		"batch:manage", "dispatch:manage", "machine:manage", "filament:manage",
+		"qc:submit", "assembly:submit", "finishing:submit", "packaging:submit",
+	} {
+		if !has(d, expected) {
+			t.Errorf("designer should have %s", expected)
+		}
+	}
+	// WHAT IS LEFT OUT IS MONEY AND PEOPLE. The shop asked for Designs and
+	// Production, and for Costing to be VISIBLE - so the verbs that decide
+	// what a customer pays stay elsewhere, and so does everything about the
+	// workspace itself.
 	for _, forbidden := range []string{
-		// Not Production, not the registry, not the workspace.
-		"production:read", "order:read", "batch:read", "machine:read", "registry:read",
-		"user:read", "brand:manage",
-		// Reads prices; does not set or approve them.
-		"pricing:generate", "pricing:override", "design:approve", "config:read",
+		// Reads prices; does not set them, and cannot touch the cost
+		// assumptions the whole engine runs on - config:manage is the same
+		// permission that writes the registry, which is why registry writing
+		// is not here either. Splitting the two is the open question.
+		"pricing:generate", "pricing:override", "config:read", "config:manage",
+		// Not the workspace, and never customer chats.
+		"user:read", "user:manage", "brand:manage", "whatsapp:read",
+		// Admin only, each for its own reason: a sweep that advances the whole
+		// board, and a leaf that stays invisible inside a Production section
+		// everybody else can now see.
+		"production:catchup", "bulk_order:read",
 	} {
 		if has(d, forbidden) {
 			t.Errorf("designer must not have %s", forbidden)
@@ -115,14 +149,16 @@ func TestPackagingQcScope(t *testing.T) {
 
 // A designer READS prices and cannot set them.
 //
-// pricing:read moved out of this list when the shop put Costing in the
-// designer's nav - see TestDesignerSeesDesignsAndCosting. What stays forbidden
-// is every verb that CHANGES a price or a design's fate.
-func TestDesignerCannotApproveOrPrice(t *testing.T) {
+// This list has shed two entries, each when the shop said so. pricing:read
+// left it when Costing went into the designer's nav; design:approve and
+// design:reject left it when the shop asked for a designer to run the Designs
+// tab outright. What stays is money: the two verbs that decide what a
+// customer actually pays, and the config the engine computes it from.
+func TestDesignerCannotPrice(t *testing.T) {
 	d := PermissionsFor(RoleDesigner)
 	for _, forbidden := range []string{
-		"design:approve", "design:reject",
 		"pricing:generate", "pricing:override",
+		"config:read", "config:manage",
 		"user:manage",
 	} {
 		if has(d, forbidden) {
@@ -203,6 +239,18 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// whatsapp:read and whatsapp:reply then went to admin, project lead and
 	// operator (+6): the people who already see orders answer the customers
 	// asking about them.
+	//
+	// The designer then went 8 -> 30 (+22) when the shop asked for that role to
+	// RUN Designs and Production rather than watch them. Sight first
+	// (registry:read, production:read, order:read, batch:read, machine:read,
+	// filament:read), then the verbs: design delete/approve/reject,
+	// shopify:publish, production create/update/fail, batch:manage,
+	// dispatch read/manage, the four station sign-offs, machine:manage and
+	// filament:manage - see TestDesignerSeesDesignsCostingAndProduction.
+	//
+	// Costing stays a READ for them, and the registry is still written with
+	// config:manage, which is admin-only because the same permission opens the
+	// cost assumptions the pricing engine runs on.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
@@ -218,26 +266,37 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
 	// holder of it would show up here before it showed up on anybody's
 	// screen, which is the point of counting rather than spot-checking.
-	if total != 117 {
-		t.Fatalf("total grants = %d, want 117", total)
+	if total != 139 {
+		t.Fatalf("total grants = %d, want 139", total)
 	}
 }
 
-// A designer can be handed the jobs waiting for a 3MF WITHOUT being handed the
-// production queue. Asserted both ways round, because the separation is only
-// worth anything if the second half holds: production:update would also carry
-// patching any job, failing one, and validating somebody's personalisation.
-func TestDesignerSuppliesDesignFilesWithoutProductionAccess(t *testing.T) {
+// A designer can be handed the jobs waiting for a 3MF and can work the queue
+// those jobs end up in.
+//
+// This assertion has inverted, in two steps and both times because the shop
+// said so: production:read left the forbidden list when a designer was given
+// sight of the Production area, and production:update followed when they were
+// given the running of it. Worth stating what that last one carries, since it
+// is the widest verb here: patching any job, failing one, and validating
+// somebody's personalisation - which means answering a customer's
+// confirmation on their behalf.
+func TestDesignerSuppliesDesignFilesAndWorksTheQueue(t *testing.T) {
 	designer := PermissionsFor(RoleDesigner)
 
-	for _, p := range []PermissionSpec{DesignJobRead, DesignJobSupply} {
+	for _, p := range []PermissionSpec{
+		DesignJobRead, DesignJobSupply, ProductionRead, ProductionUpdate,
+	} {
 		if !has(designer, p.Key()) {
 			t.Errorf("designer cannot %s, so the Non-DNP queue is unreachable for them", p.Key())
 		}
 	}
-	for _, p := range []PermissionSpec{ProductionRead, ProductionUpdate, ProductionCreate, ProductionFail} {
+	// What a designer still cannot do to the queue: sweep the whole board in
+	// one press. Working a job and restating every job at once are different
+	// acts, and only the first was asked for.
+	for _, p := range []PermissionSpec{ProductionCatchUp} {
 		if has(designer, p.Key()) {
-			t.Errorf("designer holds %s; supplying a design file must not open the production queue", p.Key())
+			t.Errorf("designer holds %s; that sweep is admin-only", p.Key())
 		}
 	}
 }

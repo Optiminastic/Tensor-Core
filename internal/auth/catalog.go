@@ -280,14 +280,63 @@ var AllPermissions = []PermissionSpec{
 // TestProjectAndBrandManageAreAdminOnly pins.
 var roleGrants = map[RoleName][]PermissionSpec{
 	RoleAdmin: AllPermissions,
-	// Designs AND Costing. PricingRead is what puts the Costing area in the nav
-	// (nav-config.ts gates it on pricing:read); a designer who cannot see what
-	// their model costs cannot act on the CP thresholds the costing page exists
-	// to show. Still cannot approve, generate or override a price.
+	// Designs, Costing and Production - the last of them READ-ONLY.
+	//
+	// PricingRead is what puts the Costing area in the nav (nav-config.ts
+	// gates it on pricing:read); a designer who cannot see what their model
+	// costs cannot act on the CP thresholds the costing page exists to show.
+	//
+	// The reads below were added when the shop asked for a designer to see
+	// the Registry and the whole Production area. Each one maps to a nav gate,
+	// so the areas are complete rather than mostly there: registry:read
+	// (Designs > Registry, and Production > Slicing settings), production:read
+	// (Production, Jobs, Packaging and the stations), order:read (Orders),
+	// batch:read (Batch Management), machine:read (Machine Management),
+	// filament:read (Inventory).
+	//
+	// READS ONLY, and that is the whole shape of this role. A designer sees
+	// the queue their work ends up in and changes nothing in it: no
+	// production:update or production:fail, no batch:manage, no
+	// machine:manage, no filament:manage, and still no approving, generating
+	// or overriding a price. The separation that matters here is verbs, not
+	// areas - see TestDesignerSuppliesDesignFilesWithoutProductionAccess,
+	// which now asserts exactly that.
+	//
+	// bulk_order:read is deliberately NOT here. It is granted to no role but
+	// ADMIN, which is what keeps that one leaf invisible inside a Production
+	// section everybody else can see.
+	//
+	// SIDE EFFECT WORTH KNOWING: nav-config.ts gates the Agent and Shipping
+	// areas on order:read too, so granting it shows a designer those sections
+	// as well. Their customer-chat leaves stay hidden - those need
+	// whatsapp:read, which this role does not have and must not - but the
+	// Agent overview and the abandoned-checkout list do carry customer
+	// details. Gate those on something of their own if that is not wanted.
 	RoleDesigner: {
-		DesignCreate, DesignRead, DesignUpdate, DesignSubmit,
+		// The Designs tab, whole: create, edit, submit, approve, reject,
+		// delete, and publish an approved design to the storefront.
+		DesignCreate, DesignRead, DesignUpdate, DesignDelete, DesignSubmit,
+		DesignApprove, DesignReject, ShopifyPublish,
 		DesignJobRead, DesignJobSupply,
+		// Costing is READ. The shop asked for it to be visible, not editable:
+		// generating and overriding a price are the two verbs that decide what
+		// a customer pays, and cost assumptions are gated on config:manage,
+		// which stays admin-only. See the note on ConfigManage below.
 		PricingRead,
+		RegistryRead,
+		// Production, whole: the queue, the beds, the machines, the shelf,
+		// dispatch, and signing off at every station.
+		//
+		// production:catchup is deliberately NOT here. It is admin-only by its
+		// own test - a one-press sweep that advances the whole board at once,
+		// which is a different kind of act from working a job.
+		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
+		OrderRead,
+		BatchRead, BatchManage,
+		DispatchRead, DispatchManage,
+		QcSubmit, AssemblySubmit, FinishingSubmit, PackagingSubmit,
+		MachineRead, MachineManage,
+		FilamentRead, FilamentManage,
 		BrandRead,
 	},
 	RoleProjectLead: {
