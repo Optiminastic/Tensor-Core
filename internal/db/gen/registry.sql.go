@@ -91,6 +91,7 @@ const clearProductFieldMaps = `-- name: ClearProductFieldMaps :exec
 DELETE FROM product_field_maps
 WHERE product_id = $1
   AND role = $2
+  AND variant_id IS NULL
 `
 
 type ClearProductFieldMapsParams struct {
@@ -106,6 +107,18 @@ type ClearProductFieldMapsParams struct {
 //
 // Scoped to the role being saved, or editing the rose would silently delete
 // the keychain's mapping.
+//
+// AND TO THE PRODUCT'S OWN ROWS. A SKU's override lives in this same table
+// carrying the same product_id - that is what migration 0129 added - so
+// without `variant_id IS NULL` this deletes every per-SKU mapping of the role
+// as well. Measured: one ordinary re-save of the product mapping took a
+// configured SKU's override from one row to none, and the next render then
+// quietly used the product's mapping for a SKU somebody had deliberately set
+// up differently. There is nothing on any screen that would say so.
+//
+// Two scopes, two queries, rather than one query taking a nullable variant:
+// a nil argument at a call site that meant to pass one is exactly how this
+// deletes the wrong rows again.
 func (q *Queries) ClearProductFieldMaps(ctx context.Context, arg ClearProductFieldMapsParams) error {
 	_, err := q.db.Exec(ctx, clearProductFieldMaps, arg.ProductID, arg.Role)
 	return err
@@ -122,6 +135,27 @@ DELETE FROM variant_bom WHERE variant_id = $1
 // ReplaceVariantBomItem inside one transaction.
 func (q *Queries) ClearVariantBom(ctx context.Context, variantID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, clearVariantBom, variantID)
+	return err
+}
+
+const clearVariantFieldMaps = `-- name: ClearVariantFieldMaps :exec
+DELETE FROM product_field_maps
+WHERE variant_id = $1
+  AND role = $2
+`
+
+type ClearVariantFieldMapsParams struct {
+	VariantID *uuid.UUID
+	Role      string
+}
+
+// Empties ONE SKU's mapping of ONE design file, so it can be written whole.
+//
+// Scoped to the variant AND the role, for both of ClearProductFieldMaps'
+// reasons: a product may print several files, and the rows beside these
+// belong to other SKUs and to the product's own default.
+func (q *Queries) ClearVariantFieldMaps(ctx context.Context, arg ClearVariantFieldMapsParams) error {
+	_, err := q.db.Exec(ctx, clearVariantFieldMaps, arg.VariantID, arg.Role)
 	return err
 }
 
@@ -921,6 +955,72 @@ func (q *Queries) InsertVariantDesign(ctx context.Context, arg InsertVariantDesi
 	return i, err
 }
 
+const insertVariantFieldMap = `-- name: InsertVariantFieldMap :exec
+INSERT INTO product_field_maps (
+    id, product_id, variant_id, property_key, scad_variable, value_type, role,
+    required, fixed_value, default_value, max_runes, position
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11, $12
+)
+ON CONFLICT (variant_id, role, lower(scad_variable)) WHERE variant_id IS NOT NULL DO UPDATE
+SET property_key  = EXCLUDED.property_key,
+    value_type    = EXCLUDED.value_type,
+    required      = EXCLUDED.required,
+    fixed_value   = EXCLUDED.fixed_value,
+    default_value = EXCLUDED.default_value,
+    max_runes     = EXCLUDED.max_runes,
+    position      = EXCLUDED.position
+`
+
+type InsertVariantFieldMapParams struct {
+	ID           uuid.UUID
+	ProductID    uuid.UUID
+	VariantID    *uuid.UUID
+	PropertyKey  string
+	ScadVariable string
+	ValueType    string
+	Role         string
+	Required     bool
+	FixedValue   *string
+	DefaultValue *string
+	MaxRunes     *int32
+	Position     int32
+}
+
+// Adds one mapped field belonging to ONE SKU.
+//
+// The same row shape as InsertProductFieldMap plus variant_id, and it carries
+// product_id as well because the column is NOT NULL - which is precisely why
+// every product-scoped read and delete of this table has to say
+// `variant_id IS NULL`. A SKU's override is not a second table; it is a row
+// in this one wearing the same product's id.
+//
+// ON CONFLICT names the OTHER partial index - the one migration 0129 created
+// WHERE variant_id IS NOT NULL - and repeating its predicate is not optional:
+// Postgres matches a conflict target against a partial index only when the
+// WHERE is restated, and without it every call fails with 42P10 naming
+// neither the index nor the reason.
+func (q *Queries) InsertVariantFieldMap(ctx context.Context, arg InsertVariantFieldMapParams) error {
+	_, err := q.db.Exec(ctx, insertVariantFieldMap,
+		arg.ID,
+		arg.ProductID,
+		arg.VariantID,
+		arg.PropertyKey,
+		arg.ScadVariable,
+		arg.ValueType,
+		arg.Role,
+		arg.Required,
+		arg.FixedValue,
+		arg.DefaultValue,
+		arg.MaxRunes,
+		arg.Position,
+	)
+	return err
+}
+
 const listAllComponentPlates = `-- name: ListAllComponentPlates :many
 SELECT p.id,
        p.sku,
@@ -1089,6 +1189,7 @@ func (q *Queries) ListAllPipelineMappings(ctx context.Context) ([]ListAllPipelin
 const listAllProductFieldMaps = `-- name: ListAllProductFieldMaps :many
 SELECT id, product_id, property_key, scad_variable, value_type, role, required, fixed_value, default_value, max_runes, variant_id, position, created_at FROM product_field_maps
 WHERE product_id = $1
+  AND variant_id IS NULL
 ORDER BY role, position, lower(scad_variable)
 `
 
@@ -1097,6 +1198,17 @@ ORDER BY role, position, lower(scad_variable)
 // For the editor and for counting what a product has configured. The render
 // path uses ListProductFieldMaps, which asks about the one file it is about
 // to run.
+//
+// THE PRODUCT'S OWN ROWS ONLY. A SKU's override carries the same product_id,
+// so without this the count on the product panel includes mappings that
+// belong to one colourway and the editor's idea of "what this product has"
+// disagrees with what it would save.
+//
+// This scoping is only safe because the two questions that decide whether an
+// ORDER becomes a job - registryRendersSKU and partRolesForRenderSKU - were
+// moved off this query and on to the per-SKU fieldMapsFor first. Asked here,
+// a product configured entirely through per-SKU overrides would answer "no
+// mapping", and no job would be created for it at all.
 func (q *Queries) ListAllProductFieldMaps(ctx context.Context, productID uuid.UUID) ([]ProductFieldMap, error) {
 	rows, err := q.db.Query(ctx, listAllProductFieldMaps, productID)
 	if err != nil {
@@ -2851,6 +2963,39 @@ func (q *Queries) SetInventoryItemSource(ctx context.Context, arg SetInventoryIt
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const setProductPersonalisationLink = `-- name: SetProductPersonalisationLink :execrows
+UPDATE product_variants
+SET personalisation_link_enabled = $1,
+    updated_at = now()
+WHERE product_id = $2
+`
+
+type SetProductPersonalisationLinkParams struct {
+	Enabled   bool
+	ProductID uuid.UUID
+}
+
+// Turns a whole product's personalisation link on or off.
+//
+// A PRODUCT-LEVEL DECISION, which is what it always was in practice. The
+// column is per variant because a variant is what an order resolves to, but
+// nobody chooses per colourway: a design either can change after it is bought
+// or it cannot, and that is a fact about the product. Offered per SKU it was
+// twenty switches that had to agree, and one left out of step is a single
+// colourway silently skipping the customer - which is exactly what happened
+// to PWDH-W.
+//
+// Retired variants are included deliberately, for setProductDesign's reason:
+// a retired SKU still has orders in flight, and leaving it on a different
+// answer from its siblings is the drift this replaces.
+func (q *Queries) SetProductPersonalisationLink(ctx context.Context, arg SetProductPersonalisationLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setProductPersonalisationLink, arg.Enabled, arg.ProductID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setVariantPersonalisationLink = `-- name: SetVariantPersonalisationLink :one

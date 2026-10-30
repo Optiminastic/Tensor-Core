@@ -9,6 +9,7 @@ package httpapi
 // ITS product's option values, and nothing in the URL proves that.
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -429,13 +430,18 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 		}
 		designID = &parsed
 	}
-	if (key == nil) == (designID == nil) {
+	// NEITHER means nothing prints this role for this SKU - how one colourway
+	// stops using a file so the file can be removed. BOTH is still refused:
+	// two files printing one part is what the table's CHECK forbids.
+	if key != nil && designID != nil {
 		detail(c, http.StatusBadRequest,
-			"Name either a template or an uploaded design, not both and not neither.")
+			"Name either a template or an uploaded design, not both.")
 		return
 	}
 
-	if _, err := s.store.Q.GetVariant(c.Request.Context(), id); isNoRows(err) {
+	ctx := c.Request.Context()
+	variant, err := s.store.Q.GetVariant(ctx, id)
+	if isNoRows(err) {
 		detail(c, http.StatusNotFound, "That variant does not exist.")
 		return
 	} else if err != nil {
@@ -443,11 +449,32 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 		return
 	}
 
-	err := s.store.InTx(c.Request.Context(), func(q *gen.Queries) error {
+	// THE CHECKS ITS SIBLING HAS ALWAYS HAD. putPreviewDesign refuses an
+	// unknown key, a mapping the file cannot read, and pieces it does not
+	// draw; this route refused none of them, so a SKU could be pointed at a
+	// typo and find out at render time - on a customer's order, hours later.
+	//
+	// Only on the template branch: a design id names an uploaded 3MF, which
+	// has no variables and no pieces to check.
+	if key != nil {
+		if refusal := s.variantDesignRefusal(ctx, variant, *key, req.Role); refusal != "" {
+			detail(c, http.StatusUnprocessableEntity, refusal)
+			return
+		}
+	}
+
+	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		if err := q.SupersedeVariantDesign(c.Request.Context(),
 			gen.SupersedeVariantDesignParams{VariantID: id, Role: req.Role},
 		); err != nil {
 			return err
+		}
+		if key == nil && designID == nil {
+			// NOTHING PRINTS THIS ROLE FOR THIS SKU now. No replacement row:
+			// an active design naming no file is a state the table's own
+			// CHECK forbids, and "no row" is already how every reader treats
+			// an unconfigured SKU.
+			return nil
 		}
 		_, err := q.InsertVariantDesign(c.Request.Context(), gen.InsertVariantDesignParams{
 			ID: uuid.New(), VariantID: id, Role: req.Role,
@@ -462,6 +489,56 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// variantDesignRefusal is why this SKU cannot print its role from this file,
+// or "" when it can.
+//
+// Ordered so each check can rely on the one before it: a mapping cannot be
+// checked against a file that does not exist, and pieces cannot be checked
+// against a file whose variables are wrong.
+//
+// Every check here is BEST-EFFORT in the same way the rest of the registry is:
+// a missing mapping, a file not uploaded yet, or an unreadable source all
+// allow the save. Configuring in either order is normal, and the readiness
+// panel is what reports a half-finished product - refusing here would force
+// one order of operations on somebody setting a product up.
+func (s *Server) variantDesignRefusal(
+	ctx context.Context, variant gen.ProductVariant, key, role string,
+) string {
+	// 1. A FILE THAT EXISTS. The same sentence putPreviewDesign uses, because
+	//    it is the same mistake on a different screen.
+	if !s.templateExists(ctx, key) {
+		return "There is no design file called " + key +
+			". Upload it on the Designs tab first."
+	}
+
+	sku := strings.TrimSpace(deref(variant.Sku))
+
+	// 2. A FILE THAT READS WHAT THIS SKU SENDS IT. OpenSCAD accepts an
+	//    unknown -D and never reads it, so a mapping pointing at a variable
+	//    this file does not declare renders a model missing exactly what the
+	//    customer asked for, and exits 0.
+	if maps := s.fieldMapsFor(ctx, variant.ProductID, sku, role); len(maps) > 0 {
+		if missing := s.undeclaredVariables(ctx, key, maps); len(missing) > 0 {
+			return undeclaredVariablesDetail(key, missing)
+		}
+	}
+
+	// 3. A FILE THAT DRAWS THE PIECES SOMEBODY CONFIGURED. Swapping the file
+	//    after the scheme was written otherwise checks nothing, and a file
+	//    that does not branch on those names renders an empty piece on every
+	//    order - which slices, prints, and is scrap.
+	//
+	//    Skipped for a file that states its own colours: it has no configured
+	//    pieces by construction, and its own are read from it.
+	if parts := s.selfColouredParts(ctx, key); len(parts) > 0 {
+		return ""
+	}
+	if parts := s.colourPartsForSKU(ctx, variant.ProductID, sku, role); len(parts) > 0 {
+		return s.verifyPartsRenderFrom(ctx, key, parts)
+	}
+	return ""
+}
+
 // productDesignRequest names the file that prints a whole product.
 //
 // No DesignID counterpart to setVariantDesign's: an uploaded 3MF is one
@@ -471,8 +548,14 @@ func (s *Server) setVariantDesign(c *gin.Context) {
 // combo's parts are named for what an operator picks up, and oneof=body base
 // refused the first one anybody tried to add: "rose".
 type productDesignRequest struct {
-	Role        string `json:"role" binding:"required,max=24"`
-	TemplateKey string `json:"template_key" binding:"required,max=64"`
+	Role string `json:"role" binding:"required,max=24"`
+	// Empty means NOTHING PRINTS THIS ROLE, which is a real state rather than
+	// a missing answer: it is what every freshly imported product already is.
+	//
+	// It was required, and that made the delete dialog a dead end - removing a
+	// design file is refused while anything renders from it, and nothing could
+	// be made to stop rendering from it short of deleting the product.
+	TemplateKey string `json:"template_key" binding:"max=64"`
 }
 
 // setProductDesign points every variant of a product at one template.
@@ -496,11 +579,6 @@ func (s *Server) setProductDesign(c *gin.Context) {
 		return
 	}
 	key := strings.TrimSpace(req.TemplateKey)
-	if key == "" {
-		detail(c, http.StatusUnprocessableEntity, "Name the template this product prints from.")
-		return
-	}
-
 	ctx := c.Request.Context()
 	variants, err := s.store.Q.ListVariantsForProduct(ctx, product.ID)
 	if err != nil {
@@ -517,12 +595,28 @@ func (s *Server) setProductDesign(c *gin.Context) {
 		return
 	}
 
+	// Checked once for the whole product: every variant is about to be pointed
+	// at the same file.
+	if key != "" && !s.templateExists(ctx, key) {
+		detail(c, http.StatusUnprocessableEntity,
+			"There is no design file called "+key+". Upload it on the Designs tab first.")
+		return
+	}
+
 	err = s.store.InTx(ctx, func(q *gen.Queries) error {
 		for _, v := range variants {
+			// Superseded either way, so the row that printed past orders stays
+			// readable - the reason these are retired rather than deleted.
 			if err := q.SupersedeVariantDesign(ctx, gen.SupersedeVariantDesignParams{
 				VariantID: v.ID, Role: req.Role,
 			}); err != nil {
 				return err
+			}
+			if key == "" {
+				// NOTHING PRINTS IT NOW. No replacement row: an active design
+				// naming no file is a state the table's own CHECK forbids,
+				// and "no row" is already how an unconfigured product reads.
+				continue
 			}
 			if _, err := q.InsertVariantDesign(ctx, gen.InsertVariantDesignParams{
 				ID: uuid.New(), VariantID: v.ID, Role: req.Role,

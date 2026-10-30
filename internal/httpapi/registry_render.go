@@ -131,7 +131,14 @@ func (s *Server) resolveRenderPlan(
 	// thing that makes a file per child SKU impossible, and it fails the worst
 	// way available: the product stops rendering and says only that it "names
 	// no template", which is the same message as having uploaded nothing.
-	template, ok := s.templateForVariant(ctx, product.ID, sku, role)
+	// AND THE COLOURWAY THEY CHOSE, not the one on the order line. For a
+	// product whose child SKUs are separate self-colouring files, the file is
+	// the colour - so a customer who changed their mind on the link and had
+	// the file resolved from the SKU they bought would be sent the colour
+	// they rejected. See skuForColourway.
+	fileSKU := s.skuForColourway(ctx, product.ID, sku, job)
+
+	template, ok := s.templateForVariant(ctx, product.ID, fileSKU, role)
 	if !ok {
 		// Half-configured: a product with a mapping and no template cannot
 		// render, and a product with neither is simply not this system's yet.
@@ -142,7 +149,7 @@ func (s *Server) resolveRenderPlan(
 	// This VARIANT's mapping, falling back to the product's - the same rule
 	// that chose the file above, so a child SKU with its own drawing may name
 	// the customer's text whatever that drawing calls it.
-	rows := s.fieldMapsFor(ctx, product.ID, sku, role)
+	rows := s.fieldMapsFor(ctx, product.ID, fileSKU, role)
 	if len(rows) == 0 {
 		return renderPlan{}, fmt.Errorf(
 			"%w: %s maps no fields for %s", errNoRegistryPlan, product.Code, role)
@@ -218,11 +225,24 @@ func (s *Server) registryRendersSKU(ctx context.Context, sku string) bool {
 	if err != nil {
 		return false
 	}
-	if len(s.designRolesForProduct(ctx, product.ID)) == 0 {
+	roles := s.designRolesForProduct(ctx, product.ID)
+	if len(roles) == 0 {
 		return false
 	}
-	rows, err := s.store.Q.ListAllProductFieldMaps(ctx, product.ID)
-	return err == nil && len(rows) > 0
+	// ASKED PER ROLE, THROUGH THE SKU. fieldMapsFor resolves this SKU's own
+	// mapping first and the product's second, so a product configured
+	// entirely through per-SKU overrides answers yes - which one read of the
+	// product's own rows cannot do, and answering no there means job creation
+	// routes a paid order to the plank path and makes no job at all.
+	//
+	// One query per role, on a path walked once per order line. The N+1
+	// warning below is about list pages, which ask this per row.
+	for _, role := range roles {
+		if len(s.fieldMapsFor(ctx, product.ID, sku, role)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // designRoleBody is the design file a product has when it has only one.

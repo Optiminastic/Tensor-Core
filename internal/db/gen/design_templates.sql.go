@@ -12,6 +12,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearSelfColouredTemplate = `-- name: ClearSelfColouredTemplate :exec
+DELETE FROM design_template_self_colour
+WHERE template_key = lower($1::text)
+`
+
+func (q *Queries) ClearSelfColouredTemplate(ctx context.Context, templateKey string) error {
+	_, err := q.db.Exec(ctx, clearSelfColouredTemplate, templateKey)
+	return err
+}
+
 const clearTemplateSection = `-- name: ClearTemplateSection :exec
 DELETE FROM design_template_sections
 WHERE template_key = lower($1::text)
@@ -106,6 +116,22 @@ func (q *Queries) InsertTemplate(ctx context.Context, arg InsertTemplateParams) 
 	return i, err
 }
 
+const isSelfColouredTemplate = `-- name: IsSelfColouredTemplate :one
+SELECT EXISTS (
+    SELECT 1 FROM design_template_self_colour
+    WHERE template_key = lower($1::text)
+) AS self_coloured
+`
+
+// Whether one file states its own colours. Asked on the render path, so it is
+// a single indexed lookup rather than a join.
+func (q *Queries) IsSelfColouredTemplate(ctx context.Context, templateKey string) (bool, error) {
+	row := q.db.QueryRow(ctx, isSelfColouredTemplate, templateKey)
+	var self_coloured bool
+	err := row.Scan(&self_coloured)
+	return self_coloured, err
+}
+
 const listActiveTemplates = `-- name: ListActiveTemplates :many
 SELECT t.id, t.template_key, t.file_id, t.version, t.status, t.uploaded_by, t.notes, t.created_at, f.storage_key, f.filename, f.size_bytes
 FROM design_templates t
@@ -194,6 +220,32 @@ func (q *Queries) ListProductsUsingTemplate(ctx context.Context, templateKey str
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSelfColouredTemplates = `-- name: ListSelfColouredTemplates :many
+SELECT template_key FROM design_template_self_colour
+`
+
+// Every file that states its own colours. A handful of rows; read whole, so
+// the Designs tab stays one query.
+func (q *Queries) ListSelfColouredTemplates(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listSelfColouredTemplates)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var template_key string
+		if err := rows.Scan(&template_key); err != nil {
+			return nil, err
+		}
+		items = append(items, template_key)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -323,6 +375,23 @@ func (q *Queries) RetireTemplate(ctx context.Context, templateKey string) (int64
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setSelfColouredTemplate = `-- name: SetSelfColouredTemplate :exec
+INSERT INTO design_template_self_colour (template_key, updated_by, updated_at)
+VALUES (lower($1::text), $2, now())
+ON CONFLICT (template_key) DO UPDATE
+SET updated_by = EXCLUDED.updated_by, updated_at = now()
+`
+
+type SetSelfColouredTemplateParams struct {
+	TemplateKey string
+	UpdatedBy   string
+}
+
+func (q *Queries) SetSelfColouredTemplate(ctx context.Context, arg SetSelfColouredTemplateParams) error {
+	_, err := q.db.Exec(ctx, setSelfColouredTemplate, arg.TemplateKey, arg.UpdatedBy)
+	return err
 }
 
 const setTemplateSection = `-- name: SetTemplateSection :exec

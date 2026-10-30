@@ -182,7 +182,11 @@ func (w *PersonalisationLinkWorker) send(ctx context.Context, orderID uuid.UUID)
 	}
 
 	messenger := w.server.whatsappFor(ctx, slug)
-	if !messenger.Configured() {
+	// CHECKED ONLY WHEN SOMETHING IS BEING DELIVERED. With delivery off the
+	// link is minted and nobody is messaged, so a brand with no WhatsApp
+	// connected is not a reason to release the order - and releasing it would
+	// take away the very page this mode exists to let somebody open.
+	if w.server.cfg.PersonalisationSendEnabled && !messenger.Configured() {
 		w.logger.Info("personalisation: not asking",
 			"brand", slug, "order", order.OrderNumber,
 			"reason", "WhatsApp is not connected for this brand")
@@ -262,7 +266,33 @@ func (s *Server) personalisationEligible(
 		}
 	}
 
-	// 5. The product's own switch. A SKU may be configured not to ask at all -
+	// 5. THE CUSTOMER HAS ALREADY HAD THEIR SAY.
+	//
+	// A confirmed or expired link means this order's window is over, and
+	// nothing should re-open it. Without this rule it was re-opened routinely:
+	// every finished render calls the sender, a combo renders three times and
+	// a colour change on the link renders again - so a render landing AFTER
+	// the confirm sent a second link, and sending HOLDS the order's jobs.
+	//
+	// Measured on T3DPS-990102: confirmed at 16:03:19, a render in flight
+	// finished at 16:03:20, the link was sent again, and the job went from
+	// validated straight back to awaiting_customer and off its bed. The
+	// customer had finished; the order waited for a window that had already
+	// closed, for another thirty minutes.
+	//
+	// Read by the RENDERER too, through personalisationWillAsk, so the same
+	// rule also stops it withholding the print file from a job whose customer
+	// is done - which is the other half of the same stall.
+	if link, err := s.store.Q.GetPersonalisationLinkByOrder(ctx, order.ID); err == nil {
+		switch strings.ToLower(strings.TrimSpace(link.Status)) {
+		case "confirmed":
+			return "", "this customer has already confirmed"
+		case "expired":
+			return "", "this customer's window has already closed"
+		}
+	}
+
+	// 6. The product's own switch. A SKU may be configured not to ask at all -
 	//    a design that cannot change after it is bought, or one whose preview
 	//    is not ready - and then there is nothing to interrupt the customer
 	//    for. One enabled SKU on the order is enough, because an order is the
@@ -381,6 +411,23 @@ func (w *PersonalisationLinkWorker) ask(
 			"order", order.OrderNumber, "error", err)
 	}
 
+	// MINTED, AND DELIVERED TO NOBODY.
+	//
+	// Settled as "sent" because that is the state every rule downstream reads
+	// - the window sweep, the customer's Confirm, the orders page - and a
+	// sixth status would have to be taught to all of them to mean the same
+	// thing. What actually happened is in the detail, which is the column for
+	// saying so, and no message id is recorded because there is no message.
+	if !w.server.cfg.PersonalisationSendEnabled {
+		w.logger.Warn("personalisation: link minted, NOBODY was messaged",
+			"brand", slug, "order", order.OrderNumber)
+		w.settleSent(ctx, claim.ID, "",
+			"link minted but not delivered: PERSONALISATION_SEND_ENABLED is false",
+			frozenMessage{})
+		w.holdTheRest(ctx, slug, order)
+		return nil
+	}
+
 	result, sendErr := messenger.SendTemplate(ctx, whatsapp.TemplateMessage{
 		To:   phone,
 		Name: w.server.cfg.PersonalisationTemplate,
@@ -422,35 +469,47 @@ func (w *PersonalisationLinkWorker) ask(
 	}
 	w.settleSent(ctx, claim.ID, result.MessageID, detail, w.frozen(ctx, order, messenger))
 
-	// THE REST OF THE ORDER IS HELD TOO, now that there is a live link.
-	//
-	// The renderer holds what it renders. It cannot hold what it never
-	// renders - a Bone Tag, a DUOSNAP, a Couple's Date Plank - so those jobs
-	// reached the customer's page with every field locked, the edit path
-	// being guarded on awaiting_customer. They are the items with nothing BUT
-	// fields to check, so a page that cannot change them is no check at all.
-	//
-	// Here rather than at job creation, which is what keeps the invariant the
-	// hold rests on: a job is only ever held while a link is live. This runs
-	// after the message is away, so every job it holds has one, and both the
-	// expiry sweep and the customer's own Confirm release the whole order.
-	if held, err := w.server.store.Q.HoldOrderPersonalisationForCustomer(ctx, &order.ID); err != nil {
-		// Not fatal, and deliberately not a release: the link is sent and the
-		// rendered jobs are held correctly. This only costs the customer the
-		// ability to correct the items nobody renders.
-		w.logger.Warn("personalisation: could not hold the rest of the order",
-			"brand", slug, "order", order.OrderNumber, "error", err)
-	} else if len(held) > 0 {
-		w.logger.Info("personalisation: holding the order's unrendered items too",
-			"brand", slug, "order", order.OrderNumber, "jobs", len(held))
-		w.server.replateBedsLeftBy(ctx, held)
-	}
+	w.holdTheRest(ctx, slug, order)
 
 	// The customer's number is NOT logged. The order number finds them.
 	w.logger.Info("personalisation link sent",
 		"brand", slug, "order", order.OrderNumber,
 		"message", result.MessageID, "expires_in", window.String())
 	return nil
+}
+
+// holdTheRest holds the items of this order that nobody renders.
+//
+// The renderer holds what it renders. It cannot hold what it never renders -
+// a Bone Tag, a DUOSNAP, a Couple's Date Plank - so those jobs reached the
+// customer's page with every field locked, the edit path being guarded on
+// awaiting_customer. They are the items with nothing BUT fields to check, so
+// a page that cannot change them is no check at all.
+//
+// Called once the link exists rather than at job creation, which is what
+// keeps the invariant the hold rests on: a job is only ever held while a link
+// is live. Both the expiry sweep and the customer's own Confirm release the
+// whole order.
+//
+// Not fatal, and deliberately not a release: the link is live and the
+// rendered jobs are held correctly. A failure here costs the customer the
+// ability to correct the items nobody renders, which is a worse page rather
+// than a wrong product.
+func (w *PersonalisationLinkWorker) holdTheRest(
+	ctx context.Context, slug string, order gen.Order,
+) {
+	held, err := w.server.store.Q.HoldOrderPersonalisationForCustomer(ctx, &order.ID)
+	if err != nil {
+		w.logger.Warn("personalisation: could not hold the rest of the order",
+			"brand", slug, "order", order.OrderNumber, "error", err)
+		return
+	}
+	if len(held) == 0 {
+		return
+	}
+	w.logger.Info("personalisation: holding the order's unrendered items too",
+		"brand", slug, "order", order.OrderNumber, "jobs", len(held))
+	w.server.replateBedsLeftBy(ctx, held)
 }
 
 // frozenMessage is what was said, captured at the moment it was said.

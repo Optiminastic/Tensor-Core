@@ -3878,6 +3878,68 @@ func (q *Queries) SetProductionJobStatus(ctx context.Context, arg SetProductionJ
 	return i, err
 }
 
+const summariseJobRendersForSKUs = `-- name: SummariseJobRendersForSKUs :many
+SELECT lower(j.sku)::text AS sku,
+       count(*) FILTER (WHERE j.model_render_queued_at IS NOT NULL)::bigint AS rendering,
+       count(*) FILTER (WHERE j.model_render_queued_at IS NULL
+                          AND j.print_file_id IS NULL
+                          AND btrim(coalesce(j.model_error, '')) <> '')::bigint AS failed,
+       ((array_agg(j.model_error ORDER BY j.updated_at DESC)
+          FILTER (WHERE btrim(coalesce(j.model_error, '')) <> ''))[1])::text AS last_error
+FROM production_jobs j
+WHERE j.sku IS NOT NULL
+  AND lower(j.sku) = ANY ($1::text[])
+GROUP BY lower(j.sku)
+`
+
+type SummariseJobRendersForSKUsRow struct {
+	Sku       string
+	Rendering int64
+	Failed    int64
+	LastError string
+}
+
+// How many of each SKU's jobs are mid-render, and how many stopped.
+//
+// The readiness panel says whether a SKU is CONFIGURED; this is the other
+// half - whether anything configured is actually moving. Without it a shop
+// that has just set a product up has no way to see the first order through
+// except by watching the production queue.
+//
+// THE THREE EXPRESSIONS MIRROR modelStatusOf's BRANCH ORDER exactly:
+// model_render_queued_at first, then an attached file, then an error. If this
+// ever disagrees with that function, the readiness panel and the queue pill
+// describe the same job differently - which is worse than neither of them
+// saying anything.
+//
+// Grouped on lower(sku) because an order's SKU arrives however the storefront
+// wrote it; ix_production_jobs_sku_lower from migration 0135 is what keeps
+// that affordable on the largest table in the schema.
+func (q *Queries) SummariseJobRendersForSKUs(ctx context.Context, skus []string) ([]SummariseJobRendersForSKUsRow, error) {
+	rows, err := q.db.Query(ctx, summariseJobRendersForSKUs, skus)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SummariseJobRendersForSKUsRow{}
+	for rows.Next() {
+		var i SummariseJobRendersForSKUsRow
+		if err := rows.Scan(
+			&i.Sku,
+			&i.Rendering,
+			&i.Failed,
+			&i.LastError,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const unassignJobsFromBatches = `-- name: UnassignJobsFromBatches :exec
 UPDATE production_jobs SET batch_id = NULL, updated_at = now()
 WHERE batch_id = ANY($1::uuid[])

@@ -208,7 +208,7 @@ func (s *Server) colourGatesTheBed() bool {
 // complement of ListBatchableJobs - so this reads as the same answer the
 // planner would give. Wording comes from production's Reason* constants so the
 // two never drift into saying the same thing differently.
-func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed bool) *string {
+func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed, generated bool) *string {
 	if j.Status != production.StatusQueued || j.BatchID != nil {
 		return nil
 	}
@@ -217,7 +217,7 @@ func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed bool) *string 
 	// puts every plank in the queue under a red warning for the twenty seconds
 	// its own render takes - which teaches an operator that red means nothing.
 	// The "Creating" pill already says where it is.
-	if modelStatusOf(j) == ModelGenerating {
+	if modelStatusOf(j, generated) == ModelGenerating {
 		return nil
 	}
 
@@ -249,7 +249,7 @@ func batchingBlockedReason(j gen.ProductionJob, colourGatesTheBed bool) *string 
 	// here". The operator's move is identical in every case and does not
 	// depend on which of the three the importer happened to write, so the
 	// queue asks for the file instead of reporting on the design tables.
-	if modelStatusOf(j) == ModelApprovalRequired && j.IssueReason != nil && !j.Held &&
+	if modelStatusOf(j, generated) == ModelApprovalRequired && j.IssueReason != nil && !j.Held &&
 		noModelIssues[*j.IssueReason] {
 		reason := UploadDesignFileWording
 		return &reason
@@ -309,7 +309,31 @@ func humanReason(reason string) string {
 // are the two bits of cross-table state PipelineStage needs beyond the job
 // row itself - resolved by the caller (singleJobDTO for one job,
 // productionJobsDTO's bulk lookups for a list), never re-queried here.
-func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colourGatesTheBed bool) productionJobResponse {
+// jobFacts is the cross-table state productionJobDTO cannot work out from the
+// job row, resolved by the caller: singleJobDTO for one job, productionJobsDTO's
+// bulk lookups for a list.
+//
+// A STRUCT RATHER THAN THREE MORE BOOLEANS. Dispatched, ColourGatesTheBed and
+// Generated are all bare bools of the same type sitting next to each other, and
+// two call sites passing them positionally is how one silently ends up in
+// another's place - a job reported as generated because an order was dispatched.
+type jobFacts struct {
+	BatchStatus       *string
+	Dispatched        bool
+	ColourGatesTheBed bool
+	// Generated is whether Tensor builds this product's model itself, RESOLVED
+	// BY THE CALLER through rendersProduct - which reads the registry.
+	//
+	// It used to be re-derived here from the hardcoded IsGeneratedProduct list,
+	// which has no database and so cannot know about a product configured in
+	// the registry. A PWDH job mid-render therefore reported "approval
+	// required", and the queue offered an Upload button for a model Tensor was
+	// in the middle of building.
+	Generated bool
+}
+
+func productionJobDTO(j gen.ProductionJob, view jobFacts) productionJobResponse {
+	batchStatus, dispatched, colourGatesTheBed := view.BatchStatus, view.Dispatched, view.ColourGatesTheBed
 	confirms := production.Confirms{
 		Name: j.NameConfirmed, Photo: j.PhotoConfirmed, Font: j.FontConfirmed,
 		Colour: j.ColourConfirmed, Variant: j.VariantConfirmed, Approval: j.CustomerApprovalReceived,
@@ -325,7 +349,7 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		Held: j.Held, IssueReason: j.IssueReason, BatchStatus: batchStatus, Dispatched: dispatched,
 	})
 	return productionJobResponse{
-		BatchingBlockedReason:  batchingBlockedReason(j, colourGatesTheBed),
+		BatchingBlockedReason:  batchingBlockedReason(j, colourGatesTheBed, view.Generated),
 		PersonalisationChanged: changed,
 		ID:                     j.ID.String(), JobNumber: j.JobNumber, OrderID: uuidPtrStr(j.OrderID),
 		BatchID: uuidPtrStr(j.BatchID), Description: j.Description, Quantity: j.Quantity,
@@ -335,9 +359,9 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 		ShopifyCustomerID: j.ShopifyCustomerID, CustomerName: j.CustomerName, Sku: j.Sku,
 		ProductName: j.ProductName, Material: j.Material, Colour: j.Colour, NozzleProfile: j.NozzleProfile,
 		FilamentGramsRequired: db.NumFloatPtr(j.FilamentGramsRequired), PrintFileID: uuidPtrStr(j.PrintFileID),
-		ModelStatus:               modelStatusOf(j),
-		IsGenerated:               IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)),
-		ModelError:                reportableModelError(j),
+		ModelStatus:               modelStatusOf(j, view.Generated),
+		IsGenerated:               view.Generated,
+		ModelError:                reportableModelError(j, view.Generated),
 		VariantTitle:              j.VariantTitle,
 		PartRole:                  j.PartRole,
 		PersonalisationProperties: rawJSON(j.PersonalisationProperties, "[]"),
@@ -363,6 +387,28 @@ func productionJobDTO(j gen.ProductionJob, batchStatus *string, dispatched, colo
 	}
 }
 
+// generatedByProduct answers "does Tensor build this?" once per DISTINCT
+// product across a list of jobs.
+//
+// rendersProduct reads the registry - two to four queries - and the production
+// queue runs to hundreds of jobs over a handful of products, so asking per row
+// is the N+1 its own note warns about. An order's items repeat the same SKU,
+// so the distinct set is small. Keyed exactly as nonGeneratedKeys keys it, so
+// the queue and the jobs table cannot disagree about one job.
+func (s *Server) generatedByProduct(
+	ctx context.Context, rows []gen.ProductionJob,
+) map[string]bool {
+	out := make(map[string]bool, len(rows))
+	for _, j := range rows {
+		key := generatedKey(deref(j.Sku), deref(j.ProductName))
+		if _, known := out[key]; known {
+			continue
+		}
+		out[key] = s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName))
+	}
+	return out
+}
+
 // singleJobDTO is productionJobDTO for the single-job endpoints: it resolves
 // the job's batch status and order dispatch state itself, best-effort - a
 // lookup failure degrades to the unbatched/not-dispatched branch rather than
@@ -381,7 +427,11 @@ func (s *Server) singleJobDTO(ctx context.Context, j gen.ProductionJob) producti
 			dispatched = true
 		}
 	}
-	return productionJobDTO(j, batchStatus, dispatched, s.colourGatesTheBed())
+	return productionJobDTO(j, jobFacts{
+		BatchStatus: batchStatus, Dispatched: dispatched,
+		ColourGatesTheBed: s.colourGatesTheBed(),
+		Generated:         s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)),
+	})
 }
 
 // productionJobsDTO is productionJobDTO for a list of jobs: two bulk lookups
@@ -418,6 +468,10 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 	}
 
 	colourGates := s.colourGatesTheBed()
+	// ONE RESOLUTION PER DISTINCT PRODUCT, not per row. rendersProduct is two
+	// to four queries and this list runs to hundreds of jobs over a handful of
+	// products - the same memo design_jobs.go uses for the same reason.
+	generated := s.generatedByProduct(ctx, rows)
 	out := make([]productionJobResponse, 0, len(rows))
 	for _, j := range rows {
 		var batchStatus *string
@@ -427,7 +481,10 @@ func (s *Server) productionJobsDTO(ctx context.Context, rows []gen.ProductionJob
 			}
 		}
 		dispatched := j.OrderID != nil && dispatchedOrderIDs[*j.OrderID]
-		dto := productionJobDTO(j, batchStatus, dispatched, colourGates)
+		dto := productionJobDTO(j, jobFacts{
+			BatchStatus: batchStatus, Dispatched: dispatched, ColourGatesTheBed: colourGates,
+			Generated: generated[generatedKey(deref(j.Sku), deref(j.ProductName))],
+		})
 		if j.BatchID != nil {
 			// Non-empty as well as present: an empty number would draw an
 			// empty chip on the row, which reads as a bed with no name
@@ -1108,6 +1165,15 @@ const (
 	// supply the model, and supplying it IS the approval: attaching a file is
 	// what releases the job into batching.
 	ModelApprovalRequired = "approval_required"
+	// ModelAwaitingCustomer - Tensor builds this and is deliberately NOT
+	// building it yet, because the customer still has a say.
+	//
+	// It read as "Creating" before, which is a claim that work is happening:
+	// an operator watched a job say it was being built for the whole
+	// thirty-minute window and reasonably concluded something had jammed. The
+	// Personalisation column said awaiting_customer beside it, so the screen
+	// contradicted itself and the louder half was wrong.
+	ModelAwaitingCustomer = "awaiting_customer"
 )
 
 // findProductionJob resolves a job by either identifier.
@@ -1130,7 +1196,7 @@ func (s *Server) findProductionJob(ctx context.Context, ref string) (gen.Product
 
 // modelStatusOf reports whether a job can be printed, and if not, who is
 // waiting on whom.
-func modelStatusOf(j gen.ProductionJob) string {
+func modelStatusOf(j gen.ProductionJob, generated bool) string {
 	// A REBUILD IN FLIGHT OUTRANKS HAVING A FILE, and this has to be the first
 	// branch. A job being re-rendered does have a model; it is the wrong one,
 	// and until this said so nothing could tell a settled model from one about
@@ -1145,13 +1211,24 @@ func modelStatusOf(j gen.ProductionJob) string {
 	// for any sibling still holding its OLD file - so a four-plank bed
 	// re-plated on the first render to land and baked in three models that
 	// were about to change, the exact failure its own comment says it prevents.
+	// A render in flight still outranks this: the branch below is about a job
+	// nobody is rendering, and ModelRenderQueuedAt means somebody is.
 	if j.ModelRenderQueuedAt.Valid {
 		return ModelGenerating
 	}
 	if j.PrintFileID != nil {
 		return ModelReady
 	}
-	if IsGeneratedProduct(deref(j.Sku), deref(j.ProductName)) {
+	// HELD FOR ITS CUSTOMER, which is not the same as being built.
+	//
+	// Third, so a render actually running and an attached model both still
+	// outrank it - a job mid-rebuild is being worked on whatever its
+	// personalisation status says.
+	if generated && j.PersonalisationStatus == production.PersonalisationAwaitingCustomer {
+		return ModelAwaitingCustomer
+	}
+
+	if generated {
 		// Checked before "generating": a failed render is still a render that
 		// has not landed, and reporting it as in-progress would leave the job
 		// looking busy for ever.
@@ -1173,8 +1250,8 @@ func modelStatusOf(j gen.ProductionJob) string {
 // unactionable: the remedy is to upload a model, and the queue already offers
 // that. This is the contract ModelError's own doc comment states - null unless
 // the status is "failed" - which the DTO previously did not keep.
-func reportableModelError(j gen.ProductionJob) *string {
-	if modelStatusOf(j) != ModelFailed {
+func reportableModelError(j gen.ProductionJob, generated bool) *string {
+	if modelStatusOf(j, generated) != ModelFailed {
 		return nil
 	}
 	return j.ModelError

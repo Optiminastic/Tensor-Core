@@ -66,12 +66,26 @@ func (s *Server) renderPreviewModel(
 		// mean this job renders the way it rendered yesterday.
 		return nil, nil
 	}
-	template, ok := s.previewTemplateFor(ctx, product.ID, sku)
+	template, ok := s.previewTemplateFor(ctx, product.ID, sku, job)
 	if !ok {
 		return nil, nil
 	}
 
 	parts := s.previewColourParts(ctx, product.ID, sku, job)
+	// THE FILE'S OWN PIECES, when it states them - before the refusal below.
+	//
+	// A flagged file names its pieces and paints them in its own source, so
+	// nothing is configured for it by design. Asked after the registry so an
+	// existing scheme is what gets used while a shop is mid-migration, and
+	// before the error so a correctly flagged file is not refused for having
+	// exactly the configuration it was flagged to avoid.
+	//
+	// That error matters more than it looks: it is returned to
+	// renderColouredPlank, which fails the WHOLE job - the printed model
+	// included - over a picture.
+	if len(parts) == 0 {
+		parts = s.selfColouredParts(ctx, template)
+	}
 	if len(parts) == 0 {
 		// A template with no pieces cannot be rendered: the renderer asks for
 		// a PART by name and there is no name to ask for. Refused rather than
@@ -79,7 +93,8 @@ func (s *Server) renderPreviewModel(
 		// otherwise never learn it is doing nothing.
 		return nil, fmt.Errorf(
 			"%s names a personalisation preview file (%s) but no pieces for it - "+
-				"add its pieces and their colours in the registry", product.Code, template)
+				"add its pieces and their colours in the registry, or mark the file as "+
+				"stating its own colours", product.Code, template)
 	}
 
 	// WHICH VARIABLES THIS FILE IS DRIVEN BY.
@@ -173,11 +188,21 @@ func (s *Server) previewArgs(
 	return args, true
 }
 
-// previewTemplateFor is the assembled file for THIS variant, or the product's.
+// previewTemplateFor is the assembled file for the colourway this job will be
+// made in, or the product's.
+//
+// THE COLOUR THEY CHOSE, NOT THE ONE THEY BOUGHT, exactly as
+// previewColourParts resolves the palette and as the printed model resolves
+// its own file. A Royal holder's colourways are separate files, each already
+// in its own colours, so looking the file up by the SKU on the order line
+// showed a customer who picked red the purple holder they had just changed
+// their mind about - and said underneath that this is exactly how it will be
+// made.
 func (s *Server) previewTemplateFor(
-	ctx context.Context, productID uuid.UUID, sku string,
+	ctx context.Context, productID uuid.UUID, sku string, job gen.ProductionJob,
 ) (string, bool) {
-	return s.templateForVariant(ctx, productID, sku, designRolePreview)
+	return s.templateForVariant(ctx, productID,
+		s.skuForColourway(ctx, productID, sku, job), designRolePreview)
 }
 
 // templateForVariant is the design file one SKU uses for one role.
@@ -276,7 +301,22 @@ func (s *Server) withDeclaredColours(
 	if err != nil || len(source) == 0 {
 		return parts
 	}
-	declared := personalise.PartColours(source)
+	// NAMES AS WELL AS HEXES, the same as selfColouredParts reads them.
+	//
+	// This read PartColours, which keeps only well-formed "#RRGGBB", while
+	// the sibling path that builds a flagged file's print scheme reads
+	// PartColourValues and resolves a name against the shelf. So one file was
+	// being read two ways: the Royal holder declares background_color =
+	// "purple" beside text_color = "#FFBF00", and the picture kept the gold
+	// and dropped the purple - a holder drawn entirely in its text colour.
+	// The Lotus is worse: every one of its colours is a name, so the picture
+	// took none of them and the flag appeared to do nothing at all.
+	//
+	// PER PIECE, where selfColouredParts is all-or-nothing. That difference
+	// is deliberate and stays: a print scheme missing a piece prints a product
+	// missing it, while a picture missing one is a picture with one piece
+	// still in the colour the registry chose.
+	declared := personalise.PartColourValues(source)
 	if len(declared) == 0 {
 		return parts
 	}
@@ -286,7 +326,11 @@ func (s *Server) withDeclaredColours(
 		if out[i].FollowsCustomer() {
 			continue
 		}
-		if hex, ok := declared[strings.ToLower(strings.TrimSpace(out[i].Name))]; ok {
+		written, ok := declared[strings.ToLower(strings.TrimSpace(out[i].Name))]
+		if !ok {
+			continue
+		}
+		if hex, ok := s.declaredColourHex(ctx, written); ok {
 			out[i].Hex = hex
 		}
 	}

@@ -313,6 +313,22 @@ type Settings struct {
 	// orders are real people's. This one is the right gate: the blast radius
 	// is one phone, and it is the tester's own.
 	PersonalisationTestRecipient string
+	// PersonalisationSendEnabled false MINTS THE LINK AND MESSAGES NOBODY.
+	//
+	// The strictest rung of the same ladder: ONLY narrows which orders are
+	// considered, TEST_RECIPIENT narrows who is reached to one phone, and this
+	// narrows it to none. The order is still held for its window and the link
+	// still appears on the orders page for somebody to open, so the page
+	// itself - the preview, the colours, the fields - can be checked without a
+	// phone buzzing for every seeded order.
+	//
+	// NOT the same as switching the check off. PERSONALISATION_CHECK_ENABLED
+	// false releases the order to the floor unasked, which is the opposite of
+	// what somebody testing the page wants; every other refusal does the same,
+	// because an order held for a link that is not coming would never be
+	// released. This one keeps the hold precisely because the link IS coming -
+	// by hand, from the orders page.
+	PersonalisationSendEnabled bool
 	// PersonalisationTemplate is the approved WhatsApp template carrying the
 	// link. SEPARATE from the win-back template: this one is a utility
 	// message about an order the customer has already paid for, and
@@ -805,6 +821,7 @@ func Load() Settings {
 		PersonalisationOnly:              csvEnv("PERSONALISATION_ONLY"),
 		PersonalisationTemplate:          envOr("PERSONALISATION_TEMPLATE_NAME", ""),
 		PersonalisationTestRecipient:     envOr("PERSONALISATION_TEST_RECIPIENT", ""),
+		PersonalisationSendEnabled:       boolEnvOr("PERSONALISATION_SEND_ENABLED", true),
 		PersonalisationColours: csvEnvOr("PERSONALISATION_COLOURS",
 			[]string{"PINK", "BLUE", "BLACK", "GOLD", "YELLOW", "GREEN", "RED", "WHITE"}),
 		WinbackLinkHost:           envOr("WINBACK_LINK_HOST", ""),

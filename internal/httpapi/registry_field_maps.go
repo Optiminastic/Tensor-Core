@@ -108,6 +108,9 @@ func (s *Server) registerRegistryFieldMaps(g *gin.RouterGroup, read, manage gin.
 	g.GET("/products/:code/field-maps", read, s.listProductFieldMaps)
 	g.PUT("/products/:code/field-maps", manage, s.putProductFieldMaps)
 	g.GET("/products/:code/observed-properties", read, s.observedProperties)
+	// One SKU's override of the mapping above - see
+	// registry_variant_field_maps.go.
+	s.registerVariantFieldMaps(g, read, manage)
 	// What this product prints, file by file. One entry for a product that
 	// prints one thing, three for a combo.
 	g.GET("/products/:code/parts", read, s.listProductParts)
@@ -151,6 +154,81 @@ type fieldMapEntry struct {
 	maxRunes *int32
 }
 
+// validateFieldMapEntries turns a request into rows, or refuses it.
+//
+// SHARED BY BOTH WRITERS - the product's mapping and a SKU's override. These
+// five refusals are the whole of what makes a saved mapping renderable, and
+// two copies of them is two sets that drift: the day one route learns that a
+// default on a required field can never be reached and the other does not,
+// the registry has a rule that depends on which screen you used.
+//
+// Reports and returns false rather than erroring, because every refusal names
+// the variable it is about and the caller has nothing to add.
+func validateFieldMapEntries(c *gin.Context, req fieldMapWriteRequest) ([]fieldMapEntry, bool) {
+	entries := make([]fieldMapEntry, 0, len(req.Maps))
+	seen := map[string]bool{}
+	for _, m := range req.Maps {
+		// Normalised on the way in, never on the way out: the mapping is
+		// matched against what the importer stored, and storing the raw label
+		// would mean normalising it on every render instead - and getting it
+		// wrong once silently.
+		key := personalise.NormaliseKey(m.PropertyKey)
+		variable := strings.TrimSpace(m.ScadVariable)
+		fixed := strings.TrimSpace(m.FixedValue)
+		if variable == "" {
+			detail(c, http.StatusUnprocessableEntity,
+				"Every row needs the variable it fills.")
+			return nil, false
+		}
+		// One source or the other. A row naming neither leaves the variable
+		// unset, which OpenSCAD accepts in silence.
+		if key == "" && fixed == "" {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s has nothing to fill it - choose an order field, or give it a "+
+					"fixed value.", variable))
+			return nil, false
+		}
+		// Caught here rather than by the unique index, so the message says
+		// which variable rather than being a constraint violation.
+		if seen[strings.ToLower(variable)] {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s is mapped twice. OpenSCAD takes the last -D on the command line, "+
+					"so two rows for one variable would make the model depend on the order they were saved in.",
+				variable))
+			return nil, false
+		}
+		seen[strings.ToLower(variable)] = true
+		// A default on a REQUIRED field can never be reached - a required
+		// field that is unanswered holds the job - so it is refused rather
+		// than saved somewhere it will quietly do nothing.
+		deflt := strings.TrimSpace(m.DefaultValue)
+		if deflt != "" && !m.Optional {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s has a default but is required. A required field that the order "+
+					"does not answer holds the job, so the default would never be used. "+
+					"Mark it optional, or drop the default.", variable))
+			return nil, false
+		}
+		// A limit on a field whose value never comes from the order is a limit
+		// on nothing: fixed_value is written by this page, not typed by a
+		// customer, so the personalisation form has no box to enforce it in.
+		if m.MaxRunes != nil && fixed != "" {
+			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
+				"%s carries a fixed value, so no customer types into it and a "+
+					"character limit would never be applied. Drop the limit, or "+
+					"let the order fill it.", variable))
+			return nil, false
+		}
+		entries = append(entries, fieldMapEntry{
+			key: key, variable: variable, valueType: m.ValueType,
+			required: !m.Optional, fixed: fixed, deflt: deflt,
+			maxRunes: m.MaxRunes,
+		})
+	}
+
+	return entries, true
+}
+
 // putProductFieldMaps replaces a product's whole mapping.
 func (s *Server) putProductFieldMaps(c *gin.Context) {
 	product, ok := s.productByCode(c)
@@ -165,65 +243,9 @@ func (s *Server) putProductFieldMaps(c *gin.Context) {
 	}
 	role := roleParam(c)
 
-	entries := make([]fieldMapEntry, 0, len(req.Maps))
-	seen := map[string]bool{}
-	for _, m := range req.Maps {
-		// Normalised on the way in, never on the way out: the mapping is
-		// matched against what the importer stored, and storing the raw label
-		// would mean normalising it on every render instead - and getting it
-		// wrong once silently.
-		key := personalise.NormaliseKey(m.PropertyKey)
-		variable := strings.TrimSpace(m.ScadVariable)
-		fixed := strings.TrimSpace(m.FixedValue)
-		if variable == "" {
-			detail(c, http.StatusUnprocessableEntity,
-				"Every row needs the variable it fills.")
-			return
-		}
-		// One source or the other. A row naming neither leaves the variable
-		// unset, which OpenSCAD accepts in silence.
-		if key == "" && fixed == "" {
-			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
-				"%s has nothing to fill it - choose an order field, or give it a "+
-					"fixed value.", variable))
-			return
-		}
-		// Caught here rather than by the unique index, so the message says
-		// which variable rather than being a constraint violation.
-		if seen[strings.ToLower(variable)] {
-			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
-				"%s is mapped twice. OpenSCAD takes the last -D on the command line, "+
-					"so two rows for one variable would make the model depend on the order they were saved in.",
-				variable))
-			return
-		}
-		seen[strings.ToLower(variable)] = true
-		// A default on a REQUIRED field can never be reached - a required
-		// field that is unanswered holds the job - so it is refused rather
-		// than saved somewhere it will quietly do nothing.
-		deflt := strings.TrimSpace(m.DefaultValue)
-		if deflt != "" && !m.Optional {
-			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
-				"%s has a default but is required. A required field that the order "+
-					"does not answer holds the job, so the default would never be used. "+
-					"Mark it optional, or drop the default.", variable))
-			return
-		}
-		// A limit on a field whose value never comes from the order is a limit
-		// on nothing: fixed_value is written by this page, not typed by a
-		// customer, so the personalisation form has no box to enforce it in.
-		if m.MaxRunes != nil && fixed != "" {
-			detail(c, http.StatusUnprocessableEntity, fmt.Sprintf(
-				"%s carries a fixed value, so no customer types into it and a "+
-					"character limit would never be applied. Drop the limit, or "+
-					"let the order fill it.", variable))
-			return
-		}
-		entries = append(entries, fieldMapEntry{
-			key: key, variable: variable, valueType: m.ValueType,
-			required: !m.Optional, fixed: fixed, deflt: deflt,
-			maxRunes: m.MaxRunes,
-		})
+	entries, ok := validateFieldMapEntries(c, req)
+	if !ok {
+		return
 	}
 
 	// Refused before it is saved, while the person who can fix it is here. A

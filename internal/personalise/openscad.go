@@ -240,6 +240,14 @@ func (r *Renderer) render(
 		return nil, err
 	}
 
+	// THE FILE'S OWN SPELLING, before a single -D is written.
+	//
+	// Here rather than in each caller because every render goes through this
+	// one function - the printed model, the customer's picture and the plank
+	// path alike - and a caller that forgot would fail silently. See
+	// AlignToSource for what the silence looked like.
+	params = AlignToSource(source, params)
+
 	// BEFORE anything is rendered. A template this binary cannot build does
 	// not fail - it draws the template's own "wrong version" placard and
 	// exits 0, which Tensor stored and batched for a printer once already.

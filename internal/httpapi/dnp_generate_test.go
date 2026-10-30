@@ -202,7 +202,7 @@ func TestModelStatusOf(t *testing.T) {
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := modelStatusOf(c.job); got != c.want {
+			if got := modelStatusOf(c.job, madeHere(c.job)); got != c.want {
 				t.Errorf("modelStatusOf = %q, want %q", got, c.want)
 			}
 		})
@@ -291,9 +291,8 @@ func TestReportableModelError(t *testing.T) {
 	plankError := `a plank needs both names; got first="" second=""`
 
 	t.Run("a plank's own failure is reported", func(t *testing.T) {
-		got := reportableModelError(gen.ProductionJob{
-			Sku: sku("T3DPS-DNP-9"), ModelError: sku("openscad: exit 1"),
-		})
+		job := gen.ProductionJob{Sku: sku("T3DPS-DNP-9"), ModelError: sku("openscad: exit 1")}
+		got := reportableModelError(job, madeHere(job))
 		if got == nil || *got != "openscad: exit 1" {
 			t.Errorf("reportableModelError = %v, want the renderer's words", got)
 		}
@@ -305,18 +304,18 @@ func TestReportableModelError(t *testing.T) {
 	// never going to be one, and showing it sends an operator hunting a fault
 	// in an order that has none.
 	t.Run("another product's stale plank error is not", func(t *testing.T) {
-		if got := reportableModelError(gen.ProductionJob{
-			Sku: sku("THO-PLA-FFF-0022"), ModelError: sku(plankError),
-		}); got != nil {
+		job := gen.ProductionJob{Sku: sku("THO-PLA-FFF-0022"), ModelError: sku(plankError)}
+		if got := reportableModelError(job, madeHere(job)); got != nil {
 			t.Errorf("reportableModelError = %q, want nil - nobody renders this product", *got)
 		}
 	})
 
 	t.Run("a job that got its model keeps no old error", func(t *testing.T) {
 		id := uuid.New()
-		if got := reportableModelError(gen.ProductionJob{
+		job := gen.ProductionJob{
 			PrintFileID: &id, Sku: sku("T3DPS-DNP-9"), ModelError: sku("openscad: exit 1"),
-		}); got != nil {
+		}
+		if got := reportableModelError(job, madeHere(job)); got != nil {
 			t.Errorf("reportableModelError = %q, want nil once the model is attached", *got)
 		}
 	})
@@ -348,7 +347,8 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 		production.IssueSKUMissing,
 	} {
 		t.Run(issue, func(t *testing.T) {
-			got := batchingBlockedReason(uploaded(issue), true)
+			job := uploaded(issue)
+			got := batchingBlockedReason(job, true, madeHere(job))
 			if got == nil || *got != UploadDesignFileWording {
 				t.Errorf("batchingBlockedReason(%s) = %v, want %q", issue, got, UploadDesignFileWording)
 			}
@@ -357,7 +357,8 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 
 	// An upload does not conjure filament, so this one keeps its own words.
 	t.Run("a reason an upload does not fix", func(t *testing.T) {
-		got := batchingBlockedReason(uploaded(production.IssueFilamentOutOfStock), true)
+		job := uploaded(production.IssueFilamentOutOfStock)
+		got := batchingBlockedReason(job, true, madeHere(job))
 		if got == nil || *got == UploadDesignFileWording {
 			t.Errorf("batchingBlockedReason(filament_out_of_stock) = %v, want the stock wording", got)
 		}
@@ -368,7 +369,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	t.Run("a held job says it is held", func(t *testing.T) {
 		j := uploaded(production.IssueSTLMissing)
 		j.Held = true
-		got := batchingBlockedReason(j, true)
+		got := batchingBlockedReason(j, true, madeHere(j))
 		if got == nil || *got == UploadDesignFileWording {
 			t.Errorf("batchingBlockedReason(held) = %v, want the hold wording", got)
 		}
@@ -378,7 +379,7 @@ func TestBatchingBlockedReasonAsksForTheDesignFile(t *testing.T) {
 	t.Run("a plank is never asked for a file", func(t *testing.T) {
 		j := uploaded(production.IssueSTLMissing)
 		j.Sku = sku("T3DPS-DNP-9")
-		if got := batchingBlockedReason(j, true); got != nil {
+		if got := batchingBlockedReason(j, true, madeHere(j)); got != nil {
 			t.Errorf("batchingBlockedReason(plank) = %q, want nil while it renders", *got)
 		}
 	})
@@ -402,14 +403,17 @@ func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
 	}
 
 	t.Run("no colour at all", func(t *testing.T) {
-		got := batchingBlockedReason(queued("[]"), true)
+		job := queued("[]")
+		got := batchingBlockedReason(job, true, madeHere(job))
 		if got == nil || *got != NoColourWording {
 			t.Errorf("batchingBlockedReason = %v, want %q", got, NoColourWording)
 		}
 	})
 
 	t.Run("unset colours", func(t *testing.T) {
-		if got := batchingBlockedReason(queued(""), true); got == nil || *got != NoColourWording {
+		job := queued("")
+		if got := batchingBlockedReason(job, true, madeHere(job)); got == nil ||
+			*got != NoColourWording {
 			t.Errorf("batchingBlockedReason = %v, want %q", got, NoColourWording)
 		}
 	})
@@ -417,7 +421,8 @@ func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
 	// A job with a colour and nothing else wrong is not blocked, and must not
 	// acquire a reason it does not have.
 	t.Run("a colour is enough", func(t *testing.T) {
-		if got := batchingBlockedReason(queued(`["GOLD"]`), true); got != nil {
+		job := queued(`["GOLD"]`)
+		if got := batchingBlockedReason(job, true, madeHere(job)); got != nil {
 			t.Errorf("batchingBlockedReason = %q, want nil", *got)
 		}
 	})
@@ -427,7 +432,7 @@ func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
 		j := queued("[]")
 		id := uuid.New()
 		j.BatchID = &id
-		if got := batchingBlockedReason(j, true); got != nil {
+		if got := batchingBlockedReason(j, true, madeHere(j)); got != nil {
 			t.Errorf("batchingBlockedReason = %q, want nil for a batched job", *got)
 		}
 	})
@@ -438,7 +443,7 @@ func TestBatchingBlockedReasonNamesAMissingColour(t *testing.T) {
 		j := queued("[]")
 		issue := production.IssueFilamentOutOfStock
 		j.IssueReason = &issue
-		got := batchingBlockedReason(j, true)
+		got := batchingBlockedReason(j, true, madeHere(j))
 		if got == nil || *got == NoColourWording {
 			t.Errorf("batchingBlockedReason = %v, want the filament wording", got)
 		}
@@ -502,4 +507,13 @@ func TestJobLinePropertiesFallsBackWhenAbsent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// madeHere is the answer productionJobDTO now resolves from the registry and
+// passes in. These unit tests name a plank SKU or a bought-in one deliberately
+// - that distinction is what they are about - so the hardcoded rule is still
+// the right answer for them, and computing it here keeps each case asserting
+// what it always asserted.
+func madeHere(j gen.ProductionJob) bool {
+	return IsGeneratedProduct(deref(j.Sku), deref(j.ProductName))
 }

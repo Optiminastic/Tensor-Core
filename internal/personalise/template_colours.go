@@ -84,3 +84,37 @@ func hexValue(written string) (string, bool) {
 	}
 	return "#" + strings.ToUpper(v[1:]), true
 }
+
+// PartColourValues is each piece's declared colour AS WRITTEN, keyed by
+// lower-cased piece name.
+//
+// The same parse as PartColours, without the hex requirement: a value is
+// returned whether the author wrote "#7D3CB5" or "purple". Quotes are
+// stripped, nothing else is interpreted.
+//
+// WHY BOTH EXIST. PartColours feeds the customer's PICTURE, which has no
+// filament behind it, so a value that is not a hex is better dropped than
+// guessed at. This feeds the PRINT model of a file that states its own
+// colours, where a bare name is not a guess at all - it is the shop's own word
+// for a spool, and the caller resolves it against the shelf exactly as a name
+// typed into the registry is resolved. Dropping it there would silently paint
+// nothing and look like the file's colours being ignored.
+func PartColourValues(source []byte) map[string]string {
+	out := map[string]string{}
+	for _, p := range DeclaredParams(source) {
+		name := strings.ToUpper(strings.TrimSpace(p.Name))
+		if !strings.HasSuffix(name, colourSuffix) {
+			continue
+		}
+		part := strings.TrimSuffix(name, colourSuffix)
+		if part == "" {
+			continue
+		}
+		value := strings.TrimSpace(strings.Trim(strings.TrimSpace(p.Default), `"'`))
+		if value == "" {
+			continue
+		}
+		out[strings.ToLower(part)] = value
+	}
+	return out
+}

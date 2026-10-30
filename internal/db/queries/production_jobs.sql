@@ -1454,3 +1454,32 @@ FROM production_job_events e
 WHERE e.job_id = ANY(sqlc.arg('job_ids')::uuid[])
   AND e.event_type LIKE '%.issue'
 ORDER BY e.job_id, e.seq DESC;
+
+-- name: SummariseJobRendersForSKUs :many
+-- How many of each SKU's jobs are mid-render, and how many stopped.
+--
+-- The readiness panel says whether a SKU is CONFIGURED; this is the other
+-- half - whether anything configured is actually moving. Without it a shop
+-- that has just set a product up has no way to see the first order through
+-- except by watching the production queue.
+--
+-- THE THREE EXPRESSIONS MIRROR modelStatusOf's BRANCH ORDER exactly:
+-- model_render_queued_at first, then an attached file, then an error. If this
+-- ever disagrees with that function, the readiness panel and the queue pill
+-- describe the same job differently - which is worse than neither of them
+-- saying anything.
+--
+-- Grouped on lower(sku) because an order's SKU arrives however the storefront
+-- wrote it; ix_production_jobs_sku_lower from migration 0135 is what keeps
+-- that affordable on the largest table in the schema.
+SELECT lower(j.sku)::text AS sku,
+       count(*) FILTER (WHERE j.model_render_queued_at IS NOT NULL)::bigint AS rendering,
+       count(*) FILTER (WHERE j.model_render_queued_at IS NULL
+                          AND j.print_file_id IS NULL
+                          AND btrim(coalesce(j.model_error, '')) <> '')::bigint AS failed,
+       ((array_agg(j.model_error ORDER BY j.updated_at DESC)
+          FILTER (WHERE btrim(coalesce(j.model_error, '')) <> ''))[1])::text AS last_error
+FROM production_jobs j
+WHERE j.sku IS NOT NULL
+  AND lower(j.sku) = ANY (sqlc.arg('skus')::text[])
+GROUP BY lower(j.sku);

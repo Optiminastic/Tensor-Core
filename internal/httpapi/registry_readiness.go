@@ -50,6 +50,17 @@ type skuReadiness struct {
 	// file, no colour scheme. Separate from Problems because a page that
 	// shows both as failures teaches people to ignore it.
 	Notes []string `json:"notes"`
+	// Rendering is how many of this SKU's jobs are building their model now.
+	//
+	// The rest of this struct says whether a SKU is CONFIGURED. This says
+	// whether anything configured is MOVING - which is the question somebody
+	// has right after setting a product up, and which had no answer short of
+	// going to the production queue and reading it by eye.
+	Rendering int64 `json:"rendering"`
+	// RenderFailed is how many stopped with an error and no model.
+	RenderFailed int64 `json:"render_failed"`
+	// LastRenderError is the most recent of those, verbatim from the renderer.
+	LastRenderError string `json:"last_render_error,omitempty"`
 }
 
 // productReadiness lists a product's SKUs and what each still needs.
@@ -65,14 +76,89 @@ func (s *Server) productReadiness(c *gin.Context) {
 		return
 	}
 
+	// ONE READ FOR THE WHOLE PRODUCT, not one per SKU. A product has a handful
+	// of colourways and this page is opened often; a query per row would make
+	// the cost of the panel grow with the catalogue.
+	renders := s.renderStateBySKU(ctx, variants)
+
 	out := make([]skuReadiness, 0, len(variants))
 	for i := range variants {
 		if variants[i].Status == "retired" {
 			continue
 		}
-		out = append(out, s.readinessOf(ctx, product.ID, product.Code, variants[i]))
+		row := s.readinessOf(ctx, product.ID, product.Code, variants[i])
+		if state, ok := renders[strings.ToLower(strings.TrimSpace(row.SKU))]; ok {
+			row.Rendering = state.Rendering
+			row.RenderFailed = state.Failed
+			row.LastRenderError = state.LastError
+			// A STOPPED RENDER IS A PROBLEM; one in flight is a NOTE.
+			//
+			// That split is the contract this panel states for itself: a
+			// page that shows progress as a failure teaches people to ignore
+			// it, and a held job is work somebody has to do.
+			if state.Failed > 0 {
+				row.Problems = append(row.Problems, renderFailedWording(state))
+				row.Ready = false
+			}
+			if state.Rendering > 0 {
+				row.Notes = append(row.Notes, renderingWording(state.Rendering))
+			}
+		}
+		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
+}
+
+// renderStateBySKU is how each of these SKUs' models are getting on.
+//
+// Keyed lower-cased, as the query groups them: an order's SKU arrives however
+// the storefront wrote it. An unreadable table answers "nothing known", which
+// renders the panel exactly as it read before this existed - configuration
+// only. Render state is worth showing and not worth failing a page over.
+func (s *Server) renderStateBySKU(
+	ctx context.Context, variants []gen.ListVariantsForProductRow,
+) map[string]gen.SummariseJobRendersForSKUsRow {
+	skus := make([]string, 0, len(variants))
+	for i := range variants {
+		if sku := strings.ToLower(strings.TrimSpace(deref(variants[i].Sku))); sku != "" {
+			skus = append(skus, sku)
+		}
+	}
+	if len(skus) == 0 {
+		return nil
+	}
+	rows, err := s.store.Q.SummariseJobRendersForSKUs(ctx, skus)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]gen.SummariseJobRendersForSKUsRow, len(rows))
+	for _, r := range rows {
+		out[r.Sku] = r
+	}
+	return out
+}
+
+// renderFailedWording says how many stopped, and what the renderer said.
+//
+// The renderer's own words rather than a summary: "a plank needs both names"
+// names the fault and the fix, where "a render failed" sends somebody to the
+// logs.
+func renderFailedWording(state gen.SummariseJobRendersForSKUsRow) string {
+	what := fmt.Sprintf("%d job", state.Failed)
+	if state.Failed != 1 {
+		what += "s"
+	}
+	if detail := strings.TrimSpace(state.LastError); detail != "" {
+		return what + " stopped while building a model: " + detail
+	}
+	return what + " stopped while building a model."
+}
+
+func renderingWording(n int64) string {
+	if n == 1 {
+		return "One job is building its model now."
+	}
+	return fmt.Sprintf("%d jobs are building their models now.", n)
 }
 
 // readinessOf answers for one SKU.
@@ -163,7 +249,7 @@ func (s *Server) readinessOf(
 // the product configures no scheme, which means it renders as the plank's two
 // pieces and has nothing to warn about.
 func (s *Server) filamentsNeeded(ctx context.Context, productID uuid.UUID, sku string) int {
-	parts := s.colourPartsForSKU(ctx, productID, sku)
+	parts := s.colourPartsForSKU(ctx, productID, sku, designRoleBody)
 	seen := map[string]bool{}
 	for _, p := range parts {
 		// A piece following the customer's choice is the colour they bought,
@@ -188,18 +274,18 @@ func (s *Server) filamentsNeeded(ctx context.Context, productID uuid.UUID, sku s
 
 // colourPartsForSKU is the printed scheme for one SKU, variant first.
 func (s *Server) colourPartsForSKU(
-	ctx context.Context, productID uuid.UUID, sku string,
+	ctx context.Context, productID uuid.UUID, sku, role string,
 ) []colourPart {
 	var own []colourPart
 	if variant, err := s.store.Q.FindVariantBySKU(ctx, sku); err == nil {
 		rows, err := s.store.Q.ListColourPartsForVariant(ctx,
-			gen.ListColourPartsForVariantParams{VariantID: &variant.ID, Role: designRoleBody})
+			gen.ListColourPartsForVariantParams{VariantID: &variant.ID, Role: role})
 		if err == nil {
 			own = toColourParts(rows)
 		}
 	}
 	rows, err := s.store.Q.ListDesignColourParts(ctx, gen.ListDesignColourPartsParams{
-		ProductID: productID, Role: designRoleBody,
+		ProductID: productID, Role: role,
 	})
 	var shared []colourPart
 	if err == nil {

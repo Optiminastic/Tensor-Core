@@ -116,3 +116,66 @@ func TestIntegrationABuiltInTemplateCannotBeDeleted(t *testing.T) {
 		t.Fatalf("delete built-in = %d %s, want 422", rr.Code, rr.Body.String())
 	}
 }
+
+func TestIntegrationAFileCanBeFreedAndThenRemoved(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	ctx := context.Background()
+	if _, err := store.Pool.Exec(ctx, `TRUNCATE products, design_templates CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	minter := newTokenMinter(t)
+	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+
+	seedTemplate(t, store, "pdhr")
+	productID, variantID := uuid.New(), uuid.New()
+	if _, err := store.Pool.Exec(ctx,
+		`INSERT INTO products (id, code, name) VALUES ($1, 'PDHR', 'Royal')`,
+		productID); err != nil {
+		t.Fatalf("product: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx,
+		`INSERT INTO product_variants (id, product_id, name, sku)
+		 VALUES ($1, $2, 'Purple', 'PDHR-P')`, variantID, productID); err != nil {
+		t.Fatalf("variant: %v", err)
+	}
+	if rr := doJSON(router, http.MethodPut, "/registry/products/PDHR/design", token,
+		map[string]any{"role": "body", "template_key": "pdhr"}); rr.Code != http.StatusNoContent {
+		t.Fatalf("assign = %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Refused while it renders something - the guard that matters.
+	if rr := doJSON(router, http.MethodDelete, "/registry/templates/pdhr", token, nil); rr.Code !=
+		http.StatusConflict {
+		t.Fatalf("delete while in use = %d %s, want 409", rr.Code, rr.Body.String())
+	}
+
+	// THE WAY OUT. Before this existed the refusal above was a dead end: it
+	// said "point those at another file first" and template_key was required,
+	// so there was no way to stop a product printing from a file short of
+	// deleting the product. An empty key is the state every freshly imported
+	// product is already in.
+	if rr := doJSON(router, http.MethodPut, "/registry/products/PDHR/design", token,
+		map[string]any{"role": "body", "template_key": ""}); rr.Code != http.StatusNoContent {
+		t.Fatalf("unassign = %d %s, want 204", rr.Code, rr.Body.String())
+	}
+
+	// Nothing renders from it now, so it goes.
+	if rr := doJSON(router, http.MethodDelete, "/registry/templates/pdhr", token, nil); rr.Code !=
+		http.StatusNoContent {
+		t.Fatalf("delete after unassigning = %d %s, want 204", rr.Code, rr.Body.String())
+	}
+
+	// And the product is back to unconfigured rather than pointing at a file
+	// that is gone - which is what readiness reports as "no design file".
+	var active int
+	if err := store.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM variant_designs WHERE variant_id = $1 AND status = 'active'`,
+		variantID).Scan(&active); err != nil {
+		t.Fatalf("count designs: %v", err)
+	}
+	if active != 0 {
+		t.Errorf("%d active designs after unassigning, want none", active)
+	}
+}

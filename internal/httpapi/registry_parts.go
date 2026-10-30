@@ -206,5 +206,34 @@ func (s *Server) partRolesForSKU(ctx context.Context, sku string) []string {
 	if err != nil {
 		return nil
 	}
-	return s.partRolesForRender(ctx, product.ID)
+	return s.partRolesForRenderSKU(ctx, product.ID, sku)
+}
+
+// partRolesForRenderSKU is partRolesForRender asked about ONE SKU.
+//
+// Identical in every rule - a role with no mapped field is left out, and the
+// preview role is refused by name whatever it maps - and different in exactly
+// one way: whether a role is mapped is answered by fieldMapsFor, which reads
+// this SKU's own mapping first and the product's second.
+//
+// That difference is the whole reason this exists. partRolesForRender reads
+// the product's own rows, so a product whose SKUs each carry their own
+// mapping would come back with no roles at all, and a line that becomes no
+// roles becomes no job - silently, on a paid order. The product-level twin
+// stays for the product-level caller, which is asking a product-level
+// question and has no SKU to ask about.
+func (s *Server) partRolesForRenderSKU(
+	ctx context.Context, productID uuid.UUID, sku string,
+) []string {
+	roles := s.designRolesForProduct(ctx, productID)
+	out := make([]string, 0, len(roles))
+	for _, role := range roles {
+		if isPreviewRole(role) {
+			continue
+		}
+		if len(s.fieldMapsFor(ctx, productID, sku, role)) > 0 {
+			out = append(out, role)
+		}
+	}
+	return out
 }

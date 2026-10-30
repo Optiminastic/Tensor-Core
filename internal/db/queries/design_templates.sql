@@ -95,3 +95,26 @@ SET section = EXCLUDED.section, updated_by = EXCLUDED.updated_by, updated_at = n
 -- Unfiles a design file, so it falls back to the heading its use implies.
 DELETE FROM design_template_sections
 WHERE template_key = lower(sqlc.arg('template_key')::text);
+
+-- name: ListSelfColouredTemplates :many
+-- Every file that states its own colours. A handful of rows; read whole, so
+-- the Designs tab stays one query.
+SELECT template_key FROM design_template_self_colour;
+
+-- name: IsSelfColouredTemplate :one
+-- Whether one file states its own colours. Asked on the render path, so it is
+-- a single indexed lookup rather than a join.
+SELECT EXISTS (
+    SELECT 1 FROM design_template_self_colour
+    WHERE template_key = lower(sqlc.arg('template_key')::text)
+) AS self_coloured;
+
+-- name: SetSelfColouredTemplate :exec
+INSERT INTO design_template_self_colour (template_key, updated_by, updated_at)
+VALUES (lower(sqlc.arg('template_key')::text), sqlc.arg('updated_by'), now())
+ON CONFLICT (template_key) DO UPDATE
+SET updated_by = EXCLUDED.updated_by, updated_at = now();
+
+-- name: ClearSelfColouredTemplate :exec
+DELETE FROM design_template_self_colour
+WHERE template_key = lower(sqlc.arg('template_key')::text);

@@ -330,6 +330,12 @@ type DesignTemplateSection struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type DesignTemplateSelfColour struct {
+	TemplateKey string
+	UpdatedBy   string
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type DispatchOrder struct {
 	ID             uuid.UUID
 	OrderID        uuid.UUID

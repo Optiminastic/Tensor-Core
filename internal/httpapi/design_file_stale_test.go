@@ -58,7 +58,7 @@ func TestAStaleDesignFileIsExplainedNotEnumerated(t *testing.T) {
 		ProductName:           strPtr("Bone Tag - Black / Gold"),
 	}
 
-	got := batchingBlockedReason(job, true)
+	got := batchingBlockedReason(job, true, madeHere(job))
 	if got == nil {
 		t.Fatal("a job with a stale design file must report why it is not batched")
 	}
@@ -88,7 +88,7 @@ func TestARebuildingJobIsNotReportedAsBlocked(t *testing.T) {
 	// It is excluded from planning while the rebuild runs, but that is
 	// progress rather than a fault - and a red row on every plank for the
 	// second its render takes teaches an operator that red means nothing.
-	if got := batchingBlockedReason(job, true); got != nil {
+	if got := batchingBlockedReason(job, true, madeHere(job)); got != nil {
 		t.Errorf("a job mid-rebuild reported %q; it is making progress", *got)
 	}
 }

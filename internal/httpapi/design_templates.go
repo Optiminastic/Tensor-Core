@@ -56,6 +56,9 @@ type templateResponse struct {
 	//
 	// A LABEL. Nothing in the render path reads it; see migration 0134.
 	Section string `json:"section"`
+	// SelfColoured says this file names its pieces and paints them itself, so
+	// nothing about colour is configured for a SKU printing from it.
+	SelfColoured bool `json:"self_coloured"`
 	// UsedBy is every product and role this file serves, empty for a file
 	// nothing links to.
 	//
@@ -107,6 +110,10 @@ func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	// nothing else reads it. See design_template_section.go.
 	g.PATCH("/:key/section", s.guards.RequirePermission(auth.ConfigManage.Key()),
 		s.setTemplateSection)
+	// Whether this file states its own colours, in which case its pieces are
+	// read from it - see design_template_self_colour.go.
+	g.PATCH("/:key/self-colour", s.guards.RequirePermission(auth.ConfigManage.Key()),
+		s.setTemplateSelfColour)
 }
 
 // uploadedTemplates is every template somebody has replaced, by lower-cased key.
@@ -188,9 +195,11 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 		return
 	}
 	sections := s.templateSectionsByKey(c)
+	selfColoured := s.selfColouredKeys(c)
 	for key, t := range uploaded {
 		t.UsedBy = usage[key]
 		t.Section = sections[key]
+		t.SelfColoured = selfColoured[key]
 		uploaded[key] = t
 	}
 
@@ -203,6 +212,7 @@ func (s *Server) listDesignTemplates(c *gin.Context) {
 		}
 		out = append(out, templateResponse{
 			Key: key, Source: "embedded", UsedBy: usage[key], Section: sections[key],
+			SelfColoured: selfColoured[key],
 		})
 	}
 	// An upload for a key this binary does not ship is still real and still

@@ -42,6 +42,23 @@ func (s *Server) recolourModel(
 	if job.PrintFileID == nil || s.storage == nil {
 		return false
 	}
+	// A COLOUR THAT CHANGES THE FILE IS NOT A RECOLOUR.
+	//
+	// This path rewrites the hex on an EXISTING model and keeps its geometry,
+	// which is right when a colourway is a palette over one shared drawing.
+	// It is wrong when the colourways are separate files - a Royal holder's
+	// purple and red are different .scad files, each already in its own
+	// colours - because the fast path would hand back the red holder painted
+	// purple rather than the purple one.
+	//
+	// Today's self-colouring products fall out of this function anyway, a few
+	// lines below, for having no piece that follows the customer. That is
+	// luck rather than a rule: a product with a file per SKU AND a piece that
+	// follows the customer would take the fast path and keep the wrong
+	// drawing. So the question is asked directly.
+	if s.recolouringWouldChangeTheFile(ctx, job, colour) {
+		return false
+	}
 	hex, err := s.resolveColourHex(ctx, colour)
 	if err != nil || hex == "" {
 		return false
@@ -164,6 +181,42 @@ func followedPiece(partName string, follows []string) (string, bool) {
 // names: the filename is jobNumber + "-" + label + ext exactly as
 // storeGeneratedModel wrote it, and that holds for a registry product whose
 // label is built another way entirely.
+// recolouringWouldChangeTheFile reports whether this colour moves the job to
+// another colourway's drawing.
+//
+// Asked by comparing the file the job resolves to NOW against the file it
+// would resolve to with the new colour, which is exactly the question - and
+// which is answered by the same skuForColourway the renderer and the picture
+// use, so the three cannot disagree about what a colour means.
+//
+// False on anything it cannot answer: an unregistered product, a lookup
+// failure, a product with no file for this role. All of those are states in
+// which the fast path behaves as it always has.
+func (s *Server) recolouringWouldChangeTheFile(
+	ctx context.Context, job gen.ProductionJob, colour string,
+) bool {
+	sku := strings.TrimSpace(deref(job.Sku))
+	if sku == "" {
+		return false
+	}
+	product, err := s.store.Q.FindProductBySKU(ctx, sku)
+	if err != nil {
+		return false
+	}
+	role := partRoleOf(job)
+
+	now, haveNow := s.templateForVariant(ctx, product.ID,
+		s.skuForColourway(ctx, product.ID, sku, job), role)
+
+	after := job
+	chosen := colour
+	after.PersonalisationColour = &chosen
+	then, haveThen := s.templateForVariant(ctx, product.ID,
+		s.skuForColourway(ctx, product.ID, sku, after), role)
+
+	return haveNow && haveThen && !strings.EqualFold(now, then)
+}
+
 func recolouredPlan(job gen.ProductionJob, row gen.FileAsset) renderPlan {
 	plan := renderPlan{
 		Label: strings.TrimSuffix(

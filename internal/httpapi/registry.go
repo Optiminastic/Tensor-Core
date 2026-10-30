@@ -148,6 +148,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	g.PUT("/variants/:id/bom", manage, s.putVariantBom)
 	// Whether this SKU's customer is asked to confirm before it prints.
 	g.PATCH("/variants/:id/personalisation-link", manage, s.setVariantPersonalisationLink)
+	// The same decision for a whole product, which is how it is actually made
+	// - see setProductPersonalisationLink.
+	g.PATCH("/products/:code/personalisation-link", manage, s.setProductPersonalisationLink)
 	// The product-level list every variant inherits. A variant that declares
 	// one of its own replaces it whole - see resolveBom.
 	g.GET("/products/:code/bom", read, s.getProductBom)

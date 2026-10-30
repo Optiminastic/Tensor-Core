@@ -316,8 +316,9 @@ func (s *Server) replateWhenRendersSettle(ctx context.Context, job gen.Productio
 		log.Debug("could not read a bed's jobs after a render", "error", err)
 		return
 	}
+	generated := s.generatedByProduct(ctx, siblings)
 	for _, sibling := range siblings {
-		if modelStatusOf(sibling) == ModelGenerating {
+		if modelStatusOf(sibling, generated[generatedKey(deref(sibling.Sku), deref(sibling.ProductName))]) == ModelGenerating {
 			// Another render on this bed is still running; that one re-plates.
 			return
 		}

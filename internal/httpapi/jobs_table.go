@@ -28,11 +28,23 @@ var jobStations = map[string]bool{"assembly": true, "finishing": true, "qc": tru
 // the unit separator, cannot appear in either.
 const generatedKeySep = "\x1f"
 
-// nonGeneratedKeys is every (sku, product name) pair on a job that
-// IsGeneratedProduct says Tensor does not make, as sku+sep+name keys.
+// generatedKey joins a job's sku and product name into the one key every
+// "does Tensor make this?" answer is memoised under.
+func generatedKey(sku, productName string) string {
+	return sku + generatedKeySep + productName
+}
+
+// nonGeneratedKeys is every (sku, product name) pair on a job that Tensor does
+// NOT make, as sku+sep+name keys.
 //
 // Read from the distinct pairs, a few dozen, rather than from every job: the
 // rule runs in Go, where it lives, and only its verdicts reach the query.
+//
+// THROUGH rendersProduct, not the hardcoded list. The queue's model status now
+// answers from the registry, and leaving this on IsGeneratedProduct would have
+// the two screens disagree about the same job - a row reported as "Generating"
+// on one page and listed under "not made here" on the other. The per-distinct
+// -pair loop is what makes the registry lookup affordable here.
 func (s *Server) nonGeneratedKeys(ctx context.Context) ([]string, error) {
 	pairs, err := s.store.Q.ListJobProductKeys(ctx)
 	if err != nil {
@@ -40,8 +52,8 @@ func (s *Server) nonGeneratedKeys(ctx context.Context) ([]string, error) {
 	}
 	out := []string{}
 	for _, p := range pairs {
-		if !IsGeneratedProduct(p.Sku, p.ProductName) {
-			out = append(out, p.Sku+generatedKeySep+p.ProductName)
+		if !s.rendersProduct(ctx, p.Sku, p.ProductName) {
+			out = append(out, generatedKey(p.Sku, p.ProductName))
 		}
 	}
 	return out, nil

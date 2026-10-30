@@ -1691,3 +1691,16 @@ CREATE TABLE IF NOT EXISTS design_template_sections (
     updated_by   varchar(64) NOT NULL,
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
+
+-- A design file that states its own colours - see migration 0135. Its pieces
+-- and their colours are read from the file's own <PIECE>_COLOR declarations
+-- rather than configured per SKU. Presence is the flag; keyed on the template
+-- key because design_templates is versioned and embedded templates have no row.
+CREATE TABLE IF NOT EXISTS design_template_self_colour (
+    template_key varchar(64) PRIMARY KEY,
+    updated_by   varchar(64) NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_production_jobs_sku_lower
+    ON production_jobs (lower(sku));

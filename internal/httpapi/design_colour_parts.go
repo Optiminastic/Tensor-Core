@@ -74,6 +74,23 @@ func (s *Server) colourPartsForJob(ctx context.Context, job gen.ProductionJob) [
 
 	role := partRoleOf(job)
 
+	// THE FILE'S OWN COLOURS FIRST, when it states them.
+	//
+	// A flagged file names its pieces and paints them in its own source, so
+	// there is nothing configured for this SKU to resolve - that is the whole
+	// point of flagging it. Asked before the schemes rather than after,
+	// because a half-configured leftover scheme would otherwise win over the
+	// file that is actually being rendered.
+	//
+	// Still one piece per declaration, and still one render pass each:
+	// Write3MF needs a hex per object, so this changes where the colours come
+	// from and nothing about how the model is built.
+	if template, ok := s.templateForVariant(ctx, product.ID, sku, role); ok {
+		if parts := s.selfColouredParts(ctx, template); len(parts) > 0 {
+			return parts
+		}
+	}
+
 	// The VARIANT's own scheme first, because a product may paint each
 	// colourway differently. A SKU that resolves to a product but not to a
 	// variant cannot happen - FindProductBySKU reaches the product THROUGH the
@@ -144,6 +161,43 @@ func (s *Server) variantForColourway(
 		return nil
 	}
 	return &bySKU.ID
+}
+
+// skuForColourway is the SKU whose FILES this job should be built from.
+//
+// THE COLOUR THEY CHOSE, NOT THE ONE THEY BOUGHT - the same rule
+// variantForColourway applies to the palette, applied to the drawing.
+//
+// It had to be applied twice because a colourway can be expressed two ways. A
+// Lotus is one file plus a scheme per variant, so re-resolving the SCHEME was
+// enough. A Royal holder is a file per child SKU, each already in its own
+// colours and declaring them itself - so for that product the file IS the
+// colour, and a scheme that followed the customer while the file did not left
+// the customer looking at the colourway they bought however they changed
+// their mind. Red, saved, still purple on screen.
+//
+// The printed model resolved its file the same way, which is the half that
+// mattered: a customer could approve a red holder and be sent a purple one,
+// with the order, the picture and the model all agreeing it was purple.
+//
+// Falls back to the SKU on the job, which is the answer whenever nobody has
+// changed anything and whenever the chosen colour is not a variant of this
+// product.
+func (s *Server) skuForColourway(
+	ctx context.Context, productID uuid.UUID, sku string, job gen.ProductionJob,
+) string {
+	variantID := s.variantForColourway(ctx, productID, sku, job)
+	if variantID == nil {
+		return sku
+	}
+	variant, err := s.store.Q.GetVariant(ctx, *variantID)
+	if err != nil {
+		return sku
+	}
+	if chosen := strings.TrimSpace(deref(variant.Sku)); chosen != "" {
+		return chosen
+	}
+	return sku
 }
 
 // matchVariantByColour finds the variant named for a colour, or nil.

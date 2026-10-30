@@ -247,8 +247,20 @@ ORDER BY position, lower(scad_variable);
 -- For the editor and for counting what a product has configured. The render
 -- path uses ListProductFieldMaps, which asks about the one file it is about
 -- to run.
+--
+-- THE PRODUCT'S OWN ROWS ONLY. A SKU's override carries the same product_id,
+-- so without this the count on the product panel includes mappings that
+-- belong to one colourway and the editor's idea of "what this product has"
+-- disagrees with what it would save.
+--
+-- This scoping is only safe because the two questions that decide whether an
+-- ORDER becomes a job - registryRendersSKU and partRolesForRenderSKU - were
+-- moved off this query and on to the per-SKU fieldMapsFor first. Asked here,
+-- a product configured entirely through per-SKU overrides would answer "no
+-- mapping", and no job would be created for it at all.
 SELECT * FROM product_field_maps
 WHERE product_id = sqlc.arg('product_id')
+  AND variant_id IS NULL
 ORDER BY role, position, lower(scad_variable);
 
 -- name: InsertProductFieldMap :exec
@@ -293,9 +305,22 @@ SET property_key  = EXCLUDED.property_key,
 --
 -- Scoped to the role being saved, or editing the rose would silently delete
 -- the keychain's mapping.
+--
+-- AND TO THE PRODUCT'S OWN ROWS. A SKU's override lives in this same table
+-- carrying the same product_id - that is what migration 0129 added - so
+-- without `variant_id IS NULL` this deletes every per-SKU mapping of the role
+-- as well. Measured: one ordinary re-save of the product mapping took a
+-- configured SKU's override from one row to none, and the next render then
+-- quietly used the product's mapping for a SKU somebody had deliberately set
+-- up differently. There is nothing on any screen that would say so.
+--
+-- Two scopes, two queries, rather than one query taking a nullable variant:
+-- a nil argument at a call site that meant to pass one is exactly how this
+-- deletes the wrong rows again.
 DELETE FROM product_field_maps
 WHERE product_id = sqlc.arg('product_id')
-  AND role = sqlc.arg('role');
+  AND role = sqlc.arg('role')
+  AND variant_id IS NULL;
 
 -- name: FindProductBySKU :one
 -- The product an order line belongs to, found by the SKU on its variant.
@@ -1080,3 +1105,64 @@ FROM component_plates p
 JOIN inventory_items i ON i.id = p.inventory_item_id
 JOIN file_assets f ON f.id = p.file_id
 ORDER BY lower(i.name), lower(p.sku), upper(p.machine_family);
+
+-- name: InsertVariantFieldMap :exec
+-- Adds one mapped field belonging to ONE SKU.
+--
+-- The same row shape as InsertProductFieldMap plus variant_id, and it carries
+-- product_id as well because the column is NOT NULL - which is precisely why
+-- every product-scoped read and delete of this table has to say
+-- `variant_id IS NULL`. A SKU's override is not a second table; it is a row
+-- in this one wearing the same product's id.
+--
+-- ON CONFLICT names the OTHER partial index - the one migration 0129 created
+-- WHERE variant_id IS NOT NULL - and repeating its predicate is not optional:
+-- Postgres matches a conflict target against a partial index only when the
+-- WHERE is restated, and without it every call fails with 42P10 naming
+-- neither the index nor the reason.
+INSERT INTO product_field_maps (
+    id, product_id, variant_id, property_key, scad_variable, value_type, role,
+    required, fixed_value, default_value, max_runes, position
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('variant_id'),
+    sqlc.arg('property_key'), sqlc.arg('scad_variable'), sqlc.arg('value_type'),
+    sqlc.arg('role'), sqlc.arg('required'), sqlc.narg('fixed_value'),
+    sqlc.narg('default_value'), sqlc.narg('max_runes'), sqlc.arg('position')
+)
+ON CONFLICT (variant_id, role, lower(scad_variable)) WHERE variant_id IS NOT NULL DO UPDATE
+SET property_key  = EXCLUDED.property_key,
+    value_type    = EXCLUDED.value_type,
+    required      = EXCLUDED.required,
+    fixed_value   = EXCLUDED.fixed_value,
+    default_value = EXCLUDED.default_value,
+    max_runes     = EXCLUDED.max_runes,
+    position      = EXCLUDED.position;
+
+-- name: ClearVariantFieldMaps :exec
+-- Empties ONE SKU's mapping of ONE design file, so it can be written whole.
+--
+-- Scoped to the variant AND the role, for both of ClearProductFieldMaps'
+-- reasons: a product may print several files, and the rows beside these
+-- belong to other SKUs and to the product's own default.
+DELETE FROM product_field_maps
+WHERE variant_id = sqlc.arg('variant_id')
+  AND role = sqlc.arg('role');
+
+-- name: SetProductPersonalisationLink :execrows
+-- Turns a whole product's personalisation link on or off.
+--
+-- A PRODUCT-LEVEL DECISION, which is what it always was in practice. The
+-- column is per variant because a variant is what an order resolves to, but
+-- nobody chooses per colourway: a design either can change after it is bought
+-- or it cannot, and that is a fact about the product. Offered per SKU it was
+-- twenty switches that had to agree, and one left out of step is a single
+-- colourway silently skipping the customer - which is exactly what happened
+-- to PWDH-W.
+--
+-- Retired variants are included deliberately, for setProductDesign's reason:
+-- a retired SKU still has orders in flight, and leaving it on a different
+-- answer from its siblings is the drift this replaces.
+UPDATE product_variants
+SET personalisation_link_enabled = sqlc.arg('enabled'),
+    updated_at = now()
+WHERE product_id = sqlc.arg('product_id');
