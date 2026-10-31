@@ -38,7 +38,7 @@ func TestIntegrationProductComponentsAreInherited(t *testing.T) {
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
 	// config:read as well, or every figure below is withheld by design.
 	token := minter.mint(t, []string{
-		auth.RegistryRead.Key(), auth.ConfigRead.Key(), auth.ConfigManage.Key(),
+		auth.RegistryRead.Key(), auth.ConfigRead.Key(), auth.RegistryManage.Key(),
 	})
 
 	productID := uuid.New()
@@ -151,7 +151,7 @@ func TestIntegrationAPrintedComponentNeedsADesignFile(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	id := uuid.New()
 	if _, err := store.Pool.Exec(ctx,
@@ -197,7 +197,7 @@ func TestIntegrationUploadingAComponentModelMarksItPrinted(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	id := uuid.New()
 	if _, err := store.Pool.Exec(ctx,
@@ -253,7 +253,7 @@ func TestIntegrationPlatesAreAddressedBySKUAndMachine(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	id := uuid.New()
 	if _, err := store.Pool.Exec(ctx,
@@ -350,7 +350,7 @@ func TestIntegrationASharedPlateServesEverySKU(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	id := uuid.New()
 	if _, err := store.Pool.Exec(ctx,

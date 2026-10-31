@@ -70,7 +70,7 @@ func TestIntegrationSavingAProductMappingKeepsEachSKUsOwn(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	productID, variantID := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
 
@@ -131,7 +131,7 @@ func TestIntegrationTheProductMappingIsReadWithoutTheSKUsOwn(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	productID, variantID := seedProductWithVariant(t, store, "PDHR", "PDHR-P")
 
@@ -177,7 +177,7 @@ func TestIntegrationASKUsOverrideIsWrittenAndWinsWhole(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 	s := registryServer(t, store)
 
 	productID, variantID := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
@@ -239,7 +239,7 @@ func TestIntegrationAnEmptyOverrideIsRefusedRatherThanStored(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	_, variantID := seedProductWithVariant(t, store, "PWDH", "PWDH-W")
 
@@ -263,7 +263,7 @@ func TestIntegrationSavingOneSKUsOverrideLeavesItsSiblingsAlone(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	productID, purple := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
 	red := uuid.New()
@@ -303,7 +303,7 @@ func TestIntegrationPointingASKUAtAFileThatDoesNotExistIsRefused(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	_, variantID := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
 
@@ -328,7 +328,7 @@ func TestIntegrationASKUWithNoMappingYetCanStillBeGivenAFile(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	_, variantID := seedProductWithVariant(t, store, "PWDH", "PWDH-W")
 

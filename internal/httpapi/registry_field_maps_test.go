@@ -45,7 +45,7 @@ func TestIntegrationFieldMapCharacterLimitSurvivesASave(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	productID := uuid.New()
 	if _, err := store.Pool.Exec(ctx,
@@ -117,7 +117,7 @@ func TestIntegrationFieldMapRefusesALimitOnAFixedValue(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryRead.Key(), auth.RegistryManage.Key()})
 
 	if _, err := store.Pool.Exec(ctx,
 		`INSERT INTO products (id, code, name) VALUES ($1, 'DNP', 'Dual Name Plank')`,

@@ -130,10 +130,13 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// in internal/auth/catalog.go. Everyone who held config:read before also
 	// holds registry:read now (Admin, Project Lead), so nobody lost a page.
 	//
-	// WRITE is still config:manage. Authoring the catalogue is a configuration
-	// act, and an editor who cannot see costs has not been asked for.
+	// WRITE is registry:manage, and used to be config:manage on the reasoning
+	// that authoring the catalogue is a configuration act. It is - but
+	// config:manage also opens /config/cost-assumptions, so granting the
+	// designers who author products the right to upload a .scad would have
+	// handed them what everything costs. The two are now separate permissions.
 	read := s.guards.RequirePermission(auth.RegistryRead.Key())
-	manage := s.guards.RequirePermission(auth.ConfigManage.Key())
+	manage := s.guards.RequirePermission(auth.RegistryManage.Key())
 
 	g.GET("/products", read, s.listRegistryProducts)
 	g.POST("/products", manage, s.createRegistryProduct)

@@ -50,7 +50,7 @@ func TestIntegrationDeletingATemplateInUseIsRefused(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.RegistryManage.Key()})
 
 	seedTemplate(t, store, "pwdh")
 	seedTemplate(t, store, "spare")
@@ -107,7 +107,7 @@ func TestIntegrationABuiltInTemplateCannotBeDeleted(t *testing.T) {
 	seedAll(t, store)
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	// Compiled into the binary: there is no row to retire, and a delete that
 	// quietly did nothing would look like it had worked.
@@ -126,7 +126,7 @@ func TestIntegrationAFileCanBeFreedAndThenRemoved(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.RegistryManage.Key()})
 
 	seedTemplate(t, store, "pdhr")
 	productID, variantID := uuid.New(), uuid.New()

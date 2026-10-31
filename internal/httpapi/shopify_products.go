@@ -66,7 +66,7 @@ func (s *Server) registerShopifyProducts(r *gin.Engine) {
 	// because it needs the brand's Shopify connection, which is addressed by
 	// slug - and because the picker and the import should read the same list.
 	// Guarded by config:manage: this writes the registry, not the storefront.
-	g.POST("/import", s.guards.RequirePermission(auth.ConfigManage.Key()),
+	g.POST("/import", s.guards.RequirePermission(auth.RegistryManage.Key()),
 		s.importShopifyProduct)
 }
 

@@ -58,7 +58,7 @@ func TestIntegrationOneSwitchSettlesEverySKUIncludingRetiredOnes(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	productID, _ := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
 	// A second live SKU, and a retired one. The retired SKU is the reason the
@@ -124,7 +124,7 @@ func TestIntegrationAForgottenFieldIsRefusedNotReadAsOff(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	productID, _ := seedProductWithVariant(t, store, "PWDH", "PWDH-P")
 

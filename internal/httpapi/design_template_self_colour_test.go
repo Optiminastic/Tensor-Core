@@ -60,7 +60,7 @@ func TestIntegrationFlaggingRefusesAFileThatDeclaresNoColours(t *testing.T) {
 	truncateSelfColour(t, store)
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.RegistryManage.Key()})
 
 	// Flagging a file with nothing to read would leave it falling back to the
 	// configured scheme for ever, looking on screen exactly like a flag that
@@ -81,7 +81,7 @@ func TestIntegrationTheFlagIsNotSetWithoutSayingSo(t *testing.T) {
 	truncateSelfColour(t, store)
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.RegistryManage.Key()})
 
 	// Absent is not false. A body that forgot the field would otherwise clear
 	// a flag somebody set, and a flagged file silently losing its flag prints

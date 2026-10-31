@@ -102,17 +102,17 @@ func (s *Server) registerDesignTemplates(r *gin.Engine) {
 	g.GET("/:key/history", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateHistory)
 	g.GET("/:key/params", s.guards.RequirePermission(auth.ConfigRead.Key()), s.templateParams)
 	g.GET("/:key/file", s.guards.RequirePermission(auth.ConfigRead.Key()), s.downloadDesignTemplate)
-	g.POST("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.uploadDesignTemplate)
+	g.POST("/:key", s.guards.RequirePermission(auth.RegistryManage.Key()), s.uploadDesignTemplate)
 	// Removing one - refused while any product still renders from it. See
 	// design_template_delete.go.
-	g.DELETE("/:key", s.guards.RequirePermission(auth.ConfigManage.Key()), s.deleteDesignTemplate)
+	g.DELETE("/:key", s.guards.RequirePermission(auth.RegistryManage.Key()), s.deleteDesignTemplate)
 	// Which heading it is filed under on the Designs tab - a label, and
 	// nothing else reads it. See design_template_section.go.
-	g.PATCH("/:key/section", s.guards.RequirePermission(auth.ConfigManage.Key()),
+	g.PATCH("/:key/section", s.guards.RequirePermission(auth.RegistryManage.Key()),
 		s.setTemplateSection)
 	// Whether this file states its own colours, in which case its pieces are
 	// read from it - see design_template_self_colour.go.
-	g.PATCH("/:key/self-colour", s.guards.RequirePermission(auth.ConfigManage.Key()),
+	g.PATCH("/:key/self-colour", s.guards.RequirePermission(auth.RegistryManage.Key()),
 		s.setTemplateSelfColour)
 }
 

@@ -16,8 +16,10 @@ func TestAdminHasEveryPermission(t *testing.T) {
 	// and whatsapp:read/reply added the inbox. See catalog.go.
 	// 46 with damage:resolve, which is admin-only by being granted to no
 	// other role - the same construction as the bulk-order pair.
-	if len(admin) != len(AllPermissions) || len(AllPermissions) != 49 {
-		t.Fatalf("admin has %d permissions, catalog has %d, want 49 each", len(admin), len(AllPermissions))
+	// 50 with registry:manage, which split authoring the catalogue away from
+	// config:manage so a designer could do the first without the second.
+	if len(admin) != len(AllPermissions) || len(AllPermissions) != 50 {
+		t.Fatalf("admin has %d permissions, catalog has %d, want 50 each", len(admin), len(AllPermissions))
 	}
 	for _, p := range AllPermissions {
 		if !has(admin, p.Key()) {
@@ -100,6 +102,9 @@ func TestDesignerSeesDesignsCostingAndProduction(t *testing.T) {
 	// the shelf, and signs off at every station.
 	for _, expected := range []string{
 		"design:delete", "design:approve", "design:reject", "shopify:publish",
+		// Authors the registry, which is the whole reason registry:manage
+		// exists apart from config:manage.
+		"registry:manage",
 		"production:create", "production:update", "production:fail",
 		"batch:manage", "dispatch:manage", "machine:manage", "filament:manage",
 		"qc:submit", "assembly:submit", "finishing:submit", "packaging:submit",
@@ -248,9 +253,13 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// dispatch read/manage, the four station sign-offs, machine:manage and
 	// filament:manage - see TestDesignerSeesDesignsCostingAndProduction.
 	//
-	// Costing stays a READ for them, and the registry is still written with
-	// config:manage, which is admin-only because the same permission opens the
-	// cost assumptions the pricing engine runs on.
+	// The designer then went 30 -> 31 (+1) when registry:manage was split out
+	// of config:manage, which is what lets that role AUTHOR the registry -
+	// upload a .scad per child SKU, map its variables - without also being
+	// handed the cost assumptions the pricing engine runs on. Admin gains the
+	// same permission by holding the whole catalogue, hence +2 in total.
+	//
+	// Costing stays a READ for them.
 	total := 0
 	for _, role := range AllRoles {
 		total += len(GrantsFor(role))
@@ -266,8 +275,8 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
 	// holder of it would show up here before it showed up on anybody's
 	// screen, which is the point of counting rather than spot-checking.
-	if total != 139 {
-		t.Fatalf("total grants = %d, want 139", total)
+	if total != 141 {
+		t.Fatalf("total grants = %d, want 141", total)
 	}
 }
 

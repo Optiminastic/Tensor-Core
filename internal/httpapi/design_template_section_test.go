@@ -50,7 +50,7 @@ func TestIntegrationFilingATemplateChangesNothingElse(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.RegistryManage.Key()})
 
 	seedTemplate(t, store, "pwdh")
 

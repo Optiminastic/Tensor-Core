@@ -23,7 +23,7 @@ import (
 func (s *Server) registerRegistryAuthoring(r *gin.Engine) {
 	g := r.Group("/registry")
 	g.Use(s.guards.RequireUser())
-	manage := s.guards.RequirePermission(auth.ConfigManage.Key())
+	manage := s.guards.RequirePermission(auth.RegistryManage.Key())
 
 	g.POST("/products/:code/options", manage, s.createProductOption)
 	g.PATCH("/options/:id", manage, s.updateProductOption)

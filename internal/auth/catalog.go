@@ -106,13 +106,24 @@ var (
 	// wrong key for that: it also opens cost assumptions, and an Operator
 	// never sees costs (TestOperatorNeverSeesCosts, which still stands).
 	//
-	// Reading the registry is therefore registry:read. WRITING it is still
-	// config:manage - authoring the catalogue is a configuration act, and
-	// nobody has asked for an editor who cannot see costs. The money on the
-	// registry's own responses (parts_cost, line_cost) is withheld from a
-	// caller without config:read rather than hidden by the page, so the
-	// separation holds at the API and not merely in the UI.
-	RegistryRead = PermissionSpec{"registry", "read", "View the product registry: SKUs, parts and templates"}
+	// Reading the registry is therefore registry:read, and WRITING it is
+	// registry:manage.
+	//
+	// Writing used to be config:manage, on the reasoning that authoring the
+	// catalogue is a configuration act and nobody had asked for an editor who
+	// could not see costs. Somebody then did: the shop wanted designers to add
+	// products, upload a .scad per child SKU and map its variables - and
+	// config:manage is the same permission that opens /config/cost-assumptions,
+	// the numbers the whole pricing engine computes from. Granting it would
+	// have handed over what everything costs in order to allow uploading a
+	// file.
+	//
+	// So the two are separated, and the money stays where it was. The
+	// registry's own money - parts_cost and line_cost on its responses - is
+	// still withheld from a caller without config:read, so a registry editor
+	// without costs sees the catalogue and not the margins.
+	RegistryRead   = PermissionSpec{"registry", "read", "View the product registry: SKUs, parts and templates"}
+	RegistryManage = PermissionSpec{"registry", "manage", "Author the product registry: products, SKUs, design files and field mappings"}
 
 	// Bulk orders are ADMIN-ONLY, at the shop's instruction: they carry
 	// negotiated prices, a customer's whole order book and the power to put a
@@ -226,7 +237,7 @@ var AllPermissions = []PermissionSpec{
 	DesignJobRead, DesignJobSupply,
 	PricingRead, PricingGenerate, PricingOverride,
 	ConfigRead, ConfigManage,
-	RegistryRead,
+	RegistryRead, RegistryManage,
 	BulkOrderRead, BulkOrderManage,
 	ShopifyPublish,
 	ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail, ProductionCatchUp,
@@ -323,7 +334,10 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		// a customer pays, and cost assumptions are gated on config:manage,
 		// which stays admin-only. See the note on ConfigManage below.
 		PricingRead,
-		RegistryRead,
+		// Reads the registry AND authors it. registry:manage exists precisely
+		// so this grant does not have to be config:manage, which would also
+		// hand over the cost assumptions above.
+		RegistryRead, RegistryManage,
 		// Production, whole: the queue, the beds, the machines, the shelf,
 		// dispatch, and signing off at every station.
 		//

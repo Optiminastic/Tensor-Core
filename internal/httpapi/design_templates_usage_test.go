@@ -38,7 +38,7 @@ func TestIntegrationTemplateListSaysWhatEachFileIsFor(t *testing.T) {
 	}
 	minter := newTokenMinter(t)
 	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
-	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.ConfigManage.Key()})
+	token := minter.mint(t, []string{auth.ConfigRead.Key(), auth.RegistryManage.Key()})
 
 	// The uploaded file itself. A key reaches the Designs tab by being
 	// uploaded or embedded, and setProductDesign refuses a key that is
