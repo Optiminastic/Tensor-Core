@@ -77,7 +77,7 @@ func runAbandonedPage(t *testing.T, items []shopify.AbandonedCheckout, query str
 	if !ok || !paged {
 		t.Fatalf("query %q did not ask for a page", query)
 	}
-	pageAbandonedCheckouts(c, items, "shop.example", p)
+	pageAbandonedCheckouts(c, items, "shop.example", p, nil)
 	var out abandonedTestPage
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v %s", err, rr.Body.String())

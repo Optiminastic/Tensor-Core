@@ -24,6 +24,7 @@ type AbandonedCheckoutCall struct {
 	Attempts      int32
 	MessageBody   *string
 	MessageLink   *string
+	DiscountCode  *string
 	LastAttemptAt pgtype.Timestamptz
 	CreatedAt     pgtype.Timestamptz
 }

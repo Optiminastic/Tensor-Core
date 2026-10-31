@@ -40,6 +40,10 @@ SET status          = sqlc.arg('status'),
     detail          = sqlc.narg('detail'),
     message_body    = coalesce(sqlc.narg('message_body'), message_body),
     message_link    = coalesce(sqlc.narg('message_link'), message_link),
+    -- COALESCE like the two above: a voice settle passing null must not wipe
+    -- the code a message settle recorded, and a failed retry keeps the code
+    -- of the attempt that reached somebody.
+    discount_code   = coalesce(sqlc.narg('discount_code'), discount_code),
     attempts        = attempts + 1,
     last_attempt_at = now()
 WHERE id = sqlc.arg('id')
@@ -87,3 +91,14 @@ LIMIT sqlc.arg('row_limit');
 UPDATE abandoned_checkout_calls
 SET interaction_id = sqlc.arg('interaction_id')
 WHERE attempt_id = sqlc.arg('attempt_id') AND channel = 'voice';
+
+-- name: ListWinbackCodesForBrand :many
+-- Which code was sent for which checkout, so a recovery can be attributed.
+--
+-- One row per checkout, newest contact first: a checkout contacted twice has
+-- two codes, and the one that could have converted it is the latest.
+SELECT DISTINCT ON (checkout_id) checkout_id, discount_code, last_attempt_at
+FROM abandoned_checkout_calls
+WHERE brand_slug = sqlc.arg('brand_slug')
+  AND discount_code IS NOT NULL
+ORDER BY checkout_id, last_attempt_at DESC;

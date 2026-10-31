@@ -1285,6 +1285,10 @@ CREATE TABLE IF NOT EXISTS abandoned_checkout_calls (
     -- The recovery link behind the button, whole and tappable. Separate from
     -- the body because Meta keeps button URLs out of the body text.
     message_link    text,
+    -- The code minted for this one customer - see migration 0138. A win-back
+    -- code reaches a checkout only by the customer following our link, so it
+    -- is what makes a recovery provably ours rather than estimated.
+    discount_code   varchar(64),
     last_attempt_at timestamptz  NOT NULL DEFAULT now(),
     created_at      timestamptz  NOT NULL DEFAULT now()
 );

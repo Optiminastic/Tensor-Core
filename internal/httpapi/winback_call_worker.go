@@ -626,8 +626,8 @@ func (w *WinbackCallWorker) message(
 	// template is a second round trip to Meta, and a message that went out
 	// must not be recorded as failed because the log could not be written
 	// prettily - so a failure here costs the body and nothing else.
-	w.settleWith(ctx, claim.ID, "sent", result.MessageID, result.Status,
-		w.sentWords(ctx, client, bodyParams), winbackFullLink(linkHost, link.Param))
+	w.settleSent(ctx, claim.ID, "sent", result.MessageID, result.Status,
+		w.sentWords(ctx, client, bodyParams), winbackFullLink(linkHost, link.Param), discount)
 	// The customer's number is NOT logged. It is personal data and the
 	// checkout name is enough to find them.
 	w.logger.Info("win-back message sent",
@@ -750,8 +750,26 @@ func (w *WinbackCallWorker) settle(
 // Separate from settle rather than two more arguments on every call site: a
 // call has no text and never will, and a voice settle passing two empty
 // strings reads as though it were missing something.
+// settleSent is settleWith plus the discount code that went with the link.
+//
+// THE CODE IS THE ATTRIBUTION. A win-back code reaches a checkout only by the
+// customer following our link, so keeping it is what later turns "this cart
+// came back" into "this cart came back because we messaged them" - see
+// migration 0138.
+func (w *WinbackCallWorker) settleSent(
+	ctx context.Context, id uuid.UUID, status, attemptID, detail, body, link, code string,
+) {
+	w.settleFull(ctx, id, status, attemptID, detail, body, link, code)
+}
+
 func (w *WinbackCallWorker) settleWith(
 	ctx context.Context, id uuid.UUID, status, attemptID, detail, body, link string,
+) {
+	w.settleFull(ctx, id, status, attemptID, detail, body, link, "")
+}
+
+func (w *WinbackCallWorker) settleFull(
+	ctx context.Context, id uuid.UUID, status, attemptID, detail, body, link, code string,
 ) {
 	params := gen.SettleWinbackContactParams{ID: id, Status: status, Detail: &detail}
 	if attemptID != "" {
@@ -764,6 +782,9 @@ func (w *WinbackCallWorker) settleWith(
 	}
 	if link != "" {
 		params.MessageLink = &link
+	}
+	if code != "" {
+		params.DiscountCode = &code
 	}
 	if _, err := w.server.store.Q.SettleWinbackContact(ctx, params); err != nil {
 		w.logger.Error("win-back: could not record the outcome",

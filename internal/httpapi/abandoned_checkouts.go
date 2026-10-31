@@ -42,6 +42,11 @@ type abandonedCheckoutsResponse struct {
 	// Shop is named so the page can say WHICH store these came from, which
 	// matters the moment a second brand is connected.
 	Shop string `json:"shop"`
+	// Attribution says, per checkout id, whether a recovery was ours - see
+	// winback_attribution.go. Beside the rows rather than on them: the rows
+	// are the integration's own type, and Tensor's judgement about a sale
+	// does not belong inside Shopify's description of a cart.
+	Attribution map[string]string `json:"attribution,omitempty"`
 }
 
 func (s *Server) listAbandonedCheckouts(c *gin.Context) {
@@ -96,9 +101,24 @@ func (s *Server) listAbandonedCheckouts(c *gin.Context) {
 	}
 	// ?page=N is the Abandoned Checkout table's page (external_pages.go):
 	// Shopify is read whole, filtered and sorted here, and fifteen rows sent.
+	// Which code we sent for which checkout. Read once per request rather
+	// than per row, and tolerated as empty: a failure here costs the arrow on
+	// the Recovered tab, not the page.
+	sentCodes := map[string]string{}
+	if rows, codeErr := s.store.Q.ListWinbackCodesForBrand(c.Request.Context(), slug); codeErr == nil {
+		for _, r := range rows {
+			sentCodes[r.CheckoutID] = deref(r.DiscountCode)
+		}
+	}
+
 	if paged {
-		pageAbandonedCheckouts(c, items, shop, numbered)
+		pageAbandonedCheckouts(c, items, shop, numbered, sentCodes)
 		return
 	}
-	c.JSON(http.StatusOK, abandonedCheckoutsResponse{Items: items, Shop: shop})
+	attribution := make(map[string]string, len(items))
+	for _, ck := range items {
+		attribution[ck.ID] = attributeRecovery(sentCodes[ck.ID], ck.DiscountCodes)
+	}
+	c.JSON(http.StatusOK, abandonedCheckoutsResponse{
+		Items: items, Shop: shop, Attribution: attribution})
 }

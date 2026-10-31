@@ -22,7 +22,7 @@ INSERT INTO abandoned_checkout_calls (
     $6, $7, 'claimed'
 )
 ON CONFLICT (brand_slug, phone, channel) DO NOTHING
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, discount_code, last_attempt_at, created_at
 `
 
 type ClaimWinbackContactParams struct {
@@ -77,6 +77,7 @@ func (q *Queries) ClaimWinbackContact(ctx context.Context, arg ClaimWinbackConta
 		&i.Attempts,
 		&i.MessageBody,
 		&i.MessageLink,
+		&i.DiscountCode,
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 	)
@@ -84,7 +85,7 @@ func (q *Queries) ClaimWinbackContact(ctx context.Context, arg ClaimWinbackConta
 }
 
 const listCheckoutCalls = `-- name: ListCheckoutCalls :many
-SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at FROM abandoned_checkout_calls
+SELECT id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, discount_code, last_attempt_at, created_at FROM abandoned_checkout_calls
 WHERE brand_slug = $1
   AND ($2::varchar IS NULL OR channel = $2)
 ORDER BY created_at DESC
@@ -126,9 +127,48 @@ func (q *Queries) ListCheckoutCalls(ctx context.Context, arg ListCheckoutCallsPa
 			&i.Attempts,
 			&i.MessageBody,
 			&i.MessageLink,
+			&i.DiscountCode,
 			&i.LastAttemptAt,
 			&i.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWinbackCodesForBrand = `-- name: ListWinbackCodesForBrand :many
+SELECT DISTINCT ON (checkout_id) checkout_id, discount_code, last_attempt_at
+FROM abandoned_checkout_calls
+WHERE brand_slug = $1
+  AND discount_code IS NOT NULL
+ORDER BY checkout_id, last_attempt_at DESC
+`
+
+type ListWinbackCodesForBrandRow struct {
+	CheckoutID    string
+	DiscountCode  *string
+	LastAttemptAt pgtype.Timestamptz
+}
+
+// Which code was sent for which checkout, so a recovery can be attributed.
+//
+// One row per checkout, newest contact first: a checkout contacted twice has
+// two codes, and the one that could have converted it is the latest.
+func (q *Queries) ListWinbackCodesForBrand(ctx context.Context, brandSlug string) ([]ListWinbackCodesForBrandRow, error) {
+	rows, err := q.db.Query(ctx, listWinbackCodesForBrand, brandSlug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWinbackCodesForBrandRow{}
+	for rows.Next() {
+		var i ListWinbackCodesForBrandRow
+		if err := rows.Scan(&i.CheckoutID, &i.DiscountCode, &i.LastAttemptAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -229,19 +269,24 @@ SET status          = $1,
     detail          = $3,
     message_body    = coalesce($4, message_body),
     message_link    = coalesce($5, message_link),
+    -- COALESCE like the two above: a voice settle passing null must not wipe
+    -- the code a message settle recorded, and a failed retry keeps the code
+    -- of the attempt that reached somebody.
+    discount_code   = coalesce($6, discount_code),
     attempts        = attempts + 1,
     last_attempt_at = now()
-WHERE id = $6
-RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, last_attempt_at, created_at
+WHERE id = $7
+RETURNING id, brand_slug, checkout_id, checkout_name, customer_name, phone, channel, attempt_id, interaction_id, status, detail, attempts, message_body, message_link, discount_code, last_attempt_at, created_at
 `
 
 type SettleWinbackContactParams struct {
-	Status      string
-	AttemptID   *string
-	Detail      *string
-	MessageBody *string
-	MessageLink *string
-	ID          uuid.UUID
+	Status       string
+	AttemptID    *string
+	Detail       *string
+	MessageBody  *string
+	MessageLink  *string
+	DiscountCode *string
+	ID           uuid.UUID
 }
 
 // Records how the claimed contact actually went.
@@ -258,6 +303,7 @@ func (q *Queries) SettleWinbackContact(ctx context.Context, arg SettleWinbackCon
 		arg.Detail,
 		arg.MessageBody,
 		arg.MessageLink,
+		arg.DiscountCode,
 		arg.ID,
 	)
 	var i AbandonedCheckoutCall
@@ -276,6 +322,7 @@ func (q *Queries) SettleWinbackContact(ctx context.Context, arg SettleWinbackCon
 		&i.Attempts,
 		&i.MessageBody,
 		&i.MessageLink,
+		&i.DiscountCode,
 		&i.LastAttemptAt,
 		&i.CreatedAt,
 	)

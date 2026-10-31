@@ -42,12 +42,21 @@ const (
 type abandonedCheckoutsPage struct {
 	pageEnvelope[shopify.AbandonedCheckout]
 	Shop string `json:"shop"`
+	// Attribution says, per checkout id, whether a recovery was ours - see
+	// winback_attribution.go. A MAP BESIDE THE ROWS rather than a field on
+	// them: the rows are shopify.AbandonedCheckout, the integration's own
+	// type, and Tensor's judgement about a sale does not belong inside
+	// Shopify's description of a cart.
+	Attribution map[string]string `json:"attribution,omitempty"`
 }
 
 // pageAbandonedCheckouts filters by the reachability tab, searches the fields
 // the table searched, sorts as its column header asked (sort=key:dir, default
 // newest first), counts the tabs over everything, and cuts one page.
-func pageAbandonedCheckouts(c *gin.Context, items []shopify.AbandonedCheckout, shop string, p offsetPage) {
+func pageAbandonedCheckouts(
+	c *gin.Context, items []shopify.AbandonedCheckout, shop string,
+	p offsetPage, sentCodes map[string]string,
+) {
 	tab, needle := c.Query("tab"), lowerSearch(c)
 	counts := map[string]int64{"": int64(len(items))}
 	out := make([]shopify.AbandonedCheckout, 0, len(items))
@@ -79,7 +88,15 @@ func pageAbandonedCheckouts(c *gin.Context, items []shopify.AbandonedCheckout, s
 	sortAbandoned(out, c.DefaultQuery("sort", "abandoned:desc"))
 	page := slicePage(out, p)
 	page.Counts = counts
-	c.JSON(http.StatusOK, abandonedCheckoutsPage{pageEnvelope: page, Shop: shop})
+	// Only for the rows actually sent: the map exists to colour an arrow on
+	// screen, and judging four hundred rows to render fifteen is work nobody
+	// asked for.
+	attribution := make(map[string]string, len(page.Items))
+	for _, ck := range page.Items {
+		attribution[ck.ID] = attributeRecovery(sentCodes[ck.ID], ck.DiscountCodes)
+	}
+	c.JSON(http.StatusOK, abandonedCheckoutsPage{
+		pageEnvelope: page, Shop: shop, Attribution: attribution})
 }
 
 // sortAbandoned orders by the table's sortable columns. An empty or unknown
