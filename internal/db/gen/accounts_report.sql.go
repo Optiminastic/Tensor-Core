@@ -8,8 +8,70 @@ package gen
 import (
 	"context"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const getAccountsReportRun = `-- name: GetAccountsReportRun :one
+SELECT r.id, r.brand_slug, r.window_start, r.window_end, r.sent_at, r.status, r.detail, r.row_count, r.order_count, r.to_addresses, r.cc_addresses, r.bcc_addresses, r.file_id, r.source, r.created_at, f.filename, f.storage_key, f.content_type
+FROM accounts_report_runs r
+JOIN file_assets f ON f.id = r.file_id
+WHERE r.id = $1 AND r.brand_slug = $2
+`
+
+type GetAccountsReportRunParams struct {
+	ID        uuid.UUID
+	BrandSlug string
+}
+
+type GetAccountsReportRunRow struct {
+	ID           uuid.UUID
+	BrandSlug    string
+	WindowStart  pgtype.Timestamptz
+	WindowEnd    pgtype.Timestamptz
+	SentAt       pgtype.Timestamptz
+	Status       string
+	Detail       *string
+	RowCount     int32
+	OrderCount   int32
+	ToAddresses  []string
+	CcAddresses  []string
+	BccAddresses []string
+	FileID       *uuid.UUID
+	Source       string
+	CreatedAt    pgtype.Timestamptz
+	Filename     string
+	StorageKey   string
+	ContentType  string
+}
+
+// One run, for serving its spreadsheet. Scoped by brand as well as id so a
+// token for one brand cannot fetch another's register.
+func (q *Queries) GetAccountsReportRun(ctx context.Context, arg GetAccountsReportRunParams) (GetAccountsReportRunRow, error) {
+	row := q.db.QueryRow(ctx, getAccountsReportRun, arg.ID, arg.BrandSlug)
+	var i GetAccountsReportRunRow
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WindowStart,
+		&i.WindowEnd,
+		&i.SentAt,
+		&i.Status,
+		&i.Detail,
+		&i.RowCount,
+		&i.OrderCount,
+		&i.ToAddresses,
+		&i.CcAddresses,
+		&i.BccAddresses,
+		&i.FileID,
+		&i.Source,
+		&i.CreatedAt,
+		&i.Filename,
+		&i.StorageKey,
+		&i.ContentType,
+	)
+	return i, err
+}
 
 const getAccountsReportSettings = `-- name: GetAccountsReportSettings :one
 SELECT brand_slug, enabled, to_addresses, cc_addresses, bcc_addresses, gst_percent, seller_state, last_window_end, last_sent_at, last_row_count, last_error, updated_by, updated_at, created_at FROM accounts_report_settings WHERE brand_slug = $1
@@ -39,6 +101,164 @@ func (q *Queries) GetAccountsReportSettings(ctx context.Context, brandSlug strin
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const insertAccountsReportRun = `-- name: InsertAccountsReportRun :one
+
+INSERT INTO accounts_report_runs (
+    id, brand_slug, window_start, window_end, status, detail,
+    row_count, order_count, to_addresses, cc_addresses, bcc_addresses,
+    file_id, source
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11, $12,
+    $13
+)
+RETURNING id, brand_slug, window_start, window_end, sent_at, status, detail, row_count, order_count, to_addresses, cc_addresses, bcc_addresses, file_id, source, created_at
+`
+
+type InsertAccountsReportRunParams struct {
+	ID           uuid.UUID
+	BrandSlug    string
+	WindowStart  pgtype.Timestamptz
+	WindowEnd    pgtype.Timestamptz
+	Status       string
+	Detail       *string
+	RowCount     int32
+	OrderCount   int32
+	ToAddresses  []string
+	CcAddresses  []string
+	BccAddresses []string
+	FileID       *uuid.UUID
+	Source       string
+}
+
+// The window's orders are NOT read from here.
+//
+// There was a ListOrdersForAccountsWindow query, and it was wrong in a way
+// worth recording: orders.line_items stores production.LineItem, which carries
+// product_name, sku, quantity and the personalisation fields and NO PRICE -
+// the pipeline's line item describes what to print, not what was charged.
+// A register built from it went out with every money column 0.00.
+//
+// The order's own total is there, but apportioning one total across lines that
+// cost different amounts invents figures, and a sales register is the last
+// place to do that. So the figures come from Shopify, which has them per line
+// and after discount. See accountsOrdersInWindow.
+// Records one register, sent or failed. A failure is a row too: "nothing
+// arrived on Thursday" is a question the page has to be able to answer, and
+// it cannot from an absence.
+func (q *Queries) InsertAccountsReportRun(ctx context.Context, arg InsertAccountsReportRunParams) (AccountsReportRun, error) {
+	row := q.db.QueryRow(ctx, insertAccountsReportRun,
+		arg.ID,
+		arg.BrandSlug,
+		arg.WindowStart,
+		arg.WindowEnd,
+		arg.Status,
+		arg.Detail,
+		arg.RowCount,
+		arg.OrderCount,
+		arg.ToAddresses,
+		arg.CcAddresses,
+		arg.BccAddresses,
+		arg.FileID,
+		arg.Source,
+	)
+	var i AccountsReportRun
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.WindowStart,
+		&i.WindowEnd,
+		&i.SentAt,
+		&i.Status,
+		&i.Detail,
+		&i.RowCount,
+		&i.OrderCount,
+		&i.ToAddresses,
+		&i.CcAddresses,
+		&i.BccAddresses,
+		&i.FileID,
+		&i.Source,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listAccountsReportRuns = `-- name: ListAccountsReportRuns :many
+SELECT r.id, r.brand_slug, r.window_start, r.window_end, r.sent_at, r.status, r.detail, r.row_count, r.order_count, r.to_addresses, r.cc_addresses, r.bcc_addresses, r.file_id, r.source, r.created_at, f.filename, f.size_bytes
+FROM accounts_report_runs r
+LEFT JOIN file_assets f ON f.id = r.file_id
+WHERE r.brand_slug = $1
+ORDER BY r.window_end DESC, r.sent_at DESC
+LIMIT $2
+`
+
+type ListAccountsReportRunsParams struct {
+	BrandSlug string
+	Lim       int32
+}
+
+type ListAccountsReportRunsRow struct {
+	ID           uuid.UUID
+	BrandSlug    string
+	WindowStart  pgtype.Timestamptz
+	WindowEnd    pgtype.Timestamptz
+	SentAt       pgtype.Timestamptz
+	Status       string
+	Detail       *string
+	RowCount     int32
+	OrderCount   int32
+	ToAddresses  []string
+	CcAddresses  []string
+	BccAddresses []string
+	FileID       *uuid.UUID
+	Source       string
+	CreatedAt    pgtype.Timestamptz
+	Filename     *string
+	SizeBytes    *int64
+}
+
+// One brand's registers, newest first. Joined to the file so the page can
+// offer the spreadsheet without a second round trip per row.
+func (q *Queries) ListAccountsReportRuns(ctx context.Context, arg ListAccountsReportRunsParams) ([]ListAccountsReportRunsRow, error) {
+	rows, err := q.db.Query(ctx, listAccountsReportRuns, arg.BrandSlug, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAccountsReportRunsRow{}
+	for rows.Next() {
+		var i ListAccountsReportRunsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.BrandSlug,
+			&i.WindowStart,
+			&i.WindowEnd,
+			&i.SentAt,
+			&i.Status,
+			&i.Detail,
+			&i.RowCount,
+			&i.OrderCount,
+			&i.ToAddresses,
+			&i.CcAddresses,
+			&i.BccAddresses,
+			&i.FileID,
+			&i.Source,
+			&i.CreatedAt,
+			&i.Filename,
+			&i.SizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listDueAccountsReports = `-- name: ListDueAccountsReports :many

@@ -1681,6 +1681,30 @@ CREATE TABLE IF NOT EXISTS accounts_report_settings (
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- Every register that has gone out, and every one that failed trying - see
+-- migration 0136. The settings row above keeps only the LAST of each, which
+-- cannot answer "send me Tuesday's file" or "why did Thursday not arrive".
+CREATE TABLE IF NOT EXISTS accounts_report_runs (
+    id            uuid PRIMARY KEY,
+    brand_slug    varchar(64) NOT NULL REFERENCES brands(slug) ON DELETE CASCADE,
+    window_start  timestamptz NOT NULL,
+    window_end    timestamptz NOT NULL,
+    sent_at       timestamptz NOT NULL DEFAULT now(),
+    status        varchar(16) NOT NULL,
+    detail        text,
+    row_count     integer     NOT NULL DEFAULT 0,
+    order_count   integer     NOT NULL DEFAULT 0,
+    to_addresses  text[]      NOT NULL DEFAULT '{}',
+    cc_addresses  text[]      NOT NULL DEFAULT '{}',
+    bcc_addresses text[]      NOT NULL DEFAULT '{}',
+    file_id       uuid        REFERENCES file_assets(id) ON DELETE SET NULL,
+    source        varchar(16) NOT NULL DEFAULT 'scheduled',
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_accounts_report_runs_brand
+    ON accounts_report_runs (brand_slug, window_end DESC);
+
 -- Which heading a design file is filed under on the Designs tab. A LABEL, and
 -- nothing else reads it - see migration 0134. Keyed on the template key rather
 -- than a design_templates row because that table is versioned and the embedded

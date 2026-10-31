@@ -28,6 +28,24 @@ type AbandonedCheckoutCall struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+type AccountsReportRun struct {
+	ID           uuid.UUID
+	BrandSlug    string
+	WindowStart  pgtype.Timestamptz
+	WindowEnd    pgtype.Timestamptz
+	SentAt       pgtype.Timestamptz
+	Status       string
+	Detail       *string
+	RowCount     int32
+	OrderCount   int32
+	ToAddresses  []string
+	CcAddresses  []string
+	BccAddresses []string
+	FileID       *uuid.UUID
+	Source       string
+	CreatedAt    pgtype.Timestamptz
+}
+
 type AccountsReportSetting struct {
 	BrandSlug     string
 	Enabled       bool

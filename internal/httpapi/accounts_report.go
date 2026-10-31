@@ -93,6 +93,22 @@ func (s *Server) mailer() *email.Client {
 func (s *Server) SendAccountsReport(
 	ctx context.Context, settings gen.AccountsReportSetting, from, to time.Time,
 ) (ReportOutcome, error) {
+	return s.sendAccountsReport(ctx, settings, from, to, reportRunScheduled)
+}
+
+// SendAccountsReportNow is the same send, recorded as a manual one.
+//
+// Separate only so the history can tell a test send from the day's register;
+// there is no second code path, which is how two behaviours drift apart.
+func (s *Server) SendAccountsReportNow(
+	ctx context.Context, settings gen.AccountsReportSetting, from, to time.Time,
+) (ReportOutcome, error) {
+	return s.sendAccountsReport(ctx, settings, from, to, reportRunManual)
+}
+
+func (s *Server) sendAccountsReport(
+	ctx context.Context, settings gen.AccountsReportSetting, from, to time.Time, source string,
+) (ReportOutcome, error) {
 	out := ReportOutcome{BrandSlug: settings.BrandSlug, WindowStart: from, WindowEnd: to}
 
 	mail := s.mailer()
@@ -134,7 +150,13 @@ func (s *Server) SendAccountsReport(
 	}
 	out.Recipients = len(message.Recipients())
 
-	if err := mail.Send(message); err != nil {
+	// RECORDED EITHER WAY, and after the attempt rather than before it. A row
+	// written first would claim a register that never left; written only on
+	// success, "nothing arrived on Thursday" stays unanswerable, which is the
+	// question the history exists for.
+	err = mail.Send(message)
+	s.recordReportRun(ctx, settings, out, source, book, err)
+	if err != nil {
 		return out, err
 	}
 	return out, nil

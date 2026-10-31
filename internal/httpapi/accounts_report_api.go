@@ -38,6 +38,10 @@ func (s *Server) registerAccountsReport(r *gin.Engine) {
 	// real accountant, and that must never be a side effect of editing a
 	// recipient list.
 	g.POST("/send", s.sendAccountsReportNow)
+	// The history, and one run's spreadsheet. Both behind accounts:manage
+	// like everything else here: a register is the shop's whole sales day.
+	g.GET("/runs", s.listAccountsReportRuns)
+	g.GET("/runs/:id/file", s.downloadAccountsReportRun)
 }
 
 type accountsReportResponse struct {
@@ -205,7 +209,7 @@ func (s *Server) sendAccountsReportNow(c *gin.Context) {
 	}
 
 	from, to := accounts.Window(time.Now(), reportZone)
-	out, sendErr := s.SendAccountsReport(ctx, settings, from, to)
+	out, sendErr := s.SendAccountsReportNow(ctx, settings, from, to)
 	if sendErr != nil {
 		_ = s.store.Q.RecordAccountsReportFailure(ctx, gen.RecordAccountsReportFailureParams{
 			BrandSlug: brand, LastError: ptr(sendErr.Error()),

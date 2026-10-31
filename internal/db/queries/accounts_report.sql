@@ -82,3 +82,38 @@ WHERE brand_slug = sqlc.arg('brand_slug');
 -- cost different amounts invents figures, and a sales register is the last
 -- place to do that. So the figures come from Shopify, which has them per line
 -- and after discount. See accountsOrdersInWindow.
+
+-- name: InsertAccountsReportRun :one
+-- Records one register, sent or failed. A failure is a row too: "nothing
+-- arrived on Thursday" is a question the page has to be able to answer, and
+-- it cannot from an absence.
+INSERT INTO accounts_report_runs (
+    id, brand_slug, window_start, window_end, status, detail,
+    row_count, order_count, to_addresses, cc_addresses, bcc_addresses,
+    file_id, source
+) VALUES (
+    sqlc.arg('id'), sqlc.arg('brand_slug'), sqlc.arg('window_start'),
+    sqlc.arg('window_end'), sqlc.arg('status'), sqlc.narg('detail'),
+    sqlc.arg('row_count'), sqlc.arg('order_count'), sqlc.arg('to_addresses'),
+    sqlc.arg('cc_addresses'), sqlc.arg('bcc_addresses'), sqlc.narg('file_id'),
+    sqlc.arg('source')
+)
+RETURNING *;
+
+-- name: ListAccountsReportRuns :many
+-- One brand's registers, newest first. Joined to the file so the page can
+-- offer the spreadsheet without a second round trip per row.
+SELECT r.*, f.filename, f.size_bytes
+FROM accounts_report_runs r
+LEFT JOIN file_assets f ON f.id = r.file_id
+WHERE r.brand_slug = sqlc.arg('brand_slug')
+ORDER BY r.window_end DESC, r.sent_at DESC
+LIMIT sqlc.arg('lim');
+
+-- name: GetAccountsReportRun :one
+-- One run, for serving its spreadsheet. Scoped by brand as well as id so a
+-- token for one brand cannot fetch another's register.
+SELECT r.*, f.filename, f.storage_key, f.content_type
+FROM accounts_report_runs r
+JOIN file_assets f ON f.id = r.file_id
+WHERE r.id = sqlc.arg('id') AND r.brand_slug = sqlc.arg('brand_slug');
