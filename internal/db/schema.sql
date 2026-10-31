@@ -1705,6 +1705,33 @@ CREATE TABLE IF NOT EXISTS accounts_report_runs (
 CREATE INDEX IF NOT EXISTS ix_accounts_report_runs_brand
     ON accounts_report_runs (brand_slug, window_end DESC);
 
+-- What survives a day being deleted - see migration 0137. The shop keeps
+-- thirty days of orders, jobs and batches; this is the rollup that stays so
+-- that deleting them does not mean the month never happened.
+CREATE TABLE IF NOT EXISTS retention_day_summaries (
+    id             uuid PRIMARY KEY,
+    brand_slug     varchar(64) NOT NULL,
+    window_end     timestamptz NOT NULL,
+    orders         integer NOT NULL DEFAULT 0,
+    line_items     integer NOT NULL DEFAULT 0,
+    revenue        numeric(14, 2) NOT NULL DEFAULT 0,
+    currency       varchar(8) NOT NULL DEFAULT 'INR',
+    jobs_completed integer NOT NULL DEFAULT 0,
+    jobs_failed    integer NOT NULL DEFAULT 0,
+    units          integer NOT NULL DEFAULT 0,
+    batches        integer NOT NULL DEFAULT 0,
+    deleted_at     timestamptz,
+    deleted_orders integer NOT NULL DEFAULT 0,
+    deleted_jobs   integer NOT NULL DEFAULT 0,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (brand_slug, window_end)
+);
+
+CREATE INDEX IF NOT EXISTS ix_retention_summaries_brand
+    ON retention_day_summaries (brand_slug, window_end DESC);
+
+CREATE INDEX IF NOT EXISTS ix_orders_created_at ON orders (created_at);
+
 -- Which heading a design file is filed under on the Designs tab. A LABEL, and
 -- nothing else reads it - see migration 0134. Keyed on the template key rather
 -- than a design_templates row because that table is versioned and the embedded

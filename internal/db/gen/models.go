@@ -827,6 +827,24 @@ type Project struct {
 	UpdatedAt   pgtype.Timestamptz
 }
 
+type RetentionDaySummary struct {
+	ID            uuid.UUID
+	BrandSlug     string
+	WindowEnd     pgtype.Timestamptz
+	Orders        int32
+	LineItems     int32
+	Revenue       pgtype.Numeric
+	Currency      string
+	JobsCompleted int32
+	JobsFailed    int32
+	Units         int32
+	Batches       int32
+	DeletedAt     pgtype.Timestamptz
+	DeletedOrders int32
+	DeletedJobs   int32
+	CreatedAt     pgtype.Timestamptz
+}
+
 type Role struct {
 	ID          uuid.UUID
 	Name        string

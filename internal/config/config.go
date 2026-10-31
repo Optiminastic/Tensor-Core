@@ -329,6 +329,21 @@ type Settings struct {
 	// released. This one keeps the hold precisely because the link IS coming -
 	// by hand, from the orders page.
 	PersonalisationSendEnabled bool
+	// RetentionEnabled turns on DELETING finished work older than
+	// RetentionDays. Off by default, and deliberately so: every other switch
+	// in this file changes what Tensor does, and this one changes what Tensor
+	// still has.
+	RetentionEnabled bool
+	// RetentionDays is how much finished history is kept. Orders are removed
+	// only once DELIVERED - a parcel in transit can still come back as a
+	// damage claim, and damage_reports point at the order.
+	RetentionDays int
+	// RetentionDryRun reports what would be deleted and deletes nothing.
+	//
+	// DEFAULTS TO TRUE, so switching retention on gives you a count before it
+	// gives you a loss. Turning both on at once is a deliberate act of two
+	// variables, which is the point.
+	RetentionDryRun bool
 	// PersonalisationTemplate is the approved WhatsApp template carrying the
 	// link. SEPARATE from the win-back template: this one is a utility
 	// message about an order the customer has already paid for, and
@@ -822,6 +837,9 @@ func Load() Settings {
 		PersonalisationTemplate:          envOr("PERSONALISATION_TEMPLATE_NAME", ""),
 		PersonalisationTestRecipient:     envOr("PERSONALISATION_TEST_RECIPIENT", ""),
 		PersonalisationSendEnabled:       boolEnvOr("PERSONALISATION_SEND_ENABLED", true),
+		RetentionEnabled:                 boolEnvOr("RETENTION_ENABLED", false),
+		RetentionDays:                    intEnvOr("RETENTION_DAYS", 30),
+		RetentionDryRun:                  boolEnvOr("RETENTION_DRY_RUN", true),
 		PersonalisationColours: csvEnvOr("PERSONALISATION_COLOURS",
 			[]string{"PINK", "BLUE", "BLACK", "GOLD", "YELLOW", "GREEN", "RED", "WHITE"}),
 		WinbackLinkHost:           envOr("WINBACK_LINK_HOST", ""),

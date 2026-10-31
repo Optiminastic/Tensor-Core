@@ -23,6 +23,29 @@ import (
 // preference. Moving it is a deliberate decision with a date attached.
 var shopifyImportSince = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
 
+// importSince is the floor an actual pull uses: the later of the event above
+// and the retention window.
+//
+// WITHOUT THIS, RETENTION UNDOES ITSELF. The floor is a fixed date, so every
+// sync asks Shopify for every order since 26 August - around fifteen hundred
+// of them, every ten minutes. Delete a sixty-day-old order under a thirty-day
+// policy and the next sync imports it straight back, possibly creating fresh
+// production jobs for a parcel delivered two months ago. The two settings are
+// therefore one decision and are read as one.
+//
+// Only when retention is ENABLED. A shop keeping everything still wants the
+// catch-up to reach back to the day the production run began.
+func (s *Server) importSince() time.Time {
+	if !s.cfg.RetentionEnabled || s.cfg.RetentionDays <= 0 {
+		return shopifyImportSince
+	}
+	rolling := time.Now().AddDate(0, 0, -s.cfg.RetentionDays)
+	if rolling.Before(shopifyImportSince) {
+		return shopifyImportSince
+	}
+	return rolling
+}
+
 // fetchAndImportShopifyOrders pulls the store's most recently created orders
 // (every financial status - a COD order sitting at "pending" is still a real
 // order) and imports each one, the same way a live webhook delivery would.
@@ -36,7 +59,7 @@ var shopifyImportSince = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
 func (s *Server) fetchAndImportShopifyOrders(
 	ctx context.Context, connID *uuid.UUID, brandSlug, shop, token string,
 ) (int, error) {
-	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0, shopifyImportSince)
+	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0, s.importSince())
 	if err != nil {
 		return 0, err
 	}

@@ -134,6 +134,20 @@ func (c *Client) Get(ctx context.Context, key string) (*Object, error) {
 	return &Object{Body: obj, Size: info.Size, ContentType: info.ContentType}, nil
 }
 
+// Delete removes the object at key.
+//
+// A key that is already gone is NOT an error. The caller is retention, which
+// re-runs over days it may have part-finished, and a sweep that failed because
+// an object it meant to remove was already removed would stall on exactly the
+// state it was trying to reach.
+func (c *Client) Delete(ctx context.Context, key string) error {
+	err := c.mc.RemoveObject(ctx, c.bucket, c.objectKey(key), minio.RemoveObjectOptions{})
+	if err != nil && !IsNotFound(err) {
+		return fmt.Errorf("minio delete %s: %w", key, err)
+	}
+	return nil
+}
+
 // IsNotFound reports whether err is MinIO's "object does not exist" error. It
 // uses errors.As so it works through any depth of wrapping (Get/Stat wrap the
 // underlying minio.ErrorResponse with fmt.Errorf), unlike a single Unwrap.
