@@ -287,3 +287,121 @@ func (c *Client) FindDiscountCode(
 	}
 	return out, nil
 }
+
+// listWinbackQuery walks the discounts this system created.
+//
+// Matched on TITLE, which is the only durable link back to a checkout:
+// CreateDiscountCode titles every win-back "Win-back #<checkout name>", and
+// that name is what abandoned_checkout_calls stores. The code itself carries
+// no such information - SATYAVATHI10 says who, never which cart.
+const listWinbackQuery = `query ListWinback($cursor: String) {
+  discountNodes(first: 100, after: $cursor, query: "title:Win-back*",
+                sortKey: CREATED_AT, reverse: true) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      discount {
+        ... on DiscountCodeBasic {
+          title
+          createdAt
+          codes(first: 1) { nodes { code } }
+        }
+      }
+    }
+  }
+}`
+
+type listWinbackResponse struct {
+	Data struct {
+		DiscountNodes struct {
+			PageInfo struct {
+				HasNextPage bool   `json:"hasNextPage"`
+				EndCursor   string `json:"endCursor"`
+			} `json:"pageInfo"`
+			Nodes []struct {
+				Discount struct {
+					Title     string `json:"title"`
+					CreatedAt string `json:"createdAt"`
+					Codes     struct {
+						Nodes []struct {
+							Code string `json:"code"`
+						} `json:"nodes"`
+					} `json:"codes"`
+				} `json:"discount"`
+			} `json:"nodes"`
+		} `json:"discountNodes"`
+	} `json:"data"`
+}
+
+// WinbackDiscount is one minted code and the checkout it was minted for.
+type WinbackDiscount struct {
+	// CheckoutName as it appears on the checkout - "#67129291899093".
+	CheckoutName string
+	Code         string
+	CreatedAt    time.Time
+}
+
+// ListWinbackDiscounts walks every win-back code this system has created.
+//
+// For reconstructing which code went to which checkout after the fact. The
+// code was minted, sent and forgotten until migration 0138 began recording
+// it, and this is what fills in the history - Shopify kept the link in the
+// title all along.
+//
+// Paged to exhaustion rather than capped: a partial list would silently leave
+// some checkouts looking as though we never messaged them, which is the exact
+// wrong answer on a page about attribution.
+func (c *Client) ListWinbackDiscounts(
+	ctx context.Context, shop, token string,
+) ([]WinbackDiscount, error) {
+	var out []WinbackDiscount
+	cursor := ""
+	for {
+		vars := map[string]any{}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+		var resp listWinbackResponse
+		if err := c.do(ctx, shop, token, listWinbackQuery, vars, &resp); err != nil {
+			return out, err
+		}
+		for _, n := range resp.Data.DiscountNodes.Nodes {
+			name := winbackCheckoutName(n.Discount.Title)
+			if name == "" || len(n.Discount.Codes.Nodes) == 0 {
+				continue
+			}
+			d := WinbackDiscount{CheckoutName: name, Code: n.Discount.Codes.Nodes[0].Code}
+			if t, err := time.Parse(time.RFC3339, n.Discount.CreatedAt); err == nil {
+				d.CreatedAt = t
+			}
+			out = append(out, d)
+		}
+		page := resp.Data.DiscountNodes.PageInfo
+		if !page.HasNextPage || page.EndCursor == "" {
+			return out, nil
+		}
+		cursor = page.EndCursor
+	}
+}
+
+// winbackCheckoutName reads the checkout out of "Win-back #67129291899093".
+//
+// Empty for anything else, including a discount a human happened to name
+// "Win-back October" - without a # and a number it names no checkout, and
+// guessing would attach somebody's manual campaign code to a real cart.
+func winbackCheckoutName(title string) string {
+	const prefix = "Win-back #"
+	title = strings.TrimSpace(title)
+	if !strings.HasPrefix(title, prefix) {
+		return ""
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(title, prefix))
+	if name == "" {
+		return ""
+	}
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return "#" + name
+}

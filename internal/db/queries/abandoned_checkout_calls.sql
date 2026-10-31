@@ -102,3 +102,15 @@ FROM abandoned_checkout_calls
 WHERE brand_slug = sqlc.arg('brand_slug')
   AND discount_code IS NOT NULL
 ORDER BY checkout_id, last_attempt_at DESC;
+
+-- name: BackfillWinbackCode :execrows
+-- Fills in the code we sent for a checkout contacted before it was recorded.
+--
+-- ONLY WHERE IT IS MISSING. A row that already knows its code is left alone,
+-- so re-running costs nothing and cannot overwrite what the sender wrote with
+-- something reconstructed afterwards.
+UPDATE abandoned_checkout_calls
+SET discount_code = sqlc.arg('discount_code')
+WHERE brand_slug = sqlc.arg('brand_slug')
+  AND checkout_name = sqlc.arg('checkout_name')
+  AND discount_code IS NULL;

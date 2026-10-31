@@ -35,6 +35,11 @@ func (s *Server) registerAbandonedCheckouts(r *gin.Engine) {
 	// roles that may see orders are exactly the ones who would act on a cart
 	// somebody left behind.
 	g.GET("", s.guards.RequirePermission(auth.OrderRead.Key()), s.listAbandonedCheckouts)
+	// Rebuilding which code went to which checkout - see winback_backfill.go.
+	// config:manage rather than order:read: it WRITES, and what it writes is
+	// the evidence the Recovered tab draws its verdict from.
+	g.POST("/backfill-codes",
+		s.guards.RequirePermission(auth.ConfigManage.Key()), s.backfillWinbackCodes)
 }
 
 type abandonedCheckoutsResponse struct {

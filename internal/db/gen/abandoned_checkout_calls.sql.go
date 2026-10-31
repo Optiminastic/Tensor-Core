@@ -12,6 +12,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const backfillWinbackCode = `-- name: BackfillWinbackCode :execrows
+UPDATE abandoned_checkout_calls
+SET discount_code = $1
+WHERE brand_slug = $2
+  AND checkout_name = $3
+  AND discount_code IS NULL
+`
+
+type BackfillWinbackCodeParams struct {
+	DiscountCode *string
+	BrandSlug    string
+	CheckoutName string
+}
+
+// Fills in the code we sent for a checkout contacted before it was recorded.
+//
+// ONLY WHERE IT IS MISSING. A row that already knows its code is left alone,
+// so re-running costs nothing and cannot overwrite what the sender wrote with
+// something reconstructed afterwards.
+func (q *Queries) BackfillWinbackCode(ctx context.Context, arg BackfillWinbackCodeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, backfillWinbackCode, arg.DiscountCode, arg.BrandSlug, arg.CheckoutName)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const claimWinbackContact = `-- name: ClaimWinbackContact :one
 INSERT INTO abandoned_checkout_calls (
     id, brand_slug, checkout_id, checkout_name, customer_name,
