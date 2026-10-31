@@ -184,8 +184,14 @@ const oldestDeletableOrderWindow = `-- name: OldestDeletableOrderWindow :one
 SELECT min(created_at)::timestamptz AS oldest
 FROM orders
 WHERE created_at < $1
+  AND created_at >= $2
   AND lower(coalesce(delivery_status, '')) = 'delivered'
 `
+
+type OldestDeletableOrderWindowParams struct {
+	Cutoff pgtype.Timestamptz
+	After  pgtype.Timestamptz
+}
 
 // The earliest trading day that still has orders old enough to remove.
 //
@@ -193,8 +199,12 @@ WHERE created_at < $1
 // a damage claim, and damage_reports point at the order - so "dispatched" is
 // not finished, "delivered" is. An order Shopify has not told us about yet
 // has a null delivery_status and is never touched.
-func (q *Queries) OldestDeletableOrderWindow(ctx context.Context, cutoff pgtype.Timestamptz) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, oldestDeletableOrderWindow, cutoff)
+// `after` lets one pass WALK FORWARD. A dry run deletes nothing, so without
+// it the next question returns the same oldest order and the loop reports one
+// day over and over instead of covering the backlog - which is exactly what
+// the first dry run did, seven times on 6 September.
+func (q *Queries) OldestDeletableOrderWindow(ctx context.Context, arg OldestDeletableOrderWindowParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, oldestDeletableOrderWindow, arg.Cutoff, arg.After)
 	var oldest pgtype.Timestamptz
 	err := row.Scan(&oldest)
 	return oldest, err

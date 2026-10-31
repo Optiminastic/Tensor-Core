@@ -62,3 +62,19 @@ func TestASweepWithNoRetentionPeriodIsRefused(t *testing.T) {
 		t.Error("a sweep with Days=0 was accepted; it would delete everything")
 	}
 }
+
+func TestTheWalkStartsFromARealTimestamp(t *testing.T) {
+	// timestamptz maps a zero time to NULL, and `created_at >= NULL` is never
+	// true - so a pass starting from the zero value would ask one question,
+	// get no rows, and report "nothing to do" against a full backlog.
+	//
+	// Asserted on the helper rather than through a database, because the
+	// failure is silent either way: the sweep returns no results and no
+	// error, which looks exactly like success.
+	if ts := timestamptz(time.Time{}); ts.Valid {
+		t.Error("the zero time produced a valid timestamp; this test's premise is gone")
+	}
+	if ts := timestamptz(time.Unix(0, 0).UTC()); !ts.Valid {
+		t.Error("the epoch did not produce a valid timestamp, so every pass asks for NULL")
+	}
+}

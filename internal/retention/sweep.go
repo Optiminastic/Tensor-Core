@@ -91,8 +91,18 @@ func Sweep(
 	var out []Result
 
 	for _, brand := range brands {
+		// ONE PASS WALKS FORWARD. after is the floor for "which day next",
+		// and it has to exist because a DRY RUN deletes nothing: without it
+		// the next question returns the same oldest order and the pass
+		// reports a single day MaxDays times. The first dry run did exactly
+		// that - 6 September, seven times - which is what a dry run is for.
+		// A REAL TIMESTAMP, not the zero value: timestamptz maps a zero time
+		// to NULL, and `created_at >= NULL` is never true - so the first
+		// question of every pass would return no rows and the sweep would
+		// report "nothing to do" against a full backlog.
+		after := time.Unix(0, 0).UTC()
 		for day := 0; day < opts.MaxDays; day++ {
-			res, done, err := sweepOneDay(ctx, store, objects, brand, cutoff, opts)
+			res, done, err := sweepOneDay(ctx, store, objects, brand, cutoff, after, opts)
 			if err != nil {
 				return out, err
 			}
@@ -100,6 +110,7 @@ func Sweep(
 				break
 			}
 			out = append(out, res)
+			after = res.WindowEnd
 		}
 	}
 	return out, nil
@@ -111,9 +122,10 @@ func Sweep(
 // caller stops without having to count days itself.
 func sweepOneDay(
 	ctx context.Context, store *db.Store, objects ObjectStore,
-	brand string, cutoff time.Time, opts Options,
+	brand string, cutoff, after time.Time, opts Options,
 ) (Result, bool, error) {
-	oldest, err := store.Q.OldestDeletableOrderWindow(ctx, timestamptz(cutoff))
+	oldest, err := store.Q.OldestDeletableOrderWindow(ctx,
+		gen.OldestDeletableOrderWindowParams{Cutoff: timestamptz(cutoff), After: timestamptz(after)})
 	if err != nil || !oldest.Valid {
 		// No rows, or nothing old enough. Either way this brand is finished.
 		return Result{}, true, nil

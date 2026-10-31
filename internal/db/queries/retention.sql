@@ -5,9 +5,14 @@
 -- a damage claim, and damage_reports point at the order - so "dispatched" is
 -- not finished, "delivered" is. An order Shopify has not told us about yet
 -- has a null delivery_status and is never touched.
+-- `after` lets one pass WALK FORWARD. A dry run deletes nothing, so without
+-- it the next question returns the same oldest order and the loop reports one
+-- day over and over instead of covering the backlog - which is exactly what
+-- the first dry run did, seven times on 6 September.
 SELECT min(created_at)::timestamptz AS oldest
 FROM orders
 WHERE created_at < sqlc.arg('cutoff')
+  AND created_at >= sqlc.arg('after')
   AND lower(coalesce(delivery_status, '')) = 'delivered';
 
 -- name: SummariseOrdersInWindow :one
