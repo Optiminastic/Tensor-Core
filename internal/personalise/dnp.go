@@ -139,6 +139,17 @@ type Params struct {
 	// Shape is the finished size. Zero means the plank, so a caller that
 	// predates per-product sizes keeps rendering exactly what it did before.
 	Shape Shape
+	// Charm is the charm the customer chose, empty for the plain plank.
+	//
+	// It selects templateCharm rather than being drawn: every charm renders
+	// the identical plank, because the charm itself is a separate piece the
+	// file only makes a peg pair for. The NAME is carried so the operator
+	// knows which charm to put in the box.
+	Charm string
+	// TextColour is the colour the customer chose, by the storefront's name -
+	// "RED", "SKY BLUE". Only the charm file reads it; the plain plank takes
+	// its colour from the hex attached to each mesh in the 3MF.
+	TextColour string
 }
 
 // ForProduct adjusts p for the product being rendered.
@@ -151,11 +162,43 @@ type Params struct {
 // margins are laid out for a different object.
 func (p Params) ForProduct(sku, productName string) Params {
 	if !isFrame(sku, productName) {
-		return p
+		return p.ForCharm()
 	}
 	p.Template = templateFrame
 	p.Hearts = 0
 	p.Shape = FrameShape
+	// THE CHARM WINS OVER THE FRAME, and the order of these two lines is the
+	// whole of that rule. Both callers reach the charm through here - they
+	// apply ForProduct after ParamsFromProperties - so a frame ordered with a
+	// charm would otherwise be sent back to the frame's own file by the three
+	// lines above, silently, after the charm had already been decided.
+	return p.ForCharm()
+}
+
+// ForCharm sends a line carrying a charm to the charm file.
+//
+// APPLIED AFTER ForProduct, AND IT WINS. The photo frame picks its own
+// template there, and a frame ordered WITH a charm still has to come off the
+// charm file - the shop's rule is that the charm decides, across every plank
+// it sells: with light, without light, premium and the frame.
+//
+// A plank with no charm is returned completely untouched, which is the whole
+// safety property of this function: nearly every plank the shop prints has no
+// charm, and all of them must keep rendering exactly what they render today.
+//
+// THE HEARTS ARE DROPPED, deliberately and visibly. The charm file declares no
+// side_hearts - it cannot draw them, because the charm occupies the 40mm at
+// the right-hand end where a side heart would sit. Hearts is zeroed rather
+// than carried so that nothing downstream reads a count this model does not
+// have: at one or two hearts the heart-joinery file prints a SECOND piece with
+// a snap-fit peg, and a parts list still claiming that piece would send an
+// operator looking for a heart that was never made.
+func (p Params) ForCharm() Params {
+	if p.Charm == "" {
+		return p
+	}
+	p.Template = templateCharm
+	p.Hearts = 0
 	return p
 }
 
@@ -198,7 +241,8 @@ const (
 // ArgsForPart is Args with PART set, for the two-colour render.
 func (p Params) ArgsForPart(part string) map[string]string {
 	args := p.Args()
-	args["PART"] = Quote(part)
+	name, value := PieceArg(p.Template, part)
+	args[name] = Quote(value)
 	return args
 }
 
@@ -206,6 +250,9 @@ func (p Params) Args() map[string]string {
 	shape := p.Shape
 	if shape.X == 0 {
 		shape = PlankShape
+	}
+	if p.Template == templateCharm {
+		return charmArgs(p, shape)
 	}
 	if p.Template == templateJoinery {
 		return joineryArgs(p, shape)
@@ -346,6 +393,23 @@ func ParamsFromProperties(props []production.LineProp) (Params, error) {
 		return Params{}, fmt.Errorf("second name is %d letters; the plank fits %d", n, maxNameLetters)
 	}
 
+	charm := CharmFromProperties(props)
+	if charm != "" {
+		// The charm file's own bound, two letters shorter than the plank's -
+		// the charm takes 40mm out of the letter run. Checked HERE rather than
+		// alongside the plank's limit above, so a name of eleven or twelve
+		// letters stays perfectly valid on the plain plank it has always been
+		// valid on, and is refused only for the product that cannot fit it.
+		if n := len([]rune(left)); n > maxCharmNameLetters {
+			return Params{}, fmt.Errorf(
+				"first name is %d letters; a plank with a charm fits %d", n, maxCharmNameLetters)
+		}
+		if n := len([]rune(right)); n > maxCharmNameLetters {
+			return Params{}, fmt.Errorf(
+				"second name is %d letters; a plank with a charm fits %d", n, maxCharmNameLetters)
+		}
+	}
+
 	hearts, found := heartsFromProperties(props)
 	if found == heartsUnreadable {
 		// A label named hearts, so the option WAS offered and its value should
@@ -369,7 +433,8 @@ func ParamsFromProperties(props []production.LineProp) (Params, error) {
 		NameLeft:  strings.ToUpper(left),
 		NameRight: strings.ToUpper(right),
 		Hearts:    hearts,
-	}, nil
+		Charm:     charm,
+	}.ForCharm(), nil
 }
 
 // heartsFromProperties finds the heart count among a line's options.

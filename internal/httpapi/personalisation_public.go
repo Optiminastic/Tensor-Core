@@ -187,7 +187,7 @@ func (s *Server) publicPersonalisation(c *gin.Context) {
 		}
 		out.Items = append(out.Items, publicItem(
 			j, s.fieldRulesFor(ctx, j),
-			s.rendersProduct(ctx, deref(j.Sku), deref(j.ProductName)),
+			s.showsPreviewFor(ctx, j),
 			s.shownModelFor(ctx, j)))
 	}
 	numberSiblings(out.Items)
@@ -441,7 +441,7 @@ func (s *Server) publicPersonalisationItem(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, publicItem(
 		job, s.fieldRulesFor(ctx, job),
-		s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)),
+		s.showsPreviewFor(ctx, job),
 		s.shownModelFor(ctx, job)))
 }
 

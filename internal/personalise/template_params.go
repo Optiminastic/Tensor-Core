@@ -24,6 +24,24 @@ var JoineryTemplateParams = []string{
 	"PART",
 }
 
+// CharmTemplateParams is the charm file's vocabulary - see charmArgs.
+//
+// A THIRD list, for the same reason there is a second: this file speaks
+// neither NAME_L nor side_hearts. It takes the two names, the finished size,
+// the charm flag and the lettering colour.
+//
+// export_part IS THIS FILE'S PART, and that is the substance of this entry
+// rather than a detail. The renderer runs a template once per coloured piece,
+// and a file that does not read the piece it was asked for draws the whole
+// model every time - the 3MF then holds two overlapping copies of the plank in
+// two colours. It slices, it prints, and it is wrong. The guarantee is
+// identical to PART's; only the word differs.
+var CharmTemplateParams = []string{
+	"name1", "name2", "add_charm", "text_color",
+	"plank_length", "plank_width", "total_height",
+	"export_part",
+}
+
 // AlwaysPassedTemplateParams is the only thing EVERY template is driven with,
 // whatever vocabulary it speaks.
 //
@@ -61,6 +79,9 @@ var plankTemplateKeys = []string{
 // this rule correctly. Two gates on one door disagreeing about what is allowed
 // through is worse than either gate alone.
 func RequiredParamsForTemplate(key string) []string {
+	if key == templateCharm {
+		return CharmTemplateParams
+	}
 	if key == templateJoinery {
 		return JoineryTemplateParams
 	}

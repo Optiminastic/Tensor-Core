@@ -182,3 +182,67 @@ func TestCompareRenderParamsHandlesBothShapes(t *testing.T) {
 		})
 	}
 }
+
+// The piece selector on the path that actually renders.
+//
+// WRITTEN BECAUSE THE OTHER TEST WAS NOT ENOUGH. personalise.Params has an
+// ArgsForPart of its own and it was taught the charm file's vocabulary; this
+// one, the only builder a real render goes through, was not. Every test
+// passed and the stored model held two 8002-triangle copies of the same plank
+// in two colours - which is the exact failure the PART rule exists to stop.
+func TestTheCharmFileIsSplitByItsOwnVariable(t *testing.T) {
+	plan := renderPlan{Template: "dnp_charm_joinery", Args: map[string]string{"name1": "\"A\""}}
+
+	base := plan.argsForPart(personalise.PartBase)
+	if got := base["export_part"]; got != "\"plank_part\"" {
+		t.Errorf("export_part = %q, want \"plank_part\"", got)
+	}
+	if _, wrong := base["PART"]; wrong {
+		t.Error("PART was passed to a file that never declares it; export_part keeps its default and both passes draw everything")
+	}
+
+	text := plan.argsForPart(personalise.PartText)
+	if got := text["export_part"]; got != "\"text_part\"" {
+		t.Errorf("export_part = %q, want \"text_part\"", got)
+	}
+	if base["export_part"] == text["export_part"] {
+		t.Error("both passes asked for the same piece")
+	}
+}
+
+func TestEveryOtherTemplateStillUsesPart(t *testing.T) {
+	// The regression that would break every product: PART must stay PART for
+	// the plank, the frame and every registry file.
+	for _, key := range []string{"dnp_heart_joinery", "dnpf_without_heart", "pdhr-p"} {
+		args := renderPlan{Template: key, Args: map[string]string{}}.argsForPart(personalise.PartText)
+		if args["PART"] != "\"text\"" {
+			t.Errorf("%s: PART = %q, want \"text\"", key, args["PART"])
+		}
+	}
+}
+
+func TestTheCustomersColourReachesTheCharmFile(t *testing.T) {
+	plan := renderPlan{Template: "dnp_charm_joinery", Args: map[string]string{"name1": "\"A\""}}
+	if got := plan.withLetteringColour("SKY BLUE").Args["text_color"]; got != "\"SkyBlue\"" {
+		t.Errorf("text_color = %q, want \"SkyBlue\" - the plank renders in the file's default", got)
+	}
+}
+
+func TestLetteringColourDoesNotTouchOtherTemplates(t *testing.T) {
+	// text_color means nothing to the plank file; setting it would be a silent
+	// no-op today and a surprise the day some file declares that name.
+	plan := renderPlan{Template: "dnp_heart_joinery", Args: map[string]string{}}
+	if _, set := plan.withLetteringColour("RED").Args["text_color"]; set {
+		t.Error("text_color was added to a template that does not want it")
+	}
+}
+
+func TestLetteringColourDoesNotMutateThePlan(t *testing.T) {
+	// The first pass's arguments must not leak into the second.
+	original := map[string]string{"name1": "\"A\""}
+	plan := renderPlan{Template: "dnp_charm_joinery", Args: original}
+	_ = plan.withLetteringColour("RED")
+	if _, leaked := original["text_color"]; leaked {
+		t.Error("withLetteringColour mutated the plan's own map")
+	}
+}

@@ -346,6 +346,15 @@ func (s *Server) renderColouredPlank(
 		}
 	}
 
+	// Hand the customer's colour to a file that states its own.
+	//
+	// The charm plank's .scad carries text_color/plank_color, and without this
+	// it kept the file's default - a gold-lettered plank in the OpenSCAD view
+	// and in anything rendered from the source rather than the 3MF. The
+	// PRINTED colour was never at risk, because that comes from the hex
+	// attached to each mesh below, which is why this went unnoticed.
+	plan = plan.withLetteringColour(colour)
+
 	// The model the floor slices: the product's own pieces, from its own file.
 	meshes, err := s.renderPieces(ctx, plan.Template, plan, parts, colour, hex, deref(job.Material))
 	if err != nil {

@@ -52,14 +52,46 @@ type renderPlan struct {
 	Stored storedRenderParams
 }
 
-// argsForPart is Args with PART set, for one of the two coloured passes.
+// argsForPart is Args with the piece selector set, for one of the two coloured
+// passes.
+//
+// THE VARIABLE IS NOT ALWAYS "PART". personalise.PieceArg decides, because a
+// template may name it something else - the charm file calls it export_part
+// and its values plank_part/text_part. This used to hardcode PART, and a file
+// that does not declare PART simply ignored it: export_part kept its default
+// "all", both passes returned the whole plank, and the 3MF held two
+// overlapping copies of the model in two colours. It sliced and it printed.
 func (p renderPlan) argsForPart(part string) map[string]string {
 	out := make(map[string]string, len(p.Args)+1)
 	for k, v := range p.Args {
 		out[k] = v
 	}
-	out["PART"] = personalise.Quote(part)
+	name, value := personalise.PieceArg(p.Template, part)
+	out[name] = personalise.Quote(value)
 	return out
+}
+
+// withLetteringColour gives a self-colouring template the customer's colour.
+//
+// Only the charm file wants this today, and only when the colour is one the
+// file offers: an unrecognised name leaves the file's own default alone rather
+// than failing the render, because nothing that PRINTS depends on this value -
+// the 3MF takes its colour from the hex on each mesh.
+//
+// Returns a copy. Mutating Args in place would leak the first pass's value
+// into the second, which is the bug argsForPart was already written to avoid.
+func (p renderPlan) withLetteringColour(colour string) renderPlan {
+	name := personalise.CharmColourName(colour)
+	if name == "" || p.Args == nil || !personalise.WantsLetteringColour(p.Template) {
+		return p
+	}
+	args := make(map[string]string, len(p.Args)+1)
+	for k, v := range p.Args {
+		args[k] = v
+	}
+	args["text_color"] = personalise.Quote(name)
+	p.Args = args
+	return p
 }
 
 // describe is the one-line summary written to the job's history, so a

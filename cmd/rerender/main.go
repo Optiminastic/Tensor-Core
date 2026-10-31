@@ -55,6 +55,18 @@ func main() {
 	// actually printed and rewriting it would erase the evidence.
 	jobNumbers := flag.String("job", "",
 		"re-render exactly these job numbers, comma-separated, whatever their status")
+	// Charm planks, which -match cannot select.
+	//
+	// The charm is a LINE PROPERTY, not a SKU: a DNP-RED is the same SKU with
+	// or without one. So -match "dual name" would sweep up every plain plank
+	// in the family to correct the few that carry a charm, replacing the file
+	// under hundreds of jobs - including ones sitting in locked batches - to
+	// fix none of them.
+	//
+	// The condition is the one personalise.CharmFromProperties applies:
+	// present, not blank, and not "No charm" in any capitalisation.
+	charmOnly := flag.Bool("charm", false,
+		"only jobs whose line carries a charm other than \"No charm\"")
 	flag.Parse()
 
 	_ = godotenv.Load("env/local.env")
@@ -93,6 +105,13 @@ func main() {
 		where += ` AND (coalesce(j.sku, '') ILIKE '%' || $1 || '%'
 		            OR coalesce(j.product_name, '') ILIKE '%' || $1 || '%')`
 		args = append(args, *match)
+	}
+	if *charmOnly {
+		where += ` AND EXISTS (
+			SELECT 1 FROM jsonb_array_elements(j.personalisation_properties) p
+			 WHERE p->>'name' = 'Charm'
+			   AND btrim(p->>'value') <> ''
+			   AND lower(btrim(p->>'value')) <> 'no charm')`
 	}
 	rows, err := store.Pool.Query(ctx, `
 		SELECT j.id, j.job_number

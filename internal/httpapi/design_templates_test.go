@@ -19,6 +19,17 @@ func TestRequiredParamsDependOnTheKey(t *testing.T) {
 	// else's plank and exits 0.
 	namesFor := map[string][2]string{
 		"dnp_heart_joinery": {"name1", "name2"},
+		"dnp_charm_joinery": {"name1", "name2"},
+	}
+	// The variable that SELECTS THE PIECE, which is PART for every template
+	// but the charm file's - it calls the same thing export_part. The rule is
+	// unchanged and is the reason this assertion exists: the renderer runs a
+	// template once per coloured piece, and one that does not read the piece
+	// it was asked for returns the whole model every time, so the 3MF holds
+	// two overlapping copies in two colours. Only the word differs, so the
+	// check names the word rather than dropping the rule.
+	pieceVarFor := map[string]string{
+		"dnp_charm_joinery": "export_part",
 	}
 	for _, key := range embeddedTemplateKeys {
 		got := requiredParamsFor(key)
@@ -32,8 +43,13 @@ func TestRequiredParamsDependOnTheKey(t *testing.T) {
 					key, got, want)
 			}
 		}
-		if !contains(got, "PART") {
-			t.Errorf("%s requires %v; the renderer passes PART to every template", key, got)
+		piece, named := pieceVarFor[key]
+		if !named {
+			piece = "PART"
+		}
+		if !contains(got, piece) {
+			t.Errorf("%s requires %v; it must declare %s, or every colour pass "+
+				"returns the whole model", key, got, piece)
 		}
 	}
 

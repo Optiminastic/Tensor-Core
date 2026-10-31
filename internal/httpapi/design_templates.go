@@ -91,7 +91,7 @@ type templateUseResponse struct {
 // bucket would reach for, and a key that vanished from this page would look
 // like the design had been deleted.
 var embeddedTemplateKeys = []string{
-	"dnp_heart_joinery",
+	"dnp_heart_joinery", "dnp_charm_joinery",
 	"dnp_with_no_heart", "dual_one_heart", "dnp_two_heart", "dnpf_without_heart",
 }
 
