@@ -64,9 +64,28 @@ WHERE v.product_id = sqlc.arg('product_id')
 ORDER BY lower(v.name);
 
 -- name: InsertVariant :one
-INSERT INTO product_variants (id, product_id, sku, name, status)
+-- personalisation_link_enabled is INHERITED, not defaulted.
+--
+-- The column defaults to true, which was right while every product in the
+-- registry was a plank whose customer is always asked. It is wrong for a
+-- product somebody is still configuring: its SKUs went live asking customers
+-- to approve a preview that had not been set up yet.
+--
+-- So it is computed rather than defaulted: a product that already has
+-- variants lends the new one their answer, and a product that has none - a
+-- product being created right now - starts switched OFF. That is what keeps a
+-- new DNP colourway asking its customer exactly as its siblings do, while a
+-- brand-new product stays quiet until somebody turns it on.
+--
+-- bool_or because the toggle is operated per PRODUCT: the siblings agree, and
+-- if they ever did not, the asking one is the safe answer to copy.
+INSERT INTO product_variants (id, product_id, sku, name, status,
+                              personalisation_link_enabled)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.narg('sku'),
-        sqlc.arg('name'), sqlc.arg('status'))
+        sqlc.arg('name'), sqlc.arg('status'),
+        COALESCE((SELECT bool_or(s.personalisation_link_enabled)
+                    FROM product_variants s
+                   WHERE s.product_id = sqlc.arg('product_id')), false))
 RETURNING *;
 
 -- name: AddVariantOptionValue :exec
@@ -388,9 +407,33 @@ RETURNING *;
 -- Sets status back to 'active', because a re-import is the statement that
 -- Shopify still sells this - which is exactly how a variant retired by an
 -- earlier import comes back when the shop restores it.
-INSERT INTO product_variants (id, product_id, sku, name, status)
+--
+-- personalisation_link_enabled is INHERITED, not defaulted.
+--
+-- The column defaults to true, which was right while every product in the
+-- registry was a plank whose customer is always asked. It is wrong for a
+-- product somebody is still configuring: its SKUs went live asking customers
+-- to approve a preview that had not been set up yet.
+--
+-- So it is computed rather than defaulted: a product that already has
+-- variants lends the new one their answer, and a product that has none - a
+-- product being created right now - starts switched OFF. That is what keeps a
+-- new DNP colourway asking its customer exactly as its siblings do, while a
+-- brand-new product stays quiet until somebody turns it on.
+--
+-- bool_or because the toggle is operated per PRODUCT: the siblings agree, and
+-- if they ever did not, the asking one is the safe answer to copy.
+--
+-- Left alone on CONFLICT: a re-import is not a decision about whether to ask
+-- this product's customers, and flipping it here would undo an operator's
+-- toggle every time Shopify synced.
+INSERT INTO product_variants (id, product_id, sku, name, status,
+                              personalisation_link_enabled)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('sku'),
-        sqlc.arg('name'), 'active')
+        sqlc.arg('name'), 'active',
+        COALESCE((SELECT bool_or(s.personalisation_link_enabled)
+                    FROM product_variants s
+                   WHERE s.product_id = sqlc.arg('product_id')), false))
 ON CONFLICT (lower(sku)) WHERE sku IS NOT NULL DO UPDATE
 SET product_id = EXCLUDED.product_id,
     name       = EXCLUDED.name,
