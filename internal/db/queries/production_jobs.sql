@@ -951,8 +951,8 @@ SET personalisation_properties = sqlc.arg('properties'),
 WHERE id = sqlc.arg('id')
   AND personalisation_status = 'awaiting_customer';
 
--- name: ReleaseStrandedPersonalisationHolds :execrows
--- Frees jobs held for a link that never arrived.
+-- name: ReleaseStrandedPersonalisationHolds :many
+-- Frees jobs held for a link that never arrived, and says whose they were.
 --
 -- THE BACKSTOP, and the reason the whole design is safe to run unattended.
 -- The renderer holds a job before the sender has run, so between those two
@@ -985,6 +985,18 @@ WHERE id = sqlc.arg('id')
 -- is held, and the send is queued behind it. Anything still stranded well
 -- after that was never going to be asked - or was asked and nothing came back
 -- for it.
+--
+-- RETURNS THE ORDERS, and that is not bookkeeping. Releasing a hold is only
+-- half of ending a window: a product with a personalisation preview has its
+-- print file deliberately withheld while the customer still has a say, so a
+-- job freed here comes out 'validated' with nothing to print.
+-- closePersonalisationWindow builds that model on every other path. This one
+-- could not, because a count does not say which orders to build. With the ids
+-- it can.
+--
+-- Measured on production 2026-11-01: T3DPS-116176 and T3DPS-116269 sat
+-- 'validated' with a preview and no print file, reachable by nothing - no open
+-- link for the sweep, no hold left for this, and no render ever queued.
 UPDATE production_jobs j
 SET personalisation_status       = 'validated',
     personalisation_validated_by = 'system (window closed)',
@@ -995,7 +1007,8 @@ WHERE j.personalisation_status = 'awaiting_customer'
       SELECT 1 FROM personalisation_links l
       WHERE l.order_id = j.order_id
         AND l.status IN ('pending', 'sent', 'opened')
-  );
+  )
+RETURNING j.order_id;
 
 -- name: HoldOrderPersonalisationForCustomer :many
 -- Holds the REST of an order's personalised jobs while the customer's window

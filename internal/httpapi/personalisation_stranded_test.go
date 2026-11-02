@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/production"
@@ -105,8 +106,8 @@ func TestAClosedLinkNoLongerStrandsItsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if freed != 3 {
-		t.Errorf("freed %d jobs, want 3", freed)
+	if len(freed) != 3 {
+		t.Errorf("freed %d jobs, want 3", len(freed))
 	}
 	for name, id := range map[string]uuid.UUID{
 		"expired link": expired, "confirmed link": confirmed, "no link": noLink,
@@ -135,8 +136,8 @@ func TestAnOpenLinkStillHoldsItsJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if freed != 0 {
-		t.Errorf("freed %d jobs; an open window must not be cut short", freed)
+	if len(freed) != 0 {
+		t.Errorf("freed %d jobs; an open window must not be cut short", len(freed))
 	}
 	for name, id := range map[string]uuid.UUID{
 		"sent": sent, "opened": opened, "pending": pending,
@@ -165,7 +166,116 @@ func TestAFreshHoldIsLeftAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if freed != 0 {
-		t.Errorf("freed %d jobs; a hold younger than the bound must stand", freed)
+	if len(freed) != 0 {
+		t.Errorf("freed %d jobs; a hold younger than the bound must stand", len(freed))
+	}
+}
+
+// orderOf reads back the order a seeded job belongs to.
+func orderOf(t *testing.T, store *db.Store, jobID uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := store.Pool.QueryRow(context.Background(),
+		`SELECT order_id FROM production_jobs WHERE id = $1`, jobID).Scan(&id); err != nil {
+		t.Fatalf("read the job's order: %v", err)
+	}
+	return id
+}
+
+func TestTheBackstopNamesTheOrdersItFreed(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	// WHY THE IDS MATTER, and not just the count.
+	//
+	// Releasing the hold is only half of ending a window. A product with a
+	// personalisation preview has its print file deliberately withheld while
+	// the customer still has a say, so a job freed here is 'validated' with
+	// nothing an operator could print - and the sweep has to build that model
+	// exactly as the other three endings do. It cannot, if all it is told is
+	// how many jobs it freed.
+	first := seedHeldJob(t, store, "NAMED-ORDER-1", "")
+	second := seedHeldJob(t, store, "NAMED-ORDER-2", "expired")
+
+	freed, err := store.Q.ReleaseStrandedPersonalisationHolds(ctx, strandedAfterTest)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	want := map[uuid.UUID]string{
+		orderOf(t, store, first):  "NAMED-ORDER-1",
+		orderOf(t, store, second): "NAMED-ORDER-2",
+	}
+	got := distinctOrders(freed)
+	if len(got) != len(want) {
+		t.Fatalf("freed %d orders, want %d - the models for the rest are never built",
+			len(got), len(want))
+	}
+	for _, id := range got {
+		if _, ok := want[id]; !ok {
+			t.Errorf("freed an order nobody seeded: %s", id)
+		}
+		delete(want, id)
+	}
+	for id, name := range want {
+		t.Errorf("%s (%s) was freed but not reported, so its model is never built", name, id)
+	}
+}
+
+func TestAJobTheBackstopFreedIsNotHeldAgain(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+
+	// THE OTHER HALF OF THE SAME BUG, and the one that made the obvious
+	// remedy useless: re-rendering a freed job put it straight back.
+	//
+	// personalisationWillAsk decides whether a finished render withholds its
+	// print file and leaves the job awaiting_customer. It answered "has this
+	// customer had their say?" from the LINK table - and a job freed by the
+	// backstop has no link row at all, so that rule never fired and every
+	// other rule still said yes. The job went back to awaiting_customer, with
+	// its file withheld again, every single time it was re-rendered.
+	//
+	// Measured on production 2026-11-01: T3DPS-116269 (PDHR-R).
+	job := seedHeldJob(t, store, "RENDER-AGAIN", "")
+	orderID := orderOf(t, store, job)
+
+	// Genuinely eligible, which is what keeps this test honest. The allow-list
+	// satisfies rule 1 and skips the watermark; a personalised line satisfies
+	// rule 2; the phone number satisfies the last gate. Without this the
+	// assertion below would pass for the wrong reason - because the order was
+	// never askable - and the bug would walk straight through it.
+	if _, err := store.Pool.Exec(ctx, `
+		UPDATE orders
+		SET line_items     = '[{"personalisation_required":true,"quantity":1}]'::jsonb,
+		    customer_phone = '9799931864'
+		WHERE id = $1`, orderID); err != nil {
+		t.Fatalf("make the order eligible: %v", err)
+	}
+	s := &Server{store: store, cfg: config.Settings{
+		PersonalisationCheckEnabled: true,
+		PersonalisationOnly:         []string{"RENDER-AGAIN"},
+	}}
+
+	// THE CONTROL. While the job is still held this order is askable, so a
+	// render must withhold its file. If this ever fails the test below proves
+	// nothing.
+	if !s.personalisationWillAsk(ctx, job) {
+		t.Fatal("a held job on an askable order must still wait for its customer" +
+			" - without this the assertion below is vacuous")
+	}
+
+	// Exactly what the backstop writes.
+	freed, err := store.Q.ReleaseStrandedPersonalisationHolds(ctx, strandedAfterTest)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if len(freed) != 1 {
+		t.Fatalf("freed %d jobs, want 1", len(freed))
+	}
+
+	if s.personalisationWillAsk(ctx, job) {
+		t.Error("a job the backstop already released must not be held again:" +
+			" its print file is withheld a second time and nothing ever builds it")
 	}
 }

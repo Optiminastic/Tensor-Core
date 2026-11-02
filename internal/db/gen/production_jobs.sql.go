@@ -3182,7 +3182,7 @@ func (q *Queries) ReleaseOrderPersonalisationToPrint(ctx context.Context, arg Re
 	return err
 }
 
-const releaseStrandedPersonalisationHolds = `-- name: ReleaseStrandedPersonalisationHolds :execrows
+const releaseStrandedPersonalisationHolds = `-- name: ReleaseStrandedPersonalisationHolds :many
 UPDATE production_jobs j
 SET personalisation_status       = 'validated',
     personalisation_validated_by = 'system (window closed)',
@@ -3194,9 +3194,10 @@ WHERE j.personalisation_status = 'awaiting_customer'
       WHERE l.order_id = j.order_id
         AND l.status IN ('pending', 'sent', 'opened')
   )
+RETURNING j.order_id
 `
 
-// Frees jobs held for a link that never arrived.
+// Frees jobs held for a link that never arrived, and says whose they were.
 //
 // THE BACKSTOP, and the reason the whole design is safe to run unattended.
 // The renderer holds a job before the sender has run, so between those two
@@ -3229,12 +3230,36 @@ WHERE j.personalisation_status = 'awaiting_customer'
 // is held, and the send is queued behind it. Anything still stranded well
 // after that was never going to be asked - or was asked and nothing came back
 // for it.
-func (q *Queries) ReleaseStrandedPersonalisationHolds(ctx context.Context, strandedAfter pgtype.Interval) (int64, error) {
-	result, err := q.db.Exec(ctx, releaseStrandedPersonalisationHolds, strandedAfter)
+//
+// RETURNS THE ORDERS, and that is not bookkeeping. Releasing a hold is only
+// half of ending a window: a product with a personalisation preview has its
+// print file deliberately withheld while the customer still has a say, so a
+// job freed here comes out 'validated' with nothing to print.
+// closePersonalisationWindow builds that model on every other path. This one
+// could not, because a count does not say which orders to build. With the ids
+// it can.
+//
+// Measured on production 2026-11-01: T3DPS-116176 and T3DPS-116269 sat
+// 'validated' with a preview and no print file, reachable by nothing - no open
+// link for the sweep, no hold left for this, and no render ever queued.
+func (q *Queries) ReleaseStrandedPersonalisationHolds(ctx context.Context, strandedAfter pgtype.Interval) ([]*uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, releaseStrandedPersonalisationHolds, strandedAfter)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
+	defer rows.Close()
+	items := []*uuid.UUID{}
+	for rows.Next() {
+		var order_id *uuid.UUID
+		if err := rows.Scan(&order_id); err != nil {
+			return nil, err
+		}
+		items = append(items, order_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const removeJobFromBatch = `-- name: RemoveJobFromBatch :one

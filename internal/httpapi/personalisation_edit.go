@@ -282,7 +282,32 @@ func (s *Server) editableFields(
 			caps[key] = int(*r.MaxRunes)
 		}
 	}
+
+	// A SKU that states no limit INHERITS one rather than falling to the
+	// default - see personalisation_field_limit.go for what that cost.
+	//
+	// Asked only when something is actually missing, so the common case
+	// (every field states its own) costs nothing, and the file is read only
+	// when the registry answered nothing at all.
+	if limitsMissing(out, caps) {
+		role := partRoleOf(job)
+		declared := 0
+		if key, ok := s.templateForVariant(ctx, product.ID, sku, role); ok {
+			declared = s.templateDeclaredLimit(ctx, key)
+		}
+		caps = resolveFieldLimits(out, caps, s.productFieldLimits(ctx, product.ID, role), declared)
+	}
 	return out, caps
+}
+
+// limitsMissing reports whether any editable field still has no limit.
+func limitsMissing(editable map[string]bool, caps map[string]int) bool {
+	for key := range editable {
+		if caps[key] <= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // --- the request --------------------------------------------------------------

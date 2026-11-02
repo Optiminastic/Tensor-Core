@@ -627,6 +627,32 @@ var stalledRenderAfter = pgtype.Interval{Microseconds: 10 * 60 * 1_000_000, Vali
 // shift.
 var strandedHoldAfter = pgtype.Interval{Microseconds: 15 * 60 * 1_000_000, Valid: true}
 
+// distinctOrders reduces freed JOBS to the orders they belong to.
+//
+// The backstop returns one row per job and an order's jobs are held together,
+// so a two-item order comes back twice. renderReleasedJobs works per order and
+// walks all of its jobs, so calling it twice would read the same rows twice to
+// enqueue nothing the second time.
+//
+// Nils are dropped rather than skipped silently-with-a-log: order_id is
+// nullable on the column, but a job held for a customer's confirmation always
+// has one, so there is nothing to report.
+func distinctOrders(freed []*uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(freed))
+	out := make([]uuid.UUID, 0, len(freed))
+	for _, id := range freed {
+		if id == nil {
+			continue
+		}
+		if _, dup := seen[*id]; dup {
+			continue
+		}
+		seen[*id] = struct{}{}
+		out = append(out, *id)
+	}
+	return out
+}
+
 // PersonalisationExpiryWorker releases jobs whose customer's window has closed.
 //
 // THIS IS WHAT MAKES THE WHOLE FEATURE SAFE TO SHIP. Everything else holds
@@ -695,9 +721,24 @@ func (w *PersonalisationExpiryWorker) Sweep(ctx context.Context) error {
 	if freed, err := w.server.store.Q.ReleaseStrandedPersonalisationHolds(ctx,
 		strandedHoldAfter); err != nil {
 		w.logger.Error("personalisation: could not free stranded holds", "error", err)
-	} else if freed > 0 {
+	} else if len(freed) > 0 {
+		orders := distinctOrders(freed)
 		w.logger.Warn("personalisation: freed jobs held for a link that never arrived",
-			"jobs", freed)
+			"jobs", len(freed), "orders", len(orders))
+		// AND BUILD WHAT THE HOLD WAS WITHHOLDING.
+		//
+		// Freeing the status is only half of ending a window. A product with
+		// a personalisation preview has its print file deliberately withheld
+		// while the customer still has a say, so these jobs are now
+		// 'validated' with nothing an operator could print - and no path left
+		// that would ever build it: no open link for the expiry sweep, no
+		// hold for this sweep, no render queued.
+		//
+		// Same call the other three endings make, for the same reason, and
+		// after the release exactly as they do it.
+		for _, orderID := range orders {
+			w.server.renderReleasedJobs(ctx, orderID)
+		}
 		w.server.triggerBatchPlan(ctx)
 	}
 
@@ -763,6 +804,24 @@ func (s *Server) personalisationWillAsk(ctx context.Context, jobID uuid.UUID) bo
 	// expiry sweep's job and nobody else's.
 	if _, err := s.store.Q.GetOpenPersonalisationLinkForOrder(ctx, *job.OrderID); err == nil {
 		return true
+	}
+
+	// THIS JOB'S WINDOW IS ALREADY OVER, so nobody is going to be asked about
+	// it again and its print file must not be withheld a second time.
+	//
+	// personalisationEligible answers "has the customer had their say?" from
+	// the LINK table, and that is blind in exactly the case that matters: a
+	// job released by ReleaseStrandedPersonalisationHolds has no link row at
+	// all, so rule 5 there never fires and every other rule still says yes.
+	// A re-render would then withhold the file again AND put the job back to
+	// awaiting_customer - re-stranding the job the backstop just freed, and
+	// doing it every time anybody re-rendered it.
+	//
+	// The job's own status is the more direct answer and the one the planner
+	// reads, so it is what this asks. An open link still outranks it above,
+	// which keeps a mid-edit customer safe.
+	if production.PersonalisationBatchable(job.PersonalisationStatus) {
+		return false
 	}
 
 	if !s.cfg.PersonalisationCheckEnabled {
