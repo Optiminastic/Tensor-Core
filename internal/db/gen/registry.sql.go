@@ -251,6 +251,31 @@ func (q *Queries) CountSKUPipelinesTable(ctx context.Context, search *string) (i
 	return count, err
 }
 
+const countUnfinishedJobsForPartRole = `-- name: CountUnfinishedJobsForPartRole :one
+SELECT count(*) FROM production_jobs j
+JOIN product_variants v ON lower(v.sku) = lower(j.sku)
+WHERE v.product_id = $1
+  AND lower(j.part_role) = lower($2)
+  AND j.status NOT IN ('dispatched', 'cancelled')
+`
+
+type CountUnfinishedJobsForPartRoleParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+// Jobs that still have to print from this part.
+//
+// Deleting a part takes its files and its mapping with it, so a job that has
+// not printed yet would be left unable to render and nothing on the floor
+// would say why. Dispatched work is not counted: its model is already made.
+func (q *Queries) CountUnfinishedJobsForPartRole(ctx context.Context, arg CountUnfinishedJobsForPartRoleParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnfinishedJobsForPartRole, arg.ProductID, arg.Role)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countVariantsForProduct = `-- name: CountVariantsForProduct :one
 SELECT count(*) AS variant_count,
        coalesce(sum((SELECT count(*) FROM variant_bom b WHERE b.variant_id = v.id)), 0)::bigint AS part_count
@@ -271,6 +296,70 @@ func (q *Queries) CountVariantsForProduct(ctx context.Context, productID uuid.UU
 	var i CountVariantsForProductRow
 	err := row.Scan(&i.VariantCount, &i.PartCount)
 	return i, err
+}
+
+const createProductPart = `-- name: CreateProductPart :one
+INSERT INTO product_parts (id, product_id, role, per_variant, position)
+VALUES ($1, $2, $3,
+        $4,
+        COALESCE((SELECT max(position) + 1 FROM product_parts p
+                   WHERE p.product_id = $2), 0))
+ON CONFLICT (product_id, lower(role)) DO UPDATE
+SET per_variant = EXCLUDED.per_variant,
+    updated_at  = now()
+RETURNING id, product_id, role, per_variant, position, created_at, updated_at
+`
+
+type CreateProductPartParams struct {
+	ID         uuid.UUID
+	ProductID  uuid.UUID
+	Role       string
+	PerVariant bool
+}
+
+// Names a part, or adopts one that already exists as files.
+//
+// ON CONFLICT rather than a refusal because a part CAN already exist without
+// a row here - derived from its files - and naming it is then the first time
+// anybody records which way it is configured. Refusing would make the obvious
+// gesture fail on exactly the products this table was added for.
+func (q *Queries) CreateProductPart(ctx context.Context, arg CreateProductPartParams) (ProductPart, error) {
+	row := q.db.QueryRow(ctx, createProductPart,
+		arg.ID,
+		arg.ProductID,
+		arg.Role,
+		arg.PerVariant,
+	)
+	var i ProductPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PerVariant,
+		&i.Position,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteColourPartsForRole = `-- name: DeleteColourPartsForRole :execrows
+DELETE FROM design_colour_parts
+WHERE product_id = $1
+  AND lower(role) = lower($2)
+`
+
+type DeleteColourPartsForRoleParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+func (q *Queries) DeleteColourPartsForRole(ctx context.Context, arg DeleteColourPartsForRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteColourPartsForRole, arg.ProductID, arg.Role)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteComponentPlate = `-- name: DeleteComponentPlate :execrows
@@ -321,6 +410,25 @@ func (q *Queries) DeleteProduct(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const deleteProductFieldMapsForRole = `-- name: DeleteProductFieldMapsForRole :execrows
+DELETE FROM product_field_maps
+WHERE product_id = $1
+  AND lower(role) = lower($2)
+`
+
+type DeleteProductFieldMapsForRoleParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+func (q *Queries) DeleteProductFieldMapsForRole(ctx context.Context, arg DeleteProductFieldMapsForRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteProductFieldMapsForRole, arg.ProductID, arg.Role)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteProductOption = `-- name: DeleteProductOption :exec
 DELETE FROM product_options WHERE id = $1
 `
@@ -332,6 +440,15 @@ DELETE FROM product_options WHERE id = $1
 // schema change would be the worse failure.
 func (q *Queries) DeleteProductOption(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteProductOption, id)
+	return err
+}
+
+const deleteProductPart = `-- name: DeleteProductPart :exec
+DELETE FROM product_parts WHERE id = $1
+`
+
+func (q *Queries) DeleteProductPart(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteProductPart, id)
 	return err
 }
 
@@ -392,6 +509,27 @@ DELETE FROM product_variants WHERE id = $1
 func (q *Queries) DeleteVariant(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteVariant, id)
 	return err
+}
+
+const deleteVariantDesignsForRole = `-- name: DeleteVariantDesignsForRole :execrows
+DELETE FROM variant_designs d
+USING product_variants v
+WHERE v.id = d.variant_id
+  AND v.product_id = $1
+  AND lower(d.role) = lower($2)
+`
+
+type DeleteVariantDesignsForRoleParams struct {
+	ProductID uuid.UUID
+	Role      string
+}
+
+func (q *Queries) DeleteVariantDesignsForRole(ctx context.Context, arg DeleteVariantDesignsForRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteVariantDesignsForRole, arg.ProductID, arg.Role)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const findProductBySKU = `-- name: FindProductBySKU :one
@@ -606,6 +744,25 @@ func (q *Queries) GetProductByCode(ctx context.Context, code string) (Product, e
 		&i.Kind,
 		&i.Status,
 		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getProductPart = `-- name: GetProductPart :one
+SELECT id, product_id, role, per_variant, position, created_at, updated_at FROM product_parts WHERE id = $1
+`
+
+func (q *Queries) GetProductPart(ctx context.Context, id uuid.UUID) (ProductPart, error) {
+	row := q.db.QueryRow(ctx, getProductPart, id)
+	var i ProductPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PerVariant,
+		&i.Position,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -2029,6 +2186,45 @@ func (q *Queries) ListProductOptions(ctx context.Context, productID uuid.UUID) (
 	return items, nil
 }
 
+const listProductParts = `-- name: ListProductParts :many
+SELECT id, product_id, role, per_variant, position, created_at, updated_at FROM product_parts
+WHERE product_id = $1
+ORDER BY position, lower(role)
+`
+
+// The parts somebody has NAMED on this product, in the order they were added.
+//
+// Not the whole answer on its own: listProductParts merges these over the
+// parts still derived from the files, so a product configured before this
+// table existed reads exactly as it always did.
+func (q *Queries) ListProductParts(ctx context.Context, productID uuid.UUID) ([]ProductPart, error) {
+	rows, err := q.db.Query(ctx, listProductParts, productID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ProductPart{}
+	for rows.Next() {
+		var i ProductPart
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProductID,
+			&i.Role,
+			&i.PerVariant,
+			&i.Position,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProductPipelines = `-- name: ListProductPipelines :many
 SELECT p.id AS product_id, p.code AS product_code, p.name AS product_name,
        (SELECT count(*) FROM product_variants v
@@ -2810,6 +3006,135 @@ func (q *Queries) ListVariantsWithOwnBom(ctx context.Context, productID uuid.UUI
 	return items, nil
 }
 
+const renameColourPartsRole = `-- name: RenameColourPartsRole :execrows
+UPDATE design_colour_parts
+SET role = $1
+WHERE product_id = $2
+  AND lower(role) = lower($3)
+`
+
+type RenameColourPartsRoleParams struct {
+	Role      string
+	ProductID uuid.UUID
+	FromRole  string
+}
+
+func (q *Queries) RenameColourPartsRole(ctx context.Context, arg RenameColourPartsRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renameColourPartsRole, arg.Role, arg.ProductID, arg.FromRole)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renameJobPartRole = `-- name: RenameJobPartRole :execrows
+UPDATE production_jobs j
+SET part_role = $1
+FROM product_variants v
+WHERE lower(v.sku) = lower(j.sku)
+  AND v.product_id = $2
+  AND lower(j.part_role) = lower($3)
+`
+
+type RenameJobPartRoleParams struct {
+	Role      string
+	ProductID uuid.UUID
+	FromRole  string
+}
+
+// And the jobs already made for it.
+//
+// Including the printed ones. part_role names WHICH DRAWING this job came
+// from, and renaming the part does not change the drawing - so leaving old
+// jobs on the old name would say they came from something else. A job left
+// behind is also a job whose re-render finds no template.
+func (q *Queries) RenameJobPartRole(ctx context.Context, arg RenameJobPartRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renameJobPartRole, arg.Role, arg.ProductID, arg.FromRole)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renameProductFieldMapsRole = `-- name: RenameProductFieldMapsRole :execrows
+UPDATE product_field_maps
+SET role = $1
+WHERE product_id = $2
+  AND lower(role) = lower($3)
+`
+
+type RenameProductFieldMapsRoleParams struct {
+	Role      string
+	ProductID uuid.UUID
+	FromRole  string
+}
+
+func (q *Queries) RenameProductFieldMapsRole(ctx context.Context, arg RenameProductFieldMapsRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renameProductFieldMapsRole, arg.Role, arg.ProductID, arg.FromRole)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renameProductPart = `-- name: RenameProductPart :one
+UPDATE product_parts
+SET role = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, product_id, role, per_variant, position, created_at, updated_at
+`
+
+type RenameProductPartParams struct {
+	Role string
+	ID   uuid.UUID
+}
+
+func (q *Queries) RenameProductPart(ctx context.Context, arg RenameProductPartParams) (ProductPart, error) {
+	row := q.db.QueryRow(ctx, renameProductPart, arg.Role, arg.ID)
+	var i ProductPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PerVariant,
+		&i.Position,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const renameVariantDesignsRole = `-- name: RenameVariantDesignsRole :execrows
+UPDATE variant_designs d
+SET role = $1
+FROM product_variants v
+WHERE v.id = d.variant_id
+  AND v.product_id = $2
+  AND lower(d.role) = lower($3)
+`
+
+type RenameVariantDesignsRoleParams struct {
+	Role      string
+	ProductID uuid.UUID
+	FromRole  string
+}
+
+// Carries a rename into the files assigned per child SKU.
+//
+// THE ROLE IS A JOIN KEY, not a label. The same string addresses
+// variant_designs, product_field_maps, design_colour_parts and
+// production_jobs.part_role, so renaming the part without carrying all four
+// leaves a part whose files, mapping and colours belong to a name nothing
+// refers to any more - and the next render finds no template and holds the
+// job with a message about a part nobody can see.
+func (q *Queries) RenameVariantDesignsRole(ctx context.Context, arg RenameVariantDesignsRoleParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renameVariantDesignsRole, arg.Role, arg.ProductID, arg.FromRole)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const replaceProductBomItem = `-- name: ReplaceProductBomItem :exec
 INSERT INTO product_bom (id, product_id, inventory_item_id, quantity)
 VALUES ($1, $2, $3,
@@ -2978,6 +3303,38 @@ func (q *Queries) SetInventoryItemSource(ctx context.Context, arg SetInventoryIt
 		&i.PreviewColour,
 		&i.PreviewPosition,
 		&i.Code,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setProductPartScope = `-- name: SetProductPartScope :one
+UPDATE product_parts
+SET per_variant = $1, updated_at = now()
+WHERE id = $2
+RETURNING id, product_id, role, per_variant, position, created_at, updated_at
+`
+
+type SetProductPartScopeParams struct {
+	PerVariant bool
+	ID         uuid.UUID
+}
+
+// Switches a part between one shared file and a file per child SKU.
+//
+// The files themselves are left exactly where they are. Flipping this hides
+// one picker and shows the other; it does not throw away what the hidden one
+// was pointing at, so flipping back finds the configuration still there.
+func (q *Queries) SetProductPartScope(ctx context.Context, arg SetProductPartScopeParams) (ProductPart, error) {
+	row := q.db.QueryRow(ctx, setProductPartScope, arg.PerVariant, arg.ID)
+	var i ProductPart
+	err := row.Scan(
+		&i.ID,
+		&i.ProductID,
+		&i.Role,
+		&i.PerVariant,
+		&i.Position,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

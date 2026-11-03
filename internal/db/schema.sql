@@ -1759,3 +1759,18 @@ CREATE TABLE IF NOT EXISTS design_template_self_colour (
 
 CREATE INDEX IF NOT EXISTS ix_production_jobs_sku_lower
     ON production_jobs (lower(sku));
+
+-- The things a product prints, named before any file exists. Mirrors
+-- migration 0139; see it for why a part is no longer only derived.
+CREATE TABLE IF NOT EXISTS product_parts (
+    id          uuid PRIMARY KEY,
+    product_id  uuid NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    role        varchar(64) NOT NULL,
+    per_variant boolean NOT NULL DEFAULT true,
+    position    integer NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_parts_role
+    ON product_parts (product_id, lower(role));
