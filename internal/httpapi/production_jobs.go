@@ -927,10 +927,20 @@ func (s *Server) buildJobsForOrder(
 ) ([]gen.InsertProductionJobParams, error) {
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
-	// Runs across PARTS, not lines, so a combo's three jobs number the way a
-	// three-product order's do - JOB-115257, -2, -3 - rather than inventing a
-	// second suffix format that every downstream reader has to learn.
+	// Runs across PARTS, not lines, so a line that prints one thing numbers
+	// the way it always did: JOB-115257, -2, -3 across the order.
+	//
+	// A line that prints SEVERAL is named for its parts instead - see
+	// jobNumberForPart. Both forms are read by orderNumberFromJobNumber
+	// unchanged, which is the only thing downstream that reads a job number
+	// rather than storing it.
 	jobIndex := 0
+	// Numbers minted in THIS call. JobNumberExists cannot see them: every
+	// param is built here and inserted by the caller afterwards, so two parts
+	// of one order would both find their name free and collide on the unique
+	// index - which aborts the transaction and leaves the order with no jobs
+	// at all.
+	minted := map[string]bool{}
 	for _, li := range items {
 		quantity := int32(li.Quantity)
 		if quantity < 1 {
@@ -978,10 +988,19 @@ func (s *Server) buildJobsForOrder(
 				// customer's own paperwork all carry the same number. Falls
 				// back to the sequence when the order number has no digits to
 				// borrow.
-				jobNumber, err := s.jobNumberFor(ctx, order.OrderNumber, jobIndex)
+				//
+				// And named for the PART when the line prints more than one,
+				// so three jobs off one combo say which is the plank and
+				// which the keychain instead of reading -2 and -3.
+				base := ""
+				if len(roles) > 1 {
+					base = jobNumberForPart(order.OrderNumber, role)
+				}
+				jobNumber, err := s.numberForJob(ctx, order.OrderNumber, base, jobIndex, minted)
 				if err != nil {
 					return nil, err
 				}
+				minted[jobNumber] = true
 				jobIndex++
 
 				p := s.jobParamsFor(jobParamsInput{
@@ -1256,6 +1275,48 @@ func reportableModelError(j gen.ProductionJob, generated bool) *string {
 	}
 	return j.ModelError
 }
+
+// numberForJob picks this job's number: its part's name where it has one, the
+// order-and-index form otherwise.
+//
+// A base already taken takes a counted suffix - JOB-116456-ROSE-2 - which is
+// what two of the same combo on one order need. Taken is asked of the
+// database AND of what this call has already minted, because the inserts have
+// not happened yet.
+func (s *Server) numberForJob(
+	ctx context.Context, orderNumber, base string, index int, minted map[string]bool,
+) (string, error) {
+	if base == "" {
+		return s.jobNumberFor(ctx, orderNumber, index)
+	}
+	for attempt := range maxPartNumberAttempts {
+		candidate := base
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, attempt+1)
+		}
+		if minted[candidate] {
+			continue
+		}
+		taken, err := s.store.Q.JobNumberExists(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return candidate, nil
+		}
+	}
+	// Past that something is wrong with the assumption, not with this order.
+	// The sequence always works, and a job numbered oddly beats no job.
+	obs.FromContext(ctx).Warn("could not name a job after its part; using the sequence",
+		"order", orderNumber, "base", base)
+	return s.store.Q.NextJobNumber(ctx)
+}
+
+// maxPartNumberAttempts bounds the search for a free part-named number.
+//
+// Ten of the same combo on one order is already past maxPerUnitSplit, so this
+// is a guard against a loop rather than a limit anybody reaches.
+const maxPartNumberAttempts = 12
 
 // jobNumberFor names the index-th job on an order after the order itself,
 // falling back to the sequence.
