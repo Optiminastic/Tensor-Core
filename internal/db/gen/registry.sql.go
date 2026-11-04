@@ -818,11 +818,12 @@ func (q *Queries) GetVariantProduct(ctx context.Context, id uuid.UUID) (GetVaria
 }
 
 const insertDesignColourPart = `-- name: InsertDesignColourPart :one
-INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id)
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id,
+                                 optional)
 VALUES ($1, $2, $3,
         $4, $5, $6,
-        $7)
-RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id
+        $7, $8)
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id, optional
 `
 
 type InsertDesignColourPartParams struct {
@@ -833,6 +834,7 @@ type InsertDesignColourPartParams struct {
 	ColourHex *string
 	Position  int32
 	VariantID *uuid.UUID
+	Optional  bool
 }
 
 func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignColourPartParams) (DesignColourPart, error) {
@@ -844,6 +846,7 @@ func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignCo
 		arg.ColourHex,
 		arg.Position,
 		arg.VariantID,
+		arg.Optional,
 	)
 	var i DesignColourPart
 	err := row.Scan(
@@ -855,6 +858,7 @@ func (q *Queries) InsertDesignColourPart(ctx context.Context, arg InsertDesignCo
 		&i.Position,
 		&i.CreatedAt,
 		&i.VariantID,
+		&i.Optional,
 	)
 	return i, err
 }
@@ -1272,7 +1276,7 @@ func (q *Queries) ListAllComponentPlates(ctx context.Context) ([]ListAllComponen
 }
 
 const listAllDesignColourParts = `-- name: ListAllDesignColourParts :many
-SELECT dcp.id, dcp.product_id, dcp.role, dcp.part_name, dcp.colour_hex, dcp.position, dcp.created_at, dcp.variant_id, v.sku AS variant_sku
+SELECT dcp.id, dcp.product_id, dcp.role, dcp.part_name, dcp.colour_hex, dcp.position, dcp.created_at, dcp.variant_id, dcp.optional, v.sku AS variant_sku
 FROM design_colour_parts dcp
 LEFT JOIN product_variants v ON v.id = dcp.variant_id
 WHERE dcp.product_id = $1
@@ -1288,6 +1292,7 @@ type ListAllDesignColourPartsRow struct {
 	Position   int32
 	CreatedAt  pgtype.Timestamptz
 	VariantID  *uuid.UUID
+	Optional   bool
 	VariantSku *string
 }
 
@@ -1312,6 +1317,7 @@ func (q *Queries) ListAllDesignColourParts(ctx context.Context, productID uuid.U
 			&i.Position,
 			&i.CreatedAt,
 			&i.VariantID,
+			&i.Optional,
 			&i.VariantSku,
 		); err != nil {
 			return nil, err
@@ -1522,7 +1528,7 @@ func (q *Queries) ListBomForVariants(ctx context.Context, variantIds []uuid.UUID
 }
 
 const listColourPartsForVariant = `-- name: ListColourPartsForVariant :many
-SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id FROM design_colour_parts
+SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id, optional FROM design_colour_parts
 WHERE variant_id = $1
   AND lower(role) = lower($2::text)
 ORDER BY position, lower(part_name)
@@ -1557,6 +1563,7 @@ func (q *Queries) ListColourPartsForVariant(ctx context.Context, arg ListColourP
 			&i.Position,
 			&i.CreatedAt,
 			&i.VariantID,
+			&i.Optional,
 		); err != nil {
 			return nil, err
 		}
@@ -1626,7 +1633,7 @@ func (q *Queries) ListComponentPlates(ctx context.Context, inventoryItemID uuid.
 }
 
 const listDesignColourParts = `-- name: ListDesignColourParts :many
-SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id FROM design_colour_parts
+SELECT id, product_id, role, part_name, colour_hex, position, created_at, variant_id, optional FROM design_colour_parts
 WHERE product_id = $1
   AND lower(role) = lower($2::text)
   AND variant_id IS NULL
@@ -1665,6 +1672,7 @@ func (q *Queries) ListDesignColourParts(ctx context.Context, arg ListDesignColou
 			&i.Position,
 			&i.CreatedAt,
 			&i.VariantID,
+			&i.Optional,
 		); err != nil {
 			return nil, err
 		}
@@ -3218,23 +3226,31 @@ func (q *Queries) RetireVariantsNotInSKUs(ctx context.Context, arg RetireVariant
 
 const setDesignColourPartColour = `-- name: SetDesignColourPartColour :one
 UPDATE design_colour_parts
-SET colour_hex = $1
-WHERE id = $2
-RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id
+SET colour_hex = $1,
+    optional   = COALESCE($2::boolean, optional)
+WHERE id = $3
+RETURNING id, product_id, role, part_name, colour_hex, position, created_at, variant_id, optional
 `
 
 type SetDesignColourPartColourParams struct {
 	ColourHex *string
+	Optional  *bool
 	ID        uuid.UUID
 }
 
-// Changes one piece between a fixed colour and the customer's choice.
+// Changes one piece between a fixed colour and the customer's choice, and
+// whether the order may leave it out altogether.
 //
-// NULL is the customer's choice, which is why this takes a nullable colour
-// rather than a colour and a flag: the two can contradict each other and
-// nothing here needs them to.
+// NULL colour_hex is the customer's choice, which is why this takes a nullable
+// colour rather than a colour and a flag: the two can contradict each other
+// and nothing here needs them to.
+//
+// NULL optional means "not mentioned", and COALESCE leaves the stored answer
+// alone. Unlike the colour, where absent means "follow the customer", absent
+// here cannot mean false: a PATCH sent to change a hex would then quietly make
+// the mirror's tick mandatory again and fail every order without one.
 func (q *Queries) SetDesignColourPartColour(ctx context.Context, arg SetDesignColourPartColourParams) (DesignColourPart, error) {
-	row := q.db.QueryRow(ctx, setDesignColourPartColour, arg.ColourHex, arg.ID)
+	row := q.db.QueryRow(ctx, setDesignColourPartColour, arg.ColourHex, arg.Optional, arg.ID)
 	var i DesignColourPart
 	err := row.Scan(
 		&i.ID,
@@ -3245,6 +3261,7 @@ func (q *Queries) SetDesignColourPartColour(ctx context.Context, arg SetDesignCo
 		&i.Position,
 		&i.CreatedAt,
 		&i.VariantID,
+		&i.Optional,
 	)
 	return i, err
 }

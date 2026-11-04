@@ -308,6 +308,7 @@ type DesignColourPart struct {
 	Position  int32
 	CreatedAt pgtype.Timestamptz
 	VariantID *uuid.UUID
+	Optional  bool
 }
 
 type DesignPricing struct {

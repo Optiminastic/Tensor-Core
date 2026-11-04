@@ -36,6 +36,16 @@ var templates embed.FS
 // a failure to fix at runtime.
 var ErrNoTemplate = errors.New("no personalisation template for this product")
 
+// ErrEmptyModel means the render succeeded and drew nothing.
+//
+// Not a failure by itself. A template that does not branch on PART, or spells
+// a piece differently from the scheme, answers with nothing - and so does a
+// piece the order genuinely did not buy, like the mirror's verified tick. The
+// two look identical from here, so this says only WHAT happened and leaves
+// which one it is to the caller, who knows whether that piece was declared
+// optional.
+var ErrEmptyModel = errors.New("openscad produced an empty model")
+
 // DefaultTimeout bounds one render.
 //
 // Measured, not guessed: a Dual Name Plank takes 22-25s on this hardware, and
@@ -328,6 +338,28 @@ func (r *Renderer) render(
 		return nil, fmt.Errorf("render aborted before completing: %w", err)
 	}
 	if runErr != nil {
+		// A SCRIPT THAT DREW NOTHING EXITS 1, exactly as a broken one does,
+		// and writes no output file either way. Measured on OpenSCAD
+		// 2026.09.12: `PART="tick"` against a template that only draws a tick
+		// for an order that bought one exits 1, prints "Current top level
+		// object is empty." and leaves the output path untouched.
+		//
+		// So the message is the only thing telling the two apart, and it has
+		// to be read. The alternative is that a conditional piece is
+		// indistinguishable from a typo in a piece name, which would mean
+		// either failing every order that did not buy the piece or trusting
+		// every empty render - a mirror printed with no badge, reported as a
+		// success.
+		//
+		// Narrow on purpose: matched only when the output file is also
+		// absent, so a template that somehow emits this line while producing
+		// geometry is still a render, and anything else OpenSCAD exits 1 for
+		// stays a plain failure naming its own last lines.
+		if emptyTopLevel(stderr.String()) {
+			if _, statErr := os.Stat(outPath); os.IsNotExist(statErr) {
+				return nil, fmt.Errorf("%w: %s", ErrEmptyModel, lastLines(stderr.String()))
+			}
+		}
 		return nil, fmt.Errorf("openscad: %w: %s", runErr, lastLines(stderr.String()))
 	}
 
@@ -338,7 +370,7 @@ func (r *Renderer) render(
 	if len(out) == 0 {
 		// OpenSCAD exits 0 on an empty model, which would otherwise reach the
 		// printer as a job that prints nothing.
-		return nil, errors.New("openscad produced an empty model")
+		return nil, ErrEmptyModel
 	}
 	return out, nil
 }
@@ -390,4 +422,18 @@ func (r *Renderer) templateSource(ctx context.Context, template string) ([]byte,
 		return nil, fmt.Errorf("%w: %s", ErrNoTemplate, template)
 	}
 	return source, nil
+}
+
+// emptyTopLevel reports whether OpenSCAD's own words say the script drew
+// nothing.
+//
+// Reading a subprocess's English is not a thing to do lightly, and this is
+// the only place it happens. There is no machine-readable signal for it: the
+// exit status is 1 for this and for a syntax error alike, and no file is
+// written in either case. The phrase has been stable across OpenSCAD's
+// releases, and the match is on the part of it that carries the meaning
+// rather than on the whole sentence, so a changed prefix or a full stop moved
+// does not silently turn every absent piece back into a failed job.
+func emptyTopLevel(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "top level object is empty")
 }

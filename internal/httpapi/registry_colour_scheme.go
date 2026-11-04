@@ -39,6 +39,12 @@ type colourSchemePart struct {
 	PartName string `json:"part_name" binding:"required"`
 	// ColourHex is "#RRGGBB", or empty for "follow the customer's choice".
 	ColourHex string `json:"colour_hex" binding:"omitempty,len=7,startswith=#"`
+	// Optional is a piece only some orders have - the mirror's verified tick.
+	// It renders nothing on the rest and is dropped from their model rather
+	// than holding the job. Off unless said, because every other piece
+	// rendering nothing is a scheme naming something the template cannot
+	// draw.
+	Optional bool `json:"optional"`
 	// ColourName is the shop's own word for a colour - "gold", "pink" - and is
 	// preferred over ColourHex when both arrive.
 	//
@@ -138,7 +144,7 @@ func (s *Server) putColourScheme(c *gin.Context) {
 			}
 			hex = resolved
 		}
-		parts = append(parts, colourPart{Name: name, Hex: hex})
+		parts = append(parts, colourPart{Name: name, Hex: hex, Optional: p.Optional})
 	}
 
 	// Every piece is rendered before any is stored - the same check the 3MF
@@ -168,7 +174,7 @@ func (s *Server) putColourScheme(c *gin.Context) {
 		row, err := s.store.Q.InsertDesignColourPart(ctx, gen.InsertDesignColourPartParams{
 			ID: uuid.New(), ProductID: product.ID, Role: role,
 			PartName: p.Name, ColourHex: hex, Position: int32(i),
-			VariantID: variantID,
+			VariantID: variantID, Optional: p.Optional,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError,

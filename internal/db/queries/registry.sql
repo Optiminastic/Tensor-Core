@@ -625,20 +625,28 @@ WHERE product_id = sqlc.arg('product_id')
   AND variant_id IS NOT DISTINCT FROM sqlc.narg('variant_id')::uuid;
 
 -- name: InsertDesignColourPart :one
-INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id)
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id,
+                                 optional)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('role'),
         sqlc.arg('part_name'), sqlc.narg('colour_hex'), sqlc.arg('position'),
-        sqlc.narg('variant_id'))
+        sqlc.narg('variant_id'), sqlc.arg('optional'))
 RETURNING *;
 
 -- name: SetDesignColourPartColour :one
--- Changes one piece between a fixed colour and the customer's choice.
+-- Changes one piece between a fixed colour and the customer's choice, and
+-- whether the order may leave it out altogether.
 --
--- NULL is the customer's choice, which is why this takes a nullable colour
--- rather than a colour and a flag: the two can contradict each other and
--- nothing here needs them to.
+-- NULL colour_hex is the customer's choice, which is why this takes a nullable
+-- colour rather than a colour and a flag: the two can contradict each other
+-- and nothing here needs them to.
+--
+-- NULL optional means "not mentioned", and COALESCE leaves the stored answer
+-- alone. Unlike the colour, where absent means "follow the customer", absent
+-- here cannot mean false: a PATCH sent to change a hex would then quietly make
+-- the mirror's tick mandatory again and fail every order without one.
 UPDATE design_colour_parts
-SET colour_hex = sqlc.narg('colour_hex')
+SET colour_hex = sqlc.narg('colour_hex'),
+    optional   = COALESCE(sqlc.narg('optional')::boolean, optional)
 WHERE id = sqlc.arg('id')
 RETURNING *;
 
