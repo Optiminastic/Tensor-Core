@@ -124,6 +124,11 @@ func Read3MF(data []byte) ([]Part, error) {
 // colourFor resolves an object's (pid, pindex) to "#RRGGBB", or "" when it
 // references no material or one this file does not define.
 func colourFor(groups map[string][]string, o xmlObject) string {
+	// The triangles' own material first, when they carry one. See
+	// triangleColour for why this is not an edge case.
+	if c := triangleColour(groups, o); c != "" {
+		return c
+	}
 	if o.PID == "" || o.PIndex == nil {
 		return ""
 	}
@@ -240,6 +245,12 @@ type xmlObject struct {
 				V1 int `xml:"v1,attr"`
 				V2 int `xml:"v2,attr"`
 				V3 int `xml:"v3,attr"`
+				// PID and P1 are the triangle's OWN material, which the 3MF
+				// materials extension lets override the object's pindex. OpenSCAD
+				// writes colour only here - every object says pindex="0", its
+				// "Default" base, and each triangle names the real colour.
+				PID string `xml:"pid,attr"`
+				P1  *int   `xml:"p1,attr"`
 			} `xml:"triangle"`
 		} `xml:"triangles"`
 	} `xml:"mesh"`
@@ -298,4 +309,47 @@ func partName(o xmlObject) string {
 		return "object " + o.ID
 	}
 	return ""
+}
+
+// triangleColour is the colour an object's triangles name for themselves, or
+// "" when they name none.
+//
+// OPENSCAD PUTS THE COLOUR HERE AND NOWHERE ELSE. Exporting a coloured model
+// (lazy-union, one object per color()), every <object> carries pindex="0" -
+// its "Default" base - and each <triangle> carries pid/p1 pointing at the real
+// one:
+//
+//	<object id="2" pid="1" pindex="0">
+//	  <triangle v1="0" v2="1" v3="2" pid="1" p1="1" />
+//
+// Reading the object alone gave every piece the default colour, which is how
+// a brown-and-white crossword frame read back as three yellow parts. The 3MF
+// materials extension says a triangle's own property overrides the object's,
+// so this is the spec being followed, not a special case for one exporter.
+//
+// The commonest colour wins when the triangles disagree. A Part is one colour
+// by definition - Write3MF stamps a single hex on it - and OpenSCAD splits
+// each color() into its own object, so within one object they agree.
+func triangleColour(groups map[string][]string, o xmlObject) string {
+	counts := map[string]int{}
+	best, bestN := "", 0
+	for _, t := range o.Mesh.Triangles.Triangle {
+		if t.P1 == nil {
+			continue
+		}
+		pid := t.PID
+		if pid == "" {
+			pid = o.PID
+		}
+		colours, ok := groups[pid]
+		if !ok || *t.P1 < 0 || *t.P1 >= len(colours) {
+			continue
+		}
+		c := colours[*t.P1]
+		counts[c]++
+		if counts[c] > bestN {
+			best, bestN = c, counts[c]
+		}
+	}
+	return best
 }

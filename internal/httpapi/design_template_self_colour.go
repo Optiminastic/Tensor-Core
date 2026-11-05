@@ -22,6 +22,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -72,12 +73,20 @@ func (s *Server) setTemplateSelfColour(c *gin.Context) {
 	// SETTING IT IS CHECKED, because a file that declares no colours would
 	// silently fall back to the configured scheme and the flag would look
 	// like it had done nothing.
+	// A file with no literals may still decide its colours from an order
+	// field - see design_file_colours.go. It is accepted only if a render with
+	// its own defaults really comes back in more than one colour.
 	if declared := s.declaredPartColours(ctx, key); len(declared) == 0 {
-		detail(c, http.StatusUnprocessableEntity,
-			key+" declares no colours, so there is nothing to read. A file states its "+
-				`own colours with a top-level declaration per piece - BACK_COLOR = "#7D3CB5"; `+
-				"- naming the same pieces it branches on PART for.")
-		return
+		objects, colours, err := s.fileColoursProof(ctx, key)
+		if err != nil || colours < 2 {
+			detail(c, http.StatusUnprocessableEntity,
+				key+" declares no colours, so there is nothing to read. A file states its "+
+					`own colours either with a declaration per piece - BACK_COLOR = "#7D3CB5"; `+
+					"- or by colouring its pieces with color() so they export as separate "+
+					fmt.Sprintf("objects. Rendered with its defaults it gave %d object(s) in %d colour(s).",
+						objects, colours))
+			return
+		}
 	}
 
 	if err := s.store.Q.SetSelfColouredTemplate(ctx, gen.SetSelfColouredTemplateParams{
