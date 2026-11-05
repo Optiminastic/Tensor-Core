@@ -64,9 +64,28 @@ WHERE v.product_id = sqlc.arg('product_id')
 ORDER BY lower(v.name);
 
 -- name: InsertVariant :one
-INSERT INTO product_variants (id, product_id, sku, name, status)
+-- personalisation_link_enabled is INHERITED, not defaulted.
+--
+-- The column defaults to true, which was right while every product in the
+-- registry was a plank whose customer is always asked. It is wrong for a
+-- product somebody is still configuring: its SKUs went live asking customers
+-- to approve a preview that had not been set up yet.
+--
+-- So it is computed rather than defaulted: a product that already has
+-- variants lends the new one their answer, and a product that has none - a
+-- product being created right now - starts switched OFF. That is what keeps a
+-- new DNP colourway asking its customer exactly as its siblings do, while a
+-- brand-new product stays quiet until somebody turns it on.
+--
+-- bool_or because the toggle is operated per PRODUCT: the siblings agree, and
+-- if they ever did not, the asking one is the safe answer to copy.
+INSERT INTO product_variants (id, product_id, sku, name, status,
+                              personalisation_link_enabled)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.narg('sku'),
-        sqlc.arg('name'), sqlc.arg('status'))
+        sqlc.arg('name'), sqlc.arg('status'),
+        COALESCE((SELECT bool_or(s.personalisation_link_enabled)
+                    FROM product_variants s
+                   WHERE s.product_id = sqlc.arg('product_id')), false))
 RETURNING *;
 
 -- name: AddVariantOptionValue :exec
@@ -388,9 +407,33 @@ RETURNING *;
 -- Sets status back to 'active', because a re-import is the statement that
 -- Shopify still sells this - which is exactly how a variant retired by an
 -- earlier import comes back when the shop restores it.
-INSERT INTO product_variants (id, product_id, sku, name, status)
+--
+-- personalisation_link_enabled is INHERITED, not defaulted.
+--
+-- The column defaults to true, which was right while every product in the
+-- registry was a plank whose customer is always asked. It is wrong for a
+-- product somebody is still configuring: its SKUs went live asking customers
+-- to approve a preview that had not been set up yet.
+--
+-- So it is computed rather than defaulted: a product that already has
+-- variants lends the new one their answer, and a product that has none - a
+-- product being created right now - starts switched OFF. That is what keeps a
+-- new DNP colourway asking its customer exactly as its siblings do, while a
+-- brand-new product stays quiet until somebody turns it on.
+--
+-- bool_or because the toggle is operated per PRODUCT: the siblings agree, and
+-- if they ever did not, the asking one is the safe answer to copy.
+--
+-- Left alone on CONFLICT: a re-import is not a decision about whether to ask
+-- this product's customers, and flipping it here would undo an operator's
+-- toggle every time Shopify synced.
+INSERT INTO product_variants (id, product_id, sku, name, status,
+                              personalisation_link_enabled)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('sku'),
-        sqlc.arg('name'), 'active')
+        sqlc.arg('name'), 'active',
+        COALESCE((SELECT bool_or(s.personalisation_link_enabled)
+                    FROM product_variants s
+                   WHERE s.product_id = sqlc.arg('product_id')), false))
 ON CONFLICT (lower(sku)) WHERE sku IS NOT NULL DO UPDATE
 SET product_id = EXCLUDED.product_id,
     name       = EXCLUDED.name,
@@ -582,20 +625,28 @@ WHERE product_id = sqlc.arg('product_id')
   AND variant_id IS NOT DISTINCT FROM sqlc.narg('variant_id')::uuid;
 
 -- name: InsertDesignColourPart :one
-INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id)
+INSERT INTO design_colour_parts (id, product_id, role, part_name, colour_hex, position, variant_id,
+                                 optional)
 VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('role'),
         sqlc.arg('part_name'), sqlc.narg('colour_hex'), sqlc.arg('position'),
-        sqlc.narg('variant_id'))
+        sqlc.narg('variant_id'), sqlc.arg('optional'))
 RETURNING *;
 
 -- name: SetDesignColourPartColour :one
--- Changes one piece between a fixed colour and the customer's choice.
+-- Changes one piece between a fixed colour and the customer's choice, and
+-- whether the order may leave it out altogether.
 --
--- NULL is the customer's choice, which is why this takes a nullable colour
--- rather than a colour and a flag: the two can contradict each other and
--- nothing here needs them to.
+-- NULL colour_hex is the customer's choice, which is why this takes a nullable
+-- colour rather than a colour and a flag: the two can contradict each other
+-- and nothing here needs them to.
+--
+-- NULL optional means "not mentioned", and COALESCE leaves the stored answer
+-- alone. Unlike the colour, where absent means "follow the customer", absent
+-- here cannot mean false: a PATCH sent to change a hex would then quietly make
+-- the mirror's tick mandatory again and fail every order without one.
 UPDATE design_colour_parts
-SET colour_hex = sqlc.narg('colour_hex')
+SET colour_hex = sqlc.narg('colour_hex'),
+    optional   = COALESCE(sqlc.narg('optional')::boolean, optional)
 WHERE id = sqlc.arg('id')
 RETURNING *;
 
@@ -1166,3 +1217,124 @@ UPDATE product_variants
 SET personalisation_link_enabled = sqlc.arg('enabled'),
     updated_at = now()
 WHERE product_id = sqlc.arg('product_id');
+
+-- name: ListProductParts :many
+-- The parts somebody has NAMED on this product, in the order they were added.
+--
+-- Not the whole answer on its own: listProductParts merges these over the
+-- parts still derived from the files, so a product configured before this
+-- table existed reads exactly as it always did.
+SELECT * FROM product_parts
+WHERE product_id = sqlc.arg('product_id')
+ORDER BY position, lower(role);
+
+-- name: GetProductPart :one
+SELECT * FROM product_parts WHERE id = sqlc.arg('id');
+
+-- name: CreateProductPart :one
+-- Names a part, or adopts one that already exists as files.
+--
+-- ON CONFLICT rather than a refusal because a part CAN already exist without
+-- a row here - derived from its files - and naming it is then the first time
+-- anybody records which way it is configured. Refusing would make the obvious
+-- gesture fail on exactly the products this table was added for.
+INSERT INTO product_parts (id, product_id, role, per_variant, position)
+VALUES (sqlc.arg('id'), sqlc.arg('product_id'), sqlc.arg('role'),
+        sqlc.arg('per_variant'),
+        COALESCE((SELECT max(position) + 1 FROM product_parts p
+                   WHERE p.product_id = sqlc.arg('product_id')), 0))
+ON CONFLICT (product_id, lower(role)) DO UPDATE
+SET per_variant = EXCLUDED.per_variant,
+    updated_at  = now()
+RETURNING *;
+
+-- name: SetProductPartScope :one
+-- Switches a part between one shared file and a file per child SKU.
+--
+-- The files themselves are left exactly where they are. Flipping this hides
+-- one picker and shows the other; it does not throw away what the hidden one
+-- was pointing at, so flipping back finds the configuration still there.
+UPDATE product_parts
+SET per_variant = sqlc.arg('per_variant'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: RenameProductPart :one
+UPDATE product_parts
+SET role = sqlc.arg('role'), updated_at = now()
+WHERE id = sqlc.arg('id')
+RETURNING *;
+
+-- name: DeleteProductPart :exec
+DELETE FROM product_parts WHERE id = sqlc.arg('id');
+
+-- name: RenameVariantDesignsRole :execrows
+-- Carries a rename into the files assigned per child SKU.
+--
+-- THE ROLE IS A JOIN KEY, not a label. The same string addresses
+-- variant_designs, product_field_maps, design_colour_parts and
+-- production_jobs.part_role, so renaming the part without carrying all four
+-- leaves a part whose files, mapping and colours belong to a name nothing
+-- refers to any more - and the next render finds no template and holds the
+-- job with a message about a part nobody can see.
+UPDATE variant_designs d
+SET role = sqlc.arg('role')
+FROM product_variants v
+WHERE v.id = d.variant_id
+  AND v.product_id = sqlc.arg('product_id')
+  AND lower(d.role) = lower(sqlc.arg('from_role'));
+
+-- name: RenameProductFieldMapsRole :execrows
+UPDATE product_field_maps
+SET role = sqlc.arg('role')
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('from_role'));
+
+-- name: RenameColourPartsRole :execrows
+UPDATE design_colour_parts
+SET role = sqlc.arg('role')
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('from_role'));
+
+-- name: RenameJobPartRole :execrows
+-- And the jobs already made for it.
+--
+-- Including the printed ones. part_role names WHICH DRAWING this job came
+-- from, and renaming the part does not change the drawing - so leaving old
+-- jobs on the old name would say they came from something else. A job left
+-- behind is also a job whose re-render finds no template.
+UPDATE production_jobs j
+SET part_role = sqlc.arg('role')
+FROM product_variants v
+WHERE lower(v.sku) = lower(j.sku)
+  AND v.product_id = sqlc.arg('product_id')
+  AND lower(j.part_role) = lower(sqlc.arg('from_role'));
+
+-- name: CountUnfinishedJobsForPartRole :one
+-- Jobs that still have to print from this part.
+--
+-- Deleting a part takes its files and its mapping with it, so a job that has
+-- not printed yet would be left unable to render and nothing on the floor
+-- would say why. Dispatched work is not counted: its model is already made.
+SELECT count(*) FROM production_jobs j
+JOIN product_variants v ON lower(v.sku) = lower(j.sku)
+WHERE v.product_id = sqlc.arg('product_id')
+  AND lower(j.part_role) = lower(sqlc.arg('role'))
+  AND j.status NOT IN ('dispatched', 'cancelled');
+
+-- name: DeleteVariantDesignsForRole :execrows
+DELETE FROM variant_designs d
+USING product_variants v
+WHERE v.id = d.variant_id
+  AND v.product_id = sqlc.arg('product_id')
+  AND lower(d.role) = lower(sqlc.arg('role'));
+
+-- name: DeleteProductFieldMapsForRole :execrows
+DELETE FROM product_field_maps
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('role'));
+
+-- name: DeleteColourPartsForRole :execrows
+DELETE FROM design_colour_parts
+WHERE product_id = sqlc.arg('product_id')
+  AND lower(role) = lower(sqlc.arg('role'));

@@ -308,6 +308,7 @@ type DesignColourPart struct {
 	Position  int32
 	CreatedAt pgtype.Timestamptz
 	VariantID *uuid.UUID
+	Optional  bool
 }
 
 type DesignPricing struct {
@@ -643,6 +644,16 @@ type ProductOptionValue struct {
 	Label     string
 	Position  int32
 	CreatedAt pgtype.Timestamptz
+}
+
+type ProductPart struct {
+	ID         uuid.UUID
+	ProductID  uuid.UUID
+	Role       string
+	PerVariant bool
+	Position   int32
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
 }
 
 type ProductVariant struct {

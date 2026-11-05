@@ -53,12 +53,16 @@ type colourPartResponse struct {
 	// the product's own scheme - the one every variant that declares nothing
 	// of its own prints from.
 	VariantSKU string `json:"variant_sku"`
+	// Optional is a piece only some orders have. It renders nothing on the
+	// rest and is left out of their model instead of holding the job.
+	Optional bool `json:"optional"`
 }
 
 func toColourPartResponse(r gen.DesignColourPart) colourPartResponse {
 	return colourPartResponse{
 		ID: r.ID.String(), Role: r.Role, PartName: r.PartName,
 		ColourHex: deref(r.ColourHex), Position: r.Position,
+		Optional: r.Optional,
 	}
 }
 
@@ -78,7 +82,7 @@ func (s *Server) listColourParts(c *gin.Context) {
 		out = append(out, colourPartResponse{
 			ID: r.ID.String(), Role: r.Role, PartName: r.PartName,
 			ColourHex: deref(r.ColourHex), Position: r.Position,
-			VariantSKU: deref(r.VariantSku),
+			VariantSKU: deref(r.VariantSku), Optional: r.Optional,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": out})
@@ -151,10 +155,15 @@ func (s *Server) uploadColourReference(c *gin.Context) {
 			v := strings.ToUpper(p.Hex)
 			hex = &v
 		}
+		// A reference 3MF cannot say a piece is optional: it is one export of
+		// one order, and a piece the designer happened not to include is
+		// indistinguishable from one the design never has. So every piece
+		// read from a file is mandatory, and a conditional one is marked
+		// afterwards from its row.
 		row, err := s.store.Q.InsertDesignColourPart(ctx, gen.InsertDesignColourPartParams{
 			ID: uuid.New(), ProductID: product.ID, Role: role,
 			PartName: p.Name, ColourHex: hex, Position: int32(i),
-			VariantID: nil,
+			VariantID: nil, Optional: false,
 		})
 		if err != nil {
 			detail(c, http.StatusInternalServerError,
@@ -231,6 +240,22 @@ func (s *Server) verifyPartsRenderFrom(
 		return ""
 	}
 	for _, p := range parts {
+		// AN OPTIONAL PIECE IS NOT CHECKED, because it cannot be.
+		//
+		// This renders with nothing but PART set, so every order-driven
+		// variable sits at the file's own default - and for a conditional
+		// piece that default is "absent". The mirror's verified_tick starts
+		// false, so the tick renders empty here on a product that is
+		// configured perfectly, and refusing it would make the piece
+		// impossible to declare at all.
+		//
+		// The cost is that a MISSPELLED optional piece is not caught at
+		// configuration time, which is the whole point of this check for
+		// every other piece. It shows up instead as a piece that never
+		// appears on any order - visible, but later and by eye.
+		if p.Optional {
+			continue
+		}
 		stl, err := s.renderer.RenderSTL(ctx, template, map[string]string{
 			"PART": personalise.Quote(p.Name),
 		})
@@ -252,6 +277,11 @@ type updateColourPartRequest struct {
 	// ColourHex is "#RRGGBB", or empty to make the piece follow the customer's
 	// chosen colour.
 	ColourHex string `json:"colour_hex" binding:"omitempty,len=7,startswith=#"`
+	// Optional is a pointer so "not mentioned" is distinguishable from
+	// "false", matching the variant link switch. A PATCH that only meant to
+	// change a hex must not quietly make a conditional piece mandatory and
+	// fail every order that does not buy it.
+	Optional *bool `json:"optional"`
 }
 
 // updateColourPart moves one piece between a fixed colour and the order's.
@@ -270,7 +300,7 @@ func (s *Server) updateColourPart(c *gin.Context) {
 		hex = &v
 	}
 	row, err := s.store.Q.SetDesignColourPartColour(c.Request.Context(),
-		gen.SetDesignColourPartColourParams{ID: id, ColourHex: hex})
+		gen.SetDesignColourPartColourParams{ID: id, ColourHex: hex, Optional: req.Optional})
 	if isNoRows(err) {
 		detail(c, http.StatusNotFound, "That colour part no longer exists.")
 		return

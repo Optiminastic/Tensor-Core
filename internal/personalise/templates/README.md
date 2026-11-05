@@ -77,3 +77,57 @@ than letter weight. The alternatives - letting the plank grow (correct letters,
 a different length per order) and a uniform scale into 200 mm (correct letters,
 but 32 x 16 instead of 50 x 40) - were both rejected. Do not change it without
 asking.
+
+## A file can say how its variables are filled
+
+Everything above is about the three DNP masters, which Go drives by name. A
+**registry product** is driven by a mapping instead: a row per variable saying
+which of the customer's answers feeds it.
+
+Somebody types that mapping, once per design, and this shop's labels make that
+worse than it sounds. The same first name is called `STEP 4-First Name-`,
+`first name on plank`, `name-1`, `left name` and `top name` across five live
+products, so there is no convention to read off and every new design means
+sitting down with a list of its own orders.
+
+**The person who draws the file already knows.** They named the variable and
+they built the storefront field. So they can say so, in the comment the
+customizer already shows:
+
+```openscad
+/* [Order] */
+NAME_L = "";    // The left name. @from STEP 4-First Name- @max 20
+NAME_R = "";    // @from STEP 5-Second Name @optional
+HEARTS = 1;     // @from RED HEART @count @default 0
+OUT_X  = 200;   // @fixed
+PART   = "all";
+```
+
+| Directive | Means |
+|---|---|
+| `@from <label>` | The storefront field that fills it, worded exactly as the storefront words it. The value runs to the next `@`, so a label keeps its spaces. |
+| `@fixed [value]` | Not the customer's. Bare, it means the value already written in the file - which is how `OUT_X = 200` is stated once rather than twice. |
+| `@optional` | An order may leave it blank. The default is required, which **holds the order**. |
+| `@default <value>` | What an unanswered optional field passes instead of the file's own default. |
+| `@max <n>` | How many characters the text box fits, 1-120. The personalisation link enforces it in the form rather than in a render half a minute later. |
+| `@text` `@number` `@count` | How the answer is read. Usually inferred from the declared value; `@count` reads a number out of wording, because the storefront sells "1 RED HEART", not "1". |
+
+Three things to know:
+
+- **Prose stays prose.** A comment with no `@` is documentation, exactly as
+  before, and so is an `@` word that is not in that table. Every existing
+  master is unaffected - `name1 = "DHAKSRAM"; // max 10 letters, A-Z` is read
+  as the sentence it is.
+- **It is a SUGGESTION, never the live mapping.** Uploading the file does not
+  configure anything. Design & fields offers "Suggest mapping", fills the form
+  from this, and somebody presses Save. A file that re-pointed a live
+  product's fields on upload would show up first as a batch of planks with the
+  names swapped.
+- **Only top-level declarations count**, the customizer's own rule. A variable
+  assigned inside a `module` cannot be set with `-D` at all, so offering it
+  would be offering something that silently does nothing.
+
+Without any of this, a product can still be mapped: Tensor pairs the file's
+variable names against the labels on that product's own recent orders and
+proposes what matches. Annotating is what makes a design mappable **before**
+it has sold anything.

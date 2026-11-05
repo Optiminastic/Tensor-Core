@@ -791,6 +791,13 @@ ORDER BY placed_at DESC NULLS LAST, imported_at DESC
 LIMIT $1
 `
 
+// SUPERSEDED by ListRecentOrderLineItemsMatching below, which reads a window
+// of ONE product's lines instead of a window of all orders. Prefer that one:
+// this window is 200 orders of anything, so a busy week of Dual Name Planks
+// fills all of it and a product that last sold a month ago reads as having no
+// fields at all. Left in place rather than deleted because deleting a
+// generated query is the kind of change that collides with work in flight.
+//
 // The line_items of the most recent orders, for reading back what customers
 // actually sent.
 //
@@ -802,6 +809,63 @@ LIMIT $1
 // expressing that in SQL would be a second copy of it.
 func (q *Queries) ListRecentOrderLineItems(ctx context.Context, limitCount int32) ([][]byte, error) {
 	rows, err := q.db.Query(ctx, listRecentOrderLineItems, limitCount)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := [][]byte{}
+	for rows.Next() {
+		var line_items []byte
+		if err := rows.Scan(&line_items); err != nil {
+			return nil, err
+		}
+		items = append(items, line_items)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRecentOrderLineItemsMatching = `-- name: ListRecentOrderLineItemsMatching :many
+SELECT line_items FROM orders o
+WHERE EXISTS (
+    SELECT 1 FROM jsonb_array_elements(o.line_items) li
+     WHERE lower(trim(li->>'sku')) = ANY($1::text[])
+        OR lower(li->>'product_name') LIKE $2::text
+)
+ORDER BY o.placed_at DESC NULLS LAST, o.imported_at DESC
+LIMIT $3
+`
+
+type ListRecentOrderLineItemsMatchingParams struct {
+	Skus       []string
+	NamePrefix string
+	LimitCount int32
+}
+
+// The line_items of the most recent orders that could belong to ONE product.
+//
+// ListRecentOrderLineItems reads the last 200 orders whatever they are, and
+// the mapping editor then throws away the ones belonging to other products.
+// That is the right shape for a shop selling one thing and the wrong one for
+// this catalogue: 200 orders is about three weeks, a busy week of Dual Name
+// Planks fills all of it, and a product that last sold a month ago offers an
+// empty dropdown - at the exact moment somebody is trying to configure it.
+//
+// So the window is 200 lines OF THIS PRODUCT instead.
+//
+// A PREFILTER, NOT THE ANSWER. The caller still applies matchesProduct to
+// every line it gets back, because the name half of the real rule is narrow
+// ("Soulmate COMBO with LIGHT - BLUE" matches Soulmate COMBO, but Dual Name
+// Plank must NOT absorb Dual Name Plank with Light) and expressing that here
+// would be a second copy of it, free to drift. This only narrows the rows.
+//
+// Unindexed by design: jsonb_array_elements per row cannot use one, and at
+// the shop's volume the whole scan is ~12ms. It is one configuration screen,
+// not a path an order travels.
+func (q *Queries) ListRecentOrderLineItemsMatching(ctx context.Context, arg ListRecentOrderLineItemsMatchingParams) ([][]byte, error) {
+	rows, err := q.db.Query(ctx, listRecentOrderLineItemsMatching, arg.Skus, arg.NamePrefix, arg.LimitCount)
 	if err != nil {
 		return nil, err
 	}

@@ -407,6 +407,12 @@ func (s *Server) renderPieces(
 
 			stl, err := s.renderer.RenderSTL(ctx, template, plan.argsForPart(part.Name))
 			if err != nil {
+				// A piece the order did not buy renders nothing, and for an
+				// OPTIONAL piece that is the answer rather than a fault. Its
+				// slot stays zero and is dropped by builtMeshes below.
+				if emptyPartIsFine(part, err) {
+					return
+				}
 				failures[i] = fmt.Errorf("render the %s: %w", part.Name, err)
 				return
 			}
@@ -422,7 +428,15 @@ func (s *Server) renderPieces(
 			// answers some with nothing. Both slice, both print, and both are
 			// wrong - so a piece that came back with no geometry holds the job
 			// and names itself.
+			//
+			// Unless the piece was declared optional, which is the design
+			// saying this one is the order's to decide. Checked here as well
+			// as above because "empty" arrives two ways: OpenSCAD writing no
+			// file, and OpenSCAD writing a well-formed STL of no triangles.
 			if len(mesh.Triangles) == 0 {
+				if emptyPartIsFine(part, nil) {
+					return
+				}
 				failures[i] = fmt.Errorf(
 					"the template rendered nothing for part %q - check that %s branches on "+
 						"PART and spells this piece the same way",
@@ -455,5 +469,8 @@ func (s *Server) renderPieces(
 			return nil, err
 		}
 	}
-	return meshes, nil
+
+	// Drop the optional pieces this order did not buy, and refuse a model
+	// with nothing left in it.
+	return builtMeshes(template, meshes)
 }

@@ -37,6 +37,18 @@ type colourPart struct {
 	// Hex is "#RRGGBB". Empty means this piece follows the customer's choice,
 	// which the caller resolves once for the whole model.
 	Hex string
+	// Optional lets this piece render nothing without failing the job.
+	//
+	// Off for every piece by default, and that default is load-bearing: a
+	// piece that comes back empty is normally a scheme naming something the
+	// template does not draw, which slices and prints and is missing a part.
+	//
+	// On for a piece the ORDER decides the existence of. The Social Mirror's
+	// blue verified tick is the case it was built for - `PART="tick"` on an
+	// order that did not buy one writes no file at all - and its .scad says
+	// so in as many words: "an order without a tick renders an empty tick
+	// piece, and Tensor holds a job with an empty piece."
+	Optional bool
 }
 
 // FollowsCustomer reports whether this piece takes the colour off the order.
@@ -226,7 +238,9 @@ func matchVariantByColour(
 func toColourParts(rows []gen.DesignColourPart) []colourPart {
 	parts := make([]colourPart, 0, len(rows))
 	for _, r := range rows {
-		parts = append(parts, colourPart{Name: r.PartName, Hex: deref(r.ColourHex)})
+		parts = append(parts, colourPart{
+			Name: r.PartName, Hex: deref(r.ColourHex), Optional: r.Optional,
+		})
 	}
 	return parts
 }

@@ -1182,6 +1182,13 @@ CREATE TABLE IF NOT EXISTS design_colour_parts (
     -- product whose palette is designed per colourway rather than being one
     -- fixed piece and one that follows the order.
     variant_id uuid REFERENCES product_variants (id) ON DELETE CASCADE,
+    -- A piece only some orders have. The mirror's blue verified tick is drawn
+    -- only when the order bought one, and `PART="tick"` on an order without
+    -- writes no file at all - so without this the four-piece mirror would fail
+    -- every order without one. A flag per piece, never a looser rule for all of
+    -- them: every other piece still holds the job when it renders nothing,
+    -- which is what catches a misspelled piece name.
+    optional   boolean     NOT NULL DEFAULT false,
     -- Rejected at the boundary AND here: a colour that is not #RRGGBB reaches
     -- Write3MF, which refuses it, and a job fails at render time for a typo
     -- made in a form weeks earlier.
@@ -1759,3 +1766,18 @@ CREATE TABLE IF NOT EXISTS design_template_self_colour (
 
 CREATE INDEX IF NOT EXISTS ix_production_jobs_sku_lower
     ON production_jobs (lower(sku));
+
+-- The things a product prints, named before any file exists. Mirrors
+-- migration 0139; see it for why a part is no longer only derived.
+CREATE TABLE IF NOT EXISTS product_parts (
+    id          uuid PRIMARY KEY,
+    product_id  uuid NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    role        varchar(64) NOT NULL,
+    per_variant boolean NOT NULL DEFAULT true,
+    position    integer NOT NULL DEFAULT 0,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_parts_role
+    ON product_parts (product_id, lower(role));

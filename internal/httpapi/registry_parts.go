@@ -20,9 +20,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
 )
 
 type productPartResponse struct {
+	// ID is the stored part's id, empty for one still derived from its files.
+	//
+	// Empty is not an error: every product configured before product_parts
+	// existed has parts and no rows, and they go on working. It is what the
+	// page uses to decide whether renaming and removing are offered yet.
+	ID string `json:"id,omitempty"`
+	// PerVariant is how this part is configured: a file per child SKU, or one
+	// file for every colourway. It decides which of the two pickers the panel
+	// shows - showing both is what it did before anybody could say.
+	PerVariant bool `json:"per_variant"`
 	// Role names the file: 'body' for a product that prints one thing, and
 	// whatever somebody called it for a product that prints three.
 	Role string `json:"role"`
@@ -98,6 +110,15 @@ func (s *Server) listProductParts(c *gin.Context) {
 			Role: role, TemplateKey: key,
 			Fields: n, Required: required[strings.ToLower(role)],
 			Ready: key != "" && n > 0,
+			// INFERRED, and inferred HERE rather than in the merge below,
+			// which returns early when nothing has been named. Left to the
+			// zero value, every product that predates named parts would come
+			// back "one shared file" and the panel would hide the per-SKU
+			// rows that are the only thing configuring PDHR and PWDH.
+			//
+			// No product-wide file means the SKUs carry their own - either
+			// because they disagree, or because there is nothing yet.
+			PerVariant: key == "",
 		}
 		if keys := perRole[strings.ToLower(role)]; len(keys) > 1 {
 			part.Conflicting = sortedKeys(keys)
@@ -119,10 +140,53 @@ func (s *Server) listProductParts(c *gin.Context) {
 		}
 		out = append(out, productPartResponse{
 			Role: role, Fields: n, Required: required[role], Ready: false,
+			PerVariant: true,
 		})
 	}
 
-	c.JSON(http.StatusOK, out)
+	c.JSON(http.StatusOK, s.withStoredParts(ctx, product.ID, out))
+}
+
+// withStoredParts merges what somebody NAMED over what the files imply.
+//
+// Additive in both directions. A derived part gains its id and its scope from
+// a stored row when there is one; a stored part with no files yet is appended,
+// which is the whole point - it is how a part can be named before anybody
+// goes to find its drawings. A product configured before this table existed
+// has no rows and comes back exactly as it did.
+func (s *Server) withStoredParts(
+	ctx context.Context, productID uuid.UUID, derived []productPartResponse,
+) []productPartResponse {
+	stored, err := s.store.Q.ListProductParts(ctx, productID)
+	if err != nil || len(stored) == 0 {
+		// An unreadable list is not a reason to hide the parts that have
+		// files. They render; only renaming them is unavailable.
+		return derived
+	}
+	byRole := make(map[string]gen.ProductPart, len(stored))
+	for _, p := range stored {
+		byRole[strings.ToLower(p.Role)] = p
+	}
+	seen := make(map[string]bool, len(derived))
+	for i := range derived {
+		role := strings.ToLower(derived[i].Role)
+		seen[role] = true
+		if p, ok := byRole[role]; ok {
+			derived[i].ID = p.ID.String()
+			derived[i].PerVariant = p.PerVariant
+		}
+		// No row means nobody has said, and the inference made when the part
+		// was built already stands.
+	}
+	for _, p := range stored {
+		if seen[strings.ToLower(p.Role)] {
+			continue
+		}
+		derived = append(derived, productPartResponse{
+			ID: p.ID.String(), Role: p.Role, PerVariant: p.PerVariant,
+		})
+	}
+	return derived
 }
 
 // sortedKeys is a set as a stable list, so a disagreement reads the same way

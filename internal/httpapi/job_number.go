@@ -67,3 +67,46 @@ func jobNumberForOrder(orderNumber string, index int) string {
 	// 1-based for a human: the second product on the order reads as "-2".
 	return fmt.Sprintf("%s%s-%d", jobNumberPrefix, digits, index+1)
 }
+
+// partToken is a part's name as it reads inside a job number.
+//
+// Upper-cased because the rest of the number is, and reduced to A-Z0-9 so a
+// part somebody called "heart keychain" cannot put a space or a second hyphen
+// into an identifier that is split on hyphens. "Heart Keychain" -> "HEARTKEYCHAIN".
+//
+// Returns "" for a name with nothing usable in it, which the caller reads as
+// "number this the old way" rather than as an error - a job numbered from the
+// index is worse than one named for its part, and far better than no job.
+func partToken(role string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(strings.TrimSpace(role)) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// jobNumberForPart names a job after its order AND the thing it prints.
+//
+// A Soulmate Combo is three printed things sold as one line, and they used to
+// be JOB-116456, -2 and -3: unique, and silent about which was the plank and
+// which the keychain. An operator holding one of three identical-looking
+// numbers had to open each to find out. Named for the part, the bed list says
+// it: JOB-116456-DNP, JOB-116456-ROSE, JOB-116456-KEYCHAIN.
+//
+// ONLY WHERE A LINE PRINTS SEVERAL THINGS. A product that prints one stays
+// plain "JOB-116456" - the overwhelming majority of the shop's jobs - because
+// renaming those would change every number on every screen and in every
+// operator's head to say something they already know.
+//
+// Readable by orderNumberFromJobNumber unchanged: it takes everything before
+// the first hyphen and requires digits, so the order still reads back out.
+func jobNumberForPart(orderNumber, role string) string {
+	digits := orderNumberDigits(orderNumber)
+	token := partToken(role)
+	if digits == "" || token == "" {
+		return ""
+	}
+	return jobNumberPrefix + digits + "-" + token
+}

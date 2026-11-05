@@ -13,7 +13,7 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
+
 	"fmt"
 	"net/http"
 	"sort"
@@ -24,7 +24,6 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
 	"github.com/Optiminastic/tensor-core/internal/personalise"
-	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 type fieldMapResponse struct {
@@ -88,32 +87,27 @@ type fieldMapWriteRequest struct {
 	} `json:"maps"`
 }
 
-// observedPropertyResponse is a field the customers have actually sent.
-type observedPropertyResponse struct {
-	// Key is normalised - what a mapping must be written against.
-	Key string `json:"key"`
-	// Label is the storefront's own wording, for recognising it. The same
-	// field is labelled three ways across three products, so the raw label is
-	// what a person recognises and the normalised key is what matches.
-	Label string `json:"label"`
-	// Sample is one real answer, which settles "is this the name or the
-	// number?" faster than any documentation.
-	Sample string `json:"sample"`
-	// Orders is how many recent orders carried it. A field on one order in
-	// two hundred is probably a retired option rather than something to map.
-	Orders int `json:"orders"`
-}
-
 func (s *Server) registerRegistryFieldMaps(g *gin.RouterGroup, read, manage gin.HandlerFunc) {
 	g.GET("/products/:code/field-maps", read, s.listProductFieldMaps)
 	g.PUT("/products/:code/field-maps", manage, s.putProductFieldMaps)
 	g.GET("/products/:code/observed-properties", read, s.observedProperties)
+	// A whole mapping proposed from the file's variables and the product's own
+	// orders, for review - see registry_field_suggest.go. READ-ONLY, and
+	// deliberately so: a proposal that wrote itself would mean re-uploading a
+	// corrected drawing silently re-pointed a live product's fields.
+	s.registerRegistryFieldSuggest(g, read)
 	// One SKU's override of the mapping above - see
 	// registry_variant_field_maps.go.
 	s.registerVariantFieldMaps(g, read, manage)
 	// What this product prints, file by file. One entry for a product that
 	// prints one thing, three for a combo.
 	g.GET("/products/:code/parts", read, s.listProductParts)
+	// Naming a part before it has files, renaming it, switching it between
+	// one shared file and a file per SKU, and removing it - see
+	// registry_part_authoring.go.
+	g.POST("/products/:code/parts", manage, s.createProductPart)
+	g.PATCH("/parts/:id", manage, s.updateProductPart)
+	g.DELETE("/parts/:id", manage, s.deleteProductPart)
 }
 
 func (s *Server) listProductFieldMaps(c *gin.Context) {
@@ -329,137 +323,6 @@ func (s *Server) mappingNamesUnknownVariables(
 			"model mapped to it would come out missing what the customer asked for.",
 		key, strings.Join(missing, ", ")), true
 }
-
-// observedProperties lists the fields customers have actually sent for this
-// product's SKUs.
-//
-// The left-hand side of the mapping editor. Without it somebody has to type
-// "step 4 first name" exactly, from memory, having first worked out that the
-// storefront's "STEP 4-First Name-:" normalises to that - and a key typed one
-// character wrong matches nothing, silently, in a way that looks exactly like
-// an order with no properties.
-func (s *Server) observedProperties(c *gin.Context) {
-	product, ok := s.productByCode(c)
-	if !ok {
-		return
-	}
-	ctx := c.Request.Context()
-
-	variants, err := s.store.Q.ListVariantsForProduct(ctx, product.ID)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read the product's variants.")
-		return
-	}
-	skus := make(map[string]bool, len(variants))
-	for _, v := range variants {
-		if v.Sku != nil && strings.TrimSpace(*v.Sku) != "" {
-			skus[strings.ToLower(strings.TrimSpace(*v.Sku))] = true
-		}
-	}
-	if len(skus) == 0 {
-		// No SKU means no order can be matched to this product at all. An
-		// empty list is the honest answer and the page says so.
-		c.JSON(http.StatusOK, []observedPropertyResponse{})
-		return
-	}
-
-	docs, err := s.store.Q.ListRecentOrderLineItems(ctx, observedPropertyOrderLimit)
-	if err != nil {
-		detail(c, http.StatusInternalServerError, "Could not read recent orders.")
-		return
-	}
-
-	found := map[string]*observedPropertyResponse{}
-	for _, doc := range docs {
-		var lines []production.LineItem
-		// An order whose line items will not parse loses its contribution to
-		// this list, never the page: this is a suggestion box, and one
-		// unreadable row is not worth refusing the whole screen over.
-		if err := json.Unmarshal(doc, &lines); err != nil {
-			continue
-		}
-		for _, line := range lines {
-			if !matchesProduct(line, product.Name, skus) {
-				continue
-			}
-			for _, p := range line.Properties {
-				if p.Hidden() || strings.TrimSpace(p.Value) == "" {
-					continue
-				}
-				key := personalise.NormaliseKey(p.Name)
-				if key == "" {
-					continue
-				}
-				if seen, ok := found[key]; ok {
-					seen.Orders++
-					continue
-				}
-				found[key] = &observedPropertyResponse{
-					Key: key, Label: strings.TrimSpace(p.Name),
-					Sample: strings.TrimSpace(p.Value), Orders: 1,
-				}
-			}
-		}
-	}
-
-	out := make([]observedPropertyResponse, 0, len(found))
-	for _, v := range found {
-		out = append(out, *v)
-	}
-	// Commonest first: a field on one order in two hundred is a retired option
-	// rather than something to map, and it should not sit above the name.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Orders != out[j].Orders {
-			return out[i].Orders > out[j].Orders
-		}
-		return out[i].Key < out[j].Key
-	})
-	c.JSON(http.StatusOK, out)
-}
-
-// matchesProduct decides whether an order line belongs to this product.
-//
-// By SKU first, which is the real answer and the only one the render path
-// uses.
-//
-// By product NAME as a fallback, because every SKU in this shop is newer than
-// the orders it should describe. SCWL's seven SKUs were added last week; not
-// one order carries them, so a SKU-only match offers an empty dropdown for
-// every product somebody is trying to configure - the exact moment the list
-// is needed.
-//
-// The name match is deliberately narrow. The storefront sells "Soulmate COMBO
-// with LIGHT - BLUE", so the colour suffix is cut and the rest must equal the
-// registry's name EXACTLY. A prefix match would be a trap: "Dual Name Plank"
-// is a prefix of "Dual Name Plank with Light", and DNP would quietly absorb
-// DNPWL's fields and offer somebody a mapping built from another product's
-// orders.
-func matchesProduct(line production.LineItem, productName string, skus map[string]bool) bool {
-	if line.SKU != nil && skus[strings.ToLower(strings.TrimSpace(*line.SKU))] {
-		return true
-	}
-	want := strings.TrimSpace(productName)
-	if want == "" {
-		return false
-	}
-	got := strings.TrimSpace(line.ProductName)
-	if strings.EqualFold(got, want) {
-		return true
-	}
-	// "<product> - <colour>". LastIndex, so a product whose own name contains
-	// " - " keeps it and only the trailing option is removed.
-	if i := strings.LastIndex(got, " - "); i > 0 {
-		return strings.EqualFold(strings.TrimSpace(got[:i]), want)
-	}
-	return false
-}
-
-// observedPropertyOrderLimit bounds how far back the editor looks.
-//
-// Enough to cover every option a live product offers, few enough that the
-// query stays a page load rather than a report. A field that has not appeared
-// in two hundred orders is not one somebody is configuring for today.
-const observedPropertyOrderLimit = 200
 
 // productByCode resolves the :code path parameter, answering the request
 // itself when it cannot.

@@ -203,6 +203,13 @@ WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'));
 SELECT id, order_number FROM orders WHERE id = ANY(sqlc.arg('ids')::uuid[]);
 
 -- name: ListRecentOrderLineItems :many
+-- SUPERSEDED by ListRecentOrderLineItemsMatching below, which reads a window
+-- of ONE product's lines instead of a window of all orders. Prefer that one:
+-- this window is 200 orders of anything, so a busy week of Dual Name Planks
+-- fills all of it and a product that last sold a month ago reads as having no
+-- fields at all. Left in place rather than deleted because deleting a
+-- generated query is the kind of change that collides with work in flight.
+--
 -- The line_items of the most recent orders, for reading back what customers
 -- actually sent.
 --
@@ -310,3 +317,33 @@ WHERE (sqlc.narg('source')::text IS NULL OR o.source = sqlc.narg('source'))
 GROUP BY o.id
 HAVING bool_and(j.packaging_status = 'packaged')
 ORDER BY COALESCE(o.placed_at, o.imported_at) DESC, o.id DESC;
+
+-- name: ListRecentOrderLineItemsMatching :many
+-- The line_items of the most recent orders that could belong to ONE product.
+--
+-- ListRecentOrderLineItems reads the last 200 orders whatever they are, and
+-- the mapping editor then throws away the ones belonging to other products.
+-- That is the right shape for a shop selling one thing and the wrong one for
+-- this catalogue: 200 orders is about three weeks, a busy week of Dual Name
+-- Planks fills all of it, and a product that last sold a month ago offers an
+-- empty dropdown - at the exact moment somebody is trying to configure it.
+--
+-- So the window is 200 lines OF THIS PRODUCT instead.
+--
+-- A PREFILTER, NOT THE ANSWER. The caller still applies matchesProduct to
+-- every line it gets back, because the name half of the real rule is narrow
+-- ("Soulmate COMBO with LIGHT - BLUE" matches Soulmate COMBO, but Dual Name
+-- Plank must NOT absorb Dual Name Plank with Light) and expressing that here
+-- would be a second copy of it, free to drift. This only narrows the rows.
+--
+-- Unindexed by design: jsonb_array_elements per row cannot use one, and at
+-- the shop's volume the whole scan is ~12ms. It is one configuration screen,
+-- not a path an order travels.
+SELECT line_items FROM orders o
+WHERE EXISTS (
+    SELECT 1 FROM jsonb_array_elements(o.line_items) li
+     WHERE lower(trim(li->>'sku')) = ANY(sqlc.arg('skus')::text[])
+        OR lower(li->>'product_name') LIKE sqlc.arg('name_prefix')::text
+)
+ORDER BY o.placed_at DESC NULLS LAST, o.imported_at DESC
+LIMIT sqlc.arg('limit_count');

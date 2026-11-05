@@ -80,13 +80,17 @@ func (s *Server) productReadiness(c *gin.Context) {
 	// of colourways and this page is opened often; a query per row would make
 	// the cost of the panel grow with the catalogue.
 	renders := s.renderStateBySKU(ctx, variants)
+	// The same, for the labels this product's orders actually carry. Read
+	// here rather than inside readinessOf for the same reason: every
+	// colourway of a product shares one set of orders.
+	observed := s.observedPropertiesFor(ctx, product)
 
 	out := make([]skuReadiness, 0, len(variants))
 	for i := range variants {
 		if variants[i].Status == "retired" {
 			continue
 		}
-		row := s.readinessOf(ctx, product.ID, product.Code, variants[i])
+		row := s.readinessOf(ctx, product.ID, product.Code, variants[i], observed)
 		if state, ok := renders[strings.ToLower(strings.TrimSpace(row.SKU))]; ok {
 			row.Rendering = state.Rendering
 			row.RenderFailed = state.Failed
@@ -162,8 +166,14 @@ func renderingWording(n int64) string {
 }
 
 // readinessOf answers for one SKU.
+//
+// observed is the labels this product's recent orders carried, read once by
+// the caller: it is the same for every colourway, and it is what turns "the
+// configuration is self-consistent" into "the configuration still describes
+// reality" - see registry_field_drift.go.
 func (s *Server) readinessOf(
-	ctx context.Context, productID uuid.UUID, code string, v gen.ListVariantsForProductRow,
+	ctx context.Context, productID uuid.UUID, code string,
+	v gen.ListVariantsForProductRow, observed []observedPropertyResponse,
 ) skuReadiness {
 	sku := strings.TrimSpace(deref(v.Sku))
 	out := skuReadiness{
@@ -207,6 +217,14 @@ func (s *Server) readinessOf(
 				template, strings.Join(missing, ", ")))
 		}
 	}
+
+	// 5. AND THE MAPPING HAS TO STILL DESCRIBE THE ORDERS.
+	//
+	// Checks 1-4 ask whether the configuration is internally consistent. It
+	// can be perfectly consistent and still wrong, because the join between
+	// an order and a variable is a label somebody typed into the storefront
+	// and nothing stops them rewording it - see registry_field_drift.go.
+	noteDrift(&out, driftOf(maps, observed))
 
 	// HOW MANY FILAMENTS THIS DESIGN ACTUALLY NEEDS.
 	//
