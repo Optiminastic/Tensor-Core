@@ -20,6 +20,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -79,6 +80,12 @@ func (s *Server) renderInFileColours(
 // a 3MF - one object in OpenSCAD's default yellow - and accepting that would
 // mark a product as coloured when every piece prints the same placeholder.
 func (s *Server) fileColoursProof(ctx context.Context, key string) (objects, colours int, err error) {
+	// A service with no OpenSCAD cannot prove anything, so the flag is
+	// refused exactly as it was before this check existed - never a panic on
+	// a nil renderer, which is what the first version of this did.
+	if s.renderer == nil || !s.renderer.Available() {
+		return 0, 0, errors.New("OpenSCAD is not configured on this service")
+	}
 	data, err := s.renderer.Render3MF(ctx, key, nil)
 	if err != nil {
 		return 0, 0, err
