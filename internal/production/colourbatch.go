@@ -96,7 +96,9 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 		// plate laid out on the A2L's 330x320 is 270x270 and cannot print on a
 		// P2S's 256x256 - which is how a bed reached P4 and came back "G-code
 		// conflicts detected ... nowhere for the wipe tower".
-		family := BedFamilyForUnits(len(b.units))
+		// The same answer the trial above was judged against, or the plate
+		// would be laid out on a bed it was never checked to fit.
+		family := bedFamilyFitting(b.units, nest)
 		planned := finaliseOn(bedpack.BedForFamily(family), b.jobs, b.units, StrategyColour, nest)
 		planned.MachineFamily = family
 		batches = append(batches, planned)
@@ -160,19 +162,41 @@ func GroupByColour(jobs []PlanJob, maxPerBed int, nest BedNester) ([]PlannedBatc
 			// does not fit.
 			for take > 0 {
 				trial := append(append([]bedpack.UnitFootprint{}, b.units...), repeat(unit, take)...)
-				// Against the bed this count would route to, so the check and
-				// the plate agree. A fifth unit is judged on an H2C's bed
-				// because a bed of five goes to an H2C; a third on a P2S's,
-				// because that is where it will print.
-				trialBed := bedpack.BedForFamily(BedFamilyForUnits(len(trial)))
+				// Against the bed this plate will actually print on, so the
+				// check and the plate agree. The count proposes the class - a
+				// fifth unit is judged on an H2C's bed because a bed of five
+				// goes to an H2C - and the FIT can promote it, because a part
+				// too wide for the P2S is not a smaller bed, it is a bigger
+				// machine.
+				trialBed := bedpack.BedForFamily(bedFamilyFitting(trial, nest))
 				if _, rejected := nest(trialBed, trial); len(rejected) == 0 {
 					break
 				}
 				take--
 			}
 			if take == 0 {
-				// Nothing more fits on this bed. Close it and let the next
-				// iteration open a fresh one for the same colour.
+				// NOTHING FITS, and what happens next depends on whether this
+				// bed is carrying anything.
+				//
+				// A bed with units on it is full: close it, and the next pass
+				// opens a fresh one for the same colour.
+				//
+				// AN EMPTY BED HAS NO FRESH BED TO TRY. Closing it emits
+				// nothing - closeBed drops a bed with no jobs - and the next
+				// pass opens another empty one and asks the identical
+				// question, for ever, with every other batch queued behind
+				// it. bedFamilyFitting should now make this unreachable, and
+				// it is still handled, because the cost of being wrong again
+				// is the whole floor stopping rather than one job going
+				// unplaced.
+				if len(b.units) == 0 {
+					delete(open, key)
+					openOrder = removeFirst(openOrder, key)
+					unbatchable = append(unbatchable, Unbatchable{
+						JobID: j.ID, JobNumber: j.JobNumber, Reason: ReasonTooLargeForBed,
+					})
+					break
+				}
 				closeBed(b)
 				delete(open, key)
 				openOrder = removeFirst(openOrder, key)
