@@ -3353,6 +3353,27 @@ func (q *Queries) RemoveJobFromBatch(ctx context.Context, arg RemoveJobFromBatch
 	return i, err
 }
 
+const reopenProductionJobForRender = `-- name: ReopenProductionJobForRender :exec
+UPDATE production_jobs
+SET issue_reason = CASE WHEN issue_reason = 'no_approved_design' THEN 'stl_missing' ELSE issue_reason END,
+    updated_at   = now()
+WHERE id = $1
+`
+
+// Turns a job judged before its product was set up into an ordinary generated
+// job awaiting its model.
+//
+// no_approved_design is job creation's verdict "Tensor does not make this",
+// and while it stands the queue reports the job as failed. Rebuild is the
+// operator overruling it, so the verdict becomes stl_missing - exactly what a
+// job created against the finished setup carries until its render lands, and
+// what SetProductionJobPrintFile clears when it does. Any other reason is left
+// alone: a rebuild does not fix colour_missing.
+func (q *Queries) ReopenProductionJobForRender(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, reopenProductionJobForRender, id)
+	return err
+}
+
 const requeueFinishedJob = `-- name: RequeueFinishedJob :exec
 UPDATE production_jobs SET
     status           = 'queued',

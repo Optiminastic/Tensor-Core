@@ -1496,3 +1496,18 @@ FROM production_jobs j
 WHERE j.sku IS NOT NULL
   AND lower(j.sku) = ANY (sqlc.arg('skus')::text[])
 GROUP BY lower(j.sku);
+
+-- name: ReopenProductionJobForRender :exec
+-- Turns a job judged before its product was set up into an ordinary generated
+-- job awaiting its model.
+--
+-- no_approved_design is job creation's verdict "Tensor does not make this",
+-- and while it stands the queue reports the job as failed. Rebuild is the
+-- operator overruling it, so the verdict becomes stl_missing - exactly what a
+-- job created against the finished setup carries until its render lands, and
+-- what SetProductionJobPrintFile clears when it does. Any other reason is left
+-- alone: a rebuild does not fix colour_missing.
+UPDATE production_jobs
+SET issue_reason = CASE WHEN issue_reason = 'no_approved_design' THEN 'stl_missing' ELSE issue_reason END,
+    updated_at   = now()
+WHERE id = sqlc.arg('id');
