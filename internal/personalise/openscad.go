@@ -224,6 +224,21 @@ func (r *Renderer) RenderSTL(ctx context.Context, template string, params map[st
 	return r.render(ctx, template, params, "stl", nil)
 }
 
+// Render3MF renders the whole model once, IN ITS OWN COLOURS.
+//
+// RenderSTL is one piece at a time and colourless - STL has no colour at all -
+// so the colours have to be stamped on afterwards from the registry. A file
+// that computes its own colours from an order field (`colors = "Gold &
+// Black"`) cannot be described that way without restating every scheme in
+// the registry, per SKU. Here OpenSCAD writes each color() as its own object
+// with its colour attached, and the file's own choice is the print's.
+//
+// lazy-union is what keeps the colours apart: without it OpenSCAD unions
+// every top-level object into one mesh and one colour.
+func (r *Renderer) Render3MF(ctx context.Context, template string, params map[string]string) ([]byte, error) {
+	return r.render(ctx, template, params, "3mf", []string{"--enable", "lazy-union"})
+}
+
 // RenderPNG renders the same model as a picture, for showing an operator what
 // the customer will receive before anything is printed. Same template and same
 // parameters as RenderSTL, so the preview cannot drift from the file that goes

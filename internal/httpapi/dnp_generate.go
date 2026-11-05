@@ -301,6 +301,21 @@ func (s *Server) renderColouredPlank(
 ) (model, preview []byte, err error) {
 	log := obs.FromContext(ctx)
 
+	// THE FILE DECIDES THE COLOURS, when it is marked to and states them
+	// through color() rather than literals. One render, colour straight from
+	// the order's mapped field, nothing restated per SKU - see
+	// design_file_colours.go. Everything below is the per-piece path every
+	// other product still takes, untouched.
+	if s.fileDecidesColours(ctx, plan.Template) {
+		printModel, err := s.renderInFileColours(ctx, plan, deref(job.Material))
+		if err != nil {
+			return nil, nil, err
+		}
+		log.Info("built a model in the file's own colours",
+			"job", job.JobNumber, "template", plan.Template)
+		return printModel, nil, nil
+	}
+
 	// The variant title first, which is where a storefront job carries it -
 	// "SKY BLUE / NO LIGHT", the colour and the light choice together.
 	//
