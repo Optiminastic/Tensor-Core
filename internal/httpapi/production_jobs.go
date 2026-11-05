@@ -1027,11 +1027,38 @@ func (s *Server) jobPartRoles(
 		// An uploaded design is one file by definition.
 		return []string{""}
 	}
-	roles := s.partRolesForSKU(ctx, deref(li.SKU))
-	if len(roles) < 2 {
-		// One part, or a product the registry does not describe. Either way
-		// this is the single job it has always been, and passing the role
-		// through would start writing 'body' where nothing wrote it before.
+	return singleJobRoles(s.partRolesForSKU(ctx, deref(li.SKU)))
+}
+
+// singleJobRoles turns the registry's parts for a line into the roles its jobs
+// carry.
+//
+// THE ONE-PART CASE WAS COLLAPSED TO "", meaning the default part, body. That
+// was right while every single-part product's part was called body - FCF and
+// TSM both are - and wrong the moment a part could be named anything, which
+// the registry's Add part dialog now allows ("plank, rose, keychain").
+//
+// Measured on the Desk Name Plank: one part, named "desk plank". Its job was
+// created as body, the render looked for a design and a mapping under body,
+// found neither, and fell through to the Dual Name Plank template:
+//
+//	a plank needs both names; got first="" second=""
+//
+// A desk plate rendered as a two-name plank, on every order, with nothing
+// pointing at the part name as the cause.
+//
+// So a single part is passed through UNLESS it is body. That keeps every
+// existing product byte-identical - their one part is body, and they still
+// get "" - which is the property the old comment was protecting: not writing
+// 'body' where nothing wrote it before. Job numbering is unaffected, because
+// a line only takes per-part job numbers when it has more than one part.
+func singleJobRoles(roles []string) []string {
+	if len(roles) == 0 {
+		// A product the registry does not describe: the single job it has
+		// always been.
+		return []string{""}
+	}
+	if len(roles) == 1 && strings.EqualFold(strings.TrimSpace(roles[0]), designRoleBody) {
 		return []string{""}
 	}
 	return roles
@@ -1254,6 +1281,13 @@ func modelStatusOf(j gen.ProductionJob, generated bool) string {
 		if j.ModelError != nil {
 			return ModelFailed
 		}
+		// Judged before the product was set up, so no render was ever queued.
+		// Reporting it as Generating left the job looking busy for ever - see
+		// job_set_up_after.go. Failed, with its own sentence and the Rebuild
+		// control, is the truth and a state the dashboard already draws.
+		if judgedBeforeSetup(j) {
+			return ModelFailed
+		}
 		return ModelGenerating
 	}
 	return ModelApprovalRequired
@@ -1272,6 +1306,12 @@ func modelStatusOf(j gen.ProductionJob, generated bool) string {
 func reportableModelError(j gen.ProductionJob, generated bool) *string {
 	if modelStatusOf(j, generated) != ModelFailed {
 		return nil
+	}
+	// A job failed by judgedBeforeSetup has no renderer complaint - nothing
+	// ever ran - so it says why, rather than drawing "Oops" with no reason.
+	if j.ModelError == nil && judgedBeforeSetup(j) {
+		wording := setUpAfterOrderWording
+		return &wording
 	}
 	return j.ModelError
 }

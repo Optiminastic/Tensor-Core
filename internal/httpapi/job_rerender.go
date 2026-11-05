@@ -58,6 +58,17 @@ func (s *Server) rerenderProductionJob(c *gin.Context) {
 			"Model generation is not configured on this service.")
 		return
 	}
+	// Before re-rendering, put the job on the part its product prints TODAY.
+	// A job created before its product was set up sits on the default part,
+	// and rebuilding it there re-renders the same wrong part - which is how a
+	// desk plate kept coming back as "a plank needs both names".
+	s.adoptCurrentPart(ctx, job)
+	// And lift the creation-time verdict "Tensor does not make this", so the
+	// queue shows the render as in progress rather than the job as failed for
+	// the half-minute OpenSCAD takes. A failed render writes its own reason.
+	if judgedBeforeSetup(job) {
+		_ = s.store.Q.ReopenProductionJobForRender(ctx, id)
+	}
 	if err := s.modelEnqueuer.Enqueue(ctx, id); err != nil {
 		detail(c, http.StatusInternalServerError, "Could not queue the render.")
 		return
