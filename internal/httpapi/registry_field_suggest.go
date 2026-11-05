@@ -318,6 +318,9 @@ func bestGuesses(
 		return pairs[i].param.Name < pairs[j].param.Name
 	})
 
+	// How many lines the commonest field reached, so a field the orders
+	// disagree about can be proposed optional rather than job-holding.
+	mostSeen := mostSeenOrders(observed)
 	out := make(map[string]fieldSuggestionResponse, len(pairs))
 	for _, pair := range pairs {
 		if _, taken := out[pair.param.Name]; taken || claimed[pair.prop.Key] {
@@ -337,7 +340,7 @@ func bestGuesses(
 			PropertyKey:   pair.prop.Key,
 			PropertyLabel: pair.prop.Label,
 			ValueType:     string(kind),
-			Optional:      said.Optional,
+			Optional:      said.Optional || absentFromSomeOrders(pair.prop, mostSeen),
 			DefaultValue:  said.Default,
 			Source:        sourceMatch,
 			Strength:      string(pair.strength),
@@ -408,4 +411,41 @@ func findObserved(observed []observedPropertyResponse, key string) *observedProp
 		}
 	}
 	return nil
+}
+
+// mostSeenOrders is the highest line count any observed property reached.
+//
+// A stand-in for "how many lines we looked at", which nothing records
+// directly: the commonest field on a product is on essentially every line of
+// it, so the top of the tally is the denominator the others are judged
+// against.
+func mostSeenOrders(observed []observedPropertyResponse) int {
+	most := 0
+	for _, p := range observed {
+		if p.Orders > most {
+			most = p.Orders
+		}
+	}
+	return most
+}
+
+// absentFromSomeOrders reports whether this field is one the storefront only
+// sometimes sends.
+//
+// PROPOSED OPTIONAL WHEN IT IS. The Family Crossword Frame is why: it sells
+// two to six names, so name_5 and name_6 are on a minority of its lines, and
+// a mapping that held the job for them meant every order of four names failed
+// with `this order carries no "name 5"` - a product that could only ever make
+// the six-name version of itself.
+//
+// The evidence was already on the screen beside each field ("name_1 · 3
+// orders", "name_5 · 1 order") and only a person was reading it. A field the
+// orders disagree about is exactly the field whose absence must not stop a
+// render, so the suggestion now says so and the operator can still overrule
+// it with one click.
+//
+// Deliberately not applied to a field on EVERY line: a plank's name is on all
+// of them, and a blank name is scrap rather than a smaller product.
+func absentFromSomeOrders(prop observedPropertyResponse, mostSeen int) bool {
+	return mostSeen > 0 && prop.Orders > 0 && prop.Orders < mostSeen
 }
