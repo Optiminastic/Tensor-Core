@@ -15,6 +15,14 @@ its licence does not contemplate redistribution inside a container image. This
 was raised and accepted as a business decision, not overlooked. The
 alternatives below remain available if it ever has to come back out.
 
+**`bahnschrift.ttf` and `GOTHICB.TTF` are committed for the same reason.** The
+Desk Name Plank (`desk-np`) sets its name in `Bahnschrift:style=Bold Condensed`
+(a named instance of this variable font) and its role in `Century Gothic:style=Bold`,
+and positions every letter from those faces' own width and kerning tables.
+Without them the worker substituted a wider face and the letters overlapped
+("ROHANMEHTA") while the render reported success. Both are Microsoft fonts,
+the same licensing position as Segoe UI above.
+
 ## Why this directory has to exist at all
 
 Without it, fontconfig does not fail — it **substitutes**, silently. In the

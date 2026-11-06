@@ -131,7 +131,13 @@ COPY fonts/ /usr/share/fonts/truetype/tensor/
 RUN fc-cache -f > /dev/null \
  && fc-match "Segoe UI Black" | tee /tmp/font-check \
  && grep -qi "seguibl\|Segoe" /tmp/font-check \
-    || echo "WARNING: Segoe UI Black is NOT installed - lettering will render ~66% thin"
+    || echo "WARNING: Segoe UI Black is NOT installed - lettering will render ~66% thin" \
+ `# The Desk Name Plank (desk-np) places each letter from Bahnschrift's and` \
+ `# Century Gothic's own widths. Substituted, the letters overlap.` \
+ && fc-match "Bahnschrift:style=Bold Condensed" file | grep -qi bahnschrift \
+    || echo "WARNING: Bahnschrift is NOT installed - desk plank names will overlap" \
+ && fc-match "Century Gothic:style=Bold" file | grep -qi gothicb \
+    || echo "WARNING: Century Gothic Bold is NOT installed - desk plank roles will misplace"
 
 # The parts a template imports and the faces it names, staged beside every
 # render by personalise.stageAssets.
