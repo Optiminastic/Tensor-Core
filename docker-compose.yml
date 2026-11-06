@@ -160,6 +160,32 @@ services:
         # than the floor's whole render pool.
         limits: {cpus: "2", memory: 1G}
 
+  # The bed's half of the pipeline: plan same-product same-colour Drafts,
+  # lock them, dispatch them to printers, pin them, and complete them when the
+  # print finishes. Same image as productionworker, a different command.
+  #
+  # Running this alongside productionworker changes nothing by itself: River
+  # locks each job to one worker, and productionworker keeps consuming these
+  # queues until RUN_BATCH_WORKERS=false is set on it. Flip that only once
+  # this service is up, or no bed forms and no print completes.
+  batchworker:
+    build:
+      context: .
+      dockerfile: productionworker.Dockerfile
+    image: tensor-production-worker
+    command: ["batchworker"]
+    env_file: [env/local.env]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgres://tensor:tensor@postgres:5432/tensor?sslmode=disable
+    restart: unless-stopped
+    deploy:
+      resources:
+        # No OpenSCAD runs here: planning, merging plates and talking to the
+        # printer host.
+        limits: {cpus: "1", memory: 1G}
+
   sliceworker:
     build:
       context: .

@@ -32,6 +32,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/personalisationworker ./cmd/personalisationworker
 
+# The bed's lifecycle - plan, lock, dispatch, pin, complete. Same image for
+# the same reason: one place for every worker's dependencies to live.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+      -o /out/batchworker ./cmd/batchworker
+
+
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
       -o /out/rerender ./cmd/rerender
 # replate carries a finished re-render onto the beds: a merged plate is a
@@ -155,6 +161,7 @@ ENV OPENSCAD_ASSET_DIR=/opt/tensor/scadassets
 
 COPY --from=build /out/productionworker /usr/local/bin/productionworker
 COPY --from=build /out/personalisationworker /usr/local/bin/personalisationworker
+COPY --from=build /out/batchworker /usr/local/bin/batchworker
 COPY --from=build /out/rerender /usr/local/bin/rerender
 COPY --from=build /out/replate /usr/local/bin/replate
 COPY --from=build /out/backfillpriority /usr/local/bin/backfillpriority

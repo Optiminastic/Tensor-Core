@@ -99,6 +99,12 @@ const (
 	RoleProduction Role = "production"
 	// RolePersonalisation is the customer's queues and nothing else.
 	RolePersonalisation Role = "personalisation"
+	// RoleBatch is the bed's whole lifecycle and nothing else: planning jobs
+	// of one product and one colour into Drafts, locking them, sending them
+	// to printers, pinning them to the printer chosen, and noticing when a
+	// print finishes. The pipeline also runs these while RUN_BATCH_WORKERS is
+	// true.
+	RoleBatch Role = "batch"
 )
 
 // Start runs the production pipeline, and the personalisation queues with it
@@ -122,6 +128,19 @@ func StartPersonalisation(
 	cfg config.Settings, logger *slog.Logger,
 ) (*Runner, error) {
 	return start(ctx, server, store, cfg, logger, RolePersonalisation)
+}
+
+// StartBatch runs ONLY the bed's queues: plan, dispatch, fleet sync (which
+// also notices finished prints) and the printer pin.
+//
+// No River periodic jobs, for StartPersonalisation's reason. Its own replan,
+// dispatch and fleet ticks are process-owned tickers instead (see
+// startBatchTickers), so they fire whichever client holds River's lease.
+func StartBatch(
+	ctx context.Context, server *httpapi.Server, store *db.Store,
+	cfg config.Settings, logger *slog.Logger,
+) (*Runner, error) {
+	return start(ctx, server, store, cfg, logger, RoleBatch)
 }
 
 func start(
@@ -234,13 +253,21 @@ func start(
 			queues[name] = qc
 		}
 	}
+	// The bed's queues likewise, until cmd/batchworker takes them.
+	ownsBatches := role == RoleBatch ||
+		(role == RoleProduction && cfg.RunBatchWorkers)
+	if ownsBatches {
+		for name, qc := range batchQueues(fleetSync) {
+			queues[name] = qc
+		}
+	}
 	if len(queues) == 0 {
-		// Reachable only by running the pipeline with both halves switched
+		// Reachable only by running the pipeline with every half switched
 		// off, which is a deployment that consumes nothing while looking
 		// healthy - the failure this whole file keeps having.
 		return nil, fmt.Errorf(
-			"this process would consume no queues: role=%s, RUN_PERSONALISATION_WORKERS=%v",
-			role, cfg.RunPersonalisationWorkers)
+			"this process would consume no queues: role=%s, RUN_PERSONALISATION_WORKERS=%v, RUN_BATCH_WORKERS=%v",
+			role, cfg.RunPersonalisationWorkers, cfg.RunBatchWorkers)
 	}
 
 	// No periodic jobs outside the pipeline. River elects ONE leader across
@@ -249,7 +276,7 @@ func start(
 	// dispatch ticks without consuming either queue.
 	var periodic []*river.PeriodicJob
 	if role == RoleProduction {
-		periodic = periodicJobs(cfg, debounce, fleetSync)
+		periodic = periodicJobs()
 	}
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
@@ -287,7 +314,8 @@ func start(
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("start river: %w", err)
 	}
-	logger.Info("production pipeline running",
+	logger.Info("production pipeline running", "role", role,
+		"owns_batches", ownsBatches, "owns_personalisation", ownsPersonalisation,
 		"concurrency", concurrency, "renders", modelGenConcurrency(cfg),
 		"auto_dispatch", cfg.BatchAutoDispatch,
 		"order_sync_minutes", cfg.OrderSyncIntervalMinutes)
@@ -300,8 +328,16 @@ func start(
 	if ownsPersonalisation {
 		startWindowSweep(tickerCtx, client, logger)
 	}
-	if orderSync := time.Duration(cfg.OrderSyncIntervalMinutes) * time.Minute; orderSync > 0 {
-		startOrderSyncTick(tickerCtx, client, orderSync, logger)
+	// The order pull belongs to the pipeline, not to the bed: a batch worker
+	// pulling Shopify would be a second owner of the import.
+	if role == RoleProduction {
+		if orderSync := time.Duration(cfg.OrderSyncIntervalMinutes) * time.Minute; orderSync > 0 {
+			startOrderSyncTick(tickerCtx, client, orderSync, logger)
+		}
+	}
+	// ONLY WHERE THE BED'S QUEUES ARE CONSUMED, for startWindowSweep's reason.
+	if ownsBatches {
+		startBatchTickers(tickerCtx, client, cfg, debounce, fleetSync, logger)
 	}
 	markPersonalisationStart(ctx, store, cfg, logger)
 
@@ -476,23 +512,10 @@ func modelGenConcurrency(cfg config.Settings) int {
 func productionQueues(cfg config.Settings, concurrency int) map[string]river.QueueConfig {
 	return map[string]river.QueueConfig{
 		production.JobCreationQueueName: {MaxWorkers: concurrency},
-		production.BatchPlanQueueName:   {MaxWorkers: 1},
-		// Its own queue, and one at a time: a refresh waits on a printer
-		// host that may be asleep, and must never hold the single
-		// batch-plan slot while it does.
-		production.FleetSyncQueueName: {MaxWorkers: 1},
 		// OpenSCAD is CPU-bound for 20-45 seconds per plank. Bounded rather
 		// than unlimited: renders are pure CPU and the box also runs the
 		// API, the database and Docker.
 		production.ModelGenQueueName: {MaxWorkers: modelGenConcurrency(cfg)},
-		// One at a time, and off the planning queue: a pass spends its time
-		// uploading multi-megabyte plates over the printer host's link, and
-		// two passes at once would race to approve the same bed.
-		production.DispatchBatchQueueName: {MaxWorkers: 1},
-		// Pins waiting on a slice. More than one at a time because each
-		// spends its life asleep between retries, and two operators sending
-		// two beds must not queue behind each other.
-		production.QueuePinQueueName: {MaxWorkers: 2},
 		// One at a time: a pull is minutes of Shopify round trips and order
 		// upserts, and two running together would race to write the same
 		// rows for no gain - Shopify is the bottleneck, not Tensor.
@@ -502,6 +525,107 @@ func productionQueues(cfg config.Settings, concurrency int) map[string]river.Que
 		production.WhatsAppInboundQueueName: {MaxWorkers: 1},
 		production.WhatsAppQueueName:        {MaxWorkers: 2},
 	}
+}
+
+// batchQueues is the bed's whole lifecycle: Draft -> Locked -> printing ->
+// completed.
+//
+// SEPARABLE BECAUSE IT IS ONE STATE MACHINE. The planner forms and locks
+// beds, dispatch sends them, the pin ties a plate to its printer, and the
+// fleet sync is what notices a print finished and completes the bed. Split
+// across processes, each half waits on the other's backlog; in one process
+// they cannot fall out of step, and a burst of renders or a Shopify pull on
+// the pipeline no longer sits in front of a bed that is ready to print.
+func batchQueues(fleetSync time.Duration) map[string]river.QueueConfig {
+	queues := map[string]river.QueueConfig{
+		// One at a time: two planners would dissolve and reform the same
+		// Drafts under each other.
+		production.BatchPlanQueueName: {MaxWorkers: 1},
+		// One at a time, and off the planning queue: a pass spends its time
+		// uploading multi-megabyte plates over the printer host's link, and
+		// two passes at once would race to approve the same bed.
+		production.DispatchBatchQueueName: {MaxWorkers: 1},
+		// Pins waiting on a slice. More than one at a time because each
+		// spends its life asleep between retries, and two operators sending
+		// two beds must not queue behind each other.
+		production.QueuePinQueueName: {MaxWorkers: 2},
+	}
+	if fleetSync > 0 {
+		// Its own queue, and one at a time: a refresh waits on a printer
+		// host that may be asleep, and must never hold the single
+		// batch-plan slot while it does. Only where the worker exists -
+		// FLEET_SYNC_INTERVAL_SECONDS=0 registers none.
+		queues[production.FleetSyncQueueName] = river.QueueConfig{MaxWorkers: 1}
+	}
+	return queues
+}
+
+// startBatchTickers schedules the bed's replan, dispatch pass and fleet
+// refresh from THIS PROCESS rather than as River periodic jobs.
+//
+// River runs periodic jobs on the elected leader alone, and on this database
+// that lease is held by whichever of several clients took it first. A
+// periodic replan registered only by the pipeline therefore ticked only while
+// the pipeline was leader - the same way the order sync and the window sweep
+// once stopped (see startOrderSyncTick). Every insert below is unique BY
+// PERIOD, so several processes ticking together produce one run between them.
+//
+// RunOnStart as before: the fleet refresh runs at once, because a fresh
+// deployment's machines table is empty until it does; a replan or a dispatch
+// on every deploy would be wasted work, or would commit filament.
+func startBatchTickers(
+	ctx context.Context, client *river.Client[pgx.Tx], cfg config.Settings,
+	debounce, fleetSync time.Duration, logger *slog.Logger,
+) {
+	plan := time.Duration(cfg.BatchPlanIntervalMinutes) * time.Minute
+	if plan > 0 {
+		tick(ctx, client, plan, false, "batch replan",
+			production.PeriodicBatchPlanConstructor(debounce), logger)
+		if cfg.BatchAutoDispatch {
+			// Reuses the batch-plan interval: dispatch has nothing to do
+			// until a plan has run.
+			tick(ctx, client, plan, false, "batch dispatch",
+				production.PeriodicDispatchConstructor(plan), logger)
+		}
+	}
+	if fleetSync > 0 {
+		tick(ctx, client, fleetSync, true, "fleet refresh",
+			production.PeriodicFleetSyncConstructor(fleetSync), logger)
+	}
+}
+
+// tick inserts build()'s job every period until ctx ends.
+func tick(
+	ctx context.Context, client *river.Client[pgx.Tx], every time.Duration, onStart bool,
+	what string, build func() (river.JobArgs, *river.InsertOpts), logger *slog.Logger,
+) {
+	insert := func() {
+		args, opts := build()
+		res, err := client.Insert(ctx, args, opts)
+		switch {
+		case err != nil:
+			// One missed tick, not a dead scheduler: the next one tries again.
+			logger.Error("could not enqueue the "+what, "error", err)
+		case res.UniqueSkippedAsDuplicate:
+			// Ordinary when several processes tick: one of them wins.
+			logger.Debug(what + " already queued")
+		}
+	}
+	go func() {
+		if onStart {
+			insert()
+		}
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				insert()
+			}
+		}
+	}()
 }
 
 // personalisationQueues is the customer's work, and all of it is on a clock.
@@ -525,17 +649,18 @@ func personalisationQueues() map[string]river.QueueConfig {
 	}
 }
 
-// periodicJobs assembles the scheduled work the pipeline owns.
+// periodicJobs is the River periodic work the pipeline still owns: the
+// WhatsApp housekeeping.
 //
-// RunOnStart differs per entry, and deliberately. A replan on every deploy would
-// be wasted work against an unchanged backlog, and a dispatch pass on every
-// deploy would commit filament. A fleet refresh is the opposite: a fresh
-// deployment's machines table is empty until something populates it, which is
-// exactly the "Machine Management shows nothing" state operators hit. So is the
-// order pull: starting up is precisely when you want to know what the store has
-// been doing while you were down.
-func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*river.PeriodicJob {
-	jobs := []*river.PeriodicJob{
+// Everything else ticks for itself. The bed's replan, dispatch and fleet
+// refresh moved to startBatchTickers, the order pull to startOrderSyncTick,
+// the window sweep to startWindowSweep and the win-back to
+// cmd/winbackworker - all for one reason: River runs periodic jobs on the
+// elected leader alone, and the lease on this database is held by whichever
+// of several clients took it first, so a job registered by one process
+// ticks only while that process happens to lead.
+func periodicJobs() []*river.PeriodicJob {
+	return []*river.PeriodicJob{
 		// Confirmations ride on the order sync, which pulls every
 		// ORDER_SYNC_INTERVAL_MINUTES; sweeping more often than that only
 		// finds nothing new.
@@ -549,55 +674,7 @@ func periodicJobs(cfg config.Settings, debounce, fleetSync time.Duration) []*riv
 			production.PeriodicWhatsAppConstructor(production.WhatsAppPurgeArgs{}, whatsappPurge),
 			&river.PeriodicJobOpts{RunOnStart: true},
 		),
-		river.NewPeriodicJob(
-			river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
-			production.PeriodicBatchPlanConstructor(debounce),
-			&river.PeriodicJobOpts{RunOnStart: false},
-		),
 	}
-	if cfg.BatchAutoDispatch {
-		// Reuses the batch-plan interval: dispatch has nothing to do until a
-		// plan has run, so checking more often than the planner produces beds
-		// is pure polling.
-		jobs = append(jobs, river.NewPeriodicJob(
-			river.PeriodicInterval(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
-			production.PeriodicDispatchConstructor(time.Duration(cfg.BatchPlanIntervalMinutes)*time.Minute),
-			&river.PeriodicJobOpts{RunOnStart: false},
-		))
-	}
-	// The order sync is deliberately absent, for the reason the win-back sweep
-	// and the window sweep are: River runs periodic jobs on the elected leader
-	// alone, and the lease on this database is held by whichever of four
-	// clients took it first. Registered here it ticked only when the
-	// production worker happened to be leader, which is why orders arrived
-	// only when somebody pressed the button. It ticks for itself now - see
-	// startOrderSyncTick.
-	// The win-back sweep is deliberately absent. River runs periodic jobs on
-	// the elected leader alone, and the leader is whichever River client took
-	// the lease first - normally this one. Scheduling the sweep from here
-	// would hand the tick to a process with neither the credentials nor the
-	// consent switches, which is how it came to be scheduled nowhere at all.
-	// cmd/winbackworker ticks for itself.
-
-	// The personalisation window is NOT closed from here any more. River runs
-	// periodic jobs on the elected leader alone, and the lease is held by
-	// whichever client took it first - which on a shared database is routinely
-	// a deployed container, not this process. Measured on 2026-10-14: the
-	// sweep ticked every minute for the five minutes this process happened to
-	// hold the lease and then stopped dead when a container took it back,
-	// leaving every held order waiting for a window that would never close.
-	//
-	// That is the same way the win-back sweep came to run twice in three days.
-	// It ticks for itself now, and so does this - see startWindowSweep.
-
-	if fleetSync <= 0 {
-		return jobs // FLEET_SYNC_INTERVAL_SECONDS=0 opts out entirely
-	}
-	return append(jobs, river.NewPeriodicJob(
-		river.PeriodicInterval(fleetSync),
-		production.PeriodicFleetSyncConstructor(fleetSync),
-		&river.PeriodicJobOpts{RunOnStart: true},
-	))
 }
 
 // EnableModelGeneration turns on rendering personalised models, or explains
