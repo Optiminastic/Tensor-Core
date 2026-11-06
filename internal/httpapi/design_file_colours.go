@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/Optiminastic/tensor-core/internal/meshio"
@@ -64,12 +65,67 @@ func (s *Server) renderInFileColours(
 		if parts[i].Colour == "" {
 			return nil, fmt.Errorf("%s gave piece %d no colour", plan.Template, i+1)
 		}
+		// OpenSCAD paints geometry the file never coloured in its own
+		// default yellow. That is a piece the file forgot, not a colour the
+		// order chose - refused, for the reason above.
+		if strings.EqualFold(parts[i].Colour, openSCADDefaultColour) {
+			return nil, fmt.Errorf("%s left piece %d uncoloured (OpenSCAD's default %s); "+
+				"check the order's colour value reaches the file", plan.Template, i+1, openSCADDefaultColour)
+		}
 		parts[i].Material = material
 		// Named for its colour, because OpenSCAD's own names ("OpenSCAD
 		// Model 2") tell the operator nothing in the slicer's object list.
 		parts[i].Name = fmt.Sprintf("piece %d %s", i+1, parts[i].Colour)
 	}
 	return meshio.Write3MF(parts)
+}
+
+// openSCADDefaultColour is what OpenSCAD's 3MF export gives geometry that no
+// color() reached - its "Default" base material.
+const openSCADDefaultColour = "#F9D72C"
+
+var (
+	scadLineComment  = regexp.MustCompile(`//[^\n]*`)
+	scadBlockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	scadColorCall    = regexp.MustCompile(`\bcolor\s*\(\s*([^),]+)`)
+	scadLiteralAssig = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\s*=\s*"[^"]*"\s*;`)
+)
+
+// coloursFollowTheOrder is the proof for a service that cannot render.
+//
+// tensor-api ships distroless, with no OpenSCAD - only the production worker
+// renders - so on prod fileColoursProof can never run there and every file
+// came back "0 object(s) in 0 colour(s)". Reading the source instead, a file
+// qualifies when it colours at least two pieces differently AND at least one
+// of those colours is COMPUTED rather than a fixed string: that is a file
+// whose colours follow a variable the order fills. A plank that writes
+// TEXT_COLOR = "YELLOW" and colours with it is fixed throughout and is still
+// refused, exactly as the render proof refuses it.
+//
+// The worker still guards the result: renderInFileColours refuses a piece in
+// OpenSCAD's default colour, so a file this misjudges holds its job rather
+// than printing a colour nobody chose.
+func coloursFollowTheOrder(source []byte) bool {
+	code := scadBlockComment.ReplaceAllString(string(source), "")
+	code = scadLineComment.ReplaceAllString(code, "")
+
+	fixed := map[string]bool{}
+	for _, m := range scadLiteralAssig.FindAllStringSubmatch(code, -1) {
+		fixed[m[1]] = true
+	}
+	args := map[string]bool{}
+	computed := false
+	for _, m := range scadColorCall.FindAllStringSubmatch(code, -1) {
+		arg := strings.TrimSpace(m[1])
+		if arg == "" {
+			continue
+		}
+		args[arg] = true
+		if !strings.HasPrefix(arg, `"`) && !strings.HasPrefix(arg, "[") && !fixed[arg] {
+			computed = true
+		}
+	}
+	return len(args) >= 2 && computed
 }
 
 // fileColoursProof test-renders a template with its own defaults and reports
