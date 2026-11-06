@@ -12,6 +12,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteBrandlessOrdersBefore = `-- name: DeleteBrandlessOrdersBefore :execrows
+DELETE FROM orders
+WHERE created_at < $1 AND brand_slug IS NULL
+`
+
+func (q *Queries) DeleteBrandlessOrdersBefore(ctx context.Context, cutoff pgtype.Timestamptz) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBrandlessOrdersBefore, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteFileAsset = `-- name: DeleteFileAsset :exec
 DELETE FROM file_assets WHERE id = $1
 `
@@ -25,13 +38,12 @@ func (q *Queries) DeleteFileAsset(ctx context.Context, id uuid.UUID) error {
 
 const deleteFinishedEmptyBatches = `-- name: DeleteFinishedEmptyBatches :execrows
 DELETE FROM batches b
-WHERE b.status = 'completed'
-  AND b.created_at < $1
+WHERE b.created_at < $1
   AND NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.batch_id = b.id)
 `
 
-// A completed bed whose jobs have all gone. Left behind it would read as a
-// plate waiting to print with nothing on it.
+// An old bed whose jobs have all gone, whatever its status. Left behind it
+// would read as a plate waiting to print with nothing on it.
 func (q *Queries) DeleteFinishedEmptyBatches(ctx context.Context, cutoff pgtype.Timestamptz) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteFinishedEmptyBatches, cutoff)
 	if err != nil {
@@ -46,7 +58,6 @@ USING orders o
 WHERE j.order_id = o.id
   AND o.created_at >= $1 AND o.created_at < $2
   AND o.brand_slug = $3
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered'
 `
 
 type DeleteJobsInWindowParams struct {
@@ -67,11 +78,25 @@ func (q *Queries) DeleteJobsInWindow(ctx context.Context, arg DeleteJobsInWindow
 	return result.RowsAffected(), nil
 }
 
+const deleteLeftoverJobsBefore = `-- name: DeleteLeftoverJobsBefore :execrows
+DELETE FROM production_jobs j
+WHERE j.created_at < $1
+  AND (j.order_id IS NULL
+       OR EXISTS (SELECT 1 FROM orders o WHERE o.id = j.order_id AND o.brand_slug IS NULL))
+`
+
+func (q *Queries) DeleteLeftoverJobsBefore(ctx context.Context, cutoff pgtype.Timestamptz) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteLeftoverJobsBefore, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteOrdersInWindow = `-- name: DeleteOrdersInWindow :execrows
 DELETE FROM orders
 WHERE created_at >= $1 AND created_at < $2
   AND brand_slug = $3
-  AND lower(coalesce(delivery_status, '')) = 'delivered'
 `
 
 type DeleteOrdersInWindowParams struct {
@@ -96,7 +121,6 @@ JOIN orders o ON o.id = j.order_id
 JOIN file_assets f ON f.id = j.print_file_id
 WHERE o.created_at >= $1 AND o.created_at < $2
   AND o.brand_slug = $3
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered'
 `
 
 type ListJobFilesInWindowParams struct {
@@ -121,6 +145,42 @@ func (q *Queries) ListJobFilesInWindow(ctx context.Context, arg ListJobFilesInWi
 	items := []ListJobFilesInWindowRow{}
 	for rows.Next() {
 		var i ListJobFilesInWindowRow
+		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLeftoverJobFilesBefore = `-- name: ListLeftoverJobFilesBefore :many
+SELECT DISTINCT f.id, f.storage_key
+FROM production_jobs j
+LEFT JOIN orders o ON o.id = j.order_id
+JOIN file_assets f ON f.id = j.print_file_id
+WHERE j.created_at < $1
+  AND (j.order_id IS NULL OR o.brand_slug IS NULL)
+`
+
+type ListLeftoverJobFilesBeforeRow struct {
+	ID         uuid.UUID
+	StorageKey string
+}
+
+// Files of old jobs no brand's day reaches: jobs with no order (orphans, or
+// made by hand) and jobs of orders with no brand.
+func (q *Queries) ListLeftoverJobFilesBefore(ctx context.Context, cutoff pgtype.Timestamptz) ([]ListLeftoverJobFilesBeforeRow, error) {
+	rows, err := q.db.Query(ctx, listLeftoverJobFilesBefore, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLeftoverJobFilesBeforeRow{}
+	for rows.Next() {
+		var i ListLeftoverJobFilesBeforeRow
 		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
 			return nil, err
 		}
@@ -185,26 +245,28 @@ SELECT min(created_at)::timestamptz AS oldest
 FROM orders
 WHERE created_at < $1
   AND created_at >= $2
-  AND lower(coalesce(delivery_status, '')) = 'delivered'
+  AND brand_slug = $3
 `
 
 type OldestDeletableOrderWindowParams struct {
-	Cutoff pgtype.Timestamptz
-	After  pgtype.Timestamptz
+	Cutoff    pgtype.Timestamptz
+	After     pgtype.Timestamptz
+	BrandSlug *string
 }
 
-// The earliest trading day that still has orders old enough to remove.
+// The earliest trading day of this brand that still has orders old enough to
+// remove.
 //
-// DELIVERED ONLY, and old enough. A parcel in transit can still come back as
-// a damage claim, and damage_reports point at the order - so "dispatched" is
-// not finished, "delivered" is. An order Shopify has not told us about yet
-// has a null delivery_status and is never touched.
+// AGE ONLY. Every order older than the retention period goes, whatever its
+// delivery, payment or production state - the shop's decision on 2026-11-06.
+// It replaced "delivered only", which kept every order Delhivery never
+// reported on (and every cancelled, refunded or returned one) for ever.
 // `after` lets one pass WALK FORWARD. A dry run deletes nothing, so without
 // it the next question returns the same oldest order and the loop reports one
 // day over and over instead of covering the backlog - which is exactly what
 // the first dry run did, seven times on 6 September.
 func (q *Queries) OldestDeletableOrderWindow(ctx context.Context, arg OldestDeletableOrderWindowParams) (pgtype.Timestamptz, error) {
-	row := q.db.QueryRow(ctx, oldestDeletableOrderWindow, arg.Cutoff, arg.After)
+	row := q.db.QueryRow(ctx, oldestDeletableOrderWindow, arg.Cutoff, arg.After, arg.BrandSlug)
 	var oldest pgtype.Timestamptz
 	err := row.Scan(&oldest)
 	return oldest, err
@@ -220,7 +282,6 @@ FROM production_jobs j
 JOIN orders o ON o.id = j.order_id
 WHERE o.created_at >= $1 AND o.created_at < $2
   AND o.brand_slug = $3
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered'
 `
 
 type SummariseJobsInWindowParams struct {
@@ -236,9 +297,7 @@ type SummariseJobsInWindowRow struct {
 	Batches   int32
 }
 
-// What one trading day printed. Counted from the jobs of the orders that are
-// about to go, not from every job in the window: a job whose order is still
-// in flight is not being deleted and must not be counted as if it were.
+// What one trading day printed, counted from the jobs of the orders about to go.
 func (q *Queries) SummariseJobsInWindow(ctx context.Context, arg SummariseJobsInWindowParams) (SummariseJobsInWindowRow, error) {
 	row := q.db.QueryRow(ctx, summariseJobsInWindow, arg.FromAt, arg.ToAt, arg.BrandSlug)
 	var i SummariseJobsInWindowRow
@@ -261,12 +320,10 @@ SELECT
         JOIN orders oo ON oo.id = li.order_id
         WHERE oo.created_at >= $1 AND oo.created_at < $2
           AND oo.brand_slug = $3
-          AND lower(coalesce(oo.delivery_status, '')) = 'delivered'
     ), 0)::int                                      AS line_items
 FROM orders o
 WHERE o.created_at >= $1 AND o.created_at < $2
   AND o.brand_slug = $3
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered'
 `
 
 type SummariseOrdersInWindowParams struct {

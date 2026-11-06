@@ -1,10 +1,11 @@
 -- name: OldestDeletableOrderWindow :one
--- The earliest trading day that still has orders old enough to remove.
+-- The earliest trading day of this brand that still has orders old enough to
+-- remove.
 --
--- DELIVERED ONLY, and old enough. A parcel in transit can still come back as
--- a damage claim, and damage_reports point at the order - so "dispatched" is
--- not finished, "delivered" is. An order Shopify has not told us about yet
--- has a null delivery_status and is never touched.
+-- AGE ONLY. Every order older than the retention period goes, whatever its
+-- delivery, payment or production state - the shop's decision on 2026-11-06.
+-- It replaced "delivered only", which kept every order Delhivery never
+-- reported on (and every cancelled, refunded or returned one) for ever.
 -- `after` lets one pass WALK FORWARD. A dry run deletes nothing, so without
 -- it the next question returns the same oldest order and the loop reports one
 -- day over and over instead of covering the backlog - which is exactly what
@@ -13,7 +14,7 @@ SELECT min(created_at)::timestamptz AS oldest
 FROM orders
 WHERE created_at < sqlc.arg('cutoff')
   AND created_at >= sqlc.arg('after')
-  AND lower(coalesce(delivery_status, '')) = 'delivered';
+  AND brand_slug = sqlc.arg('brand_slug');
 
 -- name: SummariseOrdersInWindow :one
 -- What one trading day sold, before any of it is deleted.
@@ -26,17 +27,13 @@ SELECT
         JOIN orders oo ON oo.id = li.order_id
         WHERE oo.created_at >= sqlc.arg('from_at') AND oo.created_at < sqlc.arg('to_at')
           AND oo.brand_slug = sqlc.arg('brand_slug')
-          AND lower(coalesce(oo.delivery_status, '')) = 'delivered'
     ), 0)::int                                      AS line_items
 FROM orders o
 WHERE o.created_at >= sqlc.arg('from_at') AND o.created_at < sqlc.arg('to_at')
-  AND o.brand_slug = sqlc.arg('brand_slug')
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered';
+  AND o.brand_slug = sqlc.arg('brand_slug');
 
 -- name: SummariseJobsInWindow :one
--- What one trading day printed. Counted from the jobs of the orders that are
--- about to go, not from every job in the window: a job whose order is still
--- in flight is not being deleted and must not be counted as if it were.
+-- What one trading day printed, counted from the jobs of the orders about to go.
 SELECT
     coalesce(sum(CASE WHEN j.status = 'completed' THEN 1 ELSE 0 END), 0)::int AS completed,
     coalesce(sum(CASE WHEN j.status = 'failed' THEN 1 ELSE 0 END), 0)::int    AS failed,
@@ -45,8 +42,7 @@ SELECT
 FROM production_jobs j
 JOIN orders o ON o.id = j.order_id
 WHERE o.created_at >= sqlc.arg('from_at') AND o.created_at < sqlc.arg('to_at')
-  AND o.brand_slug = sqlc.arg('brand_slug')
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered';
+  AND o.brand_slug = sqlc.arg('brand_slug');
 
 -- name: ListJobFilesInWindow :many
 -- The stored files belonging to the jobs about to be deleted, so the bucket
@@ -56,8 +52,7 @@ FROM production_jobs j
 JOIN orders o ON o.id = j.order_id
 JOIN file_assets f ON f.id = j.print_file_id
 WHERE o.created_at >= sqlc.arg('from_at') AND o.created_at < sqlc.arg('to_at')
-  AND o.brand_slug = sqlc.arg('brand_slug')
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered';
+  AND o.brand_slug = sqlc.arg('brand_slug');
 
 -- name: DeleteJobsInWindow :execrows
 -- THE JOBS FIRST, ALWAYS. production_jobs.order_id is ON DELETE SET NULL, so
@@ -68,23 +63,40 @@ DELETE FROM production_jobs j
 USING orders o
 WHERE j.order_id = o.id
   AND o.created_at >= sqlc.arg('from_at') AND o.created_at < sqlc.arg('to_at')
-  AND o.brand_slug = sqlc.arg('brand_slug')
-  AND lower(coalesce(o.delivery_status, '')) = 'delivered';
+  AND o.brand_slug = sqlc.arg('brand_slug');
 
 -- name: DeleteOrdersInWindow :execrows
 -- Line items, confirmations, personalisation links and dispatch rows cascade.
 DELETE FROM orders
 WHERE created_at >= sqlc.arg('from_at') AND created_at < sqlc.arg('to_at')
-  AND brand_slug = sqlc.arg('brand_slug')
-  AND lower(coalesce(delivery_status, '')) = 'delivered';
+  AND brand_slug = sqlc.arg('brand_slug');
 
 -- name: DeleteFinishedEmptyBatches :execrows
--- A completed bed whose jobs have all gone. Left behind it would read as a
--- plate waiting to print with nothing on it.
+-- An old bed whose jobs have all gone, whatever its status. Left behind it
+-- would read as a plate waiting to print with nothing on it.
 DELETE FROM batches b
-WHERE b.status = 'completed'
-  AND b.created_at < sqlc.arg('cutoff')
+WHERE b.created_at < sqlc.arg('cutoff')
   AND NOT EXISTS (SELECT 1 FROM production_jobs j WHERE j.batch_id = b.id);
+
+-- name: ListLeftoverJobFilesBefore :many
+-- Files of old jobs no brand's day reaches: jobs with no order (orphans, or
+-- made by hand) and jobs of orders with no brand.
+SELECT DISTINCT f.id, f.storage_key
+FROM production_jobs j
+LEFT JOIN orders o ON o.id = j.order_id
+JOIN file_assets f ON f.id = j.print_file_id
+WHERE j.created_at < sqlc.arg('cutoff')
+  AND (j.order_id IS NULL OR o.brand_slug IS NULL);
+
+-- name: DeleteLeftoverJobsBefore :execrows
+DELETE FROM production_jobs j
+WHERE j.created_at < sqlc.arg('cutoff')
+  AND (j.order_id IS NULL
+       OR EXISTS (SELECT 1 FROM orders o WHERE o.id = j.order_id AND o.brand_slug IS NULL));
+
+-- name: DeleteBrandlessOrdersBefore :execrows
+DELETE FROM orders
+WHERE created_at < sqlc.arg('cutoff') AND brand_slug IS NULL;
 
 -- name: DeleteFileAsset :exec
 -- Best effort: a file still referenced by something under RESTRICT stays, and

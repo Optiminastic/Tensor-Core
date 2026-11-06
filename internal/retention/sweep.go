@@ -12,9 +12,12 @@
 // released, and sitting in the queue reading "Creating" for ever. Nine of them
 // accumulated that way once already.
 //
-// WHAT IT NEVER TOUCHES: anything still in flight, however old. An order is
-// removable only once DELIVERED, not dispatched - a parcel in transit can
-// still come back as a damage claim, and damage_reports point at the order.
+// AGE IS THE ONLY RULE. Every order, job and bed older than the retention
+// period goes, whatever its delivery, payment or production state - the
+// shop's decision on 2026-11-06. It replaced "delivered only", which kept
+// every order Delhivery never reported on, and every cancelled or returned
+// one, for ever. damage_reports.order_id is ON DELETE SET NULL, so a claim
+// outlives its order rather than blocking the delete.
 package retention
 
 import (
@@ -65,7 +68,7 @@ type Result struct {
 	DryRun         bool
 }
 
-const defaultMaxDays = 7
+const defaultMaxDays = 60
 
 // Sweep summarises and removes one pass worth of expired days.
 //
@@ -113,7 +116,45 @@ func Sweep(
 			after = res.WindowEnd
 		}
 	}
+	if !opts.DryRun {
+		if err := sweepLeftovers(ctx, store, objects, cutoff); err != nil {
+			return out, err
+		}
+	}
 	return out, nil
+}
+
+// sweepLeftovers removes what no brand's day reaches: old jobs with no order,
+// old orders (and their jobs) with no brand, and any old bed left empty.
+//
+// Without it "everything older than the retention period goes" would not be
+// true - these rows belong to no trading day, so the day-by-day walk above
+// never visits them. No summary: there is no day for them to be summarised
+// into, and none of them is a sale.
+func sweepLeftovers(ctx context.Context, store *db.Store, objects ObjectStore, cutoff time.Time) error {
+	at := timestamptz(cutoff)
+	files, err := store.Q.ListLeftoverJobFilesBefore(ctx, at)
+	if err != nil {
+		return fmt.Errorf("list leftover job files: %w", err)
+	}
+	if _, err := store.Q.DeleteLeftoverJobsBefore(ctx, at); err != nil {
+		return fmt.Errorf("delete leftover jobs: %w", err)
+	}
+	if _, err := store.Q.DeleteBrandlessOrdersBefore(ctx, at); err != nil {
+		return fmt.Errorf("delete brandless orders: %w", err)
+	}
+	if _, err := store.Q.DeleteFinishedEmptyBatches(ctx, at); err != nil {
+		return fmt.Errorf("delete empty batches: %w", err)
+	}
+	for _, f := range files {
+		if objects != nil {
+			if err := objects.Delete(ctx, f.StorageKey); err != nil {
+				continue
+			}
+		}
+		_ = store.Q.DeleteFileAsset(ctx, f.ID)
+	}
+	return nil
 }
 
 // sweepOneDay handles the oldest trading day still holding expired orders.
@@ -124,8 +165,12 @@ func sweepOneDay(
 	ctx context.Context, store *db.Store, objects ObjectStore,
 	brand string, cutoff, after time.Time, opts Options,
 ) (Result, bool, error) {
-	oldest, err := store.Q.OldestDeletableOrderWindow(ctx,
-		gen.OldestDeletableOrderWindowParams{Cutoff: timestamptz(cutoff), After: timestamptz(after)})
+	// Scoped to THIS brand. Unscoped, the oldest expired day could belong to
+	// another brand, the summary below would find no orders, and this brand's
+	// whole backlog was skipped as "nothing to do".
+	oldest, err := store.Q.OldestDeletableOrderWindow(ctx, gen.OldestDeletableOrderWindowParams{
+		Cutoff: timestamptz(cutoff), After: timestamptz(after), BrandSlug: &brand,
+	})
 	if err != nil || !oldest.Valid {
 		// No rows, or nothing old enough. Either way this brand is finished.
 		return Result{}, true, nil
