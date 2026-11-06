@@ -77,14 +77,8 @@ func (s *Server) setTemplateSelfColour(c *gin.Context) {
 	// field - see design_file_colours.go. It is accepted only if a render with
 	// its own defaults really comes back in more than one colour.
 	if declared := s.declaredPartColours(ctx, key); len(declared) == 0 {
-		objects, colours, err := s.fileColoursProof(ctx, key)
-		if err != nil || colours < 2 {
-			detail(c, http.StatusUnprocessableEntity,
-				key+" declares no colours, so there is nothing to read. A file states its "+
-					`own colours either with a declaration per piece - BACK_COLOR = "#7D3CB5"; `+
-					"- or by colouring its pieces with color() so they export as separate "+
-					fmt.Sprintf("objects. Rendered with its defaults it gave %d object(s) in %d colour(s).",
-						objects, colours))
+		if why, refused := s.fileColoursRefusal(ctx, key); refused {
+			detail(c, http.StatusUnprocessableEntity, why)
 			return
 		}
 	}
@@ -96,6 +90,33 @@ func (s *Server) setTemplateSelfColour(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// fileColoursRefusal says why a file with no colour literals may not be
+// flagged, or nothing when it may.
+//
+// Where this service can render (locally, the worker) the file is test-rendered
+// and must come back in two colours or more. The API on prod is distroless and
+// has no OpenSCAD - every file there came back "0 object(s) in 0 colour(s)" -
+// so there it is judged from its source instead: see coloursFollowTheOrder.
+func (s *Server) fileColoursRefusal(ctx context.Context, key string) (string, bool) {
+	const lead = " declares no colours, so there is nothing to read. A file states its " +
+		`own colours either with a declaration per piece - BACK_COLOR = "#7D3CB5"; - `
+	if s.renderer != nil && !s.renderer.Available() {
+		source, err := s.renderer.Source(ctx, key)
+		if err != nil || !coloursFollowTheOrder(source) {
+			return key + lead + "or by colouring at least two pieces with color() from a " +
+				"variable the order fills.", true
+		}
+		return "", false
+	}
+	objects, colours, err := s.fileColoursProof(ctx, key)
+	if err != nil || colours < 2 {
+		return key + lead + "or by colouring its pieces with color() so they export as " +
+			fmt.Sprintf("separate objects. Rendered with its defaults it gave %d object(s) in %d colour(s).",
+				objects, colours), true
+	}
+	return "", false
 }
 
 // clearingSelfColourStrands reports whether un-flagging this file would leave
