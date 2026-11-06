@@ -464,6 +464,18 @@ type Settings struct {
 	// single env var on the pipeline, reversible without a code change.
 	RunPersonalisationWorkers bool
 
+	// RunBatchWorkers decides whether the production pipeline also runs the
+	// BED's lifecycle - planning same-product same-colour jobs into Drafts,
+	// locking them, sending them to printers, and noticing a print finished -
+	// or leaves all of it to cmd/batchworker.
+	//
+	// TRUE BY DEFAULT, for the reason RunPersonalisationWorkers is: turning it
+	// off before the batch worker is up would stop every bed from forming and
+	// every print from completing, silently. Deploy cmd/batchworker first,
+	// then set RUN_BATCH_WORKERS=false on the pipeline. Both may run at once
+	// in between - River locks each job to one worker.
+	RunBatchWorkers bool
+
 	// SMTP is the mailbox the daily sales register goes out from.
 	//
 	// ENVIRONMENT, NOT THE SETTINGS SCREEN, and deliberately: this is one
@@ -854,6 +866,7 @@ func Load() Settings {
 		RunSeed:                   boolEnvOr("RUN_SEED", true),
 		RunProductionWorkers:      boolEnvOr("RUN_PRODUCTION_WORKERS", true),
 		RunPersonalisationWorkers: boolEnvOr("RUN_PERSONALISATION_WORKERS", true),
+		RunBatchWorkers:           boolEnvOr("RUN_BATCH_WORKERS", true),
 		SMTPHost:                  envOr("SMTP_HOST", ""),
 		SMTPPort:                  intEnvOr("SMTP_PORT", 587),
 		SMTPUsername:              envOr("SMTP_USERNAME", envOr("SMTP_USER", "")),
