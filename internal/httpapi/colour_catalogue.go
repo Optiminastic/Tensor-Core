@@ -46,6 +46,14 @@ type colourCatalogue struct {
 	expiry time.Time
 }
 
+const (
+	// catalogueLoadTimeout caps how long a page waits for the catalogue.
+	catalogueLoadTimeout = 3 * time.Second
+	// catalogueRetryAfter is how long a failed load is remembered, so an
+	// unreachable BambuBuddy costs one page load a wait, not every one.
+	catalogueRetryAfter = time.Minute
+)
+
 func newColourCatalogue(ttl time.Duration) *colourCatalogue {
 	return &colourCatalogue{ttl: ttl}
 }
@@ -64,11 +72,21 @@ func (c *colourCatalogue) lookup(
 	}
 	c.mu.Unlock()
 
-	colours, err := load(ctx)
+	// BOUNDED, and a failure REMEMBERED. The catalogue only improves a
+	// suggestion, but it is fetched inside the Inventory page's request: with
+	// BambuBuddy's host up on Tailscale and its port silent, the call hung
+	// until the page's own 15s timeout and the whole page failed with it.
+	loadCtx, cancel := context.WithTimeout(ctx, catalogueLoadTimeout)
+	defer cancel()
+	colours, err := load(loadCtx)
 	if err != nil {
 		obs.FromContext(ctx).Warn("colour catalogue unavailable; suggesting from known colours only",
 			"error", err)
-		return map[string]catalogueName{}
+		empty := map[string]catalogueName{}
+		c.mu.Lock()
+		c.byHex, c.expiry = empty, time.Now().Add(catalogueRetryAfter)
+		c.mu.Unlock()
+		return empty
 	}
 	built := catalogueByHex(colours)
 
