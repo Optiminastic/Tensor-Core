@@ -96,6 +96,9 @@ func (s *Server) registerInventoryItems(r *gin.Engine) {
 	// version bump to express a distinction nobody has asked for.
 	g.GET("", s.guards.RequirePermission(auth.FilamentRead.Key()), s.listInventoryItems)
 	g.POST("", s.guards.RequirePermission(auth.FilamentManage.Key()), s.upsertInventoryItem)
+	// Bulk add from an .xlsx - see inventory_import.go.
+	g.POST("/import", s.guards.RequirePermission(auth.FilamentManage.Key()), s.importInventoryItems)
+	g.GET("/import-template", s.guards.RequirePermission(auth.FilamentRead.Key()), s.inventoryItemsImportTemplate)
 	// PATCH rather than a second POST: this one is addressed by id, which is
 	// what lets it rename. The POST above is keyed on the name and exists so
 	// re-adding an item restocks it.

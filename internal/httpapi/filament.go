@@ -39,6 +39,9 @@ func (s *Server) registerFilament(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.GET("", s.guards.RequirePermission(auth.FilamentRead.Key()), s.listFilament)
 	g.POST("", s.guards.RequirePermission(auth.FilamentManage.Key()), s.upsertFilament)
+	// Bulk add from an .xlsx - see inventory_import.go.
+	g.POST("/import", s.guards.RequirePermission(auth.FilamentManage.Key()), s.importFilament)
+	g.GET("/import-template", s.guards.RequirePermission(auth.FilamentRead.Key()), s.filamentImportTemplate)
 	// Mirrors BambuBuddy's shelf into Tensor's per-material buckets. Manage,
 	// not read: it rewrites stock figures.
 	g.POST("/sync", s.guards.RequirePermission(auth.FilamentManage.Key()), s.syncFilamentInventory)
