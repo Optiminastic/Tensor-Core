@@ -577,7 +577,9 @@ CREATE TABLE filament_inventory (
     grams_available     numeric(10, 2) NOT NULL DEFAULT 0,
     reorder_level_grams numeric(10, 2) NOT NULL DEFAULT 0,
     created_at          timestamptz NOT NULL DEFAULT now(),
-    updated_at          timestamptz NOT NULL DEFAULT now()
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    -- Values for the shelf's custom columns, by column name (0141).
+    extra               jsonb NOT NULL DEFAULT '{}'
 );
 CREATE UNIQUE INDEX uq_filament_material_colour
     ON filament_inventory (material, COALESCE(colour, ''));
@@ -653,6 +655,7 @@ CREATE TABLE inventory_items (
     code       varchar(64),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    extra      jsonb NOT NULL DEFAULT '{}',
     CONSTRAINT ck_inventory_item_source CHECK (source IN ('bought', 'printed')),
     CONSTRAINT ck_inventory_item_plate_scope CHECK (plate_scope IN ('shared', 'per_sku')),
     CONSTRAINT ck_inventory_item_preview_colour CHECK (
@@ -666,6 +669,16 @@ CREATE TABLE inventory_items (
         OR (source = 'printed' AND num_nonnulls(template_key, model_file_id) = 1)
     )
 );
+CREATE TABLE inventory_custom_columns (
+    id         uuid PRIMARY KEY,
+    shelf      varchar(16) NOT NULL CHECK (shelf IN ('filament', 'items')),
+    name       varchar(64) NOT NULL,
+    position   integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_inventory_custom_column
+    ON inventory_custom_columns (shelf, lower(name));
+
 CREATE UNIQUE INDEX uq_inventory_item_name
     ON inventory_items (lower(name));
 CREATE UNIQUE INDEX uq_inventory_item_code

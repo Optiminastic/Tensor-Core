@@ -376,6 +376,7 @@ type FilamentInventory struct {
 	ReorderLevelGrams pgtype.Numeric
 	CreatedAt         pgtype.Timestamptz
 	UpdatedAt         pgtype.Timestamptz
+	Extra             []byte
 }
 
 type FileAsset struct {
@@ -403,6 +404,14 @@ type IntegrationSetting struct {
 	UpdatedAt    pgtype.Timestamptz
 }
 
+type InventoryCustomColumn struct {
+	ID        uuid.UUID
+	Shelf     string
+	Name      string
+	Position  int32
+	CreatedAt pgtype.Timestamptz
+}
+
 type InventoryItem struct {
 	ID                  uuid.UUID
 	Name                string
@@ -420,6 +429,7 @@ type InventoryItem struct {
 	Code                *string
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
+	Extra               []byte
 }
 
 type JobPreviewModel struct {

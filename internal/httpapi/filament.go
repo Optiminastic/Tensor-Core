@@ -24,6 +24,8 @@ type filamentResponse struct {
 	ReorderLevelGrams float64   `json:"reorder_level_grams"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+	// Extra holds the shelf's custom column values, by column name.
+	Extra map[string]string `json:"extra"`
 }
 
 func filamentDTO(f gen.FilamentInventory) filamentResponse {
@@ -31,6 +33,7 @@ func filamentDTO(f gen.FilamentInventory) filamentResponse {
 		ID: f.ID.String(), Material: f.Material, Colour: f.Colour, ColourHex: f.ColourHex,
 		GramsAvailable: db.NumFloat(f.GramsAvailable), ReorderLevelGrams: db.NumFloat(f.ReorderLevelGrams),
 		CreatedAt: db.Time(f.CreatedAt), UpdatedAt: db.Time(f.UpdatedAt),
+		Extra: decodeExtra(f.Extra),
 	}
 }
 
@@ -42,6 +45,10 @@ func (s *Server) registerFilament(r *gin.Engine) {
 	// Bulk add from an .xlsx - see inventory_import.go.
 	g.POST("/import", s.guards.RequirePermission(auth.FilamentManage.Key()), s.importFilament)
 	g.GET("/import-template", s.guards.RequirePermission(auth.FilamentRead.Key()), s.filamentImportTemplate)
+	g.PATCH("/:id/extra", s.guards.RequirePermission(auth.FilamentManage.Key()), s.setFilamentExtra)
+	// The row menu: edit or delete one row by id - see filament_rows.go.
+	g.PATCH("/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.updateFilamentRow)
+	g.DELETE("/:id", s.guards.RequirePermission(auth.FilamentManage.Key()), s.deleteFilamentRow)
 	// Mirrors BambuBuddy's shelf into Tensor's per-material buckets. Manage,
 	// not read: it rewrites stock figures.
 	g.POST("/sync", s.guards.RequirePermission(auth.FilamentManage.Key()), s.syncFilamentInventory)
@@ -118,8 +125,14 @@ func (s *Server) upsertFilament(c *gin.Context) {
 
 	var row gen.FilamentInventory
 	if isNoRows(err) {
+		// The dot beside the name, from the same sources a render uses; a
+		// name nothing knows simply has none.
+		var swatch *string
+		if hex, err := s.resolveColourHex(ctx, deref(colour)); err == nil {
+			swatch = &hex
+		}
 		row, err = s.store.Q.InsertFilament(ctx, gen.InsertFilamentParams{
-			ID: uuid.New(), Material: req.Material, Colour: colour,
+			ID: uuid.New(), Material: req.Material, Colour: colour, ColourHex: swatch,
 			GramsAvailable: req.GramsAvailable, ReorderLevelGrams: req.ReorderLevelGrams,
 		})
 	} else {

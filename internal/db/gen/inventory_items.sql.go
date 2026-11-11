@@ -44,7 +44,7 @@ func (q *Queries) DeleteInventoryItem(ctx context.Context, id uuid.UUID) (int64,
 }
 
 const getInventoryItem = `-- name: GetInventoryItem :one
-SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at FROM inventory_items WHERE id = $1
+SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra FROM inventory_items WHERE id = $1
 `
 
 // One part by id, for the paths that need to know how it is made before
@@ -69,12 +69,13 @@ func (q *Queries) GetInventoryItem(ctx context.Context, id uuid.UUID) (Inventory
 		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
 
 const getInventoryItemByCode = `-- name: GetInventoryItemByCode :one
-SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at FROM inventory_items WHERE lower(code) = lower($1::text)
+SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra FROM inventory_items WHERE lower(code) = lower($1::text)
 `
 
 // One part by its stable handle, for resolving a bill of materials.
@@ -98,12 +99,13 @@ func (q *Queries) GetInventoryItemByCode(ctx context.Context, code string) (Inve
 		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
 
 const listInventoryItems = `-- name: ListInventoryItems :many
-SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at FROM inventory_items
+SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra FROM inventory_items
 ORDER BY lower(name), id
 `
 
@@ -138,6 +140,7 @@ func (q *Queries) ListInventoryItems(ctx context.Context) ([]InventoryItem, erro
 			&i.Code,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Extra,
 		); err != nil {
 			return nil, err
 		}
@@ -150,7 +153,7 @@ func (q *Queries) ListInventoryItems(ctx context.Context) ([]InventoryItem, erro
 }
 
 const listInventoryItemsTable = `-- name: ListInventoryItemsTable :many
-SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at FROM inventory_items
+SELECT id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra FROM inventory_items
 WHERE $1::text IS NULL
    OR name ILIKE '%' || $1::text || '%'
    OR coalesce(code, '') ILIKE '%' || $1::text || '%'
@@ -191,6 +194,7 @@ func (q *Queries) ListInventoryItemsTable(ctx context.Context, arg ListInventory
 			&i.Code,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Extra,
 		); err != nil {
 			return nil, err
 		}
@@ -234,7 +238,7 @@ UPDATE inventory_items SET
     code       = COALESCE($5, code),
     updated_at = now()
 WHERE id = $6
-RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at
+RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra
 `
 
 type UpdateInventoryItemParams struct {
@@ -288,6 +292,7 @@ func (q *Queries) UpdateInventoryItem(ctx context.Context, arg UpdateInventoryIt
 		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
@@ -305,7 +310,7 @@ SET name       = EXCLUDED.name,
     unit_price = EXCLUDED.unit_price,
     code       = COALESCE(EXCLUDED.code, inventory_items.code),
     updated_at = now()
-RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at
+RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra
 `
 
 type UpsertInventoryItemParams struct {
@@ -361,6 +366,7 @@ func (q *Queries) UpsertInventoryItem(ctx context.Context, arg UpsertInventoryIt
 		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }

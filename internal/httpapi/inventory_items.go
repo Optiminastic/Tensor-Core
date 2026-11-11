@@ -56,6 +56,8 @@ type inventoryItemResponse struct {
 	UnitPrice *float64  `json:"unit_price"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Extra holds the shelf's custom column values, by column name.
+	Extra map[string]string `json:"extra"`
 }
 
 func toInventoryItemResponse(i gen.InventoryItem) inventoryItemResponse {
@@ -66,6 +68,7 @@ func toInventoryItemResponse(i gen.InventoryItem) inventoryItemResponse {
 	}
 	out.UnitPrice = db.NumFloatPtr(i.UnitPrice)
 	out.Code = i.Code
+	out.Extra = decodeExtra(i.Extra)
 	return out
 }
 
@@ -99,6 +102,7 @@ func (s *Server) registerInventoryItems(r *gin.Engine) {
 	// Bulk add from an .xlsx - see inventory_import.go.
 	g.POST("/import", s.guards.RequirePermission(auth.FilamentManage.Key()), s.importInventoryItems)
 	g.GET("/import-template", s.guards.RequirePermission(auth.FilamentRead.Key()), s.inventoryItemsImportTemplate)
+	g.PATCH("/:id/extra", s.guards.RequirePermission(auth.FilamentManage.Key()), s.setInventoryItemExtra)
 	// PATCH rather than a second POST: this one is addressed by id, which is
 	// what lets it rename. The POST above is keyed on the name and exists so
 	// re-adding an item restocks it.

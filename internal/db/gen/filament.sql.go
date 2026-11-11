@@ -132,7 +132,7 @@ func (q *Queries) GetColourHexByName(ctx context.Context, colour string) (*strin
 
 const getFilamentByMaterialColour = `-- name: GetFilamentByMaterialColour :one
 
-SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra FROM filament_inventory
 WHERE material = $1
   AND COALESCE(colour, '') = COALESCE($2, '')
 `
@@ -157,6 +157,7 @@ func (q *Queries) GetFilamentByMaterialColour(ctx context.Context, arg GetFilame
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
@@ -167,7 +168,7 @@ VALUES (
     $1, $2, $3, $4,
     $5::float8, $6::float8
 )
-RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra
 `
 
 type InsertFilamentParams struct {
@@ -198,12 +199,13 @@ func (q *Queries) InsertFilament(ctx context.Context, arg InsertFilamentParams) 
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
 
 const listFilament = `-- name: ListFilament :many
-SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory ORDER BY material, colour NULLS FIRST
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra FROM filament_inventory ORDER BY material, colour NULLS FIRST
 `
 
 func (q *Queries) ListFilament(ctx context.Context) ([]FilamentInventory, error) {
@@ -224,6 +226,7 @@ func (q *Queries) ListFilament(ctx context.Context) ([]FilamentInventory, error)
 			&i.ReorderLevelGrams,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Extra,
 		); err != nil {
 			return nil, err
 		}
@@ -290,7 +293,7 @@ func (q *Queries) ListFilamentMaterials(ctx context.Context) ([]string, error) {
 }
 
 const listFilamentPage = `-- name: ListFilamentPage :many
-SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra FROM filament_inventory
 WHERE (
     $1::timestamptz IS NULL
     OR (created_at, id) < ($1::timestamptz, $2::uuid)
@@ -323,6 +326,7 @@ func (q *Queries) ListFilamentPage(ctx context.Context, arg ListFilamentPagePara
 			&i.ReorderLevelGrams,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Extra,
 		); err != nil {
 			return nil, err
 		}
@@ -335,7 +339,7 @@ func (q *Queries) ListFilamentPage(ctx context.Context, arg ListFilamentPagePara
 }
 
 const listFilamentTable = `-- name: ListFilamentTable :many
-SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at FROM filament_inventory f
+SELECT id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra FROM filament_inventory f
 WHERE ($1::boolean IS NULL OR (f.grams_available < f.reorder_level_grams) = $1::boolean)
   AND ($2::text IS NULL OR f.material = $2)
   AND (
@@ -386,6 +390,7 @@ func (q *Queries) ListFilamentTable(ctx context.Context, arg ListFilamentTablePa
 			&i.ReorderLevelGrams,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Extra,
 		); err != nil {
 			return nil, err
 		}
@@ -403,7 +408,7 @@ UPDATE filament_inventory SET
     colour_hex      = COALESCE($2, colour_hex),
     updated_at      = now()
 WHERE id = $3
-RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra
 `
 
 type SetFilamentStockFromSourceParams struct {
@@ -428,6 +433,7 @@ func (q *Queries) SetFilamentStockFromSource(ctx context.Context, arg SetFilamen
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }
@@ -438,7 +444,7 @@ UPDATE filament_inventory SET
     reorder_level_grams = $2::float8,
     updated_at          = now()
 WHERE id = $3
-RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at
+RETURNING id, material, colour, colour_hex, grams_available, reorder_level_grams, created_at, updated_at, extra
 `
 
 type UpdateFilamentLevelParams struct {
@@ -459,6 +465,7 @@ func (q *Queries) UpdateFilamentLevel(ctx context.Context, arg UpdateFilamentLev
 		&i.ReorderLevelGrams,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }

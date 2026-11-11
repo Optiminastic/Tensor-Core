@@ -3276,7 +3276,7 @@ UPDATE inventory_items SET
     shopify_product_title = coalesce($6, shopify_product_title),
     updated_at          = now()
 WHERE id = $7
-RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at
+RETURNING id, name, quantity, unit, unit_price, source, template_key, model_file_id, shopify_product_gid, shopify_product_title, plate_scope, preview_colour, preview_position, code, created_at, updated_at, extra
 `
 
 type SetInventoryItemSourceParams struct {
@@ -3322,6 +3322,7 @@ func (q *Queries) SetInventoryItemSource(ctx context.Context, arg SetInventoryIt
 		&i.Code,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Extra,
 	)
 	return i, err
 }

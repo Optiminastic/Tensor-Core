@@ -261,6 +261,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerBatches(r)
 	s.registerFilament(r)
 	s.registerInventoryItems(r)
+	s.registerInventoryColumns(r)
 	s.registerRegistry(r)
 	s.registerRegistryAuthoring(r)
 	s.registerDesignTemplates(r)
