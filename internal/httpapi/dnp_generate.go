@@ -379,6 +379,7 @@ func (s *Server) renderColouredPlank(
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble the coloured model: %w", err)
 	}
+	s.recordModelColours(ctx, job, meshes)
 
 	// And the picture, when the product has a file for it.
 	//
@@ -953,4 +954,49 @@ type storedRenderParams struct {
 	// be indistinguishable - "is this still what the order says?" could not
 	// tell the rose's model from the keychain's.
 	Role string `json:"role,omitempty"`
+}
+
+// recordModelColours writes a model's colours onto a job that records none.
+//
+// A product whose .scad declares its own colours (the Family Heart: a white
+// body and a red top) is ordered with names only - no variant colour, no
+// colour property - so the job was created colourless. Colour is what the
+// planner groups beds by, so such a job sat on "No filament colour recorded"
+// for ever while its model already said exactly which filaments it needs.
+//
+// Fills a gap only, and best effort: a colour the order or an operator stated
+// is never replaced, and a failure here costs the planner a job, not the model.
+func (s *Server) recordModelColours(ctx context.Context, job gen.ProductionJob, meshes []meshio.Part) {
+	if !isEmptyColours(job.Colours) || strings.TrimSpace(deref(job.Colour)) != "" {
+		return
+	}
+	colours := modelColours(meshes)
+	if len(colours) == 0 {
+		return
+	}
+	raw, err := json.Marshal(colours)
+	if err != nil {
+		return
+	}
+	if err := s.store.Q.FillJobColoursFromModel(ctx, gen.FillJobColoursFromModelParams{
+		ID: job.ID, Colours: raw,
+	}); err != nil {
+		obs.FromContext(ctx).Warn("could not record the model's colours on the job",
+			"job", job.JobNumber, "error", err)
+	}
+}
+
+// modelColours is each distinct part colour, in part order.
+func modelColours(meshes []meshio.Part) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range meshes {
+		hex, ok := normaliseHex(m.Colour)
+		if !ok || seen[hex] {
+			continue
+		}
+		seen[hex] = true
+		out = append(out, hex)
+	}
+	return out
 }

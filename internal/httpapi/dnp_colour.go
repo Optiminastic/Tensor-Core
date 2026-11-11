@@ -128,6 +128,14 @@ func pickColourHex(mapped, shelf *string, canonicalName string) (string, bool) {
 	if hex, ok := fallbackColours[strings.ToLower(canonicalName)]; ok {
 		return hex, true
 	}
+	// A colour written AS a hex is its own swatch. Jobs for a product whose
+	// .scad declares its colours record the model's own hexes (see
+	// recordModelColours), and no table could name #C12E1E better than itself.
+	if strings.HasPrefix(canonicalName, "#") {
+		if hex, ok := normaliseHex(canonicalName); ok {
+			return hex, true
+		}
+	}
 	return "", false
 }
 

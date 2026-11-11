@@ -68,3 +68,13 @@ RETURNING *;
 -- name: DeleteFilamentRow :one
 DELETE FROM filament_inventory WHERE id = sqlc.arg('id')
 RETURNING id;
+
+-- name: FillJobColoursFromModel :exec
+-- A rendered model's own colours, recorded on a job that names none - a
+-- product whose .scad declares its colours, ordered with no colour at all.
+-- Fills a gap only: a colour the order or an operator stated is never replaced.
+UPDATE production_jobs
+SET colours = sqlc.arg('colours')::jsonb, updated_at = now()
+WHERE id = sqlc.arg('id')
+  AND colours = '[]'::jsonb
+  AND (colour IS NULL OR btrim(colour) = '');

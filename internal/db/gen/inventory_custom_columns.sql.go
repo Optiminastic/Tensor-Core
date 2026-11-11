@@ -102,6 +102,27 @@ func (q *Queries) EnsureInventoryCustomColumn(ctx context.Context, arg EnsureInv
 	return i, err
 }
 
+const fillJobColoursFromModel = `-- name: FillJobColoursFromModel :exec
+UPDATE production_jobs
+SET colours = $1::jsonb, updated_at = now()
+WHERE id = $2
+  AND colours = '[]'::jsonb
+  AND (colour IS NULL OR btrim(colour) = '')
+`
+
+type FillJobColoursFromModelParams struct {
+	Colours []byte
+	ID      uuid.UUID
+}
+
+// A rendered model's own colours, recorded on a job that names none - a
+// product whose .scad declares its colours, ordered with no colour at all.
+// Fills a gap only: a colour the order or an operator stated is never replaced.
+func (q *Queries) FillJobColoursFromModel(ctx context.Context, arg FillJobColoursFromModelParams) error {
+	_, err := q.db.Exec(ctx, fillJobColoursFromModel, arg.Colours, arg.ID)
+	return err
+}
+
 const listInventoryCustomColumns = `-- name: ListInventoryCustomColumns :many
 
 SELECT id, shelf, name, position, created_at FROM inventory_custom_columns
