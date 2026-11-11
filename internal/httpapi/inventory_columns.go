@@ -184,12 +184,16 @@ func (s *Server) deleteInventoryColumn(c *gin.Context) {
 type setExtraRequest struct {
 	Column string `json:"column"`
 	Value  string `json:"value"`
+	// Values sets several columns at once - the Edit form saves every custom
+	// field in one go. Takes precedence over Column/Value when present.
+	Values map[string]string `json:"values"`
 }
 
 func (s *Server) setFilamentExtra(c *gin.Context)      { s.setExtra(c, shelfFilament) }
 func (s *Server) setInventoryItemExtra(c *gin.Context) { s.setExtra(c, shelfItems) }
 
-// setExtra writes one custom value on one row; an empty value clears it.
+// setExtra writes one row's custom values; an empty value clears it. Several
+// values are written together or not at all.
 func (s *Server) setExtra(c *gin.Context, shelf string) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -201,22 +205,49 @@ func (s *Server) setExtra(c *gin.Context, shelf string) {
 		detail(c, http.StatusUnprocessableEntity, "Name the column and give a value.")
 		return
 	}
-	value := strings.TrimSpace(req.Value)
-	if utf8.RuneCountInString(value) > maxExtraValue {
-		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("A value is at most %d characters.", maxExtraValue))
-		return
+	values := req.Values
+	if values == nil {
+		values = map[string]string{req.Column: req.Value}
 	}
 	ctx := c.Request.Context()
-	name, ok := s.columnNamed(ctx, shelf, req.Column)
-	if !ok {
-		detail(c, http.StatusUnprocessableEntity, fmt.Sprintf("This shelf has no column %q.", req.Column))
+	resolved, problem := s.resolveExtraValues(ctx, shelf, values)
+	if problem != "" {
+		detail(c, http.StatusUnprocessableEntity, problem)
 		return
 	}
-	if err := writeExtraValue(ctx, s.store.Q, shelf, id, name, value); err != nil {
-		detail(c, http.StatusInternalServerError, "Could not save the value.")
+	err = s.store.InTx(ctx, func(q *gen.Queries) error {
+		for name, value := range resolved {
+			if err := writeExtraValue(ctx, q, shelf, id, name, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not save the values.")
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// resolveExtraValues maps each named column to its stored name and trims each
+// value, or says what is wrong with the first that is not acceptable.
+func (s *Server) resolveExtraValues(
+	ctx context.Context, shelf string, values map[string]string,
+) (map[string]string, string) {
+	out := make(map[string]string, len(values))
+	for column, raw := range values {
+		value := strings.TrimSpace(raw)
+		if utf8.RuneCountInString(value) > maxExtraValue {
+			return nil, fmt.Sprintf("A value is at most %d characters.", maxExtraValue)
+		}
+		name, ok := s.columnNamed(ctx, shelf, column)
+		if !ok {
+			return nil, fmt.Sprintf("This shelf has no column %q.", column)
+		}
+		out[name] = value
+	}
+	return out, ""
 }
 
 // columnNamed resolves a column by name, case-insensitively, to its stored name.

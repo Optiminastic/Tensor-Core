@@ -203,3 +203,50 @@ func TestIntegrationFilamentRowEditAndDelete(t *testing.T) {
 		t.Fatalf("second delete = %d", rr.Code)
 	}
 }
+
+func TestIntegrationInventoryExtraValuesSaveTogether(t *testing.T) {
+	store := setupStore(t)
+	seedAll(t, store)
+	ctx := context.Background()
+	if _, err := store.Pool.Exec(ctx,
+		`TRUNCATE inventory_items, inventory_custom_columns CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	minter := newTokenMinter(t)
+	router := testServer(t, store, auth.NewGuards(minter.verifier, ""))
+	token := minter.mint(t, []string{auth.FilamentRead.Key(), auth.FilamentManage.Key()})
+	for _, name := range []string{"Size", "Supplier"} {
+		if rr := doJSON(router, http.MethodPost, "/inventory-columns", token,
+			map[string]string{"shelf": "items", "name": name}); rr.Code != http.StatusCreated {
+			t.Fatalf("add %s = %d", name, rr.Code)
+		}
+	}
+	var id string
+	if err := store.Pool.QueryRow(ctx, `INSERT INTO inventory_items (id, name, unit, quantity, extra)
+		VALUES (gen_random_uuid(), 'Gift box', 'piece', 1, '{"Size": "old"}') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	// One unknown column refuses the whole save.
+	rr := doJSON(router, http.MethodPatch, "/inventory-items/"+id+"/extra", token,
+		map[string]any{"values": map[string]string{"size": "10x10", "Nope": "x"}})
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown column = %d", rr.Code)
+	}
+	rr = doJSON(router, http.MethodPatch, "/inventory-items/"+id+"/extra", token,
+		map[string]any{"values": map[string]string{"size": "10x10", "Supplier": "Packwell"}})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("save = %d: %s", rr.Code, rr.Body.String())
+	}
+	var extra string
+	_ = store.Pool.QueryRow(ctx, `SELECT extra::text FROM inventory_items WHERE id = $1`, id).Scan(&extra)
+	if extra != `{"Size": "10x10", "Supplier": "Packwell"}` {
+		t.Fatalf("extra = %s", extra)
+	}
+	// Clearing one leaves the other.
+	doJSON(router, http.MethodPatch, "/inventory-items/"+id+"/extra", token,
+		map[string]any{"values": map[string]string{"Size": ""}})
+	_ = store.Pool.QueryRow(ctx, `SELECT extra::text FROM inventory_items WHERE id = $1`, id).Scan(&extra)
+	if extra != `{"Supplier": "Packwell"}` {
+		t.Fatalf("after clear, extra = %s", extra)
+	}
+}
