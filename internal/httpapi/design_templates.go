@@ -33,10 +33,12 @@ import (
 	"github.com/Optiminastic/tensor-core/internal/personalise"
 )
 
-// maxTemplateBytes bounds an upload. The shop's own masters are 45 KB; a
-// megabyte is room for one that grows tenfold and still refuses a 3MF sent to
-// the wrong endpoint by mistake.
-const maxTemplateBytes = 1 << 20
+// maxTemplateBytes bounds an upload. The shop's own masters are 45 KB, but a
+// design file can embed glyph tables and point data, and one passed a
+// megabyte (2026-11-12); five megabytes is room for that and still refuses a
+// 3MF sent to the wrong endpoint by mistake. Under the router's 8 MB
+// multipart limit, so the size check here is what answers.
+const maxTemplateBytes = 5 << 20
 
 type templateResponse struct {
 	Key        string    `json:"key"`
@@ -394,7 +396,7 @@ func (s *Server) uploadDesignTemplate(c *gin.Context) {
 		return
 	}
 	if header.Size > maxTemplateBytes {
-		detail(c, http.StatusUnprocessableEntity, "That template is larger than 1 MB.")
+		detail(c, http.StatusUnprocessableEntity, "That template is larger than 5 MB.")
 		return
 	}
 
