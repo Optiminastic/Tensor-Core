@@ -588,8 +588,11 @@ func (s *Server) linePropertiesForJob(
 // A job with neither matches nothing, which surfaces as a clear error rather
 // than as the first line on the order being rendered for the wrong customer.
 func sameLineItem(li production.LineItem, sku, product string) bool {
-	if sku != "" {
-		return li.SKU != nil && strings.EqualFold(*li.SKU, sku)
+	// A line that carries a SKU is matched by it. A line that carries NONE is
+	// matched by product name even when the job has a SKU: that job took its
+	// registry product's stand-in SKU (resolveLineSKU), which no line carries.
+	if sku != "" && strings.TrimSpace(deref(li.SKU)) != "" {
+		return strings.EqualFold(*li.SKU, sku)
 	}
 	if product == "" {
 		return false

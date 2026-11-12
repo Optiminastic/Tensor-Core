@@ -43,6 +43,12 @@ func (s *Server) rerenderProductionJob(c *gin.Context) {
 		dbError(c, err, "That production job does not exist.", "Could not load the production job.")
 		return
 	}
+	// A job made from a SKU-less line before its product was in the registry
+	// has no SKU to rebuild from; give it the product's stand-in first. See
+	// adoptRegistrySKU. Every other job is untouched by this.
+	if adopted, ok := s.adoptRegistrySKU(ctx, job); ok {
+		job = adopted
+	}
 	// An uploaded design has no template to rebuild from, and saying so is more
 	// use than queueing work that would fail with errNotPersonalisable.
 	if !s.rendersProduct(ctx, deref(job.Sku), deref(job.ProductName)) {

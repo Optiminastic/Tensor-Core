@@ -17,6 +17,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/Optiminastic/tensor-core/internal/db/gen"
@@ -49,4 +50,64 @@ func (s *Server) resolveLineSKU(ctx context.Context, li production.LineItem) pro
 	}
 	li.SKU = &sku
 	return li
+}
+
+// adoptRegistrySKU gives a job with no SKU its registry product's stand-in
+// SKU, from the order line it was made from, so Rebuild can render a job
+// created before its product was set up.
+//
+// Job creation matches SKU-less lines through resolveLineSKU; a job created
+// before the product existed missed that and was judged "upload a model".
+// Rebuild works from the job's SKU, so without this it had nothing to rebuild
+// from. Returns the updated job, or ok=false when nothing claims the line -
+// the job is then left exactly as it was.
+func (s *Server) adoptRegistrySKU(ctx context.Context, job gen.ProductionJob) (gen.ProductionJob, bool) {
+	if strings.TrimSpace(deref(job.Sku)) != "" || job.OrderID == nil {
+		return job, false
+	}
+	order, err := s.store.Q.GetOrderByID(ctx, *job.OrderID)
+	if err != nil {
+		return job, false
+	}
+	var items []production.LineItem
+	if err := json.Unmarshal(order.LineItems, &items); err != nil {
+		return job, false
+	}
+	line, ok := skulessLineFor(items, deref(job.ProductName))
+	if !ok {
+		return job, false
+	}
+	resolved := s.resolveLineSKU(ctx, line)
+	sku := strings.TrimSpace(deref(resolved.SKU))
+	if sku == "" {
+		return job, false
+	}
+	adopted, err := s.store.Q.AdoptRegistrySKU(ctx, gen.AdoptRegistrySKUParams{ID: job.ID, Sku: sku})
+	if err != nil {
+		return job, false
+	}
+	obs.FromContext(ctx).Info("job adopted its registry product's SKU on rebuild",
+		"job", job.JobNumber, "sku", sku)
+	return adopted, true
+}
+
+// skulessLineFor is the order line a SKU-less job was made from: the SKU-less
+// line with the job's product name, or the only SKU-less line when the job
+// records no name.
+func skulessLineFor(items []production.LineItem, product string) (production.LineItem, bool) {
+	var skuless []production.LineItem
+	for _, li := range items {
+		if strings.TrimSpace(deref(li.SKU)) == "" {
+			skuless = append(skuless, li)
+		}
+	}
+	for _, li := range skuless {
+		if product != "" && strings.EqualFold(strings.TrimSpace(li.ProductName), strings.TrimSpace(product)) {
+			return li, true
+		}
+	}
+	if product == "" && len(skuless) == 1 {
+		return skuless[0], true
+	}
+	return production.LineItem{}, false
 }

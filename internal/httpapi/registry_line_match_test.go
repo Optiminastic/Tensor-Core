@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -63,5 +65,67 @@ func TestIntegrationSKULessLinesMatchTheirRegistryProduct(t *testing.T) {
 	exec(`UPDATE products SET status = 'retired' WHERE code = 'COUPLES-DATE-PLANK'`)
 	if got := sku(production.LineItem{ProductID: "8154757038293"}); got != "" {
 		t.Fatalf("retired = %q", got)
+	}
+}
+
+// JOB-116587: a Couple's Date Plank job created before the product was in the
+// registry - no SKU, "upload a model". Rebuild gives it the stand-in SKU.
+func TestIntegrationRebuildAdoptsTheStandInSKU(t *testing.T) {
+	store := setupStore(t)
+	ctx := context.Background()
+	if _, err := store.Pool.Exec(ctx, `TRUNCATE products CASCADE`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := store.Pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	exec(`INSERT INTO products (id, code, name, shopify_product_id) VALUES
+	        ('00000000-0000-0000-0000-0000000000a1', 'COUPLES-DATE-PLANK', 'Couple''s Date Plank', '8154757038293')`)
+	exec(`INSERT INTO product_variants (id, product_id, sku, name) VALUES
+	        (gen_random_uuid(), '00000000-0000-0000-0000-0000000000a1', 'COUPLES-DATE-PLANK', 'All variants without a SKU')`)
+	exec(`INSERT INTO orders (id, shopify_order_id, order_number, financial_status, total_price, currency, line_items, status)
+	      VALUES ('00000000-0000-0000-0000-0000000000c1', 1, 'T-1', 'paid', 0, 'INR',
+	        '[{"sku": null, "product_id": "8154757038293", "product_name": "Couple''s Date Plank", "quantity": 1},
+	          {"sku": "DNP-RED", "product_id": "1", "product_name": "Dual Name Plank", "quantity": 1}]', 'imported')`)
+	exec(`INSERT INTO production_jobs (id, job_number, description, order_id, sku, product_name, issue_reason)
+	      VALUES ('00000000-0000-0000-0000-0000000000d1', 'J-1', 'x', '00000000-0000-0000-0000-0000000000c1',
+	              NULL, 'Couple''s Date Plank', 'no_approved_design'),
+	             ('00000000-0000-0000-0000-0000000000d2', 'J-2', 'x', '00000000-0000-0000-0000-0000000000c1',
+	              'DNP-RED', 'Dual Name Plank', NULL)`)
+	s := &Server{store: store}
+
+	job, err := store.Q.GetProductionJobByID(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, ok := s.adoptRegistrySKU(ctx, job)
+	if !ok || deref(adopted.Sku) != "COUPLES-DATE-PLANK" || adopted.PersonalisationStatus != "not_required" || !adopted.NameConfirmed {
+		t.Fatalf("adopted = %v %+v", ok, adopted)
+	}
+	// A job that already has a SKU is never touched.
+	other, _ := store.Q.GetProductionJobByID(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000d2"))
+	if _, ok := s.adoptRegistrySKU(ctx, other); ok {
+		t.Fatal("a job with a SKU was changed")
+	}
+	// Nothing claims the line: left exactly as it was.
+	exec(`UPDATE production_jobs SET sku = NULL WHERE id = '00000000-0000-0000-0000-0000000000d1'`)
+	exec(`UPDATE products SET status = 'retired'`)
+	job, _ = store.Q.GetProductionJobByID(ctx, uuid.MustParse("00000000-0000-0000-0000-0000000000d1"))
+	if _, ok := s.adoptRegistrySKU(ctx, job); ok {
+		t.Fatal("adopted a SKU from a retired product")
+	}
+}
+
+func TestSameLineItemMatchesASKULessLineByName(t *testing.T) {
+	name := "Couple's Date Plank"
+	real := "DNP-RED"
+	if !sameLineItem(production.LineItem{ProductName: name}, "COUPLES-DATE-PLANK", name) {
+		t.Fatal("a SKU-less line did not match its stand-in job")
+	}
+	if sameLineItem(production.LineItem{SKU: &real, ProductName: name}, "COUPLES-DATE-PLANK", name) {
+		t.Fatal("a line with a different SKU matched")
 	}
 }

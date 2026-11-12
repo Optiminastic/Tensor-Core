@@ -11,6 +11,107 @@ import (
 	"github.com/google/uuid"
 )
 
+const adoptRegistrySKU = `-- name: AdoptRegistrySKU :one
+UPDATE production_jobs
+SET sku                        = $1::text,
+    personalisation_status     = 'not_required',
+    name_confirmed             = true,
+    photo_confirmed            = true,
+    font_confirmed             = true,
+    colour_confirmed           = true,
+    variant_confirmed          = true,
+    customer_approval_received = true,
+    updated_at                 = now()
+WHERE id = $2
+  AND (sku IS NULL OR btrim(sku) = '')
+RETURNING id, job_number, order_id, batch_id, description, quantity, status, assembly_status, finishing_status, qc_status, packaging_status, shopify_order_id, sku, product_name, material, colour, nozzle_profile, filament_grams_required, print_file_id, estimated_print_time_minutes, due_date, priority, personalisation_name, personalisation_font, personalisation_colour, personalisation_variant, personalisation_status, name_confirmed, photo_confirmed, font_confirmed, colour_confirmed, variant_confirmed, customer_approval_received, personalisation_notes, personalisation_photo_file_id, personalisation_validated_by, personalisation_validated_at, reprint_of_job_id, split_of_job_id, shopify_customer_id, customer_name, held, colours, support_used, infill_pct, left_nozzle_mm, right_nozzle_mm, flow_pct, quality_mm, machine_family, variant_title, personalisation_properties, personalisation_original, part_role, model_error, model_error_at, issue_reason, bbox_x_mm, bbox_y_mm, bbox_z_mm, support_weight_g, purge_weight_g, colour_count, created_at, updated_at, bulk_order_id, model_render_queued_at
+`
+
+type AdoptRegistrySKUParams struct {
+	Sku string
+	ID  uuid.UUID
+}
+
+// A job created before its SKU-less product was in the registry, given the
+// product's stand-in SKU on Rebuild - and with it what job creation gives any
+// product Tensor renders: nothing for a person to confirm, since the order's
+// fields are the model's inputs rather than a proof to check. Only a job that
+// still has no SKU is touched.
+func (q *Queries) AdoptRegistrySKU(ctx context.Context, arg AdoptRegistrySKUParams) (ProductionJob, error) {
+	row := q.db.QueryRow(ctx, adoptRegistrySKU, arg.Sku, arg.ID)
+	var i ProductionJob
+	err := row.Scan(
+		&i.ID,
+		&i.JobNumber,
+		&i.OrderID,
+		&i.BatchID,
+		&i.Description,
+		&i.Quantity,
+		&i.Status,
+		&i.AssemblyStatus,
+		&i.FinishingStatus,
+		&i.QcStatus,
+		&i.PackagingStatus,
+		&i.ShopifyOrderID,
+		&i.Sku,
+		&i.ProductName,
+		&i.Material,
+		&i.Colour,
+		&i.NozzleProfile,
+		&i.FilamentGramsRequired,
+		&i.PrintFileID,
+		&i.EstimatedPrintTimeMinutes,
+		&i.DueDate,
+		&i.Priority,
+		&i.PersonalisationName,
+		&i.PersonalisationFont,
+		&i.PersonalisationColour,
+		&i.PersonalisationVariant,
+		&i.PersonalisationStatus,
+		&i.NameConfirmed,
+		&i.PhotoConfirmed,
+		&i.FontConfirmed,
+		&i.ColourConfirmed,
+		&i.VariantConfirmed,
+		&i.CustomerApprovalReceived,
+		&i.PersonalisationNotes,
+		&i.PersonalisationPhotoFileID,
+		&i.PersonalisationValidatedBy,
+		&i.PersonalisationValidatedAt,
+		&i.ReprintOfJobID,
+		&i.SplitOfJobID,
+		&i.ShopifyCustomerID,
+		&i.CustomerName,
+		&i.Held,
+		&i.Colours,
+		&i.SupportUsed,
+		&i.InfillPct,
+		&i.LeftNozzleMm,
+		&i.RightNozzleMm,
+		&i.FlowPct,
+		&i.QualityMm,
+		&i.MachineFamily,
+		&i.VariantTitle,
+		&i.PersonalisationProperties,
+		&i.PersonalisationOriginal,
+		&i.PartRole,
+		&i.ModelError,
+		&i.ModelErrorAt,
+		&i.IssueReason,
+		&i.BboxXMm,
+		&i.BboxYMm,
+		&i.BboxZMm,
+		&i.SupportWeightG,
+		&i.PurgeWeightG,
+		&i.ColourCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BulkOrderID,
+		&i.ModelRenderQueuedAt,
+	)
+	return i, err
+}
+
 const findStandInSKUForShopifyLine = `-- name: FindStandInSKUForShopifyLine :one
 SELECT v.sku::text AS sku
 FROM products p
