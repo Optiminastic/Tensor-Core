@@ -262,6 +262,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerFilament(r)
 	s.registerInventoryItems(r)
 	s.registerInventoryColumns(r)
+	s.registerProductCreation(r)
 	s.registerRegistry(r)
 	s.registerRegistryAuthoring(r)
 	s.registerDesignTemplates(r)
