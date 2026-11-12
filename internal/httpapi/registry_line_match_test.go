@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Optiminastic/tensor-core/internal/db/gen"
+
 	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
@@ -127,5 +129,22 @@ func TestSameLineItemMatchesASKULessLineByName(t *testing.T) {
 	}
 	if sameLineItem(production.LineItem{SKU: &real, ProductName: name}, "COUPLES-DATE-PLANK", name) {
 		t.Fatal("a line with a different SKU matched")
+	}
+}
+
+// 3D Name Plank: SKU-less lines whose names carry their options. The mapping
+// editor finds them by Shopify product id.
+func TestSameShopifyProductFindsSKULessLines(t *testing.T) {
+	id := "7672418959573"
+	p := gen.Product{Name: "3D Name Plank", ShopifyProductID: &id}
+	line := production.LineItem{ProductID: id, ProductName: "3D Name Plank - Regular - 3 cm height / RED / BLUE"}
+	if matchesProduct(line, p.Name, nil) {
+		t.Fatal("the name rule now matches - this test no longer proves anything")
+	}
+	if !sameShopifyProduct(line, p) {
+		t.Fatal("a line of the same Shopify product did not match")
+	}
+	if sameShopifyProduct(production.LineItem{ProductID: "1"}, p) || sameShopifyProduct(line, gen.Product{Name: p.Name}) {
+		t.Fatal("matched without a shared Shopify product id")
 	}
 }

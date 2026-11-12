@@ -104,7 +104,7 @@ func (s *Server) fileColoursRefusal(ctx context.Context, key string) (string, bo
 		`own colours either with a declaration per piece - BACK_COLOR = "#7D3CB5"; - `
 	if s.renderer != nil && !s.renderer.Available() {
 		source, err := s.renderer.Source(ctx, key)
-		if err != nil || !coloursFollowTheOrder(source) {
+		if err != nil || !coloursFollowTheOrderGiven(source, s.variablesMappedFor(ctx, key)) {
 			return key + lead + "or by colouring at least two pieces with color() from a " +
 				"variable the order fills.", true
 		}
@@ -245,6 +245,21 @@ func (s *Server) selfColouredKeys(c *gin.Context) map[string]bool {
 	out := make(map[string]bool, len(rows))
 	for _, key := range rows {
 		out[strings.ToLower(key)] = true
+	}
+	return out
+}
+
+// variablesMappedFor is every variable the order fills for products printing
+// from this template, lower-cased. Nil when it cannot be read: the source check
+// then judges the file as written, which is what it did before this existed.
+func (s *Server) variablesMappedFor(ctx context.Context, key string) map[string]bool {
+	rows, err := s.store.Q.ListVariablesMappedForTemplate(ctx, key)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(rows))
+	for _, v := range rows {
+		out[strings.ToLower(v)] = true
 	}
 	return out
 }

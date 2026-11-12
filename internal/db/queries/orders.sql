@@ -344,6 +344,11 @@ WHERE EXISTS (
     SELECT 1 FROM jsonb_array_elements(o.line_items) li
      WHERE lower(trim(li->>'sku')) = ANY(sqlc.arg('skus')::text[])
         OR lower(li->>'product_name') LIKE sqlc.arg('name_prefix')::text
+        -- A product imported from Shopify is matched by its id too: an
+        -- SKU-less line's name carries its options ("3D Name Plank - Regular
+        -- - 3 cm height / RED / BLUE") and matches no prefix rule (0142).
+        OR (sqlc.arg('shopify_product_id')::text <> ''
+            AND li->>'product_id' = sqlc.arg('shopify_product_id')::text)
 )
 ORDER BY o.placed_at DESC NULLS LAST, o.imported_at DESC
 LIMIT sqlc.arg('limit_count');

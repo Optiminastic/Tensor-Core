@@ -833,15 +833,21 @@ WHERE EXISTS (
     SELECT 1 FROM jsonb_array_elements(o.line_items) li
      WHERE lower(trim(li->>'sku')) = ANY($1::text[])
         OR lower(li->>'product_name') LIKE $2::text
+        -- A product imported from Shopify is matched by its id too: an
+        -- SKU-less line's name carries its options ("3D Name Plank - Regular
+        -- - 3 cm height / RED / BLUE") and matches no prefix rule (0142).
+        OR ($3::text <> ''
+            AND li->>'product_id' = $3::text)
 )
 ORDER BY o.placed_at DESC NULLS LAST, o.imported_at DESC
-LIMIT $3
+LIMIT $4
 `
 
 type ListRecentOrderLineItemsMatchingParams struct {
-	Skus       []string
-	NamePrefix string
-	LimitCount int32
+	Skus             []string
+	NamePrefix       string
+	ShopifyProductID string
+	LimitCount       int32
 }
 
 // The line_items of the most recent orders that could belong to ONE product.
@@ -865,7 +871,12 @@ type ListRecentOrderLineItemsMatchingParams struct {
 // the shop's volume the whole scan is ~12ms. It is one configuration screen,
 // not a path an order travels.
 func (q *Queries) ListRecentOrderLineItemsMatching(ctx context.Context, arg ListRecentOrderLineItemsMatchingParams) ([][]byte, error) {
-	rows, err := q.db.Query(ctx, listRecentOrderLineItemsMatching, arg.Skus, arg.NamePrefix, arg.LimitCount)
+	rows, err := q.db.Query(ctx, listRecentOrderLineItemsMatching,
+		arg.Skus,
+		arg.NamePrefix,
+		arg.ShopifyProductID,
+		arg.LimitCount,
+	)
 	if err != nil {
 		return nil, err
 	}

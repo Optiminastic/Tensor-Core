@@ -101,8 +101,9 @@ func (s *Server) observedPropertiesFor(
 			Skus: skus,
 			// Broad on purpose. matchesProduct below is the narrow rule and
 			// the authority; this only narrows which rows are read.
-			NamePrefix: strings.ToLower(name) + "%",
-			LimitCount: observedPropertyLineLimit,
+			NamePrefix:       strings.ToLower(name) + "%",
+			ShopifyProductID: deref(product.ShopifyProductID),
+			LimitCount:       observedPropertyLineLimit,
 		})
 	if err != nil {
 		return empty
@@ -118,7 +119,7 @@ func (s *Server) observedPropertiesFor(
 			continue
 		}
 		for _, line := range lines {
-			if !matchesProduct(line, name, known) {
+			if !matchesProduct(line, name, known) && !sameShopifyProduct(line, product) {
 				continue
 			}
 			collectProperties(line, found)
@@ -178,6 +179,14 @@ func collectProperties(line production.LineItem, found map[string]*observedPrope
 // is a prefix of "Dual Name Plank with Light", and DNP would quietly absorb
 // DNPWL's fields and offer somebody a mapping built from another product's
 // orders.
+// sameShopifyProduct reports whether a line is of the Shopify product this
+// registry product was imported from - the only reliable key for a line with
+// no SKU, whose name carries its options and matches no name rule.
+func sameShopifyProduct(line production.LineItem, product gen.Product) bool {
+	id := strings.TrimSpace(deref(product.ShopifyProductID))
+	return id != "" && strings.TrimSpace(line.ProductID) == id
+}
+
 func matchesProduct(line production.LineItem, productName string, skus map[string]bool) bool {
 	if line.SKU != nil && skus[strings.ToLower(strings.TrimSpace(*line.SKU))] {
 		return true

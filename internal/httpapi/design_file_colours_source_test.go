@@ -36,3 +36,17 @@ module out_name() { color(NAME_COLOR) name(); }
 		t.Error("one coloured piece (the second is commented out) must be refused")
 	}
 }
+
+// 3D Name Plank: color_1 and color_2 are placeholders the mapping fills.
+func TestAPlaceholderTheOrderFillsCountsAsComputed(t *testing.T) {
+	src := []byte(`color_1 = "blue";
+color_2 = "red";
+color(color_1) left();
+color(color_2) right();`)
+	if coloursFollowTheOrder(src) {
+		t.Fatal("judged as following the order with nothing mapped")
+	}
+	if !coloursFollowTheOrderGiven(src, map[string]bool{"color_1": true, "color_2": true}) {
+		t.Fatal("placeholders the mapping fills were not counted")
+	}
+}

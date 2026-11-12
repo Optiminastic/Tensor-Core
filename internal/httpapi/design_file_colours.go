@@ -106,6 +106,14 @@ var (
 // OpenSCAD's default colour, so a file this misjudges holds its job rather
 // than printing a colour nobody chose.
 func coloursFollowTheOrder(source []byte) bool {
+	return coloursFollowTheOrderGiven(source, nil)
+}
+
+// coloursFollowTheOrderGiven is coloursFollowTheOrder knowing which variables
+// the order fills. A file that writes color_1 = "blue" as a placeholder and
+// colours with it is fixed as written, but follows the order when the mapping
+// fills color_1 - so a literal the mapping fills counts as computed.
+func coloursFollowTheOrderGiven(source []byte, filled map[string]bool) bool {
 	code := scadBlockComment.ReplaceAllString(string(source), "")
 	code = scadLineComment.ReplaceAllString(code, "")
 
@@ -121,7 +129,8 @@ func coloursFollowTheOrder(source []byte) bool {
 			continue
 		}
 		args[arg] = true
-		if !strings.HasPrefix(arg, `"`) && !strings.HasPrefix(arg, "[") && !fixed[arg] {
+		if !strings.HasPrefix(arg, `"`) && !strings.HasPrefix(arg, "[") &&
+			(!fixed[arg] || filled[strings.ToLower(arg)]) {
 			computed = true
 		}
 	}

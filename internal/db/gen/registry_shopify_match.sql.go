@@ -149,6 +149,41 @@ func (q *Queries) FindStandInSKUForShopifyLine(ctx context.Context, arg FindStan
 	return sku, err
 }
 
+const listVariablesMappedForTemplate = `-- name: ListVariablesMappedForTemplate :many
+SELECT DISTINCT lower(fm.scad_variable)::text AS variable
+FROM product_field_maps fm
+WHERE fm.product_id IN (
+    SELECT v.product_id FROM variant_designs vd
+    JOIN product_variants v ON v.id = vd.variant_id
+    WHERE lower(vd.template_key) = lower($1::text)
+      AND vd.status = 'active'
+)
+`
+
+// Every OpenSCAD variable the order fills, across the products that print
+// from this template. A file that sets color_1 = "blue" as a placeholder and
+// colours with it follows the ORDER when the mapping fills color_1 - which
+// reading the file alone cannot know.
+func (q *Queries) ListVariablesMappedForTemplate(ctx context.Context, templateKey string) ([]string, error) {
+	rows, err := q.db.Query(ctx, listVariablesMappedForTemplate, templateKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var variable string
+		if err := rows.Scan(&variable); err != nil {
+			return nil, err
+		}
+		items = append(items, variable)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setProductShopifyID = `-- name: SetProductShopifyID :exec
 
 UPDATE products SET shopify_product_id = $1, updated_at = now()
