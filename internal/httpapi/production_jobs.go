@@ -942,6 +942,10 @@ func (s *Server) buildJobsForOrder(
 	// at all.
 	minted := map[string]bool{}
 	for _, li := range items {
+		// A line with no SKU takes its registry product's stand-in SKU, so
+		// everything below - and every SKU lookup after it - finds the
+		// product. See resolveLineSKU.
+		li = s.resolveLineSKU(ctx, li)
 		quantity := int32(li.Quantity)
 		if quantity < 1 {
 			quantity = 1

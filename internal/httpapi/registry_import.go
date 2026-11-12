@@ -50,6 +50,23 @@ type importProductResponse struct {
 	// Retired is how many variants this import stopped matching, because
 	// Shopify no longer lists them.
 	Retired int `json:"retired"`
+	// MatchByProduct is true when some variants carry no SKU: their orders are
+	// matched by the Shopify product instead, through a stand-in variant whose
+	// SKU is the product code.
+	MatchByProduct bool `json:"match_by_product"`
+}
+
+// standInVariantName names the variant that SKU-less orders are matched to.
+const standInVariantName = "All variants without a SKU"
+
+// shopifyNumericID is the number at the end of a Shopify gid - what an order
+// line carries as its product_id.
+func shopifyNumericID(gid string) string {
+	gid = strings.TrimSpace(gid)
+	if i := strings.LastIndex(gid, "/"); i >= 0 {
+		return gid[i+1:]
+	}
+	return gid
 }
 
 // importShopifyProduct creates or refreshes a registry product from Shopify.
@@ -106,8 +123,7 @@ func (s *Server) importShopifyProduct(c *gin.Context) {
 	}
 	if code == "" {
 		detail(c, http.StatusUnprocessableEntity,
-			"This product's variants carry no SKUs, so there is nothing to match an order by. "+
-				"Add SKUs in Shopify first.")
+			"This product has neither SKUs nor a handle to name it by. Give it a code.")
 		return
 	}
 
@@ -117,17 +133,22 @@ func (s *Server) importShopifyProduct(c *gin.Context) {
 			withSKU = append(withSKU, v)
 		}
 	}
-	if len(withSKU) == 0 {
-		detail(c, http.StatusUnprocessableEntity,
-			"None of this product's variants carry a SKU, so no order could ever be matched to it.")
-		return
-	}
+	// SKU-LESS VARIANTS ARE MATCHED BY PRODUCT, not dropped. Couple's Date
+	// Plank carries 64 variants and not one SKU, so it could never be
+	// imported. Such a product gets one stand-in variant whose SKU is its own
+	// code; an order line with no SKU finds it by Shopify product id (see
+	// resolveLineSKU), and the job carries that SKU - so the print file and the
+	// field mapping set on it drive the render exactly as for any other SKU.
+	standIn := len(withSKU) < len(found.Variants)
 
 	// Lower-cased, because the retire query compares against lower(sku) and
 	// the storefront is not consistent about case.
-	keep := make([]string, 0, len(withSKU))
+	keep := make([]string, 0, len(withSKU)+1)
 	for _, v := range withSKU {
 		keep = append(keep, strings.ToLower(strings.TrimSpace(v.SKU)))
+	}
+	if standIn {
+		keep = append(keep, strings.ToLower(code))
 	}
 
 	var retired int64
@@ -140,6 +161,18 @@ func (s *Server) importShopifyProduct(c *gin.Context) {
 		})
 		if err != nil {
 			return err
+		}
+		if err := q.SetProductShopifyID(ctx, gen.SetProductShopifyIDParams{
+			ID: product.ID, ShopifyProductID: strPtr(shopifyNumericID(found.GID)),
+		}); err != nil {
+			return err
+		}
+		if standIn {
+			if err := q.UpsertVariantBySKU(ctx, gen.UpsertVariantBySKUParams{
+				ID: uuid.New(), ProductID: product.ID, Sku: strPtr(code), Name: standInVariantName,
+			}); err != nil {
+				return err
+			}
 		}
 		for _, v := range withSKU {
 			if err := q.UpsertVariantBySKU(ctx, gen.UpsertVariantBySKUParams{
@@ -163,13 +196,14 @@ func (s *Server) importShopifyProduct(c *gin.Context) {
 
 	obs.FromContext(ctx).Info("imported a product from Shopify",
 		"code", code, "title", found.Title,
-		"variants", len(withSKU), "retired", retired)
+		"variants", len(withSKU), "stand_in", standIn, "retired", retired)
 
 	c.JSON(http.StatusOK, importProductResponse{
 		Code: code, Name: found.Title,
-		Imported: len(withSKU),
-		Skipped:  len(found.Variants) - len(withSKU),
-		Retired:  int(retired),
+		Imported:       len(withSKU),
+		Skipped:        len(found.Variants) - len(withSKU),
+		Retired:        int(retired),
+		MatchByProduct: standIn,
 	})
 }
 

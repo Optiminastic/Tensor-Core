@@ -866,8 +866,12 @@ CREATE TABLE products (
     status varchar(16)  NOT NULL DEFAULT 'active',
     notes  text,
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    -- The Shopify product this is, for order lines with no SKU (0142).
+    shopify_product_id varchar(32)
 );
+CREATE INDEX ix_products_shopify_product_id
+    ON products (shopify_product_id) WHERE shopify_product_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_products_code ON products (lower(code));
 
 CREATE TABLE product_options (

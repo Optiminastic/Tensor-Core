@@ -78,3 +78,11 @@ SET colours = sqlc.arg('colours')::jsonb, updated_at = now()
 WHERE id = sqlc.arg('id')
   AND colours = '[]'::jsonb
   AND (colour IS NULL OR btrim(colour) = '');
+
+-- name: SetJobColoursFromModel :exec
+-- A job's colours, replaced by its model's own - for a file whose colours the
+-- order decides, where the model is the only complete statement of which
+-- filaments the job needs (a variant title names the first colour alone).
+UPDATE production_jobs
+SET colours = sqlc.arg('colours')::jsonb, updated_at = now()
+WHERE id = sqlc.arg('id');

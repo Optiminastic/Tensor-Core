@@ -306,10 +306,20 @@ func (s *Server) renderColouredPlank(
 	// the order's mapped field, nothing restated per SKU - see
 	// design_file_colours.go. Everything below is the per-piece path every
 	// other product still takes, untouched.
-	if s.fileDecidesColours(ctx, plan.Template) {
+	// Or when the order fills the colour variables the file declares - see
+	// order_file_colours.go - with each colour name swapped for the shop's
+	// own swatch first.
+	orderColours := s.orderSetsFileColours(ctx, plan)
+	if orderColours {
+		plan = s.withShopColourHexes(ctx, plan)
+	}
+	if orderColours || s.fileDecidesColours(ctx, plan.Template) {
 		printModel, err := s.renderInFileColours(ctx, plan, deref(job.Material))
 		if err != nil {
 			return nil, nil, err
+		}
+		if orderColours {
+			s.setJobColoursFromModel(ctx, job, printModel)
 		}
 		log.Info("built a model in the file's own colours",
 			"job", job.JobNumber, "template", plan.Template)

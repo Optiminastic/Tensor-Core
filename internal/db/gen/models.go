@@ -604,14 +604,15 @@ type PersonalisationWatermark struct {
 }
 
 type Product struct {
-	ID        uuid.UUID
-	Code      string
-	Name      string
-	Kind      string
-	Status    string
-	Notes     *string
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
+	ID               uuid.UUID
+	Code             string
+	Name             string
+	Kind             string
+	Status           string
+	Notes            *string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	ShopifyProductID *string
 }
 
 type ProductBom struct {

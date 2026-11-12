@@ -227,6 +227,25 @@ func (q *Queries) SetFilamentColourHex(ctx context.Context, arg SetFilamentColou
 	return err
 }
 
+const setJobColoursFromModel = `-- name: SetJobColoursFromModel :exec
+UPDATE production_jobs
+SET colours = $1::jsonb, updated_at = now()
+WHERE id = $2
+`
+
+type SetJobColoursFromModelParams struct {
+	Colours []byte
+	ID      uuid.UUID
+}
+
+// A job's colours, replaced by its model's own - for a file whose colours the
+// order decides, where the model is the only complete statement of which
+// filaments the job needs (a variant title names the first colour alone).
+func (q *Queries) SetJobColoursFromModel(ctx context.Context, arg SetJobColoursFromModelParams) error {
+	_, err := q.db.Exec(ctx, setJobColoursFromModel, arg.Colours, arg.ID)
+	return err
+}
+
 const updateFilamentRow = `-- name: UpdateFilamentRow :one
 UPDATE filament_inventory
 SET material            = $1,

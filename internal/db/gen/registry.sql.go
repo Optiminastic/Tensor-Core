@@ -533,7 +533,7 @@ func (q *Queries) DeleteVariantDesignsForRole(ctx context.Context, arg DeleteVar
 }
 
 const findProductBySKU = `-- name: FindProductBySKU :one
-SELECT p.id, p.code, p.name, p.kind, p.status, p.notes, p.created_at, p.updated_at
+SELECT p.id, p.code, p.name, p.kind, p.status, p.notes, p.created_at, p.updated_at, p.shopify_product_id
 FROM product_variants v
 JOIN products p ON p.id = v.product_id
 WHERE lower(v.sku) = lower($1)
@@ -567,6 +567,7 @@ func (q *Queries) FindProductBySKU(ctx context.Context, sku string) (Product, er
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ShopifyProductID,
 	)
 	return i, err
 }
@@ -731,7 +732,7 @@ func (q *Queries) GetPipelineForShopifyProductOfSKU(ctx context.Context, arg Get
 }
 
 const getProductByCode = `-- name: GetProductByCode :one
-SELECT id, code, name, kind, status, notes, created_at, updated_at FROM products WHERE lower(code) = lower($1::text)
+SELECT id, code, name, kind, status, notes, created_at, updated_at, shopify_product_id FROM products WHERE lower(code) = lower($1::text)
 `
 
 func (q *Queries) GetProductByCode(ctx context.Context, code string) (Product, error) {
@@ -746,6 +747,7 @@ func (q *Queries) GetProductByCode(ctx context.Context, code string) (Product, e
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ShopifyProductID,
 	)
 	return i, err
 }
@@ -902,7 +904,7 @@ const insertProduct = `-- name: InsertProduct :one
 INSERT INTO products (id, code, name, kind, status, notes)
 VALUES ($1, $2, $3,
         $4, $5, $6)
-RETURNING id, code, name, kind, status, notes, created_at, updated_at
+RETURNING id, code, name, kind, status, notes, created_at, updated_at, shopify_product_id
 `
 
 type InsertProductParams struct {
@@ -933,6 +935,7 @@ func (q *Queries) InsertProduct(ctx context.Context, arg InsertProductParams) (P
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ShopifyProductID,
 	)
 	return i, err
 }
@@ -2290,7 +2293,7 @@ func (q *Queries) ListProductPipelines(ctx context.Context) ([]ListProductPipeli
 }
 
 const listProducts = `-- name: ListProducts :many
-SELECT p.id, p.code, p.name, p.kind, p.status, p.notes, p.created_at, p.updated_at,
+SELECT p.id, p.code, p.name, p.kind, p.status, p.notes, p.created_at, p.updated_at, p.shopify_product_id,
        (SELECT count(*) FROM product_options o WHERE o.product_id = p.id)  AS option_count,
        (SELECT count(*) FROM product_variants v WHERE v.product_id = p.id) AS variant_count
 FROM products p
@@ -2298,16 +2301,17 @@ ORDER BY lower(p.code)
 `
 
 type ListProductsRow struct {
-	ID           uuid.UUID
-	Code         string
-	Name         string
-	Kind         string
-	Status       string
-	Notes        *string
-	CreatedAt    pgtype.Timestamptz
-	UpdatedAt    pgtype.Timestamptz
-	OptionCount  int64
-	VariantCount int64
+	ID               uuid.UUID
+	Code             string
+	Name             string
+	Kind             string
+	Status           string
+	Notes            *string
+	CreatedAt        pgtype.Timestamptz
+	UpdatedAt        pgtype.Timestamptz
+	ShopifyProductID *string
+	OptionCount      int64
+	VariantCount     int64
 }
 
 // Every product, with how much is defined about it.
@@ -2333,6 +2337,7 @@ func (q *Queries) ListProducts(ctx context.Context) ([]ListProductsRow, error) {
 			&i.Notes,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ShopifyProductID,
 			&i.OptionCount,
 			&i.VariantCount,
 		); err != nil {
@@ -3491,7 +3496,7 @@ SET code = $1,
     notes = $5,
     updated_at = now()
 WHERE id = $6
-RETURNING id, code, name, kind, status, notes, created_at, updated_at
+RETURNING id, code, name, kind, status, notes, created_at, updated_at, shopify_product_id
 `
 
 type UpdateProductParams struct {
@@ -3525,6 +3530,7 @@ func (q *Queries) UpdateProduct(ctx context.Context, arg UpdateProductParams) (P
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ShopifyProductID,
 	)
 	return i, err
 }
@@ -3657,7 +3663,7 @@ VALUES ($1, $2, $3,
 ON CONFLICT (lower(code)) DO UPDATE
 SET name       = EXCLUDED.name,
     updated_at = now()
-RETURNING id, code, name, kind, status, notes, created_at, updated_at
+RETURNING id, code, name, kind, status, notes, created_at, updated_at, shopify_product_id
 `
 
 type UpsertProductByCodeParams struct {
@@ -3697,6 +3703,7 @@ func (q *Queries) UpsertProductByCode(ctx context.Context, arg UpsertProductByCo
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ShopifyProductID,
 	)
 	return i, err
 }
