@@ -108,6 +108,9 @@ func TestDesignerSeesDesignsCostingAndProduction(t *testing.T) {
 		"production:create", "production:update", "production:fail",
 		"batch:manage", "dispatch:manage", "machine:manage", "filament:manage",
 		"qc:submit", "assembly:submit", "finishing:submit", "packaging:submit",
+		// Every Production action an admin has, since 2026-11-13: the
+		// whole-board sweep and Bulk Orders too.
+		"production:catchup", "bulk_order:read", "bulk_order:manage",
 	} {
 		if !has(d, expected) {
 			t.Errorf("designer should have %s", expected)
@@ -125,10 +128,6 @@ func TestDesignerSeesDesignsCostingAndProduction(t *testing.T) {
 		"pricing:generate", "pricing:override", "config:read", "config:manage",
 		// Not the workspace, and never customer chats.
 		"user:read", "user:manage", "brand:manage", "whatsapp:read",
-		// Admin only, each for its own reason: a sweep that advances the whole
-		// board, and a leaf that stays invisible inside a Production section
-		// everybody else can now see.
-		"production:catchup", "bulk_order:read",
 	} {
 		if has(d, forbidden) {
 			t.Errorf("designer must not have %s", forbidden)
@@ -204,12 +203,18 @@ func TestProjectAndBrandManageAreAdminOnly(t *testing.T) {
 		// order.
 		"production:catchup",
 	}
+	// Bulk orders and the sweep are Production actions, and since 2026-11-13
+	// a DESIGNER holds every Production action an admin does.
+	designerToo := map[string]bool{"bulk_order:read": true, "bulk_order:manage": true, "production:catchup": true}
 	for _, role := range AllRoles {
 		if role == RoleAdmin {
 			continue
 		}
 		set := PermissionsFor(role)
 		for _, key := range adminOnly {
+			if role == RoleDesigner && designerToo[key] {
+				continue
+			}
 			if has(set, key) {
 				t.Errorf("%s must not have %s (admin-only)", role, key)
 			}
@@ -275,8 +280,10 @@ func TestTotalGrantsMatchSpec(t *testing.T) {
 	// 114: damage:resolve goes to ADMIN and to CUSTOMER_SUPPORT. A third
 	// holder of it would show up here before it showed up on anybody's
 	// screen, which is the point of counting rather than spot-checking.
-	if total != 141 {
-		t.Fatalf("total grants = %d, want 141", total)
+	// 144: DESIGNER gains production:catchup, bulk_order:read and
+	// bulk_order:manage (2026-11-13) - every Production action an admin has.
+	if total != 144 {
+		t.Fatalf("total grants = %d, want 144", total)
 	}
 }
 
@@ -300,13 +307,10 @@ func TestDesignerSuppliesDesignFilesAndWorksTheQueue(t *testing.T) {
 			t.Errorf("designer cannot %s, so the Non-DNP queue is unreachable for them", p.Key())
 		}
 	}
-	// What a designer still cannot do to the queue: sweep the whole board in
-	// one press. Working a job and restating every job at once are different
-	// acts, and only the first was asked for.
-	for _, p := range []PermissionSpec{ProductionCatchUp} {
-		if has(designer, p.Key()) {
-			t.Errorf("designer holds %s; that sweep is admin-only", p.Key())
-		}
+	// And the whole-board sweep, since 2026-11-13: the shop asked for a
+	// designer to perform every Production action an admin can.
+	if !has(designer, ProductionCatchUp.Key()) {
+		t.Errorf("designer cannot %s", ProductionCatchUp.Key())
 	}
 }
 

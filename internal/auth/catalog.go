@@ -313,9 +313,13 @@ var roleGrants = map[RoleName][]PermissionSpec{
 	// areas - see TestDesignerSuppliesDesignFilesWithoutProductionAccess,
 	// which now asserts exactly that.
 	//
-	// bulk_order:read is deliberately NOT here. It is granted to no role but
-	// ADMIN, which is what keeps that one leaf invisible inside a Production
-	// section everybody else can see.
+	// EVERYTHING IN PRODUCTION THAT ADMIN CAN DO, since 2026-11-13: the shop
+	// asked for a designer to read, write and perform every Production action
+	// an admin can, Product Creation included. That added the last three -
+	// production:catchup (the whole-board sweep) and bulk_order:read/manage
+	// (Bulk Orders, with its negotiated prices) - which had been admin-only.
+	// Outside Production nothing changed: users, brands, cost assumptions,
+	// setting prices, integrations and customer chats stay with ADMIN.
 	//
 	// SIDE EFFECT WORTH KNOWING: nav-config.ts gates the Agent and Shipping
 	// areas on order:read too, so granting it shows a designer those sections
@@ -344,7 +348,8 @@ var roleGrants = map[RoleName][]PermissionSpec{
 		// production:catchup is deliberately NOT here. It is admin-only by its
 		// own test - a one-press sweep that advances the whole board at once,
 		// which is a different kind of act from working a job.
-		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail,
+		ProductionRead, ProductionCreate, ProductionUpdate, ProductionFail, ProductionCatchUp,
+		BulkOrderRead, BulkOrderManage,
 		OrderRead,
 		BatchRead, BatchManage,
 		DispatchRead, DispatchManage,
