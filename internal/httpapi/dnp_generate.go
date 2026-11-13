@@ -318,9 +318,12 @@ func (s *Server) renderColouredPlank(
 		if err != nil {
 			return nil, nil, err
 		}
-		if orderColours {
-			s.setJobColoursFromModel(ctx, job, printModel)
-		}
+		// Both ways the job's colours become the model's. The job was created
+		// with the ORDER's colour, which a self-coloured part need not print
+		// in at all: an SC rose is red and white whatever colour the combo
+		// was bought in, and recorded as "WHITE" it would be batched with
+		// white jobs onto a printer with no red loaded.
+		s.setJobColoursFromModel(ctx, job, printModel)
 		log.Info("built a model in the file's own colours",
 			"job", job.JobNumber, "template", plan.Template)
 		return printModel, nil, nil
@@ -389,7 +392,15 @@ func (s *Server) renderColouredPlank(
 	if err != nil {
 		return nil, nil, fmt.Errorf("assemble the coloured model: %w", err)
 	}
-	s.recordModelColours(ctx, job, meshes)
+	if needsCustomerColour(parts) {
+		s.recordModelColours(ctx, job, meshes)
+	} else {
+		// Every piece is fixed by the file, so the order's colour played no
+		// part in this model - an SC rose is red and white whichever combo
+		// colour was bought. The model is then the only true statement of
+		// the filaments, and the planner batches on it.
+		s.replaceModelColours(ctx, job, meshes)
+	}
 
 	// And the picture, when the product has a file for it.
 	//
@@ -992,6 +1003,29 @@ func (s *Server) recordModelColours(ctx context.Context, job gen.ProductionJob, 
 		return
 	}
 	if err := s.store.Q.FillJobColoursFromModel(ctx, gen.FillJobColoursFromModelParams{
+		ID: job.ID, Colours: raw,
+	}); err != nil {
+		obs.FromContext(ctx).Warn("could not record the model's colours on the job",
+			"job", job.JobNumber, "error", err)
+	}
+}
+
+// replaceModelColours sets a job's colours to its model's, whatever they were.
+//
+// For a model none of whose pieces took the order's colour: the job was
+// created with the variant's colour ("WHITE"), which such a part need not
+// print in at all, and batched on that it would go to a printer without the
+// filaments it really needs. Best effort, like recordModelColours.
+func (s *Server) replaceModelColours(ctx context.Context, job gen.ProductionJob, meshes []meshio.Part) {
+	colours := modelColours(meshes)
+	if len(colours) == 0 {
+		return
+	}
+	raw, err := json.Marshal(colours)
+	if err != nil {
+		return
+	}
+	if err := s.store.Q.SetJobColoursFromModel(ctx, gen.SetJobColoursFromModelParams{
 		ID: job.ID, Colours: raw,
 	}); err != nil {
 		obs.FromContext(ctx).Warn("could not record the model's colours on the job",
