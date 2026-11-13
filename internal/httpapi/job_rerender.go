@@ -20,6 +20,7 @@ package httpapi
 // completed beds because their plate is the record of what actually printed.
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -69,6 +70,24 @@ func (s *Server) rerenderProductionJob(c *gin.Context) {
 	// and rebuilding it there re-renders the same wrong part - which is how a
 	// desk plate kept coming back as "a plank needs both names".
 	s.adoptCurrentPart(ctx, job)
+	// And a multi-part product's single job - a combo that arrived before its
+	// parts were set up - becomes its parts: this job the first one, the
+	// rest created beside it. See job_split_parts.go.
+	job, parts, err := s.splitIntoParts(ctx, job)
+	if errors.Is(err, errCannotSplit) {
+		detail(c, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not make this job's parts.")
+		return
+	}
+	for _, p := range parts {
+		if err := s.modelEnqueuer.Enqueue(ctx, p.ID); err != nil {
+			detail(c, http.StatusInternalServerError, "Could not queue the render.")
+			return
+		}
+	}
 	// And lift the creation-time verdict "Tensor does not make this", so the
 	// queue shows the render as in progress rather than the job as failed for
 	// the half-minute OpenSCAD takes. A failed render writes its own reason.

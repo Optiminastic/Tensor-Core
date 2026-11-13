@@ -3924,6 +3924,30 @@ func (q *Queries) SetProductionJobStatus(ctx context.Context, arg SetProductionJ
 	return i, err
 }
 
+const splitProductionJobIntoPart = `-- name: SplitProductionJobIntoPart :execrows
+UPDATE production_jobs
+SET job_number = $1, part_role = $2, updated_at = now()
+WHERE id = $3 AND status = 'queued' AND batch_id IS NULL
+`
+
+type SplitProductionJobIntoPartParams struct {
+	JobNumber string
+	PartRole  string
+	ID        uuid.UUID
+}
+
+// Turns a single job into the first part of a multi-part product: its number
+// becomes the part's (JOB-116633 -> JOB-116633-PLANK) and its part_role the
+// part's. Only while it is still queued and on no bed, so a job already
+// printing is never renamed under the floor.
+func (q *Queries) SplitProductionJobIntoPart(ctx context.Context, arg SplitProductionJobIntoPartParams) (int64, error) {
+	result, err := q.db.Exec(ctx, splitProductionJobIntoPart, arg.JobNumber, arg.PartRole, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const summariseJobRendersForSKUs = `-- name: SummariseJobRendersForSKUs :many
 SELECT lower(j.sku)::text AS sku,
        count(*) FILTER (WHERE j.model_render_queued_at IS NOT NULL)::bigint AS rendering,

@@ -1189,6 +1189,15 @@ UPDATE production_jobs
 SET part_role = coalesce(sqlc.narg('part_role'), part_role), updated_at = now()
 WHERE id = sqlc.arg('id');
 
+-- name: SplitProductionJobIntoPart :execrows
+-- Turns a single job into the first part of a multi-part product: its number
+-- becomes the part's (JOB-116633 -> JOB-116633-PLANK) and its part_role the
+-- part's. Only while it is still queued and on no bed, so a job already
+-- printing is never renamed under the floor.
+UPDATE production_jobs
+SET job_number = sqlc.arg('job_number'), part_role = sqlc.arg('part_role'), updated_at = now()
+WHERE id = sqlc.arg('id') AND status = 'queued' AND batch_id IS NULL;
+
 -- name: CountProductionJobsTable :one
 -- How many jobs a table's filters select (the Production Jobs page, or one
 -- packaging-station queue). Paired with ListProductionJobsTable. Every filter
