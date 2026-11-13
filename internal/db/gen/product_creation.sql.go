@@ -7,6 +7,8 @@ package gen
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 const findOrderByNumberForBrand = `-- name: FindOrderByNumberForBrand :one
@@ -74,4 +76,145 @@ func (q *Queries) FindOrderByNumberForBrand(ctx context.Context, arg FindOrderBy
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const findReusableProductCreationBuild = `-- name: FindReusableProductCreationBuild :one
+SELECT id, brand_slug, order_number, product, variant, status, storage_key, filename, error, requested_by, created_at, updated_at FROM product_creation_builds
+WHERE brand_slug = $1
+  AND product = $2
+  AND variant = $3
+  AND lower(order_number) = lower($4)
+  AND (status = 'done' OR (status IN ('queued', 'building') AND updated_at > now() - interval '15 minutes'))
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindReusableProductCreationBuildParams struct {
+	BrandSlug   string
+	Product     string
+	Variant     string
+	OrderNumber string
+}
+
+// The newest build of this file that is finished or still on its way - so a
+// second click downloads the first build rather than making another.
+func (q *Queries) FindReusableProductCreationBuild(ctx context.Context, arg FindReusableProductCreationBuildParams) (ProductCreationBuild, error) {
+	row := q.db.QueryRow(ctx, findReusableProductCreationBuild,
+		arg.BrandSlug,
+		arg.Product,
+		arg.Variant,
+		arg.OrderNumber,
+	)
+	var i ProductCreationBuild
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.OrderNumber,
+		&i.Product,
+		&i.Variant,
+		&i.Status,
+		&i.StorageKey,
+		&i.Filename,
+		&i.Error,
+		&i.RequestedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getProductCreationBuild = `-- name: GetProductCreationBuild :one
+SELECT id, brand_slug, order_number, product, variant, status, storage_key, filename, error, requested_by, created_at, updated_at FROM product_creation_builds WHERE id = $1
+`
+
+func (q *Queries) GetProductCreationBuild(ctx context.Context, id uuid.UUID) (ProductCreationBuild, error) {
+	row := q.db.QueryRow(ctx, getProductCreationBuild, id)
+	var i ProductCreationBuild
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.OrderNumber,
+		&i.Product,
+		&i.Variant,
+		&i.Status,
+		&i.StorageKey,
+		&i.Filename,
+		&i.Error,
+		&i.RequestedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertProductCreationBuild = `-- name: InsertProductCreationBuild :one
+INSERT INTO product_creation_builds (id, brand_slug, order_number, product, variant, requested_by)
+VALUES ($1, $2, $3, $4,
+        $5, $6)
+RETURNING id, brand_slug, order_number, product, variant, status, storage_key, filename, error, requested_by, created_at, updated_at
+`
+
+type InsertProductCreationBuildParams struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	OrderNumber string
+	Product     string
+	Variant     string
+	RequestedBy string
+}
+
+func (q *Queries) InsertProductCreationBuild(ctx context.Context, arg InsertProductCreationBuildParams) (ProductCreationBuild, error) {
+	row := q.db.QueryRow(ctx, insertProductCreationBuild,
+		arg.ID,
+		arg.BrandSlug,
+		arg.OrderNumber,
+		arg.Product,
+		arg.Variant,
+		arg.RequestedBy,
+	)
+	var i ProductCreationBuild
+	err := row.Scan(
+		&i.ID,
+		&i.BrandSlug,
+		&i.OrderNumber,
+		&i.Product,
+		&i.Variant,
+		&i.Status,
+		&i.StorageKey,
+		&i.Filename,
+		&i.Error,
+		&i.RequestedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markProductCreationBuild = `-- name: MarkProductCreationBuild :exec
+UPDATE product_creation_builds
+SET status      = $1,
+    storage_key = COALESCE($2, storage_key),
+    filename    = COALESCE($3, filename),
+    error       = $4,
+    updated_at  = now()
+WHERE id = $5
+`
+
+type MarkProductCreationBuildParams struct {
+	Status     string
+	StorageKey *string
+	Filename   *string
+	Error      *string
+	ID         uuid.UUID
+}
+
+func (q *Queries) MarkProductCreationBuild(ctx context.Context, arg MarkProductCreationBuildParams) error {
+	_, err := q.db.Exec(ctx, markProductCreationBuild,
+		arg.Status,
+		arg.StorageKey,
+		arg.Filename,
+		arg.Error,
+		arg.ID,
+	)
+	return err
 }

@@ -42,8 +42,6 @@ const (
 // The picture's layout, in degrees - MoonLamp.cs, unchanged.
 const (
 	photoLon        = 0.0   // the photo sits at the centre of the unrolled map
-	texturePhotoLon = -90.0 // where moon_texture.png has its filled-in photo area
-	photoLatSpan    = 132.0 // photo height (+-66)
 	photoMaxLonSpan = 160.0 // never wider than this
 	photoFeather    = 8.0   // soft fade of the photo edge into the moon
 	textGap         = 15.0  // photo edge to text block
@@ -53,22 +51,41 @@ const (
 	textMaxLonSpan  = 85.0  // longer lines are squeezed sideways
 )
 
+// Options are what differs between the lamps built from this map.
+type Options struct {
+	Texture         []byte  // the moon, a PNG covering the whole sphere
+	TexturePhotoLon float64 // where the texture has its filled-in photo area
+	PhotoLat        float64 // photo centre latitude; the text follows it
+	PhotoLatSpan    float64 // photo height in degrees
+}
+
+// NightLamp is the 65 mm night lamp (moon_lamp/MoonLamp.cs).
+func NightLamp() Options {
+	return Options{Texture: moonTexturePNG, TexturePhotoLon: -90, PhotoLat: 0, PhotoLatSpan: 132}
+}
+
 // Map is the lamp's brightness over the sphere, 0 (dark, thick wall) to 1
 // (bright, thin wall): rows from latitude +90 down to -90, columns from
 // longitude -180 to +180.
 type Map struct {
-	L [H][W]float64
+	L    [H][W]float64
+	opts Options
 }
 
 // Build composites the moon texture, the customer's photo and up to two lines
 // of text, as MoonLamp.Run does. A nil photo or empty text is left out.
 func Build(photo image.Image, line1, line2 string) (*Map, error) {
-	m := &Map{}
-	tex, err := png.Decode(bytes.NewReader(moonTexturePNG))
+	return BuildWith(NightLamp(), photo, line1, line2)
+}
+
+// BuildWith is Build for a lamp with its own texture and photo placement.
+func BuildWith(opts Options, photo image.Image, line1, line2 string) (*Map, error) {
+	m := &Map{opts: opts}
+	tex, err := png.Decode(bytes.NewReader(opts.Texture))
 	if err != nil {
 		return nil, err
 	}
-	m.loadTexture(tex, int(math.Round((photoLon-texturePhotoLon)*P)))
+	m.loadTexture(tex, int(math.Round((photoLon-opts.TexturePhotoLon)*P)))
 	photoHalfLon := 0.0
 	if photo != nil {
 		photoHalfLon = m.pastePhoto(photo)
@@ -124,7 +141,7 @@ func smooth(x float64) float64 {
 func (m *Map) pastePhoto(photo image.Image) float64 {
 	b := photo.Bounds()
 	aspect := float64(b.Dx()) / float64(b.Dy())
-	latSpan, lonSpan := photoLatSpan, photoLatSpan*aspect
+	latSpan, lonSpan := m.opts.PhotoLatSpan, m.opts.PhotoLatSpan*aspect
 	if lonSpan > photoMaxLonSpan {
 		lonSpan = photoMaxLonSpan
 		latSpan = lonSpan / aspect
@@ -132,7 +149,7 @@ func (m *Map) pastePhoto(photo image.Image) float64 {
 	pw, ph := int(math.Round(lonSpan*P)), int(math.Round(latSpan*P))
 	fe := math.Max(0.01, photoFeather*P)
 	c0 := int(math.Round((photoLon - lonSpan/2 + 180) * P))
-	r0 := int(math.Round((90 - latSpan/2) * P))
+	r0 := int(math.Round((90 - m.opts.PhotoLat - latSpan/2) * P))
 	scaled := scaleGray(photo, pw, ph)
 	for j := 0; j < ph; j++ {
 		r := r0 + j
@@ -281,7 +298,7 @@ func (m *Map) stamp(mask *image.Gray, lonC float64) {
 	b := mask.Bounds()
 	cw, ch := b.Dx(), b.Dy()
 	c0 := int(math.Round((lonC+180)*P - float64(cw)/2))
-	r0 := int(math.Round((90-textLat)*P - float64(ch)/2))
+	r0 := int(math.Round((90-m.opts.PhotoLat-textLat)*P - float64(ch)/2))
 	for j := 0; j < ch; j++ {
 		r := r0 + j
 		if r < 0 || r >= H {

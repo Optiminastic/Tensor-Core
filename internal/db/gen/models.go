@@ -623,6 +623,21 @@ type ProductBom struct {
 	CreatedAt       pgtype.Timestamptz
 }
 
+type ProductCreationBuild struct {
+	ID          uuid.UUID
+	BrandSlug   string
+	OrderNumber string
+	Product     string
+	Variant     string
+	Status      string
+	StorageKey  *string
+	Filename    *string
+	Error       *string
+	RequestedBy string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
 type ProductFieldMap struct {
 	ID           uuid.UUID
 	ProductID    uuid.UUID

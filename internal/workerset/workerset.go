@@ -174,6 +174,12 @@ func start(
 	// silently never takes effect.
 	river.AddWorker(workers, httpapi.NewQueuePinWorker(server, logger))
 
+	// Product Creation's background builds - the sized moon lamp, cut by
+	// OpenSCAD. Registered unconditionally like the renderer: a build is
+	// queued by somebody pressing a button, and a queue nothing consumes would
+	// leave the page waiting for ever.
+	river.AddWorker(workers, httpapi.NewProductBuildWorker(server, logger))
+
 	// Waiting for a slice, then queueing the result on the printer an operator
 	// chose. Registered unconditionally for the same reason as the pin worker:
 	// these jobs come from somebody pressing Queue, not from a flag.
@@ -298,6 +304,7 @@ func start(
 	server.EnableWhatsAppQueue(production.NewWhatsAppEnqueuer(client))
 	server.EnableBatchDispatchQueue(production.NewDispatchEnqueuer(client, debounce))
 	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(client))
+	server.EnableProductBuilds(production.NewProductBuildEnqueuer(client))
 	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(client))
 	EnableModelGeneration(server, cfg, production.NewModelGenEnqueuer(client), logger)
 
@@ -516,6 +523,9 @@ func productionQueues(cfg config.Settings, concurrency int) map[string]river.Que
 		// than unlimited: renders are pure CPU and the box also runs the
 		// API, the database and Docker.
 		production.ModelGenQueueName: {MaxWorkers: modelGenConcurrency(cfg)},
+		// One build at a time: a moon lamp is several seconds of OpenSCAD
+		// on both cores already (top and cap side by side).
+		production.ProductBuildQueueName: {MaxWorkers: 1},
 		// One at a time: a pull is minutes of Shopify round trips and order
 		// upserts, and two running together would race to write the same
 		// rows for no gain - Shopify is the bottleneck, not Tensor.

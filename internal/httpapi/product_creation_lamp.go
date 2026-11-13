@@ -75,11 +75,21 @@ func nightLampFields(order gen.Order) (photo, text, problem string) {
 		return "", "", "This order's line items could not be read."
 	}
 	bestScore := -1
+	sized := ""
 	for _, li := range lines {
+		// A 3DMS01-6P is the 6 inch moon, a different product with its own
+		// option on the page - never built as the small lamp by mistake.
+		if size, ok := moonlamp.SizeForSKU(deref(li.SKU)); ok {
+			sized = fmt.Sprintf("%d inch", size.Inches)
+			continue
+		}
 		p, t, score := lampLine(li)
 		if p != "" && score > bestScore {
 			photo, text, bestScore = p, t, score
 		}
+	}
+	if photo == "" && sized != "" {
+		return "", "", fmt.Sprintf("Order %s is a 3D Moon Lamp (%s), not the night lamp - choose 3D Moon Lamp.", order.OrderNumber, sized)
 	}
 	if photo == "" {
 		return "", "", fmt.Sprintf("Order %s has no photo (file-1) - is it a night lamp order?", order.OrderNumber)

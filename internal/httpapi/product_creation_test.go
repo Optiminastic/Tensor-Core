@@ -55,3 +55,43 @@ func TestNightLampFieldsPicksTheLampLine(t *testing.T) {
 		t.Fatalf("long text: %q", problem)
 	}
 }
+
+// 3DMS01-6P is the 6 inch moon; the night lamp option points there instead.
+func TestMoonLampSizesComeFromTheSKU(t *testing.T) {
+	order := orderWithLines(`[{"sku":"3DMS01-6P","product_name":"3D Moon Lamp - 3D Moon 6 inches dia","properties":[
+		{"name":"file-1","value":"https://x/m.jpg"},{"name":"text-moon","value":"Monasri"}]}]`)
+	size, photo, text, problem := moonLampFields(order)
+	if problem != "" || size.Inches != 6 || size.R != 75 || photo != "https://x/m.jpg" || text != "Monasri" {
+		t.Fatalf("got %+v %q %q %q", size, photo, text, problem)
+	}
+	if _, _, p := nightLampFields(order); !strings.Contains(p, "3D Moon Lamp (6 inch)") {
+		t.Fatalf("night lamp on a sized moon: %q", p)
+	}
+	if _, _, _, p := moonLampFields(orderWithLines(`[{"sku":"3DMS01-6","properties":[{"name":"file-1","value":"https://x/m.jpg"}]}]`)); !strings.Contains(p, "4P, 5P or 6P") {
+		t.Fatalf("night lamp SKU taken as a sized moon: %q", p)
+	}
+}
+
+func TestPDNPReadsOnlyTheFrontText(t *testing.T) {
+	order := orderWithLines(`[{"sku":"PDNP-YEL","product_name":"PREMIUM DUAL NAME PLANK - Yellow","properties":[
+		{"name":"_has_gpo","value":"1626162"},{"name":"STEP 4-First Name","value":"AVANTI"},
+		{"name":"STEP 5-Second Name","value":"AMOL"},{"name":"STEP 6 - Front Text","value":" TOGETHER FOREVER "}]}]`)
+	if text, problem := pdnpFrontText(order); text != "TOGETHER FOREVER" || problem != "" {
+		t.Fatalf("got %q %q", text, problem)
+	}
+	noText := orderWithLines(`[{"sku":"PDNP-BLU","properties":[{"name":"STEP 4-First Name","value":"A"}]}]`)
+	if _, p := pdnpFrontText(noText); !strings.Contains(p, "no front text") {
+		t.Fatalf("missing front text: %q", p)
+	}
+	if _, p := pdnpFrontText(orderWithLines(`[{"sku":"DNP-YEL","properties":[{"name":"STEP 6 - Front Text","value":"X"}]}]`)); !strings.Contains(p, "no Premium Dual Name Plank") {
+		t.Fatalf("plain DNP taken as premium: %q", p)
+	}
+	emoji := orderWithLines(`[{"sku":"PDNP-PUR","properties":[{"name":"STEP 6 - Front Text","value":"LOVE 😀"}]}]`)
+	if _, p := pdnpFrontText(emoji); !strings.Contains(p, "😀") {
+		t.Fatalf("emoji the worker cannot draw was accepted: %q", p)
+	}
+	hearts := orderWithLines(`[{"sku":"PDNP-PUR","properties":[{"name":"STEP 6 - Front Text","value":"I ❤️ YOU ♥ Café"}]}]`)
+	if _, p := pdnpFrontText(hearts); p != "" {
+		t.Fatalf("hearts and accents refused: %q", p)
+	}
+}

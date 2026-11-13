@@ -143,7 +143,11 @@ RUN fc-cache -f > /dev/null \
  && fc-match "Bahnschrift:style=Bold Condensed" file | grep -qi bahnschrift \
     || echo "WARNING: Bahnschrift is NOT installed - desk plank names will overlap" \
  && fc-match "Century Gothic:style=Bold" file | grep -qi gothicb \
-    || echo "WARNING: Century Gothic Bold is NOT installed - desk plank roles will misplace"
+    || echo "WARNING: Century Gothic Bold is NOT installed - desk plank roles will misplace" \
+ `# The Premium DNP front plate (internal/frontplate) sets its text in Arial` \
+ `# Bold and fits it from Arial's own metrics.` \
+ && fc-match "Arial:style=Bold" file | grep -qi arialbd \
+    || echo "WARNING: Arial Bold is NOT installed - premium DNP front text will print in another face"
 
 # The parts a template imports and the faces it names, staged beside every
 # render by personalise.stageAssets.

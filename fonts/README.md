@@ -58,3 +58,10 @@ If you are not licensed for it, the honest alternatives are:
 Do not simply point `FONT` at a face whose widths differ without re-measuring:
 the templates would then draw one font while sizing it as another, which is
 exactly the state this directory exists to end.
+
+**`arialbd.ttf` is committed for the same reason.** The Premium Dual Name
+Plank's front plate (`internal/frontplate`, the shop's `front_plate.scad`) sets
+its text in `Arial:style=Bold` and sizes it from Arial's own metrics
+(`textmetrics`). Without it the worker would substitute another face and the
+text would print in it while the build reported success. A Microsoft font, the
+same licensing position as Segoe UI above.

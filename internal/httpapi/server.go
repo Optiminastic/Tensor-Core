@@ -68,6 +68,9 @@ type Server struct {
 	// for BambuBuddy to place - the send still works, the choice is just not
 	// honoured, and the response says so.
 	pinEnqueuer *production.QueuePinEnqueuer
+	// productBuilds schedules Product Creation's background builds (the
+	// sized moon lamp), which the production worker renders.
+	productBuilds *production.ProductBuildEnqueuer
 
 	// sliceQueueEnqueuer schedules the job that waits for a slice to finish and
 	// then queues the result on the printer an operator chose. Nil until
@@ -206,6 +209,12 @@ func (s *Server) EnableBatchDispatchQueue(e *production.DispatchEnqueuer) {
 // printer an operator picked, once it has been sliced.
 func (s *Server) EnableQueuePinQueue(e *production.QueuePinEnqueuer) {
 	s.pinEnqueuer = e
+}
+
+// EnableProductBuilds attaches the enqueuer for Product Creation's background
+// builds.
+func (s *Server) EnableProductBuilds(e *production.ProductBuildEnqueuer) {
+	s.productBuilds = e
 }
 
 // EnableSliceQueue attaches the enqueuer that queues a plate once BambuBuddy

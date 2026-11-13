@@ -1798,3 +1798,22 @@ CREATE TABLE IF NOT EXISTS product_parts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_product_parts_role
     ON product_parts (product_id, lower(role));
+
+-- Background print-file builds for Product Creation (0143).
+CREATE TABLE product_creation_builds (
+    id           uuid PRIMARY KEY,
+    brand_slug   varchar(64)  NOT NULL,
+    order_number varchar(64)  NOT NULL,
+    product      varchar(32)  NOT NULL,
+    variant      varchar(32)  NOT NULL DEFAULT '',
+    status       varchar(16)  NOT NULL DEFAULT 'queued'
+                 CHECK (status IN ('queued', 'building', 'done', 'failed')),
+    storage_key  text,
+    filename     varchar(200),
+    error        text,
+    requested_by varchar(64)  NOT NULL DEFAULT '',
+    created_at   timestamptz  NOT NULL DEFAULT now(),
+    updated_at   timestamptz  NOT NULL DEFAULT now()
+);
+CREATE INDEX ix_product_creation_builds_lookup
+    ON product_creation_builds (brand_slug, product, lower(order_number), created_at DESC);

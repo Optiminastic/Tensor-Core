@@ -42,6 +42,13 @@ func (s *Server) registerProductCreation(r *gin.Engine) {
 	g.Use(s.guards.RequireUser())
 	g.POST("/dnp-photo-frame", s.guards.RequirePermission(auth.ProductionRead.Key()), s.dnpPhotoFrame)
 	g.POST("/night-lamp", s.guards.RequirePermission(auth.ProductionRead.Key()), s.nightLamp)
+	read := s.guards.RequirePermission(auth.ProductionRead.Key())
+	g.POST("/moon-lamp", read, s.moonLampPreview)
+	g.POST("/moon-lamp/builds", read, s.startMoonLampBuild)
+	g.GET("/builds/:id", read, s.productBuild)
+	g.GET("/builds/:id/file", read, s.productBuildFile)
+	g.GET("/builds/:id/preview", read, s.productBuildPreview)
+	g.POST("/pdnp-front-text/builds", read, s.startPDNPBuild)
 }
 
 type productCreationRequest struct {

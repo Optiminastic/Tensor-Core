@@ -1,11 +1,14 @@
 package moonlamp
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/Optiminastic/tensor-core/internal/orientation"
@@ -91,5 +94,67 @@ func TestPhotoAndTextChangeTheWall(t *testing.T) {
 	}
 	if brightest < 0.95 {
 		t.Fatalf("no text found beside the photo (brightest %.2f)", brightest)
+	}
+}
+
+func TestSizeForSKU(t *testing.T) {
+	for sku, want := range map[string]int{"3DMS01-4P": 4, "3DMS01-5p": 5, "3DMS01-6P": 6, "3DMS01-6": 0, "3DMS01-7P": 0, "": 0} {
+		s, ok := SizeForSKU(sku)
+		if (want == 0) == ok || (ok && s.Inches != want) {
+			t.Errorf("SizeForSKU(%q) = %v %v, want %d", sku, s.Inches, ok, want)
+		}
+	}
+}
+
+// The skin OpenSCAD cuts must be closed, or the cut leaves holes in the moon.
+func TestSkinSTLIsClosed(t *testing.T) {
+	m, err := BuildWith(Sized(), nil, "RAHUL", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Size{Inches: 4, R: 50, Step: 2} // coarse: the topology is what is tested
+	mm, err := loadSTL(m.SkinSTL(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := map[[2]int]int{}
+	for _, f := range mm.faces {
+		for k := 0; k < 3; k++ {
+			edges[[2]int{f[k], f[(k+1)%3]}]++
+		}
+	}
+	for e, n := range edges {
+		if n != 1 || edges[[2]int{e[1], e[0]}] != 1 {
+			t.Fatalf("edge %v: %d forward, %d back", e, n, edges[[2]int{e[1], e[0]}])
+		}
+	}
+	if w := mm.hi[0] - mm.lo[0]; w < 101 || w > 106 {
+		t.Fatalf("width %.1f mm, want ~103", w)
+	}
+}
+
+func TestWriteKitIsABambuProject(t *testing.T) {
+	m, _ := BuildWith(Sized(), nil, "", "")
+	skin := m.SkinSTL(Size{Inches: 4, R: 50, Step: 3})
+	kit, err := WriteKit(Plate(Size{Inches: 4, R: 50}, "T1", skin, skin), MoonPrintSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := zip.NewReader(bytes.NewReader(kit), int64(len(kit)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, f := range z.File {
+		names[f.Name] = true
+	}
+	for _, want := range []string{"3D/3dmodel.model", "Metadata/project_settings.config", "Metadata/model_settings.config",
+		"3D/Objects/object_1.model", "3D/Objects/object_4.model"} {
+		if !names[want] {
+			t.Errorf("3MF missing %s", want)
+		}
+	}
+	if s := setJSON(`{"a": "1", "layer_height": "0.2", "c": [1, 2]}`, "layer_height", `"0.16"`); !strings.Contains(s, `"layer_height": "0.16"`) {
+		t.Fatalf("setJSON: %s", s)
 	}
 }

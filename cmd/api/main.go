@@ -152,6 +152,7 @@ func main() {
 	// and BambuBuddy quietly places the plate wherever it likes - which is the
 	// behaviour the chooser exists to replace.
 	server.EnableQueuePinQueue(production.NewQueuePinEnqueuer(riverClient))
+	server.EnableProductBuilds(production.NewProductBuildEnqueuer(riverClient))
 	// The Queue button lands in THIS process, so the follow-up that queues the
 	// sliced plate has to be schedulable from here too.
 	server.EnableSliceQueue(production.NewQueueSlicedPlateEnqueuer(riverClient))
