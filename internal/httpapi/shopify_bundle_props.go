@@ -3,12 +3,13 @@ package httpapi
 // Products sold inside a Shopify bundle.
 //
 // A Soulmate COMBO sold as a bundle reaches Shopify's order as three lines -
-// the plank, the rose and the keychain - but Shopify keeps everything the
-// customer typed on the BUNDLE: every component line arrives with no fields
-// of its own. The Shopify client hands each line the bundle's fields; this
-// keeps, on each line, only the ones its own product reads, so the plank
-// carries the two names and the colour, the rose its name and the keychain
-// its name - three products, each with its own details, in one order.
+// the plank, the rose and the keychain - each holding EVERY field the
+// customer typed for the whole combo (a variant bundle copies them onto each
+// line; a product bundle leaves them on the bundle and the Shopify client
+// hands them down). This keeps, on each line, only the ones its own product
+// reads, so the plank carries the two names and the colour, the rose its name
+// and the keychain its name - three products, each with its own details, in
+// one order.
 
 import (
 	"context"

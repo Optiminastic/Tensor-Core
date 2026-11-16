@@ -251,3 +251,23 @@ func TestListRecentOrdersReadsBundleFieldsSeparately(t *testing.T) {
 		t.Errorf("a line sold on its own changed: %+v", plank)
 	}
 }
+
+// A variant bundle copies every field onto every line, and marks each with
+// the bundle it was sold as. Such a line is still flagged, so the importer
+// can keep only its own fields.
+func TestAVariantBundleLineIsFlaggedThoughItHasFields(t *testing.T) {
+	var n orderNode
+	raw := `{"id":"gid://shopify/Order/1","name":"T3DPS-116755","lineItems":{"nodes":[
+		{"sku":"3DRN","quantity":1,"customAttributes":[
+			{"key":"_bundle_parent_variant_id","value":"52199194427605"},
+			{"key":"STEP 4 - Name On 3D Rose","value":"RTGTWGW"},
+			{"key":"STEP 5 - Name On Heart Keychain","value":"GWGGTW"}]}
+	]}}`
+	if err := json.Unmarshal([]byte(raw), &n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := toOrderSummary(n).LineItems[0]
+	if !got.FromBundle || len(got.Properties) != 3 {
+		t.Errorf("variant bundle line = %+v, want flagged with its fields kept for the importer", got)
+	}
+}

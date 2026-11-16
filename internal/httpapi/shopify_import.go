@@ -344,8 +344,8 @@ type shopifyLineItem struct {
 	DiscountedUnitPrice string `json:"discounted_price"`
 	LineTotal           string `json:"line_total"`
 
-	// FromBundle says Properties came from the Shopify bundle this line was
-	// sold in, not from the line - see narrowBundleProps.
+	// FromBundle says this line was sold inside a Shopify bundle, so its
+	// Properties may be the whole bundle's - see narrowBundleProps.
 	FromBundle bool `json:"from_bundle,omitempty"`
 }
 

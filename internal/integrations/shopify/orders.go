@@ -93,11 +93,15 @@ type OrderLineItem struct {
 	LineTotal           string
 
 	// Bundle is the title of the Shopify bundle this line was sold in, empty
-	// for a line sold on its own. FromBundle says Properties came from that
-	// bundle rather than from the line itself.
+	// for a line sold on its own. FromBundle says the line was sold inside a
+	// bundle, so its Properties may be the whole bundle's rather than its own.
 	Bundle     string
 	FromBundle bool
 }
+
+// bundleParentProperty is the field Shopify writes on every line of a variant
+// bundle, naming the bundle variant it was sold as.
+const bundleParentProperty = "_bundle_parent_variant_id"
 
 // OrderLineProp is a Shopify line-item custom attribute (equivalent to the
 // REST webhook's "properties" - print facts and personalisation are read
@@ -409,16 +413,23 @@ func toOrderSummary(n orderNode) OrderSummary {
 		for _, a := range li.CustomAttributes {
 			item.Properties = append(item.Properties, OrderLineProp{Name: a.Key, Value: a.Value})
 		}
-		// A bundle's component line carries nothing of its own: the names the
-		// customer typed sit on the bundle. Hand them to the line, and say so,
-		// so the importer can keep only what this part uses.
+		// A line sold inside a bundle carries either nothing of its own (a
+		// product bundle: the names sit on the bundle) or a copy of EVERY
+		// field the customer typed for the whole bundle (a variant bundle:
+		// the rose arrives holding the keychain's name too). Either way it is
+		// flagged, so the importer keeps only what this part uses.
 		if g := li.LineItemGroup; g != nil {
 			item.Bundle = g.Title
+			item.FromBundle = true
 			if len(item.Properties) == 0 {
-				item.FromBundle = true
 				for _, a := range g.CustomAttributes {
 					item.Properties = append(item.Properties, OrderLineProp{Name: a.Key, Value: a.Value})
 				}
+			}
+		}
+		for _, p := range item.Properties {
+			if p.Name == bundleParentProperty {
+				item.FromBundle = true
 			}
 		}
 		s.LineItems = append(s.LineItems, item)
