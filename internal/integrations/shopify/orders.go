@@ -91,6 +91,12 @@ type OrderLineItem struct {
 	UnitPrice           string
 	DiscountedUnitPrice string
 	LineTotal           string
+
+	// Bundle is the title of the Shopify bundle this line was sold in, empty
+	// for a line sold on its own. FromBundle says Properties came from that
+	// bundle rather than from the line itself.
+	Bundle     string
+	FromBundle bool
 }
 
 // OrderLineProp is a Shopify line-item custom attribute (equivalent to the
@@ -173,6 +179,7 @@ const listOrdersQuery = `query ListOrders($first: Int!, $query: String, $after: 
           discountedTotalSet { shopMoney { amount } }
           product { id }
           customAttributes { key value }
+          lineItemGroup { id }
         }
       }
     }
@@ -269,6 +276,10 @@ type orderNode struct {
 				ID string `json:"id"`
 			} `json:"product"`
 			CustomAttributes []attributeNode `json:"customAttributes"`
+			// LineItemGroup is the bundle this line was sold as part of. A
+			// Shopify bundle keeps what the customer typed on the bundle, not
+			// on its component lines.
+			LineItemGroup *lineItemGroupNode `json:"lineItemGroup"`
 		} `json:"nodes"`
 	} `json:"lineItems"`
 }
@@ -320,6 +331,7 @@ func (c *Client) ListRecentOrders(
 		}
 
 		for _, n := range out.Data.Orders.Nodes {
+			c.fillBundleGroups(ctx, shop, token, &n)
 			summaries = append(summaries, toOrderSummary(n))
 		}
 
@@ -396,6 +408,18 @@ func toOrderSummary(n orderNode) OrderSummary {
 		}
 		for _, a := range li.CustomAttributes {
 			item.Properties = append(item.Properties, OrderLineProp{Name: a.Key, Value: a.Value})
+		}
+		// A bundle's component line carries nothing of its own: the names the
+		// customer typed sit on the bundle. Hand them to the line, and say so,
+		// so the importer can keep only what this part uses.
+		if g := li.LineItemGroup; g != nil {
+			item.Bundle = g.Title
+			if len(item.Properties) == 0 {
+				item.FromBundle = true
+				for _, a := range g.CustomAttributes {
+					item.Properties = append(item.Properties, OrderLineProp{Name: a.Key, Value: a.Value})
+				}
+			}
 		}
 		s.LineItems = append(s.LineItems, item)
 	}

@@ -37,7 +37,7 @@ func (s *Server) importShopifyOrder(
 	ctx context.Context, connID *uuid.UUID, brandSlug string,
 	payload shopifyOrderPayload, fallbackStatus string,
 ) (gen.Order, error) {
-	items := mapShopifyLineItems(payload.LineItems)
+	items := mapShopifyLineItems(s.narrowBundleProps(ctx, payload.LineItems))
 	lineItemsJSON, err := json.Marshal(items)
 	if err != nil {
 		return gen.Order{}, err
@@ -343,6 +343,10 @@ type shopifyLineItem struct {
 	UnitPrice           string `json:"price"`
 	DiscountedUnitPrice string `json:"discounted_price"`
 	LineTotal           string `json:"line_total"`
+
+	// FromBundle says Properties came from the Shopify bundle this line was
+	// sold in, not from the line - see narrowBundleProps.
+	FromBundle bool `json:"from_bundle,omitempty"`
 }
 
 type shopifyLineProp struct {

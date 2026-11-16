@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -184,5 +185,69 @@ func TestListRecentOrdersStopsOnEmptyPage(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Errorf("made %d requests against an always-empty page, want 1", requests)
+	}
+}
+
+func TestABundleLineTakesTheBundlesFields(t *testing.T) {
+	var n orderNode
+	raw := `{"id":"gid://shopify/Order/1","name":"T3DPS-116750","lineItems":{"nodes":[
+		{"sku":"SC-ROSE","title":"Soulmate COMBO - 3D Rose (part)","quantity":1,"customAttributes":[],
+		 "lineItemGroup":{"title":"Soulmate COMBO","customAttributes":[{"key":"STEP 4 - Name On 3D Rose","value":"EFAWF"}]}},
+		{"sku":"DNP-RED","title":"Dual Name Plank","quantity":1,"customAttributes":[{"key":"STEP 4-First Name","value":"A"}]}
+	]}}`
+	if err := json.Unmarshal([]byte(raw), &n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := toOrderSummary(n).LineItems
+	if !got[0].FromBundle || got[0].Bundle != "Soulmate COMBO" || len(got[0].Properties) != 1 ||
+		got[0].Properties[0].Value != "EFAWF" {
+		t.Errorf("bundle line = %+v, want the bundle's field", got[0])
+	}
+	if got[1].FromBundle || got[1].Bundle != "" || got[1].Properties[0].Value != "A" {
+		t.Errorf("a line sold on its own changed: %+v", got[1])
+	}
+}
+
+// The order list asks only whether a line is in a bundle; the bundle's fields
+// come from a second, per-order query, asked only for orders that have one.
+func TestListRecentOrdersReadsBundleFieldsSeparately(t *testing.T) {
+	var bundleQueries int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "OrderBundles") {
+			bundleQueries++
+			_, _ = w.Write([]byte(`{"data":{"order":{"lineItems":{"nodes":[
+				{"lineItemGroup":{"id":"gid://shopify/LineItemGroup/9","title":"Soulmate COMBO",
+				  "customAttributes":[{"key":"STEP 4 - Name On 3D Rose","value":"EFAWF"}]}},
+				{"lineItemGroup":null}
+			]}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"orders":{"nodes":[
+			{"id":"gid://shopify/Order/1","name":"T3DPS-116750","lineItems":{"nodes":[
+				{"sku":"SC-ROSE","quantity":1,"customAttributes":[],"lineItemGroup":{"id":"gid://shopify/LineItemGroup/9"}},
+				{"sku":"DNP-RED","quantity":1,"customAttributes":[{"key":"STEP 4-First Name","value":"A"}]}
+			]}},
+			{"id":"gid://shopify/Order/2","name":"T3DPS-116751","lineItems":{"nodes":[
+				{"sku":"DNP-BLU","quantity":1,"customAttributes":[]}
+			]}}
+		]}}}`))
+	}))
+	defer server.Close()
+
+	orders, err := testClient(server.URL).ListRecentOrders(context.Background(), "shop.myshopify.com", "tok", 0, time.Time{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if bundleQueries != 1 {
+		t.Fatalf("asked for bundle fields %d times, want once - only the order that has a bundle", bundleQueries)
+	}
+	rose := orders[0].LineItems[0]
+	if !rose.FromBundle || rose.Bundle != "Soulmate COMBO" || len(rose.Properties) != 1 || rose.Properties[0].Value != "EFAWF" {
+		t.Errorf("bundle line = %+v, want the bundle's field", rose)
+	}
+	if plank := orders[0].LineItems[1]; plank.FromBundle || plank.Properties[0].Value != "A" {
+		t.Errorf("a line sold on its own changed: %+v", plank)
 	}
 }

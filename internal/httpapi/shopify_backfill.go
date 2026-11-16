@@ -124,7 +124,8 @@ func toOrderPayload(o shopify.OrderSummary) shopifyOrderPayload {
 			ProductID: li.ProductID, SKU: li.SKU, Name: li.Name, Title: li.Title,
 			Quantity: li.Quantity, VariantTitle: li.VariantTitle, ImageURL: li.ImageURL,
 			UnitPrice: li.UnitPrice, DiscountedUnitPrice: li.DiscountedUnitPrice,
-			LineTotal: li.LineTotal,
+			LineTotal:  li.LineTotal,
+			FromBundle: li.FromBundle,
 		}
 		for _, prop := range li.Properties {
 			item.Properties = append(item.Properties, shopifyLineProp{Name: prop.Name, Value: prop.Value})
