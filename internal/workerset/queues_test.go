@@ -89,6 +89,7 @@ func TestTheFloorKeepsItsOwnWork(t *testing.T) {
 		production.JobCreationQueueName,
 		production.ModelGenQueueName,
 		production.OrderSyncQueueName,
+		production.OrderSyncRecentQueueName,
 	} {
 		if _, ok := floor[name]; !ok {
 			t.Errorf("%s left the production half", name)

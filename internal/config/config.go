@@ -507,6 +507,12 @@ type Settings struct {
 	// the run that started this - importing a backlog of hundreds - takes
 	// minutes. Timing out mid-import is precisely the failure this replaced.
 	OrderSyncTimeoutMinutes int
+	// OrderSyncRecentSeconds drives the quick pull of NEW orders - those placed
+	// in the last two days - between full pulls. The full pull re-reads the
+	// whole window (1,600-odd orders) and takes minutes, so a new order could
+	// wait up to twenty before it reached the floor; the quick pull reads a
+	// few dozen and brings it in within a minute or two. 0 disables it.
+	OrderSyncRecentSeconds int
 
 	// FleetSyncTimeoutMinutes overrides River's 1-minute default: a refresh is
 	// 1 + N SEQUENTIAL calls, each with its own 10s client timeout, so an
@@ -875,6 +881,7 @@ func Load() Settings {
 		SMTPFromName:              envOr("SMTP_FROM_NAME", envOr("EMAIL_FROM_NAME", "Tensor")),
 		OrderSyncIntervalMinutes:  intEnvOr("ORDER_SYNC_INTERVAL_MINUTES", 10),
 		OrderSyncTimeoutMinutes:   intEnvOr("ORDER_SYNC_TIMEOUT_MINUTES", 15),
+		OrderSyncRecentSeconds:    intEnvOr("ORDER_SYNC_RECENT_SECONDS", 60),
 		BambuBuddyTimeoutSeconds:  intEnvOr("BAMBUBUDDY_TIMEOUT_SECONDS", 0),
 
 		MachineMaterialMatchBonusMinutes:    floatEnvOr("MACHINE_MATERIAL_MATCH_BONUS_MINUTES", 30),

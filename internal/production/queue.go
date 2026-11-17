@@ -101,6 +101,11 @@ func (SyncFleetArgs) Kind() string { return "sync_fleet" }
 // one sync hold up batch planning for minutes.
 const OrderSyncQueueName = "order_sync"
 
+// OrderSyncRecentQueueName carries the minute-by-minute pull of new orders,
+// apart from OrderSyncQueueName so it is never stuck behind a full pull that
+// takes minutes.
+const OrderSyncRecentQueueName = "order_sync_recent"
+
 // SyncOrdersArgs pulls a brand's orders from Shopify and imports them.
 //
 // Carries the brand slug, not the shop domain or the access token: a River job
@@ -109,6 +114,12 @@ const OrderSyncQueueName = "order_sync"
 // the connection when it runs.
 type SyncOrdersArgs struct {
 	BrandSlug string `json:"brand_slug"`
+	// Recent pulls only the orders placed in the last two days - the quick
+	// check that runs every minute so a new order is in Tensor within a
+	// minute or two, on its own queue so it never waits behind the full
+	// pull. The full pull (Recent false) still sweeps the whole window for
+	// status changes on older orders.
+	Recent bool `json:"recent,omitempty"`
 }
 
 func (SyncOrdersArgs) Kind() string { return "sync_shopify_orders" }
@@ -668,5 +679,14 @@ func (ExpirePersonalisationLinksArgs) InsertOpts() river.InsertOpts {
 				rivertype.JobStateRetryable,
 			},
 		},
+	}
+}
+
+// OrderSyncRecentInsertOpts is OrderSyncInsertOpts for the quick pull of new
+// orders, on its own queue.
+func OrderSyncRecentInsertOpts(period time.Duration) *river.InsertOpts {
+	return &river.InsertOpts{
+		Queue:      OrderSyncRecentQueueName,
+		UniqueOpts: river.UniqueOpts{ByPeriod: period},
 	}
 }

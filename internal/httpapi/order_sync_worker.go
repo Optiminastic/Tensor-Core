@@ -64,7 +64,7 @@ func (w *OrderSyncWorker) Timeout(*river.Job[production.SyncOrdersArgs]) time.Du
 // business being stored in one.
 func (w *OrderSyncWorker) Work(ctx context.Context, job *river.Job[production.SyncOrdersArgs]) error {
 	if strings.TrimSpace(job.Args.BrandSlug) == "" {
-		return w.syncAll(ctx, job.Attempt)
+		return w.syncAll(ctx, job.Attempt, job.Args.Recent)
 	}
 	return w.syncBrand(ctx, job.Args.BrandSlug, job.Attempt)
 }
@@ -102,7 +102,7 @@ func (w *OrderSyncWorker) syncBrand(ctx context.Context, slug string, attempt in
 // stopping at the first bad token would leave the rest stale for no reason
 // anybody can see. The error returned at the end names how many failed, so
 // River retries the pass while the stores that did work keep their imports.
-func (w *OrderSyncWorker) syncAll(ctx context.Context, attempt int) error {
+func (w *OrderSyncWorker) syncAll(ctx context.Context, attempt int, recent bool) error {
 	conns, err := w.server.store.Q.ListConnectedShopifyBrands(ctx)
 	if err != nil {
 		return fmt.Errorf("list connected shopify stores: %w", err)
@@ -117,8 +117,11 @@ func (w *OrderSyncWorker) syncAll(ctx context.Context, attempt int) error {
 		if conn.ExternalAccountID == nil || conn.AccessToken == nil {
 			continue
 		}
-		n, err := w.server.SyncOrdersForBrand(ctx,
-			conn.BrandSlug, *conn.ExternalAccountID, *conn.AccessToken)
+		sync := w.server.SyncOrdersForBrand
+		if recent {
+			sync = w.server.SyncRecentOrdersForBrand
+		}
+		n, err := sync(ctx, conn.BrandSlug, *conn.ExternalAccountID, *conn.AccessToken)
 		if err != nil {
 			w.logger.Error("shopify order sync failed for a brand",
 				"brand", conn.BrandSlug, "shop", *conn.ExternalAccountID, "error", err)
@@ -127,8 +130,14 @@ func (w *OrderSyncWorker) syncAll(ctx context.Context, attempt int) error {
 		}
 		imported += n
 	}
-	w.logger.Info("shopify order sync complete",
-		"brands", len(conns), "imported", imported, "failed", failed, "attempt", attempt)
+	// The quick pull runs every minute; logged quietly so it does not bury
+	// everything else. A failure is still an error below.
+	log := w.logger.Info
+	if recent {
+		log = w.logger.Debug
+	}
+	log("shopify order sync complete", "brands", len(conns), "imported", imported,
+		"failed", failed, "attempt", attempt, "recent", recent)
 	if failed > 0 {
 		return fmt.Errorf("%d of %d stores could not be synced", failed, len(conns))
 	}

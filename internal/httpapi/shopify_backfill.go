@@ -59,7 +59,25 @@ func (s *Server) importSince() time.Time {
 func (s *Server) fetchAndImportShopifyOrders(
 	ctx context.Context, connID *uuid.UUID, brandSlug, shop, token string,
 ) (int, error) {
-	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0, s.importSince())
+	return s.importShopifyOrdersSince(ctx, connID, brandSlug, shop, token, s.importSince())
+}
+
+// SyncRecentOrdersForBrand imports only the orders placed in the last two
+// days - the minute-by-minute check that brings a new order in quickly. Two
+// days rather than one because Shopify's date filter is by calendar day in
+// the store's zone, so an order just after midnight is never missed.
+func (s *Server) SyncRecentOrdersForBrand(ctx context.Context, brandSlug, shop, token string) (int, error) {
+	since := time.Now().AddDate(0, 0, -2)
+	if floor := s.importSince(); since.Before(floor) {
+		since = floor
+	}
+	return s.importShopifyOrdersSince(ctx, nil, brandSlug, shop, token, since)
+}
+
+func (s *Server) importShopifyOrdersSince(
+	ctx context.Context, connID *uuid.UUID, brandSlug, shop, token string, since time.Time,
+) (int, error) {
+	orders, err := s.shopify.ListRecentOrders(ctx, shop, token, 0, since)
 	if err != nil {
 		return 0, err
 	}

@@ -341,6 +341,9 @@ func start(
 		if orderSync := time.Duration(cfg.OrderSyncIntervalMinutes) * time.Minute; orderSync > 0 {
 			startOrderSyncTick(tickerCtx, client, orderSync, logger)
 		}
+		if recent := time.Duration(cfg.OrderSyncRecentSeconds) * time.Second; recent > 0 {
+			startRecentOrderSyncTick(tickerCtx, client, recent, logger)
+		}
 	}
 	// ONLY WHERE THE BED'S QUEUES ARE CONSUMED, for startWindowSweep's reason.
 	if ownsBatches {
@@ -530,6 +533,8 @@ func productionQueues(cfg config.Settings, concurrency int) map[string]river.Que
 		// upserts, and two running together would race to write the same
 		// rows for no gain - Shopify is the bottleneck, not Tensor.
 		production.OrderSyncQueueName: {MaxWorkers: 1},
+		// The quick pull of new orders, apart so a full pull never holds it up.
+		production.OrderSyncRecentQueueName: {MaxWorkers: 1},
 		// One at a time, so a customer's messages are answered in the
 		// order they arrived. See WhatsAppInboundQueueName.
 		production.WhatsAppInboundQueueName: {MaxWorkers: 1},
@@ -713,4 +718,33 @@ func EnableModelGeneration(
 	// No machine family to report: a rendered job names no printer class, and
 	// which machine takes its bed is BambuBuddy's call.
 	logger.Info("model generation enabled", "openscad", cfg.OpenSCADBin)
+}
+
+// startRecentOrderSyncTick pulls the orders placed in the last two days on a
+// short ticker, so a new order reaches Tensor within a minute or two instead
+// of waiting for the next full pull. Same ownership rule as
+// startOrderSyncTick: this process ticks it and this process consumes it.
+func startRecentOrderSyncTick(
+	ctx context.Context, client *river.Client[pgx.Tx], every time.Duration, logger *slog.Logger,
+) {
+	enqueue := func() {
+		_, err := client.Insert(ctx, production.SyncOrdersArgs{Recent: true},
+			production.OrderSyncRecentInsertOpts(every))
+		if err != nil {
+			logger.Error("could not enqueue the quick Shopify order sync", "error", err)
+		}
+	}
+	go func() {
+		enqueue()
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				enqueue()
+			}
+		}
+	}()
 }
