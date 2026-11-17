@@ -190,6 +190,7 @@ func (s *Server) resolveRenderPlan(
 
 	// Past this point the product IS configured, so every failure is the
 	// order's or the configuration's and none of them fall back.
+	props = withVariantColour(props, maps, job)
 	args, err := personalise.MappedArgs(props, maps)
 	if err != nil {
 		return renderPlan{}, err
@@ -300,4 +301,41 @@ func partRoleOf(job gen.ProductionJob) string {
 		return designRoleBody
 	}
 	return role
+}
+
+// withVariantColour answers a mapped COLOUR field the order did not send with
+// the colour the customer bought.
+//
+// The storefront asks for the colour as a variant AND, on newer orders, as a
+// field ("STEP 1 - Colour"). Older orders carry only the variant - "BLUE" on
+// SC-BLU - so a product mapping the field refused them with "this order
+// carries no step 1 colour" though the colour was on the line all along.
+//
+// Only a field whose key says colour, only when the order lacks it, and only
+// when the line names one: the variant's first option, then the job's own
+// colour column. A field the order did send is never touched.
+func withVariantColour(props []production.LineProp, maps []personalise.FieldMap, job gen.ProductionJob) []production.LineProp {
+	have := make(map[string]bool, len(props))
+	for _, p := range props {
+		if strings.TrimSpace(p.Value) != "" {
+			have[personalise.NormaliseKey(p.Name)] = true
+		}
+	}
+	colour := colourFromVariant(job.VariantTitle)
+	if colour == "" {
+		colour = strings.TrimSpace(deref(job.Colour))
+	}
+	if colour == "" {
+		return props
+	}
+	out := props
+	for _, m := range maps {
+		key := personalise.NormaliseKey(m.PropertyKey)
+		if m.Fixed != "" || have[key] || !(strings.Contains(key, "colour") || strings.Contains(key, "color")) {
+			continue
+		}
+		out = append(out[:len(out):len(out)], production.LineProp{Name: m.PropertyKey, Value: colour})
+		have[key] = true
+	}
+	return out
 }

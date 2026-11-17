@@ -49,7 +49,7 @@ func TestIntegrationBundleLinesKeepOnlyTheirOwnFields(t *testing.T) {
 		{SKU: "SC-ROSE", FromBundle: true, Properties: copyOf()},
 		{SKU: "SC-KEY", FromBundle: true, Properties: copyOf()},
 		{SKU: "SC-PLANK-BLK", FromBundle: true, Properties: copyOf()}, // not in the registry yet
-		{SKU: "SC-ROSE", Properties: copyOf()},                       // sold on its own
+		{SKU: "SC-ROSE", Properties: copyOf()},                        // sold on its own
 	})
 
 	if len(got[0].Properties) != 1 || got[0].Properties[0].Value != "EFAWF" {

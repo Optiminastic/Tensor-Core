@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +33,16 @@ type builtFile struct {
 	name    string
 	data    []byte
 	preview []byte
+	// parts are the separate files of a product that prints as several -
+	// the Soulmate Combo's plank, rose and keychain - each downloadable on
+	// its own beside data, which then holds all of them.
+	parts []builtPart
+}
+
+// builtPart is one of a build's separate files, stored as parts/<name>.3mf.
+type builtPart struct {
+	name string
+	data []byte
 }
 
 // productBuilder builds one product's print file for an order, on the worker.
@@ -41,6 +52,8 @@ type productBuilder func(ctx context.Context, s *Server, order gen.Order) (built
 var productBuilders = map[string]productBuilder{
 	moonLampProduct: buildMoonLamp,
 	pdnpProduct:     buildPDNPFront,
+	soulmateProduct: buildSoulmateCombo,
+	duoSnapProduct:  buildDuoSnap,
 }
 
 // previewFileName is the preview stored beside a build's print file.
@@ -107,7 +120,39 @@ func (s *Server) productBuildFile(c *gin.Context) {
 		detail(c, http.StatusConflict, "That file is not ready yet.")
 		return
 	}
-	s.streamStored(c, *b.StorageKey, deref(b.Filename), "model/3mf")
+	s.streamStored(c, *b.StorageKey, deref(b.Filename), contentTypeOf(deref(b.Filename)))
+}
+
+// partName is what a build part may be called: lower-case words, nothing that
+// could climb out of the build's folder.
+var partName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// productBuildPart answers GET .../builds/:id/parts/:part with one of a
+// multi-file build's separate files.
+func (s *Server) productBuildPart(c *gin.Context) {
+	b, ok := s.loadBuild(c)
+	if !ok {
+		return
+	}
+	part := c.Param("part")
+	if !partName.MatchString(part) {
+		detail(c, http.StatusBadRequest, "That is not a part of this build.")
+		return
+	}
+	if b.Status != "done" || b.StorageKey == nil {
+		detail(c, http.StatusConflict, "That file is not ready yet.")
+		return
+	}
+	name := strings.TrimSuffix(deref(b.Filename), path.Ext(deref(b.Filename))) + "_" + part + ".3mf"
+	s.streamStored(c, path.Dir(*b.StorageKey)+"/parts/"+part+".3mf", name, "model/3mf")
+}
+
+// contentTypeOf names a stored print file's type from its name.
+func contentTypeOf(filename string) string {
+	if strings.EqualFold(path.Ext(filename), ".zip") {
+		return "application/zip"
+	}
+	return "model/3mf"
 }
 
 // productBuildPreview answers GET .../builds/:id/preview with the PNG drawn
@@ -235,8 +280,14 @@ func (w *ProductBuildWorker) build(ctx context.Context, b gen.ProductCreationBui
 	}
 	dir := fmt.Sprintf("product-creation/%s", b.ID)
 	key := dir + "/" + f.name
-	if err := s.storage.Put(ctx, key, bytes.NewReader(f.data), int64(len(f.data)), "model/3mf"); err != nil {
-		return "", "", fmt.Errorf("could not store the 3MF")
+	if err := s.storage.Put(ctx, key, bytes.NewReader(f.data), int64(len(f.data)), contentTypeOf(f.name)); err != nil {
+		return "", "", fmt.Errorf("could not store the file")
+	}
+	for _, p := range f.parts {
+		if err := s.storage.Put(ctx, dir+"/parts/"+p.name+".3mf", bytes.NewReader(p.data),
+			int64(len(p.data)), "model/3mf"); err != nil {
+			return "", "", fmt.Errorf("could not store the %s file", p.name)
+		}
 	}
 	if f.preview != nil {
 		if err := s.storage.Put(ctx, dir+"/"+previewFileName, bytes.NewReader(f.preview),

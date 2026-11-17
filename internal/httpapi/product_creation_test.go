@@ -95,3 +95,19 @@ func TestPDNPReadsOnlyTheFrontText(t *testing.T) {
 		t.Fatalf("hearts and accents refused: %q", p)
 	}
 }
+
+func TestDuoSnapReadsTheTwoNamesAndTheColourOnly(t *testing.T) {
+	order := orderWithLines(`[{"sku":"T3DPS-DUO-2","product_name":"DUOSNAP - Blue","variant_title":"Blue","properties":[
+		{"name":"_has_gpo","value":"1340827"},{"name":"TOP NAME","value":"SAVITA"},{"name":"BOTTOM NAME","value":"SHUBHAM"},
+		{"name":"PHOTO","value":"https://option.nyc3.digitaloceanspaces.com/uploads/x.jpg"},{"name":"Whatsapp Number","value":"8295250560"}]}]`)
+	d, problem := duoSnapFields(order)
+	if problem != "" || d.top != "SAVITA" || d.bottom != "SHUBHAM" || d.colour != "Blue" {
+		t.Fatalf("got %+v %q", d, problem)
+	}
+	if _, p := duoSnapFields(orderWithLines(`[{"sku":"T3DPS-DUO-2","variant_title":"Blue","properties":[{"name":"TOP NAME","value":"A"}]}]`)); !strings.Contains(p, "BOTTOM NAME") {
+		t.Fatalf("missing bottom name: %q", p)
+	}
+	if _, p := duoSnapFields(orderWithLines(`[{"sku":"DNP-RED","properties":[{"name":"TOP NAME","value":"A"}]}]`)); !strings.Contains(p, "no Duo Snap") {
+		t.Fatalf("a plank taken as a Duo Snap: %q", p)
+	}
+}
