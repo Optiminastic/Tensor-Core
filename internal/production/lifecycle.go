@@ -360,6 +360,12 @@ type LineItem struct {
 	// So everything is kept. The typed fields stay the machine-readable path;
 	// this is the record of what was actually sent.
 	Properties []LineProp `json:"properties,omitempty"`
+
+	// Bundle names the Shopify bundle this line was sold in - "Soulmate
+	// COMBO" for its plank, rose and keychain lines - and is empty for a line
+	// sold on its own. A bundle line's job is named for the item it prints
+	// (JOB-116755-ROSE) rather than numbered -2, -3.
+	Bundle string `json:"bundle,omitempty"`
 }
 
 // LineProp is one Shopify line-item custom attribute, verbatim.

@@ -9,9 +9,12 @@ package httpapi
 // storefront, the packing slip, the customer's email - already prints.
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/Optiminastic/tensor-core/internal/production"
 )
 
 // orderDigits matches a run of digits.
@@ -109,4 +112,29 @@ func jobNumberForPart(orderNumber, role string) string {
 		return ""
 	}
 	return jobNumberPrefix + digits + "-" + token
+}
+
+// bundleJobBase names the job of one product sold inside a Shopify bundle.
+//
+// A combo sold as a bundle - Soulmate COMBO = plank + 3D Rose Name + heart
+// keychain - reaches Tensor as one line per item, each its own registry
+// product printing one thing. Numbered as single products they read
+// JOB-116755, -2, -3, and nobody holding one can tell the rose from the
+// keychain. So the job is named for the item: its part's name when the
+// registry gives it one (plank, rose, keychain), else its product's code
+// (3DRN). The same item bought on its own keeps its plain number - only a
+// bundle line comes here.
+func (s *Server) bundleJobBase(ctx context.Context, orderNumber string, li production.LineItem, role string) string {
+	if r := strings.TrimSpace(role); r != "" && !strings.EqualFold(r, designRoleBody) {
+		return jobNumberForPart(orderNumber, r)
+	}
+	sku := strings.TrimSpace(deref(li.SKU))
+	if sku == "" {
+		return ""
+	}
+	product, err := s.store.Q.FindProductBySKU(ctx, sku)
+	if err != nil {
+		return ""
+	}
+	return jobNumberForPart(orderNumber, product.Code)
 }

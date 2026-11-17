@@ -137,6 +137,14 @@ var errNoRegistryPlan = errors.New("no registry configuration for this SKU")
 func (s *Server) resolveRenderPlan(
 	ctx context.Context, job gen.ProductionJob, props []production.LineProp,
 ) (renderPlan, error) {
+	// A job made from a whole-combo line before its items existed (SC-RED,
+	// part "rose") rebuilds from the item's own product (3DRN), so it does
+	// not depend on the combo's parts still being set up. See legacy_combo.go.
+	if item, ok := s.legacyComboItemSKU(ctx, deref(job.Sku), partRoleOf(job)); ok {
+		if roles := s.partRolesForSKU(ctx, item); len(roles) > 0 {
+			job.Sku, job.PartRole = &item, roles[0]
+		}
+	}
 	sku := strings.TrimSpace(deref(job.Sku))
 	if sku == "" {
 		return renderPlan{}, fmt.Errorf("%w: the job carries no SKU", errNoRegistryPlan)

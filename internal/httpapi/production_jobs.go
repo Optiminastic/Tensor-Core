@@ -925,6 +925,9 @@ func (s *Server) splitsPerUnit(li production.LineItem, quantity int32) bool {
 func (s *Server) buildJobsForOrder(
 	ctx context.Context, order gen.Order, items []production.LineItem,
 ) ([]gen.InsertProductionJobParams, error) {
+	// A Soulmate COMBO sold as one line (SC-RED, SCWL-RED) is made as its three
+	// items, exactly like the bundle it is now - see legacy_combo.go.
+	items = s.expandLegacyCombos(ctx, items)
 	shopifyID := order.ShopifyOrderID
 	out := make([]gen.InsertProductionJobParams, 0, len(items))
 	// Runs across PARTS, not lines, so a line that prints one thing numbers
@@ -996,9 +999,15 @@ func (s *Server) buildJobsForOrder(
 				// And named for the PART when the line prints more than one,
 				// so three jobs off one combo say which is the plank and
 				// which the keychain instead of reading -2 and -3.
+				//
+				// And named for the ITEM when the line is one of a Shopify
+				// bundle's products - the combo's rose arrives as its own line,
+				// and its job should say ROSE, not -2. See bundleJobBase.
 				base := ""
 				if len(roles) > 1 {
 					base = jobNumberForPart(order.OrderNumber, role)
+				} else if strings.TrimSpace(li.Bundle) != "" {
+					base = s.bundleJobBase(ctx, order.OrderNumber, li, role)
 				}
 				jobNumber, err := s.numberForJob(ctx, order.OrderNumber, base, jobIndex, minted)
 				if err != nil {

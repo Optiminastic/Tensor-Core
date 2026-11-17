@@ -347,6 +347,8 @@ type shopifyLineItem struct {
 	// FromBundle says this line was sold inside a Shopify bundle, so its
 	// Properties may be the whole bundle's - see narrowBundleProps.
 	FromBundle bool `json:"from_bundle,omitempty"`
+	// Bundle is that bundle's title, carried onto the line - see LineItem.Bundle.
+	Bundle string `json:"bundle,omitempty"`
 }
 
 type shopifyLineProp struct {
@@ -418,6 +420,7 @@ func mapShopifyLineItems(items []shopifyLineItem) []production.LineItem {
 			CustomerApprovalReceived:     propBool(props, "customer_approval_received"),
 			Properties:                   keepProperties(li.Properties),
 			VariantTitle:                 nonEmptyPtr(li.VariantTitle),
+			Bundle:                       bundleTitle(li),
 			ImageURL:                     nonEmptyPtr(li.ImageURL),
 			UnitPrice:                    nonEmptyPtr(li.UnitPrice),
 			DiscountedUnitPrice:          nonEmptyPtr(li.DiscountedUnitPrice),

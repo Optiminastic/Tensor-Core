@@ -144,6 +144,7 @@ func toOrderPayload(o shopify.OrderSummary) shopifyOrderPayload {
 			UnitPrice: li.UnitPrice, DiscountedUnitPrice: li.DiscountedUnitPrice,
 			LineTotal:  li.LineTotal,
 			FromBundle: li.FromBundle,
+			Bundle:     li.Bundle,
 		}
 		for _, prop := range li.Properties {
 			item.Properties = append(item.Properties, shopifyLineProp{Name: prop.Name, Value: prop.Value})

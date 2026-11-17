@@ -64,3 +64,16 @@ func (s *Server) mappedPropertyKeys(ctx context.Context, sku string) map[string]
 	}
 	return out
 }
+
+// bundleTitle is the bundle a line was sold in, for naming its job. A variant
+// bundle's lines can arrive flagged with no group title; they are still
+// bundle lines.
+func bundleTitle(li shopifyLineItem) string {
+	if t := strings.TrimSpace(li.Bundle); t != "" {
+		return t
+	}
+	if li.FromBundle {
+		return "bundle"
+	}
+	return ""
+}

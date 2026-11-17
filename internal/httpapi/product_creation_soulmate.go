@@ -10,11 +10,10 @@ package httpapi
 // is handed is a stand-in made from the order line - it has no id, so the
 // colour bookkeeping that path does against a real job touches nothing.
 //
-// Both shapes of combo order are read: an older order carrying one SC-xxx
-// line (the SC product's plank, rose and keychain parts; an SCWL-xxx "with
-// LIGHT" line prints the same three), and a combo sold as
-// a Shopify bundle, which arrives as SC-PLANK-xxx, 3DRN and SC-KEY lines
-// (SC-ROSE on the first test orders, before the rose became 3D Rose Name).
+// Every item is its own registry product: SC-PLANK-<colour>, 3DRN (3D Rose
+// Name) and SC-KEY, as a Shopify bundle order delivers them (SC-ROSE on the
+// first test orders). A combo sold as one line - SC-RED, or SCWL-RED "with
+// LIGHT" - is read as the same three items (legacy_combo.go).
 
 import (
 	"archive/zip"
@@ -28,7 +27,6 @@ import (
 	"image/draw"
 	"image/png"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -60,26 +58,28 @@ func (s *Server) soulmateParts(ctx context.Context, order gen.Order) ([]comboPar
 	if err := jsonUnmarshalLines(order.LineItems, &lines); err != nil {
 		return nil, "This order's line items could not be read."
 	}
+	for i := range lines {
+		lines[i] = s.resolveLineSKU(ctx, lines[i])
+	}
+	// A whole-combo line (SC-RED, SCWL-RED) is read as its three items, the
+	// same as a bundle order - see legacy_combo.go.
+	lines = s.expandLegacyCombos(ctx, lines)
 	found := map[string]comboPart{}
 	for _, li := range lines {
-		li = s.resolveLineSKU(ctx, li)
 		sku := strings.TrimSpace(deref(li.SKU))
 		upper := strings.ToUpper(sku)
+		name := ""
 		switch {
 		case strings.HasPrefix(upper, "SC-PLANK"):
-			found["plank"] = comboPart{"plank", sku, designRoleBody, li}
+			name = "plank"
 		case upper == "3DRN" || upper == "SC-ROSE":
-			found["rose"] = comboPart{"rose", sku, designRoleBody, li}
+			name = "rose"
 		case upper == "SC-KEY":
-			found["keychain"] = comboPart{"keychain", sku, designRoleBody, li}
+			name = "keychain"
 		default:
-			// The SC product sold as one line: its parts are roles.
-			if fileSKU, ok := s.comboSKU(ctx, upper); ok {
-				for _, name := range soulmatePartNames {
-					found[name] = comboPart{name, fileSKU, name, li}
-				}
-			}
+			continue
 		}
+		found[name] = comboPart{name, sku, s.itemRole(ctx, sku), li}
 	}
 	var parts []comboPart
 	var missing []string
@@ -267,21 +267,11 @@ func sideBySide(pngs [][]byte) []byte {
 	return buf.Bytes()
 }
 
-// comboSKU is the SKU whose registry setup prints this combo line: the line's
-// own when its product has the plank, rose and keychain parts, else - for the
-// Soulmate COMBO with LIGHT, SCWL-RED - the plain combo's in the same colour,
-// SC-RED. The light is a stand the plank sits in, not a print, so the three
-// files are the same; SCWL has no registry setup of its own to drift from SC.
-func (s *Server) comboSKU(ctx context.Context, upper string) (string, bool) {
-	isCombo := func(sku string) bool {
-		roles := s.partRolesForSKU(ctx, sku)
-		return slices.Contains(roles, "plank") && slices.Contains(roles, "rose") && slices.Contains(roles, "keychain")
+// itemRole is the part an item's product prints from - "rose" once its part
+// is named, "body" before.
+func (s *Server) itemRole(ctx context.Context, sku string) string {
+	if roles := s.partRolesForSKU(ctx, sku); len(roles) > 0 {
+		return roleOrBody(roles[0])
 	}
-	if isCombo(upper) {
-		return upper, true
-	}
-	if colour, ok := strings.CutPrefix(upper, "SCWL-"); ok && isCombo("SC-"+colour) {
-		return "SC-" + colour, true
-	}
-	return "", false
+	return designRoleBody
 }
