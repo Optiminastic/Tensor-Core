@@ -50,10 +50,12 @@ type productBuilder func(ctx context.Context, s *Server, order gen.Order) (built
 
 // productBuilders maps a build's product to its builder.
 var productBuilders = map[string]productBuilder{
-	moonLampProduct: buildMoonLamp,
-	pdnpProduct:     buildPDNPFront,
-	soulmateProduct: buildSoulmateCombo,
-	duoSnapProduct:  buildDuoSnap,
+	moonLampProduct:   buildMoonLamp,
+	pdnpProduct:       buildPDNPFront,
+	soulmateProduct:   buildSoulmateCombo,
+	duoSnapProduct:    buildDuoSnap,
+	registryProduct:   registryBuilder(""),
+	coupleDateProduct: registryBuilder(coupleDateCode),
 }
 
 // previewFileName is the preview stored beside a build's print file.

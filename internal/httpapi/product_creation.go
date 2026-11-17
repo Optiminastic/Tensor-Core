@@ -51,6 +51,8 @@ func (s *Server) registerProductCreation(r *gin.Engine) {
 	g.GET("/builds/:id/parts/:part", read, s.productBuildPart)
 	g.POST("/soulmate-combo/builds", read, s.startSoulmateBuild)
 	g.POST("/duo-snap/builds", read, s.startDuoSnapBuild)
+	g.POST("/registry/builds", read, s.startRegistryBuild(registryProduct, ""))
+	g.POST("/couple-date-plank/builds", read, s.startRegistryBuild(coupleDateProduct, coupleDateCode))
 	g.POST("/pdnp-front-text/builds", read, s.startPDNPBuild)
 }
 
