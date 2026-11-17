@@ -11,7 +11,8 @@ package httpapi
 // colour bookkeeping that path does against a real job touches nothing.
 //
 // Both shapes of combo order are read: an older order carrying one SC-xxx
-// line (the SC product's plank, rose and keychain parts), and a combo sold as
+// line (the SC product's plank, rose and keychain parts; an SCWL-xxx "with
+// LIGHT" line prints the same three), and a combo sold as
 // a Shopify bundle, which arrives as SC-PLANK-xxx, 3DRN and SC-KEY lines
 // (SC-ROSE on the first test orders, before the rose became 3D Rose Name).
 
@@ -73,10 +74,9 @@ func (s *Server) soulmateParts(ctx context.Context, order gen.Order) ([]comboPar
 			found["keychain"] = comboPart{"keychain", sku, designRoleBody, li}
 		default:
 			// The SC product sold as one line: its parts are roles.
-			roles := s.partRolesForSKU(ctx, sku)
-			if slices.Contains(roles, "plank") && slices.Contains(roles, "rose") && slices.Contains(roles, "keychain") {
+			if fileSKU, ok := s.comboSKU(ctx, upper); ok {
 				for _, name := range soulmatePartNames {
-					found[name] = comboPart{name, sku, name, li}
+					found[name] = comboPart{name, fileSKU, name, li}
 				}
 			}
 		}
@@ -265,4 +265,23 @@ func sideBySide(pngs [][]byte) []byte {
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, canvas)
 	return buf.Bytes()
+}
+
+// comboSKU is the SKU whose registry setup prints this combo line: the line's
+// own when its product has the plank, rose and keychain parts, else - for the
+// Soulmate COMBO with LIGHT, SCWL-RED - the plain combo's in the same colour,
+// SC-RED. The light is a stand the plank sits in, not a print, so the three
+// files are the same; SCWL has no registry setup of its own to drift from SC.
+func (s *Server) comboSKU(ctx context.Context, upper string) (string, bool) {
+	isCombo := func(sku string) bool {
+		roles := s.partRolesForSKU(ctx, sku)
+		return slices.Contains(roles, "plank") && slices.Contains(roles, "rose") && slices.Contains(roles, "keychain")
+	}
+	if isCombo(upper) {
+		return upper, true
+	}
+	if colour, ok := strings.CutPrefix(upper, "SCWL-"); ok && isCombo("SC-"+colour) {
+		return "SC-" + colour, true
+	}
+	return "", false
 }
