@@ -466,7 +466,7 @@ func (s *Server) previewBatch(c *gin.Context) {
 		detail(c, http.StatusInternalServerError, "Could not read the batch's jobs.")
 		return
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, batchPlateBed(batch, jobs))
 	if herr != nil {
 		detail(c, herr.status, herr.msg)
 		return
@@ -801,7 +801,7 @@ func (s *Server) recomputeBatchPlate(ctx context.Context, c *gin.Context, batch 
 	if !s.filesReady(c) {
 		return gen.Batch{}, false
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, batchPlateBed(batch, jobs))
 	if herr != nil {
 		detail(c, herr.status, herr.msg)
 		return gen.Batch{}, false
@@ -863,7 +863,7 @@ func (s *Server) mergedPlateFor(
 		return uuid.Nil, nil, nil, statusErr(http.StatusServiceUnavailable,
 			"Object storage is not configured, so the merged plate cannot be built.")
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, plateBed(jobs))
+	plate, herr := s.buildMergedPlate(ctx, jobs, batch.BatchNumber, batchPlateBed(batch, jobs))
 	if herr != nil {
 		return uuid.Nil, nil, nil, statusErr(herr.status, herr.msg)
 	}
@@ -944,6 +944,20 @@ func plateBedForTarget(jobs []gen.ProductionJob, family string) bedpack.Bed {
 		return bedpack.BedForFamily(family)
 	}
 	return plateBed(jobs)
+}
+
+// batchPlateBed is the bed a batch's plate is laid out on: the class the
+// planner packed it for (machine_family), else the unit count.
+//
+// The planner chooses the class by SIZE - a bed of one 200 x 281 mm Family
+// Plank is promoted past the P2S's 256 x 256 because it does not fit there
+// (production.bedFamilyFitting) - and records it on the batch. Laying the
+// preview out by the unit count alone put that one plank back on a P2S bed,
+// and the batch it had just planned answered "The batch's jobs do not fit on
+// a single bed": no plate preview, and Download plate saved the error as
+// preview.json. BATCH-1001950.
+func batchPlateBed(b gen.Batch, jobs []gen.ProductionJob) bedpack.Bed {
+	return plateBedForTarget(jobs, deref(b.MachineFamily))
 }
 
 // targetFamilyForProfile is the machine class a machine_profiles row names.

@@ -406,7 +406,7 @@ func (s *Server) cachePreview(ctx context.Context, b gen.Batch) {
 		log.Warn("could not load batch jobs for preview cache", "batch", b.ID, "error", err)
 		return
 	}
-	plate, herr := s.buildMergedPlate(ctx, jobs, b.BatchNumber, plateBed(jobs))
+	plate, herr := s.buildMergedPlate(ctx, jobs, b.BatchNumber, batchPlateBed(b, jobs))
 	if herr != nil {
 		log.Warn("could not build preview plate", "batch", b.ID, "error", herr.msg)
 		return
