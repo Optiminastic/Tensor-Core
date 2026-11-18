@@ -511,6 +511,10 @@ func (s *Server) templateLoader() func(context.Context, string) ([]byte, bool, e
 		if s.storage == nil {
 			return nil, false, fmt.Errorf("object storage is not configured")
 		}
+		// An uploaded version never changes (see template_source_cache.go).
+		if source, ok := templateSources.get(row.StorageKey); ok {
+			return source, true, nil
+		}
 		obj, err := s.storage.Get(ctx, row.StorageKey)
 		if err != nil {
 			return nil, false, err
@@ -520,6 +524,7 @@ func (s *Server) templateLoader() func(context.Context, string) ([]byte, bool, e
 		if err != nil {
 			return nil, false, err
 		}
+		templateSources.put(row.StorageKey, source)
 		return source, true, nil
 	}
 }
