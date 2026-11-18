@@ -33,9 +33,10 @@ func (s *Server) narrowBundleProps(ctx context.Context, items []shopifyLineItem)
 		if len(used) == 0 {
 			continue
 		}
+		slots := slotNumbers(used)
 		kept := make([]shopifyLineProp, 0, len(li.Properties))
 		for _, p := range li.Properties {
-			if used[personalise.NormaliseKey(p.Name)] {
+			if keepsField(used, slots, p.Name) {
 				kept = append(kept, p)
 			}
 		}
@@ -44,6 +45,51 @@ func (s *Server) narrowBundleProps(ctx context.Context, items []shopifyLineItem)
 		}
 	}
 	return items
+}
+
+// slotNumbers is the slot a bundle line is, read off the fields it maps: a
+// Photo Fridge Magnet's PFM-2 maps "colour 2" and "text 2", so it is slot 2.
+// Empty for a product whose fields carry no number (the Soulmate items).
+func slotNumbers(used map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for key := range used {
+		if n := trailingNumber(key); n != "" {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// keepsField reports whether a bundle line keeps one of the order's fields:
+// the fields its product maps, and - for a numbered slot - that slot's other
+// fields too. The magnet's design reads only the colour and the caption, but
+// its line is where the floor finds the photo, so PHOTO - 2 stays on PFM-2
+// beside colour 2 and text 2, and leaves every other magnet's line.
+func keepsField(used, slots map[string]bool, name string) bool {
+	key := personalise.NormaliseKey(name)
+	if used[key] {
+		return true
+	}
+	n := trailingNumber(key)
+	return n != "" && slots[n] && !strings.HasPrefix(key, "_")
+}
+
+// trailingNumber is the number a normalised field name ends in ("photo 2"
+// -> "2"), or "" when its last word is not a number.
+func trailingNumber(key string) string {
+	word := key
+	if i := strings.LastIndex(key, " "); i >= 0 {
+		word = key[i+1:]
+	}
+	if word == "" || word == key {
+		return ""
+	}
+	for _, r := range word {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return word
 }
 
 // mappedPropertyKeys is every order field a SKU reads, normalised the way the

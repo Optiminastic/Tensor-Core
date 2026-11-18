@@ -1,8 +1,9 @@
 package httpapi
 
 // A pack sold as a bundle of numbered slots of ONE product - a Photo Fridge
-// Magnet FIVE arrives as PFM-1 ... PFM-5 - keeps on each line only the fields
-// that slot's own mapping reads, even before the product has a design file.
+// Magnet FIVE arrives as PFM-1 ... PFM-5 - keeps on each line only that
+// slot's fields: the ones its own mapping reads, and its other numbered
+// fields (the photo the design does not read), even with no design file.
 
 import (
 	"context"
@@ -33,19 +34,20 @@ func TestIntegrationEachBundleSlotKeepsOnlyItsOwnFields(t *testing.T) {
 		uuid.New(), productID); err != nil {
 		t.Fatalf("part: %v", err)
 	}
+	// As on prod: the design reads the colour and the caption, not the photo.
 	mapSlot := func(variantID uuid.UUID, keys ...string) {
 		for i, key := range keys {
 			if _, err := store.Pool.Exec(ctx, `
 				INSERT INTO product_field_maps
 				       (id, product_id, variant_id, role, property_key, scad_variable, value_type, required, position)
 				VALUES ($1, $2, $3, 'magnet', $4, $5, 'string', true, $6)`,
-				uuid.New(), productID, variantID, key, []string{"colour", "photo", "text"}[i], i); err != nil {
+				uuid.New(), productID, variantID, key, []string{"color", "TEXT"}[i], i); err != nil {
 				t.Fatalf("map %s: %v", key, err)
 			}
 		}
 	}
-	mapSlot(slot1, "colour 1", "photo 1", "text 1")
-	mapSlot(slot2, "colour 2", "photo 2", "text 2")
+	mapSlot(slot1, "colour 1", "text 1")
+	mapSlot(slot2, "colour 2", "text 2")
 
 	s := NewServer(config.Settings{Environment: "development", AuthAudience: "tensor-core"},
 		store, auth.NewGuards(newTokenMinter(t).verifier, ""), nil)
@@ -58,6 +60,7 @@ func TestIntegrationEachBundleSlotKeepsOnlyItsOwnFields(t *testing.T) {
 		{Name: "colour 2", Value: "White & Red"},
 		{Name: "PHOTO - 2", Value: "https://example.com/2.png"},
 		{Name: "text-2", Value: "CARTOON"},
+		{Name: "PHOTO - 12", Value: "https://example.com/12.png"}, // not slot 1's
 	}
 	copyOf := func() []shopifyLineProp { return append([]shopifyLineProp(nil), pack...) }
 	got := s.narrowBundleProps(ctx, []shopifyLineItem{
