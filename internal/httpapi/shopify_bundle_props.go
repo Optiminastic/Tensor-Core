@@ -15,6 +15,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/Optiminastic/tensor-core/internal/personalise"
 )
 
@@ -44,25 +46,60 @@ func (s *Server) narrowBundleProps(ctx context.Context, items []shopifyLineItem)
 	return items
 }
 
-// mappedPropertyKeys is every order field a SKU's registry product reads,
-// normalised the way the renderer matches them. Empty when the SKU is not in
-// the registry or maps nothing.
+// mappedPropertyKeys is every order field a SKU reads, normalised the way the
+// renderer matches them. Empty when the SKU is not in the registry or maps
+// nothing.
+//
+// Asked per SKU, the way the renderer asks (fieldMapsFor: the SKU's own
+// mapping, else the product's). A Photo Fridge Magnet pack arrives as one
+// line per magnet - PFM-1 ... PFM-5, all of one product - and each slot reads
+// only its own fields (PFM-2: COLOUR - 2, PHOTO - 2, TEXT - 2), which only a
+// per-SKU mapping can say. Read product-wide, every slot would keep all five.
 func (s *Server) mappedPropertyKeys(ctx context.Context, sku string) map[string]bool {
-	product, err := s.store.Q.FindProductBySKU(ctx, strings.TrimSpace(sku))
+	sku = strings.TrimSpace(sku)
+	product, err := s.store.Q.FindProductBySKU(ctx, sku)
 	if err != nil {
 		return nil
 	}
-	maps, err := s.store.Q.ListAllProductFieldMaps(ctx, product.ID)
-	if err != nil {
-		return nil
-	}
-	out := make(map[string]bool, len(maps))
-	for _, m := range maps {
-		if key := personalise.NormaliseKey(m.PropertyKey); key != "" {
-			out[key] = true
+	out := map[string]bool{}
+	for _, role := range s.mappedRoles(ctx, product.ID) {
+		for _, m := range s.fieldMapsFor(ctx, product.ID, sku, role) {
+			if key := personalise.NormaliseKey(m.PropertyKey); key != "" {
+				out[key] = true
+			}
 		}
 	}
 	return out
+}
+
+// mappedRoles is every part a product's fields can be mapped against: its
+// named parts, its design files' roles and the roles its own mapping uses. A
+// product with no design file yet (the magnet) still has its parts.
+func (s *Server) mappedRoles(ctx context.Context, productID uuid.UUID) []string {
+	seen := map[string]bool{}
+	var roles []string
+	add := func(role string) {
+		role = roleOrBody(role)
+		if !seen[strings.ToLower(role)] {
+			seen[strings.ToLower(role)] = true
+			roles = append(roles, role)
+		}
+	}
+	if parts, err := s.store.Q.ListProductParts(ctx, productID); err == nil {
+		for _, p := range parts {
+			add(p.Role)
+		}
+	}
+	for _, role := range s.designRolesForProduct(ctx, productID) {
+		add(role)
+	}
+	if maps, err := s.store.Q.ListAllProductFieldMaps(ctx, productID); err == nil {
+		for _, m := range maps {
+			add(m.Role)
+		}
+	}
+	add(designRoleBody)
+	return roles
 }
 
 // bundleTitle is the bundle a line was sold in, for naming its job. A variant
