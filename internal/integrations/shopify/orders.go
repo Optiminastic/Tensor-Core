@@ -300,6 +300,36 @@ type orderNode struct {
 func (c *Client) ListRecentOrders(
 	ctx context.Context, shop, token string, limit int, createdAtMin time.Time,
 ) ([]OrderSummary, error) {
+	query := ""
+	if !createdAtMin.IsZero() {
+		// Shopify's search syntax, not a GraphQL argument. Date-only: the
+		// store's own day boundary is what an operator means by "since
+		// Wednesday", and a UTC timestamp would cut the day at the wrong
+		// hour.
+		query = "created_at:>=" + createdAtMin.Format("2006-01-02")
+	}
+	return c.listOrders(ctx, shop, token, limit, query)
+}
+
+// ListOrdersUpdatedSince lists the orders Shopify changed at or after since -
+// new ones, and older ones whose payment, fulfilment or cancellation moved.
+//
+// The minute-by-minute sync asks this rather than "created in the last two
+// days": that re-read every recent order (and a bundle follow-up for each)
+// every minute to find the one or two that were new. A full timestamp, not a
+// date: the window is minutes wide.
+func (c *Client) ListOrdersUpdatedSince(
+	ctx context.Context, shop, token string, limit int, since time.Time,
+) ([]OrderSummary, error) {
+	return c.listOrders(ctx, shop, token, limit,
+		"updated_at:>='"+since.UTC().Format(time.RFC3339)+"'")
+}
+
+// listOrders pages through the orders a Shopify search query matches ("" for
+// all), newest first.
+func (c *Client) listOrders(
+	ctx context.Context, shop, token string, limit int, query string,
+) ([]OrderSummary, error) {
 	if limit <= 0 || limit > maxSyncOrders {
 		limit = maxSyncOrders
 	}
@@ -315,12 +345,8 @@ func (c *Client) ListRecentOrders(
 		}
 
 		vars := map[string]any{"first": page}
-		if !createdAtMin.IsZero() {
-			// Shopify's search syntax, not a GraphQL argument. Date-only: the
-			// store's own day boundary is what an operator means by "since
-			// Wednesday", and a UTC timestamp would cut the day at the wrong
-			// hour.
-			vars["query"] = "created_at:>=" + createdAtMin.Format("2006-01-02")
+		if query != "" {
+			vars["query"] = query
 		}
 		if after != "" {
 			vars["after"] = after

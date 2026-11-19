@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,16 +63,47 @@ func (s *Server) fetchAndImportShopifyOrders(
 	return s.importShopifyOrdersSince(ctx, connID, brandSlug, shop, token, s.importSince())
 }
 
-// SyncRecentOrdersForBrand imports only the orders placed in the last two
-// days - the minute-by-minute check that brings a new order in quickly. Two
-// days rather than one because Shopify's date filter is by calendar day in
-// the store's zone, so an order just after midnight is never missed.
+// recentSyncOverlap is how far back each quick sync reaches past the previous
+// one's start, so an order Shopify stamps a moment late is still caught.
+const recentSyncOverlap = 2 * time.Minute
+
+// recentSyncMarks is when each store's last quick sync STARTED, by brand.
+// Per process and in memory: a restart starts again from the two-day window.
+var recentSyncMarks sync.Map
+
+// SyncRecentOrdersForBrand is the minute-by-minute check that brings a new
+// order in quickly.
+//
+// It asks Shopify only for the orders UPDATED since this store's last quick
+// sync began (less a two-minute overlap) - a new order counts as updated, and
+// so does an older one whose payment, fulfilment or cancellation moved. It
+// used to re-import every order CREATED in the last two days, every minute,
+// with a bundle follow-up query each, to find the one or two that were new.
+//
+// The first run in a process (and the first after a failed one) still reads
+// the two-day window, so nothing placed while the worker was down is missed:
+// the mark only moves on a run that succeeded. Two days rather than one
+// because Shopify's created_at filter is by calendar day in the store's zone.
 func (s *Server) SyncRecentOrdersForBrand(ctx context.Context, brandSlug, shop, token string) (int, error) {
-	since := time.Now().AddDate(0, 0, -2)
-	if floor := s.importSince(); since.Before(floor) {
-		since = floor
+	started := time.Now()
+	var orders []shopify.OrderSummary
+	var err error
+	if mark, ok := recentSyncMarks.Load(brandSlug); ok {
+		orders, err = s.shopify.ListOrdersUpdatedSince(ctx, shop, token, 0,
+			mark.(time.Time).Add(-recentSyncOverlap))
+	} else {
+		since := started.AddDate(0, 0, -2)
+		if floor := s.importSince(); since.Before(floor) {
+			since = floor
+		}
+		orders, err = s.shopify.ListRecentOrders(ctx, shop, token, 0, since)
 	}
-	return s.importShopifyOrdersSince(ctx, nil, brandSlug, shop, token, since)
+	if err != nil {
+		return 0, err
+	}
+	imported := s.importOrderSummaries(ctx, nil, brandSlug, shop, orders)
+	recentSyncMarks.Store(brandSlug, started)
+	return imported, nil
 }
 
 func (s *Server) importShopifyOrdersSince(
@@ -81,6 +113,14 @@ func (s *Server) importShopifyOrdersSince(
 	if err != nil {
 		return 0, err
 	}
+	return s.importOrderSummaries(ctx, connID, brandSlug, shop, orders), nil
+}
+
+// importOrderSummaries imports each order the way a webhook delivery would,
+// skipping (and logging) one that fails rather than abandoning the rest.
+func (s *Server) importOrderSummaries(
+	ctx context.Context, connID *uuid.UUID, brandSlug, shop string, orders []shopify.OrderSummary,
+) int {
 	imported := 0
 	for _, o := range orders {
 		if _, err := s.importShopifyOrder(ctx, connID, brandSlug, toOrderPayload(o), "pending"); err != nil {
@@ -90,7 +130,7 @@ func (s *Server) importShopifyOrdersSince(
 		}
 		imported++
 	}
-	return imported, nil
+	return imported
 }
 
 // backfillShopifyOrders does a one-time catch-up import of the store's most
