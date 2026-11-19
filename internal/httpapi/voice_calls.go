@@ -73,6 +73,10 @@ type placeVoiceCallRequest struct {
 	ProductName    string `json:"product_name" binding:"max=160"`
 	CartValue      string `json:"cart_value" binding:"max=24"`
 	ItemCount      int    `json:"item_count" binding:"omitempty,min=0,max=999"`
+	// CustomerState is the state from the checkout's address, from which Tensor
+	// picks the language the call opens in (Hindi when it is empty). It is not
+	// sent to the agent itself.
+	CustomerState string `json:"customer_state" binding:"max=80"`
 }
 
 type placeVoiceCallResponse struct {
@@ -117,6 +121,13 @@ func (s *Server) agentVariables(req placeVoiceCallRequest) map[string]string {
 	}
 	if req.ItemCount > 0 {
 		variables["item_count"] = itoa(req.ItemCount)
+	}
+	// The language the call opens in, chosen from the customer's state - only
+	// once the variable's name is configured (see SarvamLanguageVariable for
+	// why it is off until then), and then on every call: Hindi when there is no
+	// state. The state itself is not sent.
+	if name := strings.TrimSpace(s.cfg.SarvamLanguageVariable); name != "" {
+		variables[name] = callLanguageForState(req.CustomerState)
 	}
 	return variables
 }

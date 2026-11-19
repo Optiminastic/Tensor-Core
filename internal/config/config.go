@@ -610,6 +610,13 @@ type Settings struct {
 	// A name that lives on somebody else's console should not need a deploy to
 	// follow. The other three have never moved and stay in the code.
 	SarvamProductVariable string
+	// SarvamLanguageVariable names the agent variable that carries the language
+	// a call opens in, chosen by Tensor from the customer's state (see
+	// callLanguageForState), e.g. preferred_language. EMPTY BY DEFAULT, which
+	// sends nothing: Sarvam refuses a whole call over a variable its agent
+	// version does not define, so it is switched on only once every agent
+	// version Tensor calls has it.
+	SarvamLanguageVariable string
 
 	// The win-back scheduler: the worker that rings a customer a few minutes
 	// after they walk away from a checkout. See
@@ -905,6 +912,7 @@ func Load() Settings {
 		SarvamAgentPhoneNumber:      envOr("SARVAM_AGENT_PHONE_NUMBER", ""),
 		SarvamBaseURL:               envOr("SARVAM_BASE_URL", ""),
 		SarvamProductVariable:       envOr("SARVAM_PRODUCT_VARIABLE", "cart_item_name"),
+		SarvamLanguageVariable:      envOr("SARVAM_LANGUAGE_VARIABLE", ""),
 		WinbackCallsEnabled:         boolEnvOr("WINBACK_CALLS_ENABLED", false),
 		WinbackCallDelayMinutes:     intEnvOr("WINBACK_CALL_DELAY_MINUTES", 0),
 		WinbackCallAgentVersion:     intEnvOr("WINBACK_CALL_AGENT_VERSION", 8),

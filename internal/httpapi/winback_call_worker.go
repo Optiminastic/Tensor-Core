@@ -803,6 +803,7 @@ func requestFor(c candidate) placeVoiceCallRequest {
 		ProductName:    productPhrase(c.checkout),
 		CartValue:      spokenAmount(c.checkout.TotalAmount),
 		ItemCount:      c.checkout.ItemCount,
+		CustomerState:  c.checkout.Province,
 	}
 }
 
