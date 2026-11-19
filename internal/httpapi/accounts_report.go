@@ -60,7 +60,7 @@ func ReportZone() *time.Location { return reportZone }
 // Exported so the worker can say so AT STARTUP rather than at midday: a
 // deployment that forgot the credentials should be obvious on the first page
 // of the logs, not in one line nobody is watching six hours later.
-func (s *Server) MailboxReady() bool { return s.mailer().Configured() }
+func (s *Server) MailboxReady() bool { return s.mailer(s.cfg.SMTPFromName).Configured() }
 
 // ReportOutcome is what one send did, for the caller to log or show.
 type ReportOutcome struct {
@@ -73,15 +73,17 @@ type ReportOutcome struct {
 	Filename    string
 }
 
-// mailer builds the SMTP client from the process environment.
-func (s *Server) mailer() *email.Client {
+// mailer builds the SMTP client from the process environment, sending as
+// fromName - the report passes its own title, so the inbox shows which
+// store and which day before the mail is opened.
+func (s *Server) mailer(fromName string) *email.Client {
 	return email.New(email.Config{
 		Host:     s.cfg.SMTPHost,
 		Port:     s.cfg.SMTPPort,
 		Username: s.cfg.SMTPUsername,
 		Password: s.cfg.SMTPPassword,
 		From:     s.cfg.SMTPFrom,
-		FromName: s.cfg.SMTPFromName,
+		FromName: fromName,
 	})
 }
 
@@ -111,7 +113,7 @@ func (s *Server) sendAccountsReport(
 ) (ReportOutcome, error) {
 	out := ReportOutcome{BrandSlug: settings.BrandSlug, WindowStart: from, WindowEnd: to}
 
-	mail := s.mailer()
+	mail := s.mailer(reportSubject(to))
 	if !mail.Configured() {
 		return out, fmt.Errorf(
 			"no mailbox is configured on this service, so the register cannot be sent " +
@@ -308,8 +310,14 @@ func parseMoney(v string) float64 {
 	return f
 }
 
+// reportName is how the register presents itself in the inbox - as the
+// store, not as Tensor.
+const reportName = "The3dPrintingStore Report"
+
+// reportSubject is the sender name and the subject alike: the store and the
+// day, dd/mm/yyyy in IST, the same day the attachment is named for.
 func reportSubject(windowEnd time.Time) string {
-	return fmt.Sprintf("Sales register - %s", windowEnd.In(reportZone).Format("02 Jan 2006"))
+	return reportName + " | " + windowEnd.In(reportZone).Format("02/01/2006")
 }
 
 func reportBody(from, to time.Time, orders, rows int) string {

@@ -194,7 +194,7 @@ func TestSubjectAndFilenameAgreeOnTheDay(t *testing.T) {
 	// They are read side by side in an inbox; disagreeing is how somebody
 	// files the wrong day.
 	end := time.Date(2026, 10, 28, 12, 0, 0, 0, ReportZone())
-	if !strings.Contains(reportSubject(end), "28 Oct 2026") {
+	if reportSubject(end) != "The3dPrintingStore Report | 28/10/2026" {
 		t.Errorf("subject = %q", reportSubject(end))
 	}
 	if !strings.Contains(accounts.Filename(end, ReportZone()), "2026-10-28") {

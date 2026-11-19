@@ -85,7 +85,7 @@ func (s *Server) getAccountsReport(c *gin.Context) {
 		SellerState: accounts.DefaultSellerState,
 		To:          []string{}, CC: []string{}, BCC: []string{},
 	}
-	mail := s.mailer()
+	mail := s.mailer(s.cfg.SMTPFromName)
 	out.MailboxReady = mail.Configured()
 	out.MailboxFrom = s.cfg.SMTPFrom
 
