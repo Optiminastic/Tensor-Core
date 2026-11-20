@@ -167,6 +167,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// Which slicer pipeline each SKU prints with, per machine class - see
 	// registry_pipelines.go.
 	s.registerRegistryPipelines(g, read, manage)
+	// Tensor's own copy of each pipeline's presets, plus its overrides - see
+	// slicing_profiles.go.
+	s.registerSlicingProfiles(g, read, manage)
 	s.registerRegistryComponents(g, read, manage)
 	// Every stored part file at once, for the Designs tab's library view -
 	// see registry_part_files.go. Read-only: a part file is changed through

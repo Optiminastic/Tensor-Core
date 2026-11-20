@@ -1817,3 +1817,25 @@ CREATE TABLE product_creation_builds (
 );
 CREATE INDEX ix_product_creation_builds_lookup
     ON product_creation_builds (brand_slug, product, lower(order_number), created_at DESC);
+
+-- Tensor's own copy of a pipeline's slicer presets, plus overrides (0144).
+CREATE TABLE slicing_profiles (
+    id                   uuid PRIMARY KEY,
+    bambu_pipeline_id    integer,
+    name                 varchar(200) NOT NULL,
+    machine_family       varchar(16)  NOT NULL,
+    printer_preset_name  varchar(200) NOT NULL,
+    printer_preset       jsonb        NOT NULL,
+    process_preset_name  varchar(200) NOT NULL,
+    process_preset       jsonb        NOT NULL,
+    filament_preset_name varchar(200) NOT NULL,
+    filament_preset      jsonb        NOT NULL,
+    overrides            jsonb        NOT NULL DEFAULT '{}'::jsonb,
+    version              integer      NOT NULL DEFAULT 1,
+    imported_at          timestamptz,
+    updated_by           varchar(64)  NOT NULL DEFAULT '',
+    created_at           timestamptz  NOT NULL DEFAULT now(),
+    updated_at           timestamptz  NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_slicing_profiles_pipeline
+    ON slicing_profiles (bambu_pipeline_id) WHERE bambu_pipeline_id IS NOT NULL;

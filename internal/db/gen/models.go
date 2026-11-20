@@ -966,6 +966,25 @@ type SliceMetric struct {
 	CreatedAt              pgtype.Timestamptz
 }
 
+type SlicingProfile struct {
+	ID                 uuid.UUID
+	BambuPipelineID    *int32
+	Name               string
+	MachineFamily      string
+	PrinterPresetName  string
+	PrinterPreset      []byte
+	ProcessPresetName  string
+	ProcessPreset      []byte
+	FilamentPresetName string
+	FilamentPreset     []byte
+	Overrides          []byte
+	Version            int32
+	ImportedAt         pgtype.Timestamptz
+	UpdatedBy          string
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
+}
+
 type UserAuthzState struct {
 	UserID             string
 	PermissionsVersion int32
