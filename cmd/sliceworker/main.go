@@ -102,12 +102,19 @@ func main() {
 		// back to the CLI's defaults. Loud, because that is a different slice.
 		log.Printf("bundled process presets unreadable, print slices will not fill from parents: %v", err)
 	}
+	filaments, err := slicing.LoadSystemPresets(cfg.BambuRoot, "filament")
+	if err != nil {
+		// Only profiles built on a Bambu system filament need these; those are
+		// released with the reason rather than sliced with a blank filament.
+		log.Printf("bundled filament presets unreadable, system-filament profiles will not slice: %v", err)
+	}
 	river.AddWorker(workers, slicing.NewPrintSliceWorker(slicing.PrintSliceDeps{
 		Store:     store.Q,
 		Objects:   objects,
 		Library:   bambubuddy.NewWithTimeout(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey, time.Duration(cfg.BambuBuddyTimeoutSeconds)*time.Second),
 		Queuer:    production.NewQueueSlicedPlateEnqueuer(insertOnly),
 		Processes: processes,
+		Filaments: filaments,
 		BambuRoot: cfg.BambuRoot,
 		Timeout:   sliceTimeout,
 		Logger:    logger,

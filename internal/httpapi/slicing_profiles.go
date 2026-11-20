@@ -174,7 +174,7 @@ func (s *Server) importPipeline(ctx context.Context, p bambubuddy.Pipeline, user
 	}
 	// The same filament preset dispatch slices with today (filamentPresetOf):
 	// the first. One file per slot is made from it at slice time.
-	filament, err := s.readPreset(ctx, p.FilamentPresets[0], "filament")
+	filament, err := s.readFilament(ctx, p.FilamentPresets[0])
 	if err != nil {
 		return gen.SlicingProfile{}, err.Error()
 	}
@@ -190,6 +190,24 @@ func (s *Server) importPipeline(ctx context.Context, p bambubuddy.Pipeline, user
 		return gen.SlicingProfile{}, "it could not be saved"
 	}
 	return row, ""
+}
+
+// readFilament reads a local filament preset, or stores a reference to one of
+// Bambu's own filaments, which BambuBuddy names but has no settings for. The
+// slice worker resolves the reference from the bundled profiles
+// (slicing.SystemPresets.ResolveFilament).
+func (s *Server) readFilament(ctx context.Context, p bambubuddy.PresetVal) (readPresetResult, error) {
+	if strings.EqualFold(p.Source, "local") {
+		return s.readPreset(ctx, p, "filament")
+	}
+	if p.ID == "" || !(strings.EqualFold(p.Source, "cloud") || strings.EqualFold(p.Source, "standard")) {
+		return readPresetResult{}, fmt.Errorf("its filament preset (%s) cannot be copied", p.Source)
+	}
+	raw, err := json.Marshal(slicing.SystemFilamentRef(strings.ToLower(p.Source), p.ID))
+	if err != nil {
+		return readPresetResult{}, err
+	}
+	return readPresetResult{Name: slicing.SystemFilamentLabel(p.Source, p.ID), raw: raw}, nil
 }
 
 type readPresetResult struct {

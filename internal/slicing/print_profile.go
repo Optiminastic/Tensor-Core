@@ -88,8 +88,8 @@ func BuildPresetFiles(p PrintProfile, bed BedSettings) (PresetFiles, error) {
 	}
 	tag := profileTag(p)
 
-	machine := userPreset(p.Printer, tag+" machine")
-	process := userPreset(p.Process, tag+" process")
+	machine := userPreset(p.Printer, "machine", tag+" machine")
+	process := userPreset(p.Process, "process", tag+" process")
 	maps.Copy(process, p.Overrides)
 	for k, v := range bed.NozzleOverrides {
 		if machineScopedKeys[k] {
@@ -111,6 +111,7 @@ func BuildPresetFiles(p PrintProfile, bed BedSettings) (PresetFiles, error) {
 		f := maps.Clone(p.Filament)
 		delete(f, "inherits")
 		f["from"] = "User"
+		f["type"] = "filament"
 		f["name"] = fmt.Sprintf("%s filament %d", tag, i+1)
 		f["filament_colour"] = []any{strings.ToUpper(colour)}
 		b, err := json.Marshal(f)
@@ -124,7 +125,11 @@ func BuildPresetFiles(p PrintProfile, bed BedSettings) (PresetFiles, error) {
 
 // userPreset copies a preset as a uniquely named User preset. A System preset
 // is made to inherit itself by name, which is how the CLI accepts it.
-func userPreset(src map[string]any, name string) map[string]any {
+//
+// The type is always set: the CLI refuses a preset without one ("unknown
+// config type"), and BambuBuddy's copy of a system printer preset (the P2S
+// one, 2026-11-20) carries none.
+func userPreset(src map[string]any, kind, name string) map[string]any {
 	dst := maps.Clone(src)
 	if from, _ := src["from"].(string); strings.EqualFold(from, "system") {
 		if own, _ := src["name"].(string); own != "" {
@@ -132,6 +137,7 @@ func userPreset(src map[string]any, name string) map[string]any {
 		}
 	}
 	dst["from"] = "User"
+	dst["type"] = kind
 	dst["name"] = name
 	return dst
 }

@@ -65,6 +65,7 @@ type PrintSliceDeps struct {
 	Library   PrintLibrary
 	Queuer    PrintQueuer
 	Processes SystemPresets
+	Filaments SystemPresets
 	BambuRoot string
 	Timeout   time.Duration
 	Logger    *slog.Logger
@@ -183,6 +184,14 @@ func (w *PrintSliceWorker) presetFiles(ctx context.Context, a SlicePrintArgs, lo
 	profile, err := DecodeProfile(row)
 	if err != nil {
 		return PresetFiles{}, 0, permanent("%v", err)
+	}
+	if IsSystemFilamentRef(profile.Filament) {
+		if w.deps.Filaments == nil {
+			return PresetFiles{}, 0, permanent("profile %q slices with a Bambu system filament and this worker cannot read the bundled filaments", row.Name)
+		}
+		if profile.Filament, err = w.deps.Filaments.ResolveFilament(profile.Filament); err != nil {
+			return PresetFiles{}, 0, permanent("profile %q: %v", row.Name, err)
+		}
 	}
 	if w.deps.Processes != nil {
 		if _, err := w.deps.Processes.FillFromChain(profile.Process); err != nil {

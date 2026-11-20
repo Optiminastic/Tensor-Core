@@ -9,10 +9,12 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/auth"
 	"github.com/Optiminastic/tensor-core/internal/config"
+	"github.com/Optiminastic/tensor-core/internal/slicing"
 )
 
-// A stub BambuBuddy with three pipelines: one that imports, one with no
-// presets, and one aimed at a printer class Tensor does not run.
+// A stub BambuBuddy: an H2C pipeline on saved presets and a P2S one on a Bambu
+// system filament, both import; one with no presets, one aimed at a printer
+// class Tensor does not run and one with an unreadable filament are skipped.
 func presetStub(t *testing.T, infill *string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -24,6 +26,12 @@ func presetStub(t *testing.T, infill *string) *httptest.Server {
 				 "printer_preset":{"source":"local","id":"12"},"process_preset":{"source":"local","id":"8"},
 				 "filament_presets":[{"source":"local","id":"13"}]},
 				{"id":8,"name":"Empty","target_kind":"printer_class","target_model_class":"A2L"},
+				{"id":10,"name":"P2S stock PLA","target_kind":"printer_class","target_model_class":"P2S",
+				 "printer_preset":{"source":"local","id":"12"},"process_preset":{"source":"local","id":"8"},
+				 "filament_presets":[{"source":"cloud","id":"GFSA00_11"}]},
+				{"id":11,"name":"Odd filament","target_kind":"printer_class","target_model_class":"P2S",
+				 "printer_preset":{"source":"local","id":"12"},"process_preset":{"source":"local","id":"8"},
+				 "filament_presets":[{"source":"usb","id":"x"}]},
 				{"id":9,"name":"X1C","target_kind":"printer_class","target_model_class":"X1C",
 				 "printer_preset":{"source":"local","id":"12"},"process_preset":{"source":"local","id":"8"},
 				 "filament_presets":[{"source":"local","id":"13"}]}
@@ -86,24 +94,50 @@ func TestIntegrationSlicingProfilesImportAndOverride(t *testing.T) {
 		}
 		return out
 	}
+	heart := func() profile {
+		t.Helper()
+		for _, p := range list() {
+			if p.Family == "H2C" {
+				return p
+			}
+		}
+		t.Fatal("the H2C profile is missing")
+		return profile{}
+	}
 
 	if rr := doJSON(router, http.MethodPost, "/registry/slicing-profiles/import", readOnly, nil); rr.Code != http.StatusForbidden {
 		t.Fatalf("import without registry:manage = %d, want 403", rr.Code)
 	}
 
 	first := importAll()
-	if len(first.Imported) != 1 || len(first.Skipped) != 2 {
-		t.Fatalf("imported %d, skipped %d; want 1 and 2: %+v", len(first.Imported), len(first.Skipped), first.Skipped)
+	if len(first.Imported) != 2 || len(first.Skipped) != 3 {
+		t.Fatalf("imported %d, skipped %d; want 2 and 3: %+v", len(first.Imported), len(first.Skipped), first.Skipped)
 	}
-	got := list()
-	if len(got) != 1 || got[0].Family != "H2C" || got[0].Version != 1 || got[0].Settings["layer_height"] != "0.28" {
+	if n := len(list()); n != 2 {
+		t.Fatalf("listed %d profiles, want 2", n)
+	}
+	// A pipeline on one of Bambu's own filaments is stored as a reference the
+	// slice worker resolves from the bundled profiles.
+	var filament []byte
+	var filamentName string
+	if err := store.Pool.QueryRow(ctx, `SELECT filament_preset_name, filament_preset FROM slicing_profiles
+		WHERE bambu_pipeline_id = 10`).Scan(&filamentName, &filament); err != nil {
+		t.Fatalf("stock-filament profile: %v", err)
+	}
+	var ref map[string]any
+	if json.Unmarshal(filament, &ref) != nil || !slicing.IsSystemFilamentRef(ref) ||
+		filamentName != "Bambu system filament GFSA00_11" {
+		t.Fatalf("stock filament stored as %q %s", filamentName, filament)
+	}
+	got := heart()
+	if got.Version != 1 || got.Settings["layer_height"] != "0.28" {
 		t.Fatalf("after import: %+v", got)
 	}
-	id := got[0].ID
+	id := got.ID
 
 	// An unchanged pipeline re-imports without moving the version.
 	importAll()
-	if v := list()[0].Version; v != 1 {
+	if v := heart().Version; v != 1 {
 		t.Fatalf("re-importing an unchanged pipeline moved the version to %d", v)
 	}
 
@@ -120,7 +154,7 @@ func TestIntegrationSlicingProfilesImportAndOverride(t *testing.T) {
 	if code := put(map[string]any{"wall_loops": "3"}); code != http.StatusOK {
 		t.Fatalf("a valid override = %d", code)
 	}
-	p := list()[0]
+	p := heart()
 	if p.Version != 2 || p.Settings["wall_loops"] != "3" || p.Overrides["wall_loops"] != "3" {
 		t.Fatalf("after override: %+v", p)
 	}
@@ -129,7 +163,7 @@ func TestIntegrationSlicingProfilesImportAndOverride(t *testing.T) {
 	// and moves the version.
 	infill = "15%"
 	importAll()
-	p = list()[0]
+	p = heart()
 	if p.Version != 3 || p.Settings["sparse_infill_density"] != "15%" || p.Settings["wall_loops"] != "3" {
 		t.Fatalf("after a changed re-import: %+v", p)
 	}
