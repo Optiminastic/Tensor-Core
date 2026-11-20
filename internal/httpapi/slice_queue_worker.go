@@ -54,37 +54,18 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 		return nil // nothing to queue against, and retrying cannot change that
 	}
 
-	slice, err := w.server.bambu.GetSliceJob(ctx, a.SliceJobID)
-	if err != nil {
-		return w.retryOrGiveUp(ctx, job, fmt.Errorf("read slice job %d: %w", a.SliceJobID, err))
-	}
-
-	if slice.Failed() {
-		// It will never produce a file. Say why on the batch and release it so
-		// the bed can be sent again, rather than leaving it permanently
-		// un-sendable with a slice nobody is running.
-		reason := slice.Reason()
-		if reason == "" {
-			// Said out loud rather than dressed up. "Could not slice" reads as
-			// a cause; it is the absence of one, and an operator who knows
-			// that looks in BambuBuddy instead of at the bed.
-			reason = fmt.Sprintf(
-				"BambuBuddy could not slice this plate for %s and gave no reason. Check the slice job in BambuBuddy.",
-				a.MachineName)
+	// Tensor sliced this plate itself and uploaded the finished file, so
+	// there is no BambuBuddy slice job to wait on. Everything after this -
+	// the tray check, sizing the mapping to the sliced file, queueing - is
+	// the same for both slicers.
+	slicedFileID := a.LibraryFileID
+	if slicedFileID == 0 {
+		id, stop, err := w.awaitBambuSlice(ctx, job)
+		if stop {
+			return err
 		}
-		w.releaseAfterFailure(ctx, a.BatchID, reason)
-		w.logger.Warn("slice failed; the bed is sendable again",
-			"batch", a.BatchID, "slice_job", a.SliceJobID,
-			"status", slice.Status, "reason", reason)
-		return nil
+		slicedFileID = id
 	}
-
-	if !slice.Done() {
-		// The ordinary answer early on. River backs off and asks again.
-		return w.retryOrGiveUp(ctx, job,
-			fmt.Errorf("slice job %d has not finished yet", a.SliceJobID))
-	}
-	slicedFileID := slice.Result.LibraryFileID
 
 	// The spools may have moved while the slice ran, and the plate is now
 	// sliced declaring the colours that WERE loaded. Queueing it anyway would
@@ -167,6 +148,47 @@ func (w *SliceQueueWorker) Work(ctx context.Context, job *river.Job[production.Q
 		"batch", a.BatchID, "machine", a.MachineName, "printer", a.PrinterID,
 		"queue_item", item.ID, "file", slicedFileID, "ams_mapping", mapping)
 	return nil
+}
+
+
+// awaitBambuSlice waits on the slice BambuBuddy is running for this plate. It
+// returns the sliced library file once it exists; stop is true when the job
+// should end now, with err deciding whether River retries.
+func (w *SliceQueueWorker) awaitBambuSlice(
+	ctx context.Context, job *river.Job[production.QueueSlicedPlateArgs],
+) (fileID int, stop bool, err error) {
+	a := job.Args
+	slice, err := w.server.bambu.GetSliceJob(ctx, a.SliceJobID)
+	if err != nil {
+		return 0, true, w.retryOrGiveUp(ctx, job, fmt.Errorf("read slice job %d: %w", a.SliceJobID, err))
+	}
+
+	if slice.Failed() {
+		// It will never produce a file. Say why on the batch and release it so
+		// the bed can be sent again, rather than leaving it permanently
+		// un-sendable with a slice nobody is running.
+		reason := slice.Reason()
+		if reason == "" {
+			// Said out loud rather than dressed up. "Could not slice" reads as
+			// a cause; it is the absence of one, and an operator who knows
+			// that looks in BambuBuddy instead of at the bed.
+			reason = fmt.Sprintf(
+				"BambuBuddy could not slice this plate for %s and gave no reason. Check the slice job in BambuBuddy.",
+				a.MachineName)
+		}
+		w.releaseAfterFailure(ctx, a.BatchID, reason)
+		w.logger.Warn("slice failed; the bed is sendable again",
+			"batch", a.BatchID, "slice_job", a.SliceJobID,
+			"status", slice.Status, "reason", reason)
+		return 0, true, nil
+	}
+
+	if !slice.Done() {
+		// The ordinary answer early on. River backs off and asks again.
+		return 0, true, w.retryOrGiveUp(ctx, job,
+			fmt.Errorf("slice job %d has not finished yet", a.SliceJobID))
+	}
+	return slice.Result.LibraryFileID, false, nil
 }
 
 // trayCheck confirms the spools this plate was sliced for are still in place.

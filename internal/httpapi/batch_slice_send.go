@@ -176,6 +176,16 @@ func (s *Server) sendBatchToMachine(
 	nozzleMap := nozzleMapOverrides(machine, assignments,
 		s.physicalExtruderMap(ctx, pipeline), towerBed, s.bedUnitsFor(ctx, bedJobs))
 
+	// A class switched to Tensor's own slicer leaves here: same machine, same
+	// trays, same nozzle map, sliced by the slice worker instead of BambuBuddy
+	// (batch_tensor_slice.go).
+	if s.slicesWithTensor(machine) {
+		return s.sendForTensorSlice(ctx, tensorSend{
+			Batch: batch, Machine: machine, Pipeline: pipeline, Plate: plate,
+			Assignments: assignments, NozzleMap: nozzleMap, PrinterID: printerID,
+		}, out)
+	}
+
 	uploaded, err := s.uploadPlate(ctx, batch, plate)
 	if err != nil {
 		return out, err

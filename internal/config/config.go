@@ -82,6 +82,14 @@ type Settings struct {
 	// real slicer. Never set true against a production deployment.
 	FakeSlice bool
 
+	// TensorSliceFamilies are the machine classes (H2C, A2L, P2S) whose beds
+	// Tensor slices itself, with its own slicing profiles, instead of asking
+	// BambuBuddy to. Empty, the default, keeps every class on BambuBuddy.
+	// A class listed here needs its pipelines imported as profiles first;
+	// a bed whose pipeline has no profile is refused, never sliced on BambuBuddy
+	// behind the operator's back.
+	TensorSliceFamilies []string
+
 	// Production worker (cmd/productionworker): how many order's-worth of jobs
 	// the Job Creation Worker builds at once.
 	ProductionConcurrency int
@@ -824,6 +832,7 @@ func Load() Settings {
 		PrinterAvgPowerKW:   floatEnvOr("PRINTER_AVG_POWER_KW", 0.11),
 		SliceConcurrency:    intEnvOr("SLICE_CONCURRENCY", 2),
 		FakeSlice:           boolEnvOr("FAKE_SLICE", false),
+		TensorSliceFamilies: csvEnv("TENSOR_SLICE_FAMILIES"),
 
 		ProductionConcurrency:   intEnvOr("PRODUCTION_CONCURRENCY", 5),
 		BatchMaxWaitHours:       floatEnvOr("BATCH_MAX_WAIT_HOURS", 4),

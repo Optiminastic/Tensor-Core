@@ -469,6 +469,10 @@ type QueueSlicedPlateArgs struct {
 	AmsMapping []int `json:"ams_mapping"`
 	// TrayHexes is what each of those trays held when the slice was requested.
 	TrayHexes []string `json:"tray_hexes"`
+	// LibraryFileID is set when Tensor sliced the plate itself and uploaded
+	// the finished file: there is no BambuBuddy slice job to wait on, and
+	// SliceJobID is zero.
+	LibraryFileID int `json:"library_file_id,omitempty"`
 }
 
 func (QueueSlicedPlateArgs) Kind() string { return "queue_sliced_plate" }

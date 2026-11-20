@@ -36,8 +36,14 @@ RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # Extract the Bambu Studio AppImage (GPL/AGPL - bundling is permitted).
+#
+# PINNED TO BAMBUBUDDY'S VERSION, and it must move with it. Print slices use
+# BambuBuddy's own presets (slicing_profiles), and presets saved by one Bambu
+# Studio version can segfault another: 02.07 crashed on 02.08 H2C presets
+# ("could not found extruder_type ... extruder_index 2"). BambuBuddy's version
+# is in any file it slices, 3D/3dmodel.model "Application".
 WORKDIR /opt/bambu
-ARG APPIMAGE_URL=https://github.com/bambulab/BambuStudio/releases/download/v02.07.01.62/BambuStudio_ubuntu24.04-v02.07.01.62-20260616195227.AppImage
+ARG APPIMAGE_URL=https://github.com/bambulab/BambuStudio/releases/download/v02.08.02.61/BambuStudio_ubuntu24.04-v02.08.02.61-20260820225108.AppImage
 RUN curl -fL -o bambu.AppImage "$APPIMAGE_URL" \
     && chmod +x bambu.AppImage \
     && (./bambu.AppImage --appimage-extract || true) \

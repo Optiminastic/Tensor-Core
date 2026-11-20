@@ -18,8 +18,10 @@ import (
 
 	"github.com/Optiminastic/tensor-core/internal/config"
 	"github.com/Optiminastic/tensor-core/internal/db"
+	"github.com/Optiminastic/tensor-core/internal/integrations/bambubuddy"
 	"github.com/Optiminastic/tensor-core/internal/obs"
 	"github.com/Optiminastic/tensor-core/internal/orientation"
+	"github.com/Optiminastic/tensor-core/internal/production"
 	"github.com/Optiminastic/tensor-core/internal/slicing"
 	"github.com/Optiminastic/tensor-core/internal/storage"
 )
@@ -85,6 +87,31 @@ func main() {
 	river.AddWorker(workers, slicing.NewBatchSliceWorker(
 		store, objects, cfg.BambuRoot, sliceTimeout, logger, cfg.FakeSlice,
 	))
+
+	// Third kind: slice a bed for printing with Tensor's own profile and hand
+	// the file to BambuBuddy (print_worker.go). It enqueues the queueing step on
+	// another queue, through an insert-only client - this one knows only the
+	// slice kinds.
+	insertOnly, err := slicing.NewInsertOnlyClient(store.Pool)
+	if err != nil {
+		log.Fatalf("build insert-only river client: %v", err)
+	}
+	processes, err := slicing.LoadSystemPresets(cfg.BambuRoot, "process")
+	if err != nil {
+		// Profiles still slice; only the gaps their parents would fill fall
+		// back to the CLI's defaults. Loud, because that is a different slice.
+		log.Printf("bundled process presets unreadable, print slices will not fill from parents: %v", err)
+	}
+	river.AddWorker(workers, slicing.NewPrintSliceWorker(slicing.PrintSliceDeps{
+		Store:     store.Q,
+		Objects:   objects,
+		Library:   bambubuddy.NewWithTimeout(cfg.BambuBuddyURL, cfg.BambuBuddyAPIKey, time.Duration(cfg.BambuBuddyTimeoutSeconds)*time.Second),
+		Queuer:    production.NewQueueSlicedPlateEnqueuer(insertOnly),
+		Processes: processes,
+		BambuRoot: cfg.BambuRoot,
+		Timeout:   sliceTimeout,
+		Logger:    logger,
+	}))
 
 	client, err := river.NewClient(riverpgxv5.New(store.Pool), &river.Config{
 		Queues:  map[string]river.QueueConfig{slicing.QueueName: {MaxWorkers: concurrency}},
