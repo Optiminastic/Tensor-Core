@@ -231,7 +231,7 @@ func (s *Server) EnableModelGeneration(r *personalise.Renderer, e *production.Mo
 	// cmd/productionworker cannot disagree about whether uploaded templates are
 	// honoured - a worker rendering the embedded shape while the API reports the
 	// uploaded one would be a very quiet kind of wrong.
-	s.renderer = r.WithTemplateLoader(s.templateLoader())
+	s.renderer = r.WithTemplateLoader(s.templateLoader()).WithFontLoader(s.fontLoader())
 	s.modelEnqueuer = e
 }
 
@@ -275,6 +275,7 @@ func (s *Server) Router() *gin.Engine {
 	s.registerRegistry(r)
 	s.registerRegistryAuthoring(r)
 	s.registerDesignTemplates(r)
+	s.registerDesignFonts(r)
 	s.registerMachineOps(r)
 	s.registerFleetMachines(r)
 	s.registerDispatch(r)

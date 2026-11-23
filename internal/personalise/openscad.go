@@ -72,6 +72,9 @@ type Renderer struct {
 	assetDir string
 	timeout  time.Duration
 	loadTmpl TemplateLoader
+	// loadFonts supplies uploaded faces (fonts.go). Nil means none, which is
+	// how every render behaved before fonts could be uploaded.
+	loadFonts FontLoader
 	// version is the binary's own version, read once and shared with every
 	// clone WithTemplateLoader makes. A pointer so the clone stays a plain
 	// struct copy. See version.go.
@@ -310,6 +313,11 @@ func (r *Renderer) render(
 	if err := r.stageAssets(dir); err != nil {
 		return nil, err
 	}
+	// Uploaded faces, for the families this template names that no worker
+	// ships. Nothing is staged for a template whose fonts are all built in.
+	if err := r.stageUploadedFonts(ctx, dir, source); err != nil {
+		return nil, err
+	}
 
 	scadPath := filepath.Join(dir, template+".scad")
 	if err := os.WriteFile(scadPath, source, 0o600); err != nil {
@@ -333,7 +341,11 @@ func (r *Renderer) render(
 	// than installed, because fontconfig substitutes a missing family instead
 	// of failing - a template asking for Lobster on a machine without it
 	// renders in something else, successfully.
-	if fonts := filepath.Join(dir, fontDirName); r.assetDir != "" {
+	//
+	// The directory exists only when the asset directory has a fonts/ folder
+	// or a face was uploaded for this template, so a render with neither runs
+	// exactly as it did.
+	if fonts := filepath.Join(dir, fontDirName); r.assetDir != "" || r.loadFonts != nil {
 		if info, err := os.Stat(fonts); err == nil && info.IsDir() {
 			cmd.Env = append(os.Environ(), "OPENSCAD_FONT_PATH="+fonts)
 		}

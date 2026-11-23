@@ -1839,3 +1839,19 @@ CREATE TABLE slicing_profiles (
 );
 CREATE UNIQUE INDEX uq_slicing_profiles_pipeline
     ON slicing_profiles (bambu_pipeline_id) WHERE bambu_pipeline_id IS NOT NULL;
+
+CREATE TABLE design_fonts (
+    id           uuid PRIMARY KEY,
+    families     text[] NOT NULL,
+    style        varchar(128) NOT NULL DEFAULT '',
+    filename     varchar(255) NOT NULL,
+    storage_key  varchar(512) NOT NULL,
+    sha256       char(64) NOT NULL,
+    size_bytes   bigint NOT NULL,
+    uploaded_by  varchar(255) NOT NULL DEFAULT '',
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT design_fonts_families_not_empty CHECK (cardinality(families) > 0)
+);
+
+CREATE UNIQUE INDEX uq_design_fonts_sha256 ON design_fonts (sha256);
+CREATE INDEX ix_design_fonts_families ON design_fonts USING gin (families);

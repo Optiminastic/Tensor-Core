@@ -311,6 +311,18 @@ type DesignColourPart struct {
 	Optional  bool
 }
 
+type DesignFont struct {
+	ID         uuid.UUID
+	Families   []string
+	Style      string
+	Filename   string
+	StorageKey string
+	Sha256     string
+	SizeBytes  int64
+	UploadedBy string
+	CreatedAt  pgtype.Timestamptz
+}
+
 type DesignPricing struct {
 	DesignID           uuid.UUID
 	DesignCp           pgtype.Numeric

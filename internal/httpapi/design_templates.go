@@ -437,6 +437,20 @@ func (s *Server) uploadDesignTemplate(c *gin.Context) {
 		return
 	}
 
+	// A font the file names that no worker has and nobody uploaded would be
+	// replaced by a substitute at render time - silently, with the outline
+	// grown around the letters wrong too. Refused here, naming the family to
+	// upload. Only NEW uploads are checked; stored templates are left alone.
+	missingFonts, err := s.missingTemplateFonts(ctx, source)
+	if err != nil {
+		detail(c, http.StatusInternalServerError, "Could not check the fonts this file uses.")
+		return
+	}
+	if len(missingFonts) > 0 {
+		detail(c, http.StatusUnprocessableEntity, missingFontsDetail(missingFonts))
+		return
+	}
+
 	fileID := uuid.New()
 	storageKey := fmt.Sprintf("templates/%s/%s.scad", key, fileID)
 	if err := s.storage.Put(ctx, storageKey, bytes.NewReader(source),
