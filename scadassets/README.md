@@ -29,6 +29,16 @@ like a successful render.
 Any other subdirectory is ignored, so a folder of working files beside the parts
 is not copied on every render.
 
+## Faces here
+
+- `Lobster-Regular.ttf` — the heart keychain (OFL, see `Lobster-OFL.txt`).
+- `Ondfuturs-Demo.ttf` — the Duo Snap (`name_font = "Ondfuturs"`), the same file
+  `internal/duosnap` embeds. Without it the registry's DUOSNAP template rendered
+  in a substitute face (JOB-116894-23). Rendering "KARAN & PRIYA" without it gave
+  20,188 triangles of lettering against 21,524 in Ondfuturs, and an outline of
+  37,438 against 36,260. It is a
+  *demo* release of the face; check its licence covers selling prints.
+
 ## Licensing
 
 Everything here ships in the production image, so it must be redistributable.
