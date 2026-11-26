@@ -306,22 +306,27 @@ func renderPhotoSheets(sheets []photosheet.Sheet, format string) ([]byte, string
 	return b, "image/png", err
 }
 
-// sheetPhotoClient is photoClient with longer to finish: a sheet run downloads
-// dozens of full-size phone photos from a slow host, four at a time.
+// sheetPhotoClient is photoClient for one byte range of a photo
+// (photo_fetch_parallel.go): the same refusals, a minute per range, and
+// enough idle connections kept open for the ranges running side by side.
 var sheetPhotoClient = &http.Client{
-	Timeout:       90 * time.Second,
-	Transport:     photoClient.Transport,
+	Timeout: 60 * time.Second,
+	Transport: &http.Transport{
+		DialContext:         photoClient.Transport.(*http.Transport).DialContext,
+		MaxIdleConnsPerHost: photoConnections,
+	},
 	CheckRedirect: photoClient.CheckRedirect,
 }
 
-// downloadSheetPhotos fetches each distinct photo once, four at a time, each tried twice. A photo
-// that cannot be fetched is left out and named, rather than failing the run.
+// downloadSheetPhotos fetches each distinct photo once, all of them at once
+// under the connection cap (photo_fetch_parallel.go). A photo that cannot be
+// fetched is left out and named, rather than failing the run.
 func downloadSheetPhotos(ctx context.Context, photos []sheetPhoto) ([]photosheet.Item, []string) {
 	images := map[string]image.Image{}
 	problems := map[string]string{}
 	var mu sync.Mutex
 	var g errgroup.Group
-	g.SetLimit(4)
+	g.SetLimit(photoConnections)
 	seen := map[string]bool{}
 	for _, p := range photos {
 		if seen[p.url] {
@@ -330,12 +335,7 @@ func downloadSheetPhotos(ctx context.Context, photos []sheetPhoto) ([]photosheet
 		seen[p.url] = true
 		u := p.url
 		g.Go(func() error {
-			img, err := fetchPhotoWith(ctx, sheetPhotoClient, u)
-			if err != nil && ctx.Err() == nil {
-				// Once more: the photo host is slow, and one timeout in a run
-				// of thirty photos is the usual failure, not a broken link.
-				img, err = fetchPhotoWith(ctx, sheetPhotoClient, u)
-			}
+			img, err := fetchPhotoFast(ctx, u)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
