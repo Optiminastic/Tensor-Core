@@ -179,6 +179,9 @@ func (s *Server) registerRegistry(r *gin.Engine) {
 	// see registry_preview_design.go. Its PIECES go through the colour-scheme
 	// route above with role "preview"; this is only which file they come from.
 	s.registerRegistryPreviewDesign(g, read, manage)
+	// The size a product's customer photo prints at on the Custom Photo
+	// sheets, and a sample PDF of it - see registry_photo_print.go. Optional.
+	s.registerRegistryPhotoPrint(g, read, manage)
 }
 
 func (s *Server) listRegistryProducts(c *gin.Context) {

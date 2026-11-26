@@ -1855,3 +1855,29 @@ CREATE TABLE design_fonts (
 
 CREATE UNIQUE INDEX uq_design_fonts_sha256 ON design_fonts (sha256);
 CREATE INDEX ix_design_fonts_families ON design_fonts USING gin (families);
+
+-- 0146: the size a product's customer photo prints at (Custom Photo sheets).
+CREATE TABLE IF NOT EXISTS product_photo_sizes (
+    id          uuid PRIMARY KEY,
+    product_id  uuid NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+    width_mm    double precision NOT NULL,
+    height_mm   double precision NOT NULL,
+    shape       varchar(8) NOT NULL DEFAULT 'rect',
+    when_field  varchar(64) NOT NULL DEFAULT '',
+    when_value  varchar(128) NOT NULL DEFAULT '',
+    position    integer NOT NULL DEFAULT 0,
+    updated_by  varchar(255) NOT NULL DEFAULT '',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT product_photo_sizes_positive CHECK (width_mm > 0 AND height_mm > 0),
+    CONSTRAINT product_photo_sizes_shape CHECK (shape IN ('rect', 'circle'))
+);
+CREATE INDEX IF NOT EXISTS ix_product_photo_sizes_product ON product_photo_sizes (product_id, position);
+
+CREATE TABLE IF NOT EXISTS product_photo_samples (
+    product_id   uuid PRIMARY KEY REFERENCES products (id) ON DELETE CASCADE,
+    filename     varchar(255) NOT NULL,
+    storage_key  varchar(512) NOT NULL,
+    size_bytes   bigint NOT NULL,
+    uploaded_by  varchar(255) NOT NULL DEFAULT '',
+    created_at   timestamptz NOT NULL DEFAULT now()
+);

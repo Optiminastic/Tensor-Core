@@ -41,15 +41,15 @@ func TestEachProductPrintsAtItsOwnSize(t *testing.T) {
 		{sheetLine("TSM-BLK", 1, "batch_size", "Small"), photoSpec{w: 41, h: 41, circle: true}},
 	}
 	for _, c := range cases {
-		got, problem, ok := photoSpecFor(c.li)
+		got, problem, ok := photoSpecFor(c.li, builtinRulesForSKU)
 		if !ok || problem != "" || got != c.want {
 			t.Errorf("%s: %+v %q %v, want %+v", *c.li.SKU, got, problem, ok, c.want)
 		}
 	}
-	if _, _, ok := photoSpecFor(sheetLine("DNPF-GLD", 1)); ok {
+	if _, _, ok := photoSpecFor(sheetLine("DNPF-GLD", 1), builtinRulesForSKU); ok {
 		t.Error("a DNP frame is not a sheet photo product")
 	}
-	if _, problem, _ := photoSpecFor(sheetLine("FCF-BLU", 1, "photo_frames", "5")); problem == "" {
+	if _, problem, _ := photoSpecFor(sheetLine("FCF-BLU", 1, "photo_frames", "5"), builtinRulesForSKU); problem == "" {
 		t.Error("an unknown frame count must be named, not guessed")
 	}
 }
@@ -62,7 +62,7 @@ func TestOrderPhotosTakesEveryPhotoOncePerCopy(t *testing.T) {
 		sheetLine("DNPF-GLD", 1, "LEFT PHOTO", "https://x/c.jpg"),
 	}
 	raw, _ := json.Marshal(lines)
-	photos, skipped := orderPhotos(gen.Order{OrderNumber: "T3DPS-116894", LineItems: raw})
+	photos, skipped := orderPhotos(gen.Order{OrderNumber: "T3DPS-116894", LineItems: raw}, builtinRulesForSKU)
 	if len(photos) != 3 || photos[0].url != "https://x/a.jpg" || photos[2].url != "https://x/b.jpg" {
 		t.Fatalf("photos = %+v", photos)
 	}
@@ -71,5 +71,25 @@ func TestOrderPhotosTakesEveryPhotoOncePerCopy(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "carries no photo") {
 		t.Fatalf("skipped = %v", skipped)
+	}
+}
+
+// A registry size wins over the built-in one, and a field rule over the
+// default.
+func TestRegistryRulesOverrideTheBuiltInSizes(t *testing.T) {
+	registry := func(sku string) []photoRule {
+		if sku == "PFM-1" {
+			return []photoRule{
+				{WidthMM: 70, HeightMM: 70, Shape: shapeRect, WhenField: "Magnet Size", WhenValue: "big"},
+				{WidthMM: 50, HeightMM: 50, Shape: shapeRect},
+			}
+		}
+		return builtinRulesForSKU(sku)
+	}
+	big, _, _ := photoSpecFor(sheetLine("PFM-1", 1, "magnet size", "BIG"), registry)
+	small, _, _ := photoSpecFor(sheetLine("PFM-1", 1), registry)
+	duo, _, _ := photoSpecFor(sheetLine("T3DPS-DUO-1", 1), registry)
+	if big != (photoSpec{w: 70, h: 70}) || small != (photoSpec{w: 50, h: 50}) || duo != (photoSpec{w: 65, h: 105}) {
+		t.Fatalf("big %+v small %+v duo %+v", big, small, duo)
 	}
 }

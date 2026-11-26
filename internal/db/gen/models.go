@@ -694,6 +694,28 @@ type ProductPart struct {
 	UpdatedAt  pgtype.Timestamptz
 }
 
+type ProductPhotoSample struct {
+	ProductID  uuid.UUID
+	Filename   string
+	StorageKey string
+	SizeBytes  int64
+	UploadedBy string
+	CreatedAt  pgtype.Timestamptz
+}
+
+type ProductPhotoSize struct {
+	ID        uuid.UUID
+	ProductID uuid.UUID
+	WidthMm   float64
+	HeightMm  float64
+	Shape     string
+	WhenField string
+	WhenValue string
+	Position  int32
+	UpdatedBy string
+	CreatedAt pgtype.Timestamptz
+}
+
 type ProductVariant struct {
 	ID                         uuid.UUID
 	ProductID                  uuid.UUID

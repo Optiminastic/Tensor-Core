@@ -5,14 +5,9 @@ package httpapi
 //
 // An operator types order numbers separated by commas. Every line of those
 // orders that is a photo product contributes its photos, each at the size
-// that product takes:
-//
-//	DuoSnap (T3DPS-DUO-*)          65 x 105 mm
-//	Photo fridge magnet (PFM-*)    56.6 x 59.7 mm
-//	Family Crossword frame (FCF-*) by photo_frames: 3 -> 106 x 80,
-//	                               4 -> 89 x 67, 6 -> 71 x 54 mm
-//	Social sticker (TSM-*)         round, 51 mm when batch_size is Large,
-//	                               otherwise 41 mm
+// that product takes - the registry's Photo print size for the product, or
+// the sizes Tensor ships for DuoSnap, fridge magnets, Family Crossword and
+// social stickers (photo_print_rules.go).
 //
 // Nothing is stored; asking again builds the same sheets.
 
@@ -49,40 +44,28 @@ type photoSpec struct {
 	circle bool
 }
 
-// crosswordSizes is the Family Crossword photo by how many frames it has.
-var crosswordSizes = map[string]photoSpec{
-	"3": {w: 106, h: 80},
-	"4": {w: 89, h: 67},
-	"6": {w: 71, h: 54},
-}
+// photoRulesFor resolves the photo sizes of an order line's SKU: the
+// registry's when the product has any, otherwise the built-in ones. nil means
+// the line is not a photo product.
+type photoRulesFor func(sku string) []photoRule
 
 // photoSpecFor is the size a line's photos print at. ok is false for a line
 // that is not a photo product; problem says why a photo product cannot be
 // laid out.
-func photoSpecFor(li production.LineItem) (spec photoSpec, problem string, ok bool) {
+func photoSpecFor(li production.LineItem, rulesFor photoRulesFor) (spec photoSpec, problem string, ok bool) {
 	sku := ""
 	if li.SKU != nil {
-		sku = strings.ToUpper(strings.TrimSpace(*li.SKU))
+		sku = strings.TrimSpace(*li.SKU)
 	}
-	switch {
-	case strings.HasPrefix(sku, "T3DPS-DUO"):
-		return photoSpec{w: 65, h: 105}, "", true
-	case strings.HasPrefix(sku, "PFM"):
-		return photoSpec{w: 56.6, h: 59.7}, "", true
-	case strings.HasPrefix(sku, "FCF"):
-		frames := lineProp(li, "photo frames")
-		if s, known := crosswordSizes[frames]; known {
-			return s, "", true
-		}
-		return photoSpec{}, fmt.Sprintf("%s has photo_frames %q; the photo size is known for 3, 4 or 6", sku, frames), true
-	case strings.HasPrefix(sku, "TSM"):
-		d := 41.0
-		if strings.Contains(strings.ToLower(lineProp(li, "batch size")), "large") {
-			d = 51
-		}
-		return photoSpec{w: d, h: d, circle: true}, "", true
+	rules := rulesFor(sku)
+	if len(rules) == 0 {
+		return photoSpec{}, "", false
 	}
-	return photoSpec{}, "", false
+	spec, problem = matchPhotoRule(rules, li)
+	if problem != "" {
+		problem = sku + " " + problem
+	}
+	return spec, problem, true
 }
 
 // lineProp is the value of the property whose normalised name is key.
@@ -152,13 +135,13 @@ func shortOrder(number string) string {
 
 // orderPhotos are the photos one order contributes, and why any of its photo
 // lines contributes none.
-func orderPhotos(order gen.Order) (photos []sheetPhoto, skipped []string) {
+func orderPhotos(order gen.Order, rulesFor photoRulesFor) (photos []sheetPhoto, skipped []string) {
 	var lines []production.LineItem
 	if err := jsonUnmarshalLines(order.LineItems, &lines); err != nil {
 		return nil, []string{order.OrderNumber + ": the line items could not be read"}
 	}
 	for _, li := range lines {
-		spec, problem, ok := photoSpecFor(li)
+		spec, problem, ok := photoSpecFor(li, rulesFor)
 		if !ok {
 			continue
 		}
@@ -229,10 +212,34 @@ func (s *Server) customPhotoSheet(c *gin.Context) {
 	s.answerPhotoSheet(c, photoSheetJob{photos: photos, skipped: skipped, format: format, numbers: numbers})
 }
 
+// photoRulesResolver looks each SKU up once per request: the registry's
+// sizes for its product when it has any, else the built-in ones.
+func (s *Server) photoRulesResolver(ctx context.Context) photoRulesFor {
+	seen := map[string][]photoRule{}
+	return func(sku string) []photoRule {
+		key := strings.ToLower(sku)
+		if r, ok := seen[key]; ok {
+			return r
+		}
+		var rules []photoRule
+		if sku != "" {
+			if rows, err := s.store.Q.PhotoSizesForSKU(ctx, sku); err == nil && len(rows) > 0 {
+				rules = rulesFromRows(rows)
+			}
+		}
+		if rules == nil {
+			rules = builtinRulesForSKU(sku)
+		}
+		seen[key] = rules
+		return rules
+	}
+}
+
 // sheetPhotos finds the orders and gathers their photos.
 func (s *Server) sheetPhotos(ctx context.Context, slug string, numbers []string) ([]sheetPhoto, []string, error) {
 	var photos []sheetPhoto
 	var skipped []string
+	rulesFor := s.photoRulesResolver(ctx)
 	for _, n := range numbers {
 		order, err := s.store.Q.FindOrderByNumberForBrand(ctx, gen.FindOrderByNumberForBrandParams{
 			BrandSlug: &slug, Number: n,
@@ -244,7 +251,7 @@ func (s *Server) sheetPhotos(ctx context.Context, slug string, numbers []string)
 		if err != nil {
 			return nil, nil, err
 		}
-		p, sk := orderPhotos(order)
+		p, sk := orderPhotos(order, rulesFor)
 		if len(p) == 0 && len(sk) == 0 {
 			sk = []string{order.OrderNumber + ": no DuoSnap, fridge magnet, crossword or social sticker in it"}
 		}
