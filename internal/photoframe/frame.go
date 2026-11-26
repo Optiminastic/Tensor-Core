@@ -203,3 +203,12 @@ func outline(dst *image.RGBA, r image.Rectangle, t int) {
 		draw.Draw(dst, side.Intersect(dst.Bounds()), black, image.Point{}, draw.Src)
 	}
 }
+
+// Resample is resample for other print layouts (internal/photosheet): it fills
+// r of dst with the source area (sx, sy, sw, sh), box-averaged.
+func Resample(dst *image.RGBA, r image.Rectangle, src *image.RGBA, sx, sy, sw, sh float64) {
+	resample(dst, r, src, sx, sy, sw, sh)
+}
+
+// ToRGBA returns img as an *image.RGBA, converting only when it is not one.
+func ToRGBA(img image.Image) *image.RGBA { return toRGBA(img) }

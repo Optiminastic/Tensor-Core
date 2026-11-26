@@ -54,6 +54,7 @@ func (s *Server) registerProductCreation(r *gin.Engine) {
 	g.POST("/registry/builds", read, s.startRegistryBuild(registryProduct, ""))
 	g.POST("/couple-date-plank/builds", read, s.startRegistryBuild(coupleDateProduct, coupleDateCode))
 	g.POST("/pdnp-front-text/builds", read, s.startPDNPBuild)
+	g.POST("/custom-photo", read, s.customPhotoSheet)
 }
 
 type productCreationRequest struct {
@@ -206,6 +207,12 @@ func refusePrivateAddress(_, address string, _ syscall.RawConn) error {
 }
 
 func fetchPhoto(ctx context.Context, raw string) (image.Image, error) {
+	return fetchPhotoWith(ctx, photoClient, raw)
+}
+
+// fetchPhotoWith is fetchPhoto through a given client - the same refusals,
+// another time limit.
+func fetchPhotoWith(ctx context.Context, client *http.Client, raw string) (image.Image, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, errors.New("the photo link is not an https URL")
@@ -214,7 +221,7 @@ func fetchPhoto(ctx context.Context, raw string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := photoClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("the photo could not be downloaded")
 	}
