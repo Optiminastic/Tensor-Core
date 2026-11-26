@@ -195,6 +195,12 @@ func (s *Server) customPhotoSheet(c *gin.Context) {
 		Format       string `json:"format"`
 	}
 	_ = c.ShouldBindJSON(&req)
+	// The server's write timeout (HTTP_WRITE_TIMEOUT_SECONDS, 60 s) is shorter
+	// than downloading a big run of photos from the slow photo host. Hitting
+	// it closed the connection AS the finished sheets went out: Tensor logged
+	// a 200 after 81 s and the page said it could not reach Tensor-Core. This
+	// route alone gets four minutes, matching the frontend proxy's limit.
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(4 * time.Minute))
 	numbers := parseOrderNumbers(req.OrderNumbers + "," + req.OrderNumber)
 	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "" {
